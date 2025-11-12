@@ -1,0 +1,45 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "build"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$rustc"
+      ],
+      "isBackground": false
+    },
+    {
+      "label": "Run (flash via probe-rs)",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "run"
+      ],
+      "options": {
+        "env": {
+          "DEFMT_LOG": "info"
+        }
+      },
+      "problemMatcher": [
+        "$rustc"
+      ]
+    },
+    {
+      "label": "Clean",
+      "type": "shell",
+      "command": "cargo",
+      "args": [
+        "clean"
+      ]
+    }
+  ]
+}
