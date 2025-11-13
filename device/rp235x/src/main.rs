@@ -1,19 +1,22 @@
-//! BMI088 IMU Test
-//!
-//! Reads accelerometer and gyroscope data from the BMI088 sensor over SPI
-
 #![no_std]
 #![no_main]
-
-mod drivers;
+// Firmware entrypoint; only device-specific wiring lives here
 
 use defmt::*;
-use drivers::bmi088::Bmi088;
+use common::drivers::bmi088::Bmi088;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
+
+// Provide an async delay adapter for generic drivers
+struct EmbassyDelay;
+impl common::utils::delay::DelayMs for EmbassyDelay {
+    async fn delay_ms(&mut self, ms: u32) {
+        Timer::after_millis(ms.into()).await;
+    }
+}
 
 // Program metadata for `picotool info`.
 #[unsafe(link_section = ".bi_entries")]
@@ -63,7 +66,8 @@ async fn main(_spawner: Spawner) {
     let mut imu = Bmi088::new(spi, cs_accel, cs_gyro);
 
     info!("Initializing BMI088 at 10 MHz SPI...");
-    match imu.init().await {
+    let mut delay = EmbassyDelay;
+    match imu.init(&mut delay).await {
         Ok(_) => info!("BMI088 initialized successfully!"),
         Err(e) => {
             error!("BMI088 initialization failed: {:?}", e);

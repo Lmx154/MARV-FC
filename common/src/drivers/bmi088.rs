@@ -1,22 +1,17 @@
-//! BMI088 IMU Driver (Accelerometer + Gyroscope) for Embassy
+//! Generic BMI088 IMU Driver (Accelerometer + Gyroscope)
 //!
-//! Async driver for reading raw accelerometer and gyroscope data from the BMI088 sensor
-//! using Embassy's async SPI interface with DMA support.
-//!
-//! The BMI088 exposes TWO separate SPI targets with distinct chip-selects:
-//!   * Accelerometer (ACC) 8-bit registers, CHIP_ID = 0x1E
-//!   * Gyroscope (GYR) 8-bit registers, CHIP_ID = 0x0F
-//!
-//! SPI mode: CPOL=0, CPHA=0 (Mode 0)
-//! Read protocol: Set MSB=1 of register address for reads
-//! Clock speed: Up to 10 MHz for data operations
+//! Async, MCU-agnostic driver using embedded-hal 1.0 traits.
+//! - SPI: embedded_hal_async::spi::SpiBus<u8>
+//! - CS pins: embedded_hal::digital::OutputPin
+//! - Delays: provided by a simple async trait defined in common::utils::delay
 
 #![allow(dead_code)]
 
 use defmt::{debug, info, warn, Format};
-use embassy_rp::gpio::Output;
-use embassy_rp::spi::Spi;
-use embassy_time::Timer;
+use embedded_hal::digital::OutputPin;
+use embedded_hal_async::spi::SpiBus;
+
+use crate::utils::delay::DelayMs;
 
 /// BMI088 Accelerometer register map (subset)
 mod acc {
@@ -43,8 +38,8 @@ mod gyr {
 
 #[derive(Debug, Format)]
 pub enum Error {
-    Bus,
     Spi,
+    Cs,
     ChipIdAccel(u8),
     ChipIdGyro(u8),
     AccelNotReady,
@@ -58,59 +53,61 @@ pub struct Bmi088Raw {
     pub gyro: [i16; 3],
 }
 
-/// BMI088 driver using Embassy async SPI
-pub struct Bmi088<'d, T: embassy_rp::spi::Instance> {
-    spi: Spi<'d, T, embassy_rp::spi::Async>,
-    cs_accel: Output<'d>,
-    cs_gyro: Output<'d>,
+/// Generic BMI088 driver using async SPI bus and two CS pins
+pub struct Bmi088<SPI, CSACC, CSGYR>
+where
+    SPI: SpiBus<u8>,
+    CSACC: OutputPin,
+    CSGYR: OutputPin,
+{
+    spi: SPI,
+    cs_accel: CSACC,
+    cs_gyro: CSGYR,
 }
 
-impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
+impl<SPI, CSACC, CSGYR> Bmi088<SPI, CSACC, CSGYR>
+where
+    SPI: SpiBus<u8>,
+    CSACC: OutputPin,
+    CSGYR: OutputPin,
+{
     /// Create a new BMI088 driver instance
-    pub fn new(
-        spi: Spi<'d, T, embassy_rp::spi::Async>,
-        cs_accel: Output<'d>,
-        cs_gyro: Output<'d>,
-    ) -> Self {
-        Self {
-            spi,
-            cs_accel,
-            cs_gyro,
-        }
+    pub fn new(spi: SPI, cs_accel: CSACC, cs_gyro: CSGYR) -> Self {
+        Self { spi, cs_accel, cs_gyro }
     }
 
     /// Initialize the BMI088 sensor with proper power-up sequence
-    pub async fn init(&mut self) -> Result<(), Error> {
+    pub async fn init<D: DelayMs>(&mut self, delay: &mut D) -> Result<(), Error> {
         info!("BMI088: Starting initialization sequence");
 
         // Ensure CS lines are high initially
-        self.cs_accel.set_high();
-        self.cs_gyro.set_high();
-        Timer::after_millis(10).await;
+        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
+        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
+        delay.delay_ms(10).await;
 
         // Step 1: Reset gyroscope first (datasheet recommendation)
         info!("BMI088: Resetting gyroscope");
         self.write_gyr(gyr::SOFTRESET, 0xB6).await?;
-        Timer::after_millis(100).await;
+        delay.delay_ms(100).await;
 
         // Step 2: Reset accelerometer
         info!("BMI088: Resetting accelerometer");
         self.write_acc(acc::SOFTRESET, 0xB6).await?;
-        Timer::after_millis(100).await;
+        delay.delay_ms(100).await;
 
         // Dummy read to switch back to SPI mode after reset
         let _ = self.read_acc(acc::CHIP_ID).await;
-        Timer::after_millis(10).await;
+        delay.delay_ms(10).await;
 
         // Step 3: Critical BMI088 accelerometer power-up sequence
         info!("BMI088: Configuring power management");
         self.write_acc(acc::PWR_CONF, 0x00).await?; // Active mode (exit suspend)
-        Timer::after_millis(5).await;
+        delay.delay_ms(5).await;
         self.write_acc(acc::PWR_CTRL, 0x04).await?; // Enable accelerometer
-        Timer::after_millis(50).await;
+        delay.delay_ms(50).await;
 
         // Additional stability delay
-        Timer::after_millis(50).await;
+        delay.delay_ms(50).await;
 
         // Step 4: Verify chip IDs with multiple attempts
         let mut acc_id = 0u8;
@@ -118,7 +115,7 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
         let mut success = false;
 
         for attempt in 0..10 {
-            Timer::after_millis(20).await;
+            delay.delay_ms(20).await;
 
             if let Ok(id) = self.read_acc(acc::CHIP_ID).await {
                 acc_id = id;
@@ -164,7 +161,7 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
 
         // Configure gyro bandwidth to max ODR (2000 Hz)
         self.write_gyr(gyr::BW, 0x00).await?;
-        Timer::after_millis(2).await;
+        delay.delay_ms(2).await;
 
         info!("BMI088: Initialization complete (accel 1600Hz, gyro 2000Hz)");
         Ok(())
@@ -178,9 +175,9 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
         let mut rx_buf = [0u8; 8];
         tx_buf[0] = acc::ACC_X_L | 0x80;
 
-        self.cs_accel.set_low();
+        self.cs_accel.set_low().map_err(|_| Error::Cs)?;
         let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_accel.set_high();
+        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
 
         result.map_err(|_| Error::Spi)?;
 
@@ -199,9 +196,9 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
         let mut rx_buf = [0u8; 7];
         tx_buf[0] = gyr::RATE_X_L | 0x80;
 
-        self.cs_gyro.set_low();
+        self.cs_gyro.set_low().map_err(|_| Error::Cs)?;
         let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_gyro.set_high();
+        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
 
         result.map_err(|_| Error::Spi)?;
 
@@ -226,9 +223,9 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
         let tx_buf = [reg | 0x80, 0x00, 0x00];
         let mut rx_buf = [0u8; 3];
 
-        self.cs_accel.set_low();
+        self.cs_accel.set_low().map_err(|_| Error::Cs)?;
         let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_accel.set_high();
+        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
 
         result.map_err(|_| Error::Spi)?;
         Ok(rx_buf[2]) // Data is in the third byte
@@ -238,9 +235,9 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
     async fn write_acc(&mut self, reg: u8, val: u8) -> Result<(), Error> {
         let tx_buf = [reg & 0x7F, val];
 
-        self.cs_accel.set_low();
+        self.cs_accel.set_low().map_err(|_| Error::Cs)?;
         let result = self.spi.write(&tx_buf).await;
-        self.cs_accel.set_high();
+        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
 
         result.map_err(|_| Error::Spi)
     }
@@ -250,9 +247,9 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
         let tx_buf = [reg | 0x80, 0x00];
         let mut rx_buf = [0u8; 2];
 
-        self.cs_gyro.set_low();
+        self.cs_gyro.set_low().map_err(|_| Error::Cs)?;
         let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_gyro.set_high();
+        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
 
         result.map_err(|_| Error::Spi)?;
         Ok(rx_buf[1])
@@ -262,9 +259,9 @@ impl<'d, T: embassy_rp::spi::Instance> Bmi088<'d, T> {
     async fn write_gyr(&mut self, reg: u8, val: u8) -> Result<(), Error> {
         let tx_buf = [reg & 0x7F, val];
 
-        self.cs_gyro.set_low();
+        self.cs_gyro.set_low().map_err(|_| Error::Cs)?;
         let result = self.spi.write(&tx_buf).await;
-        self.cs_gyro.set_high();
+        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
 
         result.map_err(|_| Error::Spi)
     }

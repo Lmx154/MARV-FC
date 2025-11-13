@@ -1,0 +1,9 @@
+[target.thumbv8m.main-none-eabihf]
+# Set your preferred runner; for probe-rs flashing, uncomment and set chip if needed.
+runner = "probe-rs run --chip RP2350B"
+# Alternatively, for UF2 deploy via bootloader:
+# runner = "elf2uf2-rs --deploy"
+
+[build]
+# Ensure this crate compiles for the Cortex-M target by default when run from this directory
+target = "thumbv8m.main-none-eabihf"

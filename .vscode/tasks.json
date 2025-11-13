@@ -1,45 +1,44 @@
 {
-  "version": "2.0.0",
-  "tasks": [
-    {
-      "label": "Build",
-      "type": "shell",
-      "command": "cargo",
-      "args": [
-        "build"
-      ],
-      "group": {
-        "kind": "build",
-        "isDefault": true
-      },
-      "problemMatcher": [
-        "$rustc"
-      ],
-      "isBackground": false
-    },
-    {
-      "label": "Run (flash via probe-rs)",
-      "type": "shell",
-      "command": "cargo",
-      "args": [
-        "run"
-      ],
-      "options": {
-        "env": {
-          "DEFMT_LOG": "info"
-        }
-      },
-      "problemMatcher": [
-        "$rustc"
-      ]
-    },
-    {
-      "label": "Clean",
-      "type": "shell",
-      "command": "cargo",
-      "args": [
-        "clean"
-      ]
-    }
-  ]
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build firmware (rp235x)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"-p",
+				"rp235x",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash + RTT (probe-rs)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"run",
+				"-p",
+				"rp235x",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"options": {
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		}
+	]
 }
