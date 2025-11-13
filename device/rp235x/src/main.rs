@@ -7,8 +7,14 @@ use common::drivers::bmi088::Bmi088;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
+use embassy_rp::i2c::{Config as I2cConfig, I2c as I2cBus};
 use embassy_time::Timer;
 use {defmt_rtt as _, panic_probe as _};
+// Bind I2C1 interrupt for async I2C driver
+use embassy_rp::i2c::InterruptHandler;
+embassy_rp::bind_interrupts!(struct Irqs {
+    I2C1_IRQ => InterruptHandler<embassy_rp::peripherals::I2C1>;
+});
 
 // Provide an async delay adapter for generic drivers
 struct EmbassyDelay;
@@ -79,6 +85,23 @@ async fn main(_spawner: Spawner) {
                 Timer::after_millis(100).await;
             }
         }
+    }
+
+    // ----- BMM350 Magnetometer (I2C1 on GP6/GP7) -----
+    use common::drivers::bmm350::{Bmm350, BMM350_ADDR};
+    let scl = p.PIN_7; // I2C1 SCL (per hardware.md)
+    let sda = p.PIN_6; // I2C1 SDA (per hardware.md)
+    let mut i2c_cfg = I2cConfig::default();
+    i2c_cfg.frequency = 100_000; // Start at 100 kHz for robustness during bring-up
+
+    let i2c1 = I2cBus::new_async(p.I2C1, scl, sda, Irqs, i2c_cfg);
+    let mut mag = Bmm350::new(i2c1, BMM350_ADDR);
+    mag.set_debug(true);
+
+    info!("Initializing BMM350 magnetometer...");
+    match mag.init(&mut delay).await {
+        Ok(_) => info!("BMM350 initialized successfully!"),
+        Err(e) => warn!("BMM350 init failed: {:?}", e),
     }
 
     info!("=== STRESS TEST MODE ===");
@@ -180,6 +203,14 @@ async fn main(_spawner: Spawner) {
             Err(e) => {
                 error_count += 1;
                 error!("IMU read error #{}: {:?}", error_count, e);
+            }
+        }
+
+        // Sample BMM350 RAW values roughly every 50 samples (~20 Hz)
+        if sample_count % 50 == 0 {
+            match mag.read_raw(&mut delay).await {
+                Ok(raw) => info!("MAG raw: [{}, {}, {}]", raw.xyz[0], raw.xyz[1], raw.xyz[2]),
+                Err(e) => warn!("MAG read_raw error: {:?}", e),
             }
         }
 
