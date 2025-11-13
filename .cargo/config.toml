@@ -1,5 +1,3 @@
-[build]
-target = "thumbv8m.main-none-eabihf"
-
+# Use probe-rs as the runner for the embedded ARMv8-M target so `cargo run` flashes the device
 [target.thumbv8m.main-none-eabihf]
-runner = "probe-rs run --chip RP235x"
+runner = "probe-rs run"
