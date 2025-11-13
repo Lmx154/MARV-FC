@@ -11,6 +11,7 @@ use defmt::warn;
 use crate::drivers::bmi088::{Bmi088, Bmi088Raw};
 use crate::drivers::bmm350::{Bmm350, RawMag};
 use crate::drivers::bmp390::Bmp390;
+use crate::drivers::neom9n::{NeoM9n, GpsData};
 use crate::utils::delay::DelayMs;
 
 /// Generic async sink for delivering sensor data to the application layer.
@@ -96,6 +97,45 @@ where
             Ok(sample) => sink.publish(sample).await,
             Err(e) => warn!("BMP390 read error: {:?}", e),
         }
+        if interval_ms > 0 { delay.delay_ms(interval_ms).await; }
+    }
+}
+
+/// Run an async NEO-M9N read loop delivering parsed `GpsData` when available.
+pub async fn run_neom9n_task<I2C, D, S>(
+    gps: &mut NeoM9n<I2C>,
+    delay: &mut D,
+    sink: &mut S,
+    interval_ms: u32,
+)
+where
+    I2C: embedded_hal_async::i2c::I2c,
+    D: DelayMs,
+    S: DataSink<GpsData>,
+{
+    if let Err(e) = gps.init(delay).await { warn!("NEO-M9N init error: {:?}", e); }
+    // Nudge a NAV-PVT reply initially
+    let _ = gps.poll_nav_pvt().await;
+    let mut buf = [0u8; 128];
+    let mut loops: u32 = 0;
+    loop {
+        match gps.read_and_parse(delay, &mut buf).await {
+            Ok(Some(fix)) => {
+                sink.publish(fix).await;
+            }
+            Ok(None) => {
+                // Publish the last known (stale) fix so downstream can see activity
+                if let Some(last) = gps.last() {
+                    sink.publish(last).await;
+                }
+                // If nothing parsed for a while, send another NAV-PVT poll to verify link.
+                if loops % 20 == 0 {
+                    let _ = gps.poll_nav_pvt().await;
+                }
+            }
+            Err(e) => warn!("NEO-M9N read error: {:?}", e),
+        }
+        loops = loops.wrapping_add(1);
         if interval_ms > 0 { delay.delay_ms(interval_ms).await; }
     }
 }

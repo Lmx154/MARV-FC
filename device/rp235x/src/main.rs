@@ -7,7 +7,8 @@ use common::drivers::bmi088::{Bmi088, Bmi088Raw};
 use common::drivers::bmm350::{Bmm350, BMM350_ADDR};
 use common::drivers::bmp390::{Bmp390, BMP3X_ADDR_SDO_HIGH};
 use common::drivers::bmm350::RawMag;
-use common::tasks::sensors::{run_bmi088_task, run_bmm350_task, run_bmp390_task, DataSink};
+use common::tasks::sensors::{run_bmi088_task, run_bmm350_task, run_bmp390_task, run_neom9n_task, DataSink};
+use common::drivers::neom9n::{NeoM9n, UBLOX_I2C_ADDR, GpsData};
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
@@ -42,13 +43,17 @@ struct MagData { xyz: [i32; 3], seq: u32 }
 struct BaroData { t_c_x100: i32, p_pa: i32, seq: u32 }
 
 #[derive(Copy, Clone, Default)]
+struct GpsState { fix: Option<GpsData>, seq: u32 }
+
+#[derive(Copy, Clone, Default)]
 struct SensorsState {
     imu: ImuData,
     mag: MagData,
     baro: BaroData,
+    gps: GpsState,
 }
 
-static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState { imu: ImuData { accel: [0;3], gyro: [0;3], seq: 0 }, mag: MagData { xyz: [0;3], seq: 0 }, baro: BaroData { t_c_x100: 0, p_pa: 0, seq: 0 } });
+static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState { imu: ImuData { accel: [0;3], gyro: [0;3], seq: 0 }, mag: MagData { xyz: [0;3], seq: 0 }, baro: BaroData { t_c_x100: 0, p_pa: 0, seq: 0 }, gps: GpsState { fix: None, seq: 0 } });
 
 // Shared I2C0/I2C1 bus managers for multiple I2C devices
 type I2c0Type = I2c<'static, embassy_rp::peripherals::I2C0, I2cAsync>;
@@ -187,11 +192,13 @@ async fn main(spawner: Spawner) {
     let i2c1 = I2c::new_async(p.I2C1, i2c1_scl, i2c1_sda, Irqs, i2c1_cfg);
     let i2c1_mutex = I2C1_MUTEX.init(Mutex::new(i2c1));
     let i2c_for_bmm = SharedI2c { bus: i2c1_mutex };
+    let i2c_for_gps = SharedI2c { bus: i2c1_mutex };
 
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088)).unwrap();
     spawner.spawn(mag_task(i2c_for_bmm)).unwrap();
     spawner.spawn(baro_task(i2c_for_bmp)).unwrap();
+    spawner.spawn(gps_task(i2c_for_gps)).unwrap();
     spawner.spawn(logger_task(led)).unwrap();
 }
 
@@ -223,6 +230,15 @@ impl DataSink<(i32, i32)> for BaroSink {
         guard.baro.t_c_x100 = data.0;
         guard.baro.p_pa = data.1;
         guard.baro.seq = guard.baro.seq.wrapping_add(1);
+    }
+}
+
+struct GpsSink;
+impl DataSink<GpsData> for GpsSink {
+    async fn publish(&mut self, data: GpsData) {
+        let mut guard = STATE.lock().await;
+        guard.gps.fix = Some(data);
+        guard.gps.seq = guard.gps.seq.wrapping_add(1);
     }
 }
 
@@ -263,19 +279,35 @@ async fn logger_task(mut led: Output<'static>) {
     let mut prev_imu_seq: u32 = 0;
     let mut prev_mag_seq: u32 = 0;
     let mut prev_baro_seq: u32 = 0;
+    let mut prev_gps_seq: u32 = 0;
     let mut prev_t = Instant::now();
     loop {
         // Fetch a snapshot and emit unified line at fastest cadence (~1 kHz)
         let s = STATE.lock().await.clone();
         // More detailed data at debug level every loop
-        debug!(
-            "IMU A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | seqs i:{} m:{} b:{}",
-            s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
-            s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
-            s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
-            (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
-            s.imu.seq, s.mag.seq, s.baro.seq
-        );
+        if let Some(fix) = s.gps.fix {
+            debug!(
+                "IMU A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} m:{} b:{} g:{}",
+                s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
+                s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
+                (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
+                fix.month, fix.day, fix.year, fix.hour, fix.minute, fix.second,
+                fix.latitude/10_000_000, (fix.latitude%10_000_000).abs(),
+                fix.longitude/10_000_000, (fix.longitude%10_000_000).abs(),
+                fix.altitude/1000, fix.satellites, fix.fix_type,
+                s.imu.seq, s.mag.seq, s.baro.seq, s.gps.seq
+            );
+        } else {
+            debug!(
+                "IMU A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} m:{} b:{} g:{}",
+                s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
+                s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
+                (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
+                s.imu.seq, s.mag.seq, s.baro.seq, s.gps.seq
+            );
+        }
 
         // Once per ~1s (or slightly more), compute true rates from deltas and print with current values
         let elapsed_ms = prev_t.elapsed().as_millis() as u32;
@@ -283,17 +315,34 @@ async fn logger_task(mut led: Output<'static>) {
             let imu_rate = (s.imu.seq.wrapping_sub(prev_imu_seq) * 1000) / elapsed_ms.max(1);
             let mag_rate = (s.mag.seq.wrapping_sub(prev_mag_seq) * 1000) / elapsed_ms.max(1);
             let baro_rate = (s.baro.seq.wrapping_sub(prev_baro_seq) * 1000) / elapsed_ms.max(1);
-            info!(
-                "Rates IMU:{} Hz MAG:{} Hz BARO:{} Hz | IMU A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa",
-                imu_rate, mag_rate, baro_rate,
-                s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
-                s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
-                s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
-                (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa
-            );
+            let gps_rate = (s.gps.seq.wrapping_sub(prev_gps_seq) * 1000) / elapsed_ms.max(1);
+            if let Some(fix) = s.gps.fix {
+                info!(
+                    "Rates IMU:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {}",
+                    imu_rate, mag_rate, baro_rate, gps_rate,
+                    s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
+                    s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                    s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
+                    (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
+                    fix.month, fix.day, fix.year, fix.hour, fix.minute, fix.second,
+                    fix.latitude/10_000_000, (fix.latitude%10_000_000).abs(),
+                    fix.longitude/10_000_000, (fix.longitude%10_000_000).abs(),
+                    fix.altitude/1000, fix.satellites, fix.fix_type
+                );
+            } else {
+                info!(
+                    "Rates IMU:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix",
+                    imu_rate, mag_rate, baro_rate, gps_rate,
+                    s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
+                    s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                    s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
+                    (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa
+                );
+            }
             prev_imu_seq = s.imu.seq;
             prev_mag_seq = s.mag.seq;
             prev_baro_seq = s.baro.seq;
+            prev_gps_seq = s.gps.seq;
             prev_t = Instant::now();
         }
 
@@ -304,4 +353,15 @@ async fn logger_task(mut led: Output<'static>) {
         Timer::after_micros(800).await; // total 1ms period
         n = n.wrapping_add(1);
     }
+}
+
+#[embassy_executor::task]
+async fn gps_task(i2c_dev: SharedI2c<'static>) {
+    let mut delay = EmbassyDelay;
+    info!("NEO-M9N: starting task on I2C1 @0x{:02X}", UBLOX_I2C_ADDR);
+    let mut gps = NeoM9n::new(i2c_dev, UBLOX_I2C_ADDR);
+    gps.set_debug(false);
+    let mut sink = GpsSink;
+    // ~20 Hz polling; device may output ~10 Hz by default
+    run_neom9n_task(&mut gps, &mut delay, &mut sink, 50).await;
 }
