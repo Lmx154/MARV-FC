@@ -21,6 +21,45 @@
 			]
 		},
 		{
+			"label": "Build firmware (radio)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"-p",
+				"radio",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash + RTT (radio, probe-rs)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"run",
+				"-p",
+				"radio",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"options": {
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
 			"label": "Flash + RTT (probe-rs)",
 			"type": "shell",
 			"command": "cargo",
@@ -28,6 +67,45 @@
 				"run",
 				"-p",
 				"rp235x",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"options": {
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Build firmware (gs)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"-p",
+				"gs",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash + RTT (gs, probe-rs)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"run",
+				"-p",
+				"gs",
 				"--target",
 				"thumbv8m.main-none-eabihf"
 			],

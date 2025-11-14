@@ -2,6 +2,8 @@
 members = [
     "common",
     "device/rp235x",
+    "device/radio",
+    "device/gs",
     "simulator",
 ]
 resolver = "3"

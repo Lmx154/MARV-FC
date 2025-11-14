@@ -3,3 +3,4 @@ pub mod bmi088;
 pub mod bmm350;
 pub mod bmp390;
 pub mod neom9n;
+pub mod sx1262;
