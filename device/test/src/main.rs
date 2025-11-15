@@ -10,7 +10,7 @@ use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 
 use embedded_hal::digital::{InputPin, OutputPin};
-use embassy_embedded_hal::shared_bus::blocking::spi::SpiDeviceBlocking;
+use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_hal_bus::spi::NoDelay;
 
 use sx126x::{
@@ -62,7 +62,7 @@ async fn main(_spawner: Spawner) {
     let cs = Output::new(p.PIN_5, Level::High);
 
     // Wrap in a blocking SpiDevice compatible with sx126x
-    let spi_dev = SpiDeviceBlocking::new(spi, cs, NoDelay);
+    let spi_dev = ExclusiveDevice::new(spi, cs, NoDelay).unwrap();
 
     // -----------------------------
     // RADIO CONTROL PINS
@@ -71,9 +71,8 @@ async fn main(_spawner: Spawner) {
     let busy  = Input::new(p.PIN_0, Pull::None);
     let dio1  = Input::new(p.PIN_6, Pull::None);
 
-    // Manual RF switch
-    let mut txen = Output::new(p.PIN_8, Level::Low);
-    let mut rxen = Output::new(p.PIN_9, Level::Low);
+    // Manual RF switch (txen passed into driver as ANT; no external rxen in this example)
+    let txen = Output::new(p.PIN_8, Level::Low);
 
     // LED (GP25)
     let mut led = Output::new(p.PIN_25, Level::Low);
@@ -145,15 +144,15 @@ async fn main(_spawner: Spawner) {
     // Must be off (manual switch)
     radio.set_dio2_as_rf_switch_ctrl(false).unwrap();
 
-    // Enter RX mode
-    rxen.set_high().ok();
+    // Enter RX mode (driver controls ANT pin)
+    radio.set_ant_enabled(false).unwrap();
 
     let mut rxbuf = [0u8; 64];
 
     info!("Starting ping-pong loop…");
     loop {
         if INITIATOR {
-            send(&mut radio, &mut txen, &mut rxen, b"PING");
+            send(&mut radio, b"PING");
             if recv(&mut radio, &mut rxbuf) == Some(b"PONG") {
                 led.set_high();
                 delay_ms(150);
@@ -163,7 +162,7 @@ async fn main(_spawner: Spawner) {
         } else {
             if recv(&mut radio, &mut rxbuf) == Some(b"PING") {
                 led.set_high();
-                send(&mut radio, &mut txen, &mut rxen, b"PONG");
+                send(&mut radio, b"PONG");
                 led.set_low();
             }
         }
@@ -174,32 +173,41 @@ async fn main(_spawner: Spawner) {
 // HELPERS
 // ------------------------
 
-fn send<TSPI, RST, BSY, ANT, DIO1, E>(
+fn send<TSPI, RST, BSY, ANT, DIO1, TSPIERR, TPINERR>(
     radio: &mut SX126x<TSPI, RST, BSY, ANT, DIO1>,
-    txen: &mut impl OutputPin<Error = E>,
-    rxen: &mut impl OutputPin<Error = E>,
     msg: &[u8],
-) {
-    rxen.set_low().ok();
-    txen.set_high().ok();
+) where
+    TSPI: embedded_hal::spi::SpiDevice<u8, Error = TSPIERR>,
+    RST: OutputPin<Error = TPINERR>,
+    BSY: InputPin<Error = TPINERR>,
+    ANT: OutputPin<Error = TPINERR>,
+    DIO1: InputPin<Error = TPINERR>,
+    TSPIERR: core::fmt::Debug,
+    TPINERR: core::fmt::Debug,
+{
+    // Let the driver toggle the antenna pin for us
+    radio.set_ant_enabled(true).unwrap();
 
     radio
-        .write_bytes(
-            msg,
-            RxTxTimeout::from_ms(3000),
-            8,
-            LoRaCrcType::CrcOn,
-        )
-        .ok();
+        .write_bytes(msg, RxTxTimeout::from_ms(3000), 8, LoRaCrcType::CrcOn)
+        .unwrap();
 
-    txen.set_low().ok();
-    rxen.set_high().ok();
+    radio.set_ant_enabled(false).unwrap();
 }
 
-fn recv<TSPI, RST, BSY, ANT, DIO1>(
-    radio: &mut SX126x<TSPI, RST, BSY, ANT, DIO1>,
-    buf: &mut [u8],
-) -> Option<&[u8]> {
+fn recv<'a, TSPI, RST, BSY, ANT, DIO1, TSPIERR, TPINERR>(
+    radio: &'a mut SX126x<TSPI, RST, BSY, ANT, DIO1>,
+    buf: &'a mut [u8],
+) -> Option<&'a [u8]>
+where
+    TSPI: embedded_hal::spi::SpiDevice<u8, Error = TSPIERR>,
+    RST: OutputPin<Error = TPINERR>,
+    BSY: InputPin<Error = TPINERR>,
+    ANT: OutputPin<Error = TPINERR>,
+    DIO1: InputPin<Error = TPINERR>,
+    TSPIERR: core::fmt::Debug,
+    TPINERR: core::fmt::Debug,
+{
     radio.set_rx(RxTxTimeout::from_ms(4000)).ok()?;
     radio.wait_on_busy().ok()?;
 
