@@ -73,17 +73,19 @@ pub enum LoRaBandwidth {
 }
 impl LoRaBandwidth {
     fn param(self) -> u8 {
+        // Semtech encoding (datasheet / sx126x.h): fine BWs + normal 125/250/500 values
+        // NOTE: Only Bw125/Bw250/Bw500 are used in our current app; they must be 0x04/0x05/0x06.
         match self {
             Self::Bw7_81 => 0x00,
-            Self::Bw10_42 => 0x01,
-            Self::Bw15_63 => 0x02,
-            Self::Bw20_83 => 0x03,
-            Self::Bw31_25 => 0x04,
-            Self::Bw41_67 => 0x05,
-            Self::Bw62_5 => 0x06,
-            Self::Bw125 => 0x07,
-            Self::Bw250 => 0x08,
-            Self::Bw500 => 0x09,
+            Self::Bw10_42 => 0x08,
+            Self::Bw15_63 => 0x01,
+            Self::Bw20_83 => 0x09,
+            Self::Bw31_25 => 0x02,
+            Self::Bw41_67 => 0x0A,
+            Self::Bw62_5 => 0x03,
+            Self::Bw125 => 0x04,
+            Self::Bw250 => 0x05,
+            Self::Bw500 => 0x06,
         }
     }
 }
@@ -160,22 +162,22 @@ impl Default for Sx1262Config {
         Self {
             use_dcdc: true,
             tcxo_enable: true,
-            tcxo_voltage_code: 0x07, // 3.3V for Waveshare Core1262-HF
-            tcxo_delay_ms: 5,
+            tcxo_voltage_code: 0x02, // 1.8V (legacy known-good)
+            tcxo_delay_ms: 20,       // longer warmup to avoid XOSC start issues
             xtal_freq_hz: 32_000_000,
             lora_sf: LoRaSpreadingFactor::Sf7,
             lora_bw: LoRaBandwidth::Bw125,
             lora_cr: LoRaCodingRate::Cr45,
             lora_ldro: false,
-            preamble_len: 32, // longer preamble for easier acquisition
+            preamble_len: 12,        // legacy preamble length
             explicit_header: true,
             crc_on: true,
             invert_iq: false,
             pa_duty_cycle: 0x04,
             pa_hp_max: 0x07,
-            tx_power: 14,
-            tx_ramp: TxRamp::Us200,
-            lora_sync_word: 0x3444,
+            tx_power: 0,             // conservative starting TX power
+            tx_ramp: TxRamp::Us40,   // faster ramp per legacy
+            lora_sync_word: 0x3444,  // public sync by default (override to private if desired)
         }
     }
 }
@@ -432,10 +434,9 @@ where
         self.wait_not_busy(delay, 20).await?;
         let _ = self.get_status(delay).await;
 
-        // SetRegulatorMode FIRST
-        // 0x02 = DC-DC, 0x01 = LDO
-        let reg_mode = if self.cfg.use_dcdc { 0x02 } else { 0x01 };
-        self.write_cmd(delay, 0x96, &[reg_mode]).await?; // SetRegulatorMode
+    // SetRegulatorMode: 0 = LDO, 1 = DC-DC+LDO (datasheet)
+    let reg_mode = if self.cfg.use_dcdc { 0x01 } else { 0x00 };
+    self.write_cmd(delay, 0x96, &[reg_mode]).await?; // SetRegulatorMode
 
         // Clear device errors
         self.write_cmd(delay, 0x07, &[0x00, 0x00]).await?; // ClearDeviceErrors
@@ -521,9 +522,14 @@ where
 
         // SetDio3AsTcxoCtrl
         self.write_cmd(delay, 0x97, &frame).await?;
+    // Give TCXO explicit warm-up time before forcing XOSC
+    delay.delay_ms(self.cfg.tcxo_delay_ms as u32).await;
+
         // Move to StandbyXosc so TCXO drives the 32 MHz source
         self.write_cmd(delay, 0x80, &[0x01]).await?; // StandbyXosc
-        self.wait_not_busy(delay, 20).await?;
+        // Allow a generous busy timeout here; some boards take longer than the nominal delay
+        let tmo = (self.cfg.tcxo_delay_ms as u32).saturating_add(50);
+        self.wait_not_busy(delay, tmo).await?;
         Ok(())
     }
 
@@ -697,8 +703,8 @@ where
         self.set_lora_packet_params(delay, 255).await?;
 
         // Configure IRQ: RxDone | Timeout | HeaderValid | CrcErr | PreambleDetected | SyncWordValid
-        const IRQ_RX_DONE: u16 = 0x0002;
-        const IRQ_TIMEOUT: u16 = 0x0100;
+    const IRQ_RX_DONE: u16 = 0x0002;
+    const IRQ_TIMEOUT: u16 = 0x0200; // correct Rx/Tx timeout bit
         const IRQ_HEADER_VALID: u16 = 0x0010;
         const IRQ_CRC_ERR: u16 = 0x0040;
         const IRQ_PREAMBLE_DET: u16 = 0x0004;
@@ -753,7 +759,7 @@ where
             "SX1262: RX IRQ=0x{:04X} (RxDone={} Timeout={} PreambleDet={} SyncValid={} HdrValid={} CrcErr={})",
             irq,
             (irq & 0x0002) != 0,
-            (irq & 0x0100) != 0,
+            (irq & 0x0200) != 0,
             (irq & 0x0004) != 0,
             (irq & 0x0008) != 0,
             (irq & 0x0010) != 0,
@@ -761,7 +767,7 @@ where
         );
 
         let done = (irq & 0x0002) != 0; // RxDone
-        let timeout = (irq & 0x0100) != 0; // Timeout
+        let timeout = (irq & 0x0200) != 0; // Timeout
         let mut len = 0u8;
 
         if done {
@@ -814,8 +820,8 @@ where
 
         // Prepare buffer and IRQs
         self.clear_irq_status(delay, 0xFFFF).await?;
-        const IRQ_TX_DONE: u16 = 0x0001;
-        const IRQ_TIMEOUT: u16 = 0x0100;
+    const IRQ_TX_DONE: u16 = 0x0001;
+    const IRQ_TIMEOUT: u16 = 0x0200; // correct Rx/Tx timeout bit
         let mask = IRQ_TX_DONE | IRQ_TIMEOUT;
         self.set_dio_irq_params(delay, mask, mask).await?;
         info!("SX1262: TX IRQ configured mask=0x{:04X}", mask);
