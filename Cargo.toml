@@ -4,6 +4,7 @@ members = [
     "device/rp235x",
     "device/radio",
     "device/gs",
+    "device/test",
     "simulator",
 ]
 resolver = "3"

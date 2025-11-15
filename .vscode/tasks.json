@@ -118,5 +118,45 @@
 				"$rustc"
 			]
 		}
+		,
+		{
+			"label": "Build firmware (test)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"-p",
+				"test",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash + RTT (test, probe-rs)",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"run",
+				"-p",
+				"test",
+				"--target",
+				"thumbv8m.main-none-eabihf"
+			],
+			"options": {
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		}
 	]
 }
