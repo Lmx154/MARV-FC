@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 #![allow(async_fn_in_trait)]
 
-use defmt::{info, warn};
+use defmt::info;
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::spi::SpiBus;
 
@@ -264,6 +264,7 @@ where
             if irq & 0x0001 != 0 {
                 self.write_cmd(delay, 0x02, &[0x00, 0x01]).await?;
                 self.rf_sw.set(RfState::Rx);
+                info!("TX done -> entering RX");
                 return Ok(());
             }
             delay.delay_ms(1).await;
@@ -315,6 +316,7 @@ where
 
         // Continuous RX
         self.write_cmd(delay, 0x82, &[0xFF, 0xFF, 0xFF]).await?;
+        info!("Started RX (continuous)");
         Ok(())
     }
 

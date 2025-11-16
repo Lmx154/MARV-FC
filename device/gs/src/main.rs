@@ -14,6 +14,7 @@ use embassy_time::{Timer, Duration};
 
 use common::drivers::sx1262::*;
 use common::lora::lora_config::*;
+use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
 
 // Simple delay
@@ -71,24 +72,23 @@ async fn main(_spawner: Spawner) {
     let cfg = LoRaConfig::preset_default();
     radio.init(&mut delay, &cfg).await.unwrap();
 
+
+    let mut link = LoRaLink::new(&mut radio);
     // Continuous RX
-    radio.start_rx_continuous(&mut delay).await.unwrap();
+    link.start_rx(&mut delay).await.unwrap();
 
     let mut buf = [0u8; 255];
 
-    info!("GS ready, listening…");
+    info!("GS ready (LoRaLink)…");
 
     loop {
-        if let Ok(Some(rx)) = radio.poll_raw(&mut delay, &mut buf).await {
-            info!("GS RX len={} RSSI={} SNR/4={}", rx.len, rx.rssi, rx.snr_x4);
+        if let Ok(len) = link.recv(&mut delay, &mut buf).await {
+            info!("GS LoRaLink RX len={} data={:?}", len, &buf[..len]);
 
-            if rx.len == 4 && &buf[..4] == b"PING" {
-                info!("Received PING → sending PONG");
-                radio.tx_raw(&mut delay, b"PONG").await.unwrap();
-                radio.start_rx_continuous(&mut delay).await.unwrap();
-            }
+            // Respond with PONG
+            link.send(&mut delay, b"PONG").await.unwrap();
         }
 
-        Timer::after_millis(50).await;
+        Timer::after_millis(20).await;
     }
 }

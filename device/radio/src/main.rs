@@ -13,7 +13,9 @@ use embassy_time::{Timer, Duration};
 
 use common::drivers::sx1262::*;
 use common::lora::lora_config::*;
+use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
+
 
 struct EmbassyDelay;
 impl DelayMs for EmbassyDelay {
@@ -66,11 +68,19 @@ async fn main(_spawner: Spawner) {
     let cfg = LoRaConfig::preset_default();
     radio.init(&mut delay, &cfg).await.unwrap();
 
-    info!("Radio: starting PING loop");
+    let mut link = LoRaLink::new(&mut radio);
+
+    info!("Radio LoRaLink TX loop");
+
 
     loop {
-        info!("Sending PING…");
-        radio.tx_raw(&mut delay, b"PING").await.unwrap();
+        link.send(&mut delay, b"PING").await.unwrap();
+
+        let mut buf = [0u8; 255];
+        if let Ok(len) = link.recv(&mut delay, &mut buf).await {
+            info!("Radio LoRaLink RX len={} data={:?}", len, &buf[..len]);
+        }
+
         Timer::after_secs(1).await;
     }
 }

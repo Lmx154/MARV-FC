@@ -24,6 +24,10 @@ pub struct LoRaConfig {
     pub crc_on: bool,
     pub invert_iq: bool,
     pub sync_word: u16,
+
+    //LoRa Link Layer
+    pub link_ack_timeout_ms: u32,
+    pub link_retries: usize,
 }
 
 impl LoRaConfig {
@@ -50,6 +54,8 @@ impl LoRaConfig {
             invert_iq: false,
 
             sync_word: 0x1424, // MAVLink private sync later
+            link_ack_timeout_ms: 200,
+            link_retries: 4,
         }
     }
 
