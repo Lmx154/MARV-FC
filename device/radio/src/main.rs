@@ -1,4 +1,3 @@
-// device/radio/src/main.rs
 #![no_std]
 #![no_main]
 
@@ -15,7 +14,7 @@ use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
 use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
-use common::tasks::radio::{run_bidir_test, Role};
+use common::tasks::radio::{run_mavlink_text_demo, Role, MavEndpointConfig};
 
 // Simple embassy-based delay
 struct EmbassyDelay;
@@ -79,7 +78,6 @@ async fn main(_spawner: Spawner) {
         rx: Output::new(p.PIN_9, Level::Low),
     };
 
-    // Shared LoRa config (PHY + link policy)
     let cfg = LoRaConfig::preset_default();
     info!(
         "Radio LoRa cfg: f={} Hz sf={} bw_code={} cr_code={} sw=0x{:04X}",
@@ -91,18 +89,20 @@ async fn main(_spawner: Spawner) {
 
     radio.init(&mut delay).await.unwrap();
 
-    // Build link layer on top of Layer 0
     let mut link = LoRaLink::new(&mut radio);
-
-    // Use link policy from LoRaConfig (shared between layers)
     link.ack_timeout_ms = cfg.link_ack_timeout_ms;
     link.retries        = cfg.link_retries;
 
     info!(
-        "Radio: LoRaLink bidirectional test mode (ack_timeout_ms={} retries={})",
+        "Radio: LoRaLink MAVLink text demo (ack_timeout_ms={} retries={})",
         link.ack_timeout_ms,
         link.retries
     );
 
-    run_bidir_test(&mut link, &mut delay, Role::Radio).await;
+    let mav_cfg = MavEndpointConfig {
+        sys_id: 42,
+        comp_id: 1,
+    };
+
+    run_mavlink_text_demo(&mut link, &mut delay, Role::Radio, mav_cfg).await;
 }

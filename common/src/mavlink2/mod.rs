@@ -3,15 +3,17 @@
 #![allow(async_fn_in_trait)]
 
 use defmt::{debug, warn};
-use mavio::{Frame, V2};
+use mavio::Frame;
 use mavio::error::FrameError;
+use mavio::protocol::V2;
 
 use crate::lora::link::{LoRaLink, LinkError, Sx1262Interface};
 use crate::utils::delay::DelayMs;
 
 /// Public re-exports so higher layers can use mavio types directly.
 pub mod prelude {
-    pub use mavio::{Frame, V2};
+    pub use mavio::Frame;
+    pub use mavio::protocol::V2;
     pub use mavio::dialects;
     pub use crate::mavlink2::{MavError, send_frame_over_lora, recv_frame_over_lora};
 }
@@ -24,7 +26,7 @@ pub enum MavError {
     /// MAVLink frame is too large for LoRaLink MTU.
     EncodeTooBig,
     /// MAVLink frame (de)serialization error.
-    Frame(FrameError),
+    Frame,
 }
 
 impl From<LinkError> for MavError {
@@ -34,8 +36,8 @@ impl From<LinkError> for MavError {
 }
 
 impl From<FrameError> for MavError {
-    fn from(e: FrameError) -> Self {
-        MavError::Frame(e)
+    fn from(_e: FrameError) -> Self {
+        MavError::Frame
     }
 }
 
@@ -86,13 +88,9 @@ where
     RADIO: Sx1262Interface,
 {
     let len = link.recv(delay, buf).await.map_err(MavError::from)?;
-    // Safety: mavio marks deserialize as unsafe because bytes may be garbage.
-    // Here we accept that risk; on error we just map into MavError::Frame.
+
+    // SAFETY: mavio marks this unsafe; on error we just return MavError::Frame.
     let frame = unsafe { Frame::<V2>::deserialize(&buf[..len]) }?;
-    debug!(
-        "MavLoRa: received MAVLink2 frame len={} msg_id={}",
-        len,
-        frame.message_id().0
-    );
+    debug!("MavLoRa: received MAVLink2 frame len={}", len);
     Ok(frame)
 }

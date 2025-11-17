@@ -1,4 +1,3 @@
-// device/gs/src/main.rs
 #![no_std]
 #![no_main]
 
@@ -15,7 +14,7 @@ use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
 use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
-use common::tasks::radio::{run_bidir_test, Role};
+use common::tasks::radio::{run_mavlink_text_demo, Role, MavEndpointConfig};
 
 // Simple delay
 struct EmbassyDelay;
@@ -90,16 +89,20 @@ async fn main(_spawner: Spawner) {
 
     radio.init(&mut delay).await.unwrap();
 
-    // Build link layer on top of Layer 0
     let mut link = LoRaLink::new(&mut radio);
     link.ack_timeout_ms = cfg.link_ack_timeout_ms;
     link.retries        = cfg.link_retries;
 
     info!(
-        "GS: LoRaLink bidirectional test mode (ack_timeout_ms={} retries={})",
+        "GS: LoRaLink MAVLink text demo (ack_timeout_ms={} retries={})",
         link.ack_timeout_ms,
         link.retries
     );
 
-    run_bidir_test(&mut link, &mut delay, Role::Ground).await;
+    let mav_cfg = MavEndpointConfig {
+        sys_id: 1,
+        comp_id: 1,
+    };
+
+    run_mavlink_text_demo(&mut link, &mut delay, Role::Ground, mav_cfg).await;
 }
