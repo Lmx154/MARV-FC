@@ -7,3 +7,4 @@ pub mod tasks;
 pub mod types;
 pub mod utils;
 pub mod lora;
+pub mod mavlink2;

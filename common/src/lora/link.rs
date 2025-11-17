@@ -85,6 +85,14 @@ impl<'a, RADIO> LoRaLink<'a, RADIO>
 where
     RADIO: Sx1262Interface,
 {
+    /// Max payload size in bytes (not including LoRaLink header).
+    /// 4-byte header + 240-byte payload <= 255-byte SX1262 limit.
+    pub const MTU: usize = 240;
+
+    pub fn mtu(&self) -> usize {
+        Self::MTU
+    }
+
     pub fn new(radio: &'a mut RADIO) -> Self {
         Self {
             radio,
@@ -96,20 +104,28 @@ where
     }
 
     pub async fn start_rx(&mut self, delay: &mut impl DelayMs) -> Result<()> {
-        self.radio.start_rx_continuous(delay).await.map_err(|_| LinkError::Radio)
+        self.radio
+            .start_rx_continuous(delay)
+            .await
+            .map_err(|_| LinkError::Radio)
     }
 
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
-    /// Send a reliable frame (payload only)
+    /// Send a reliable frame (payload only).
+    ///
+    /// Stop-and-wait ARQ:
+    ///  - TX data frame
+    ///  - Wait for ACK
+    ///  - Retry up to self.retries
     pub async fn send(
         &mut self,
         delay: &mut impl DelayMs,
         payload: &[u8],
     ) -> Result<()> {
-        if payload.len() > 240 {
+        if payload.len() > Self::MTU {
             return Err(LinkError::TooLarge);
         }
 
@@ -127,25 +143,39 @@ where
         };
 
         header.encode(&mut frame);
-        frame[4..4 + payload.len()].copy_from_slice(payload);
+        frame[LinkHeader::SIZE..LinkHeader::SIZE + payload.len()]
+            .copy_from_slice(payload);
 
         // TX + WAIT FOR ACK
         for attempt in 0..=self.retries {
             info!("LoRaLink TX seq={} attempt={}", seq, attempt + 1);
 
-            self.radio.tx_raw(delay, &frame[..header.len as usize + LinkHeader::SIZE]).await
+            self.radio
+                .tx_raw(
+                    delay,
+                    &frame[..header.len as usize + LinkHeader::SIZE],
+                )
+                .await
                 .map_err(|_| LinkError::Radio)?;
 
             // After TX, immediately switch to RX
-            self.radio.start_rx_continuous(delay).await.map_err(|_| LinkError::Radio)?;
+            self.radio
+                .start_rx_continuous(delay)
+                .await
+                .map_err(|_| LinkError::Radio)?;
 
             // Wait for ACK
             let mut elapsed = 0;
             let mut buf = [0u8; 255];
 
             while elapsed < self.ack_timeout_ms {
-                if let Some(rx) = self.radio.poll_raw(delay, &mut buf).await.map_err(|_| LinkError::Radio)? {
-                    if rx.len >= 4 {
+                if let Some(rx) = self
+                    .radio
+                    .poll_raw(delay, &mut buf)
+                    .await
+                    .map_err(|_| LinkError::Radio)?
+                {
+                    if rx.len >= LinkHeader::SIZE as u8 {
                         if let Some(h) = LinkHeader::decode(&buf[..4]) {
                             if (h.flags & FLAG_ACK) != 0 && h.ack == seq {
                                 info!("LoRaLink ACK received for seq={}", seq);
@@ -159,71 +189,114 @@ where
                 elapsed += 10;
             }
 
-            warn!("LoRaLink: ACK timeout seq={} (attempt {})", seq, attempt + 1);
+            warn!(
+                "LoRaLink: ACK timeout seq={} (attempt {})",
+                seq,
+                attempt + 1
+            );
         }
 
         Err(LinkError::Timeout)
     }
 
-    /// Receive a reliable LoRaLink frame
+    /// Blocking receive: waits until a valid frame and returns its payload len.
+    ///
+    /// This is built on top of `try_recv`, which does a single poll step.
     pub async fn recv(
         &mut self,
         delay: &mut impl DelayMs,
         buf: &mut [u8],
     ) -> Result<usize> {
-        let mut rx_buf = [0u8; 255];
-
         loop {
-            if let Some(rx) = self.radio.poll_raw(delay, &mut rx_buf).await.map_err(|_| LinkError::Radio)? {
-                if rx.len < 4 {
-                    continue;
-                }
-
-                let Some(h) = LinkHeader::decode(&rx_buf[..4]) else {
-                    continue;
-                };
-
-                let payload_len = h.len as usize;
-                if payload_len > buf.len() || payload_len + 4 > rx.len as usize {
-                    return Err(LinkError::CorruptFrame);
-                }
-
-                // Expected sequence?
-                if h.seq != self.expected_seq {
-                    warn!("LoRaLink: out-of-order seq={} expected={}", h.seq, self.expected_seq);
-                } else {
-                    self.expected_seq = self.expected_seq.wrapping_add(1);
-                }
-
-                // Copy payload
-                buf[..payload_len].copy_from_slice(&rx_buf[4..4 + payload_len]);
-
-                // Send ACK
-                let mut ack_frame = [0u8; 4];
-                let ack_header = LinkHeader {
-                    seq: 0,
-                    ack: h.seq,
-                    flags: FLAG_ACK,
-                    len: 0,
-                };
-                ack_header.encode(&mut ack_frame);
-
-                info!("LoRaLink: Sending ACK for seq={}", h.seq);
-                self.radio.tx_raw(delay, &ack_frame).await.map_err(|_| LinkError::Radio)?;
-
-                // IMPORTANT: After transmitting an ACK, return to RX mode so we
-                // continue to receive future frames. If we do not do this the
-                // radio remains in TX/FS mode and will no longer receive any
-                // frames (classic SX1262 behavior).
-                self.radio.start_rx_continuous(delay).await.map_err(|_| LinkError::Radio)?;
-                info!("LoRaLink: ACK TX done -> entered RX");
-
-                // Return payload
-                return Ok(payload_len);
+            if let Some(len) = self.try_recv(delay, buf).await? {
+                return Ok(len);
             }
 
+            // No frame yet – back off a bit.
             delay.delay_ms(10).await;
         }
+    }
+
+    /// Non-blocking receive helper.
+    ///
+    /// - Returns Ok(Some(len)) if a valid frame was received (and ACKed).
+    /// - Returns Ok(None) if no frame is available right now.
+    /// - Returns Err(_) on radio / framing errors.
+    ///
+    /// This is what you’ll want to use inside a higher-level MAVLink task.
+    pub async fn try_recv(
+        &mut self,
+        delay: &mut impl DelayMs,
+        buf: &mut [u8],
+    ) -> Result<Option<usize>> {
+        let mut rx_buf = [0u8; 255];
+
+        // Single poll
+        let raw = match self
+            .radio
+            .poll_raw(delay, &mut rx_buf)
+            .await
+            .map_err(|_| LinkError::Radio)?
+        {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+
+        if raw.len < LinkHeader::SIZE as u8 {
+            // Too short to be a valid frame; drop.
+            return Ok(None);
+        }
+
+        let Some(h) = LinkHeader::decode(&rx_buf[..4]) else {
+            // Malformed header; drop.
+            return Ok(None);
+        };
+
+        let payload_len = h.len as usize;
+        if payload_len > buf.len() || payload_len + LinkHeader::SIZE > raw.len as usize {
+            return Err(LinkError::CorruptFrame);
+        }
+
+        // Expected sequence?
+        if h.seq != self.expected_seq {
+            warn!(
+                "LoRaLink: out-of-order seq={} expected={}",
+                h.seq,
+                self.expected_seq
+            );
+        } else {
+            self.expected_seq = self.expected_seq.wrapping_add(1);
+        }
+
+        // Copy payload for caller
+        buf[..payload_len]
+            .copy_from_slice(&rx_buf[LinkHeader::SIZE..LinkHeader::SIZE + payload_len]);
+
+        // Send ACK
+        let mut ack_frame = [0u8; LinkHeader::SIZE];
+        let ack_header = LinkHeader {
+            seq: 0,
+            ack: h.seq,
+            flags: FLAG_ACK,
+            len: 0,
+        };
+        ack_header.encode(&mut ack_frame);
+
+        info!("LoRaLink: Sending ACK for seq={}", h.seq);
+        self.radio
+            .tx_raw(delay, &ack_frame)
+            .await
+            .map_err(|_| LinkError::Radio)?;
+
+        // IMPORTANT: After transmitting an ACK, return to RX mode so we
+        // continue to receive future frames.
+        self.radio
+            .start_rx_continuous(delay)
+            .await
+            .map_err(|_| LinkError::Radio)?;
+        info!("LoRaLink: ACK TX done -> entered RX");
+
+        Ok(Some(payload_len))
     }
 }
 
@@ -232,10 +305,22 @@ where
 // -----------------------------------------------------------------------------
 
 pub trait Sx1262Interface {
-    async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()>;
-    async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()>;
-    async fn poll_raw(&mut self, delay: &mut impl DelayMs, buf: &mut [u8])
-        -> RadioResult<Option<RawRx>>;
+    async fn tx_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        payload: &[u8],
+    ) -> RadioResult<()>;
+
+    async fn start_rx_continuous(
+        &mut self,
+        delay: &mut impl DelayMs,
+    ) -> RadioResult<()>;
+
+    async fn poll_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        buf: &mut [u8],
+    ) -> RadioResult<Option<RawRx>>;
 }
 
 // Blanket implementation
@@ -249,15 +334,110 @@ where
     DIO1: embedded_hal::digital::InputPin,
     SW: crate::drivers::sx1262::RfSwitch,
 {
-    async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()> {
+    async fn tx_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        payload: &[u8],
+    ) -> RadioResult<()> {
         self.tx_raw(delay, payload).await
     }
 
-    async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()> {
+    async fn start_rx_continuous(
+        &mut self,
+        delay: &mut impl DelayMs,
+    ) -> RadioResult<()> {
         self.start_rx_continuous(delay).await
     }
 
-    async fn poll_raw(&mut self, delay: &mut impl DelayMs, buf: &mut [u8]) -> RadioResult<Option<RawRx>> {
+    async fn poll_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        buf: &mut [u8],
+    ) -> RadioResult<Option<RawRx>> {
         self.poll_raw(delay, buf).await
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Optional Fault Injection Wrapper for Stress Testing
+// -----------------------------------------------------------------------------
+
+/// Wraps any Sx1262Interface and can drop RX frames or ACKs
+/// deterministically to exercise retries/timeouts.
+///
+/// Not used by default – but available for dedicated stress builds.
+pub struct FaultyRadio<R> {
+    inner: R,
+    drop_every_nth_rx: u8,
+    rx_count: u8,
+    drop_every_nth_ack: u8,
+    ack_count: u8,
+}
+
+impl<R> FaultyRadio<R> {
+    pub fn new(inner: R, drop_rx_every: u8, drop_ack_every: u8) -> Self {
+        Self {
+            inner,
+            drop_every_nth_rx: drop_rx_every,
+            rx_count: 0,
+            drop_every_nth_ack: drop_ack_every,
+            ack_count: 0,
+        }
+    }
+
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+}
+
+impl<R> Sx1262Interface for FaultyRadio<R>
+where
+    R: Sx1262Interface,
+{
+    async fn tx_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        payload: &[u8],
+    ) -> RadioResult<()> {
+        // Heuristic: small (len == 4) frames are ACKs
+        let is_ack = payload.len() == LinkHeader::SIZE;
+
+        if is_ack && self.drop_every_nth_ack != 0 {
+            self.ack_count = self.ack_count.wrapping_add(1);
+            if self.ack_count % self.drop_every_nth_ack == 0 {
+                warn!("FaultyRadio: DROPPING ACK TX");
+                // Pretend success, but do nothing (ACK lost on air).
+                return Ok(());
+            }
+        }
+
+        self.inner.tx_raw(delay, payload).await
+    }
+
+    async fn start_rx_continuous(
+        &mut self,
+        delay: &mut impl DelayMs,
+    ) -> RadioResult<()> {
+        self.inner.start_rx_continuous(delay).await
+    }
+
+    async fn poll_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        buf: &mut [u8],
+    ) -> RadioResult<Option<RawRx>> {
+        let res = self.inner.poll_raw(delay, buf).await?;
+        if let Some(raw) = res {
+            if self.drop_every_nth_rx != 0 {
+                self.rx_count = self.rx_count.wrapping_add(1);
+                if self.rx_count % self.drop_every_nth_rx == 0 {
+                    warn!("FaultyRadio: DROPPING RX frame");
+                    return Ok(None);
+                }
+            }
+            Ok(Some(raw))
+        } else {
+            Ok(None)
+        }
     }
 }

@@ -525,7 +525,7 @@ where
         Ok(())
     }
 
-    pub async fn poll_raw(
+       pub async fn poll_raw(
         &mut self,
         delay: &mut impl DelayMs,
         buf: &mut [u8],
@@ -536,11 +536,11 @@ where
         }
         Self::log_irq("RX poll", irq);
 
-        let done = irq & Self::IRQ_RX_DONE != 0;
-        let header_valid = irq & Self::IRQ_HEADER_VALID != 0;
-        let header_err = irq & Self::IRQ_HEADER_ERR != 0;
-        let crc_err = irq & Self::IRQ_CRC_ERR != 0;
-        let timeout = irq & Self::IRQ_TIMEOUT != 0;
+        let done         = irq & Self::IRQ_RX_DONE        != 0;
+        let header_valid = irq & Self::IRQ_HEADER_VALID   != 0;
+        let header_err   = irq & Self::IRQ_HEADER_ERR     != 0;
+        let crc_err      = irq & Self::IRQ_CRC_ERR        != 0;
+        let timeout      = irq & Self::IRQ_TIMEOUT        != 0;
 
         if timeout {
             debug!("RX timeout IRQ observed");
@@ -555,26 +555,28 @@ where
             debug!("Header valid before RxDone (partial reception)");
         }
 
+        // Any of these means the frame is unusable at the PHY level.
+        // Do NOT forward it upward – just clear IRQs and report "no frame".
+        if header_err || crc_err || timeout {
+            self.write_cmd(delay, 0x02, &irq.to_be_bytes()).await?;
+            return Ok(None);
+        }
+
         let mut len = 0usize;
         if done {
             let (l, start) = self.get_rx_buffer_status(delay).await?;
             len = l as usize;
             let max = buf.len().min(len);
-            self.read_buffer(delay, start, &mut buf[..max])
-                .await?;
+            self.read_buffer(delay, start, &mut buf[..max]).await?;
         }
 
         // Packet status (RSSI / SNR)
-        let pkt = self
-            .read_cmd::<3>(delay, 0x14)
-            .await
-            .unwrap_or([0; 3]);
+        let pkt = self.read_cmd::<3>(delay, 0x14).await.unwrap_or([0; 3]);
         let rssi = -(pkt[0] as i16) / 2;
         let snr_x4 = pkt[1] as i8 as i16;
 
         // Clear consumed IRQ bits
-        self.write_cmd(delay, 0x02, &irq.to_be_bytes())
-            .await?;
+        self.write_cmd(delay, 0x02, &irq.to_be_bytes()).await?;
 
         Ok(Some(RawRx {
             len: len as u8,
@@ -582,4 +584,5 @@ where
             snr_x4,
         }))
     }
+
 }

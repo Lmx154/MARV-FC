@@ -10,6 +10,12 @@ use crate::utils::delay::DelayMs;
 const KIND_APP_PING: u8 = 0x10;
 const KIND_APP_PONG: u8 = 0x11;
 
+/// Stress-test tuning
+const STRESS_MODE: bool = true;
+
+/// Max payload size at LoRaLink level (must match LoRaLink::MTU)
+const LINK_MAX_PAYLOAD: usize = 240;
+
 /// Simple stats for debugging (optional)
 #[derive(Default)]
 pub struct LinkStats {
@@ -27,6 +33,28 @@ pub enum Role {
     Radio,
     /// "Server" – responds to each ping with a pong.
     Ground,
+}
+
+/// In stress mode, choose a payload length in [8, 220] pseudo-randomly.
+/// In normal mode, fixed 16 bytes for readability.
+fn choose_payload_len(app_seq: u32) -> usize {
+    if !STRESS_MODE {
+        return 16;
+    }
+    let min_len = 8usize;
+    let max_len = 220usize;
+    let span = max_len - min_len;
+    min_len + ((app_seq as usize * 17) % span)
+}
+
+/// Gap between full ping-pong cycles.
+/// In stress mode we keep it very small; in normal mode we make logs readable.
+fn cycle_gap_ms() -> u32 {
+    if STRESS_MODE {
+        5
+    } else {
+        500
+    }
 }
 
 /// Entry point for a **bidirectional link-layer test**.
@@ -69,11 +97,12 @@ async fn run_radio_client<'a, RADIO>(
 
     let mut stats = LinkStats::default();
     let mut app_seq_tx: u32 = 0;
-    let mut tx_buf = [0u8; 32];
+
+    // TX buffer sized to the link MTU so we can hit edge cases
+    let mut tx_buf = [0u8; LINK_MAX_PAYLOAD];
     let mut rx_buf = [0u8; 255];
 
-    // Gap between full ping-pong cycles, so logs are readable
-    const CYCLE_GAP_MS: u32 = 500;
+    let gap = cycle_gap_ms();
 
     loop {
         app_seq_tx = app_seq_tx.wrapping_add(1);
@@ -82,18 +111,25 @@ async fn run_radio_client<'a, RADIO>(
         // Build PING payload:
         //   [0]    = KIND_APP_PING
         //   [1..4] = app_seq_tx (big-endian)
-        //   [5..]  = simple pattern
+        //   [5..]  = deterministic pattern based on app_seq_tx
         // -------------------------------------------------------------
+        let mut tx_len = choose_payload_len(app_seq_tx);
+        if tx_len < 16 {
+            tx_len = 16;
+        }
+        if tx_len > LINK_MAX_PAYLOAD {
+            tx_len = LINK_MAX_PAYLOAD;
+        }
+
         tx_buf[0] = KIND_APP_PING;
         tx_buf[1] = (app_seq_tx >> 24) as u8;
         tx_buf[2] = (app_seq_tx >> 16) as u8;
         tx_buf[3] = (app_seq_tx >> 8) as u8;
         tx_buf[4] = app_seq_tx as u8;
 
-        for i in 5..16 {
-            tx_buf[i] = i as u8;
+        for i in 5..tx_len {
+            tx_buf[i] = (app_seq_tx as u8).wrapping_add(i as u8);
         }
-        let tx_len = 16;
 
         info!(
             "RadioTask: SEND PING app_seq_tx={} len={}",
@@ -118,7 +154,7 @@ async fn run_radio_client<'a, RADIO>(
                     stats.tx_timeout
                 );
                 // On timeout, skip waiting for PONG and move to next cycle.
-                delay.delay_ms(CYCLE_GAP_MS).await;
+                delay.delay_ms(gap).await;
                 continue;
             }
             Err(LinkError::Radio) => {
@@ -128,7 +164,7 @@ async fn run_radio_client<'a, RADIO>(
                     app_seq_tx,
                     stats.tx_radio_err
                 );
-                delay.delay_ms(CYCLE_GAP_MS).await;
+                delay.delay_ms(gap).await;
                 continue;
             }
             Err(e) => {
@@ -137,7 +173,7 @@ async fn run_radio_client<'a, RADIO>(
                     app_seq_tx,
                     e
                 );
-                delay.delay_ms(CYCLE_GAP_MS).await;
+                delay.delay_ms(gap).await;
                 continue;
             }
         }
@@ -149,7 +185,10 @@ async fn run_radio_client<'a, RADIO>(
         // - GS:    receives PING, replies with PONG
         // - Radio: receives PONG here via recv()
         // -------------------------------------------------------------
-        info!("RadioTask: waiting for PONG in response to app_seq_tx={}", app_seq_tx);
+        info!(
+            "RadioTask: waiting for PONG in response to app_seq_tx={}",
+            app_seq_tx
+        );
 
         let len = match link.recv(delay, &mut rx_buf).await {
             Ok(len) => len,
@@ -178,16 +217,18 @@ async fn run_radio_client<'a, RADIO>(
         };
 
         if len < 5 {
-            warn!("RadioTask: short frame while waiting for PONG len={}", len);
+            warn!(
+                "RadioTask: short frame while waiting for PONG len={}",
+                len
+            );
             continue;
         }
 
         let kind = rx_buf[0];
-        let pong_seq: u32 =
-            ((rx_buf[1] as u32) << 24) |
-            ((rx_buf[2] as u32) << 16) |
-            ((rx_buf[3] as u32) << 8)  |
-             (rx_buf[4] as u32);
+        let pong_seq: u32 = ((rx_buf[1] as u32) << 24)
+            | ((rx_buf[2] as u32) << 16)
+            | ((rx_buf[3] as u32) << 8)
+            | (rx_buf[4] as u32);
 
         if kind != KIND_APP_PONG {
             warn!(
@@ -195,6 +236,19 @@ async fn run_radio_client<'a, RADIO>(
                 kind, len
             );
             continue;
+        }
+
+        // Validate payload pattern end-to-end
+        for i in 5..len {
+            let expected = (pong_seq as u8).wrapping_add(i as u8);
+            if rx_buf[i] != expected {
+                warn!(
+                    "RadioTask: PONG payload mismatch at i={} got=0x{:02X} exp=0x{:02X}",
+                    i, rx_buf[i], expected
+                );
+                stats.rx_corrupt += 1;
+                break;
+            }
         }
 
         stats.rx_ok += 1;
@@ -205,7 +259,7 @@ async fn run_radio_client<'a, RADIO>(
             stats.rx_ok
         );
 
-        delay.delay_ms(CYCLE_GAP_MS).await;
+        delay.delay_ms(gap).await;
     }
 }
 
@@ -229,7 +283,7 @@ async fn run_gs_server<'a, RADIO>(
     let mut app_seq_tx: u32 = 0;
 
     let mut rx_buf = [0u8; 255];
-    let mut tx_buf = [0u8; 32];
+    let mut tx_buf = [0u8; LINK_MAX_PAYLOAD];
 
     loop {
         // -------------------------------------------------------------
@@ -270,11 +324,10 @@ async fn run_gs_server<'a, RADIO>(
         }
 
         let kind = rx_buf[0];
-        let ping_seq: u32 =
-            ((rx_buf[1] as u32) << 24) |
-            ((rx_buf[2] as u32) << 16) |
-            ((rx_buf[3] as u32) << 8)  |
-             (rx_buf[4] as u32);
+        let ping_seq: u32 = ((rx_buf[1] as u32) << 24)
+            | ((rx_buf[2] as u32) << 16)
+            | ((rx_buf[3] as u32) << 8)
+            | (rx_buf[4] as u32);
 
         if kind != KIND_APP_PING {
             warn!(
@@ -282,6 +335,19 @@ async fn run_gs_server<'a, RADIO>(
                 kind, len
             );
             continue;
+        }
+
+        // Validate PING payload pattern
+        for i in 5..len {
+            let expected = (ping_seq as u8).wrapping_add(i as u8);
+            if rx_buf[i] != expected {
+                warn!(
+                    "GsTask: PING payload mismatch at i={} got=0x{:02X} exp=0x{:02X}",
+                    i, rx_buf[i], expected
+                );
+                stats.rx_corrupt += 1;
+                break;
+            }
         }
 
         stats.rx_ok += 1;
@@ -296,9 +362,17 @@ async fn run_gs_server<'a, RADIO>(
         // Build PONG response:
         //   [0]    = KIND_APP_PONG
         //   [1..4] = app_seq_tx (server-side sequence)
-        // Optional: we could also echo ping_seq somewhere if you want.
+        //   [5..]  = deterministic pattern based on app_seq_tx
         // -------------------------------------------------------------
         app_seq_tx = app_seq_tx.wrapping_add(1);
+
+        let mut tx_len = choose_payload_len(app_seq_tx);
+        if tx_len < 16 {
+            tx_len = 16;
+        }
+        if tx_len > LINK_MAX_PAYLOAD {
+            tx_len = LINK_MAX_PAYLOAD;
+        }
 
         tx_buf[0] = KIND_APP_PONG;
         tx_buf[1] = (app_seq_tx >> 24) as u8;
@@ -306,10 +380,9 @@ async fn run_gs_server<'a, RADIO>(
         tx_buf[3] = (app_seq_tx >> 8) as u8;
         tx_buf[4] = app_seq_tx as u8;
 
-        for i in 5..16 {
-            tx_buf[i] = (0xF0u8).wrapping_add(i as u8); // Different pattern from PING
+        for i in 5..tx_len {
+            tx_buf[i] = (app_seq_tx as u8).wrapping_add(i as u8);
         }
-        let tx_len = 16;
 
         info!(
             "GsTask: SEND PONG app_seq_tx={} in response to ping_seq={}",
