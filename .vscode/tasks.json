@@ -2,13 +2,13 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "Build firmware (rp235x)",
+			"label": "Build firmware (pick crate)",
 			"type": "shell",
 			"command": "cargo",
 			"args": [
 				"build",
 				"-p",
-				"rp235x",
+				"${input:firmwareCrate}",
 				"--target",
 				"thumbv8m.main-none-eabihf"
 			],
@@ -21,13 +21,13 @@
 			]
 		},
 		{
-			"label": "Flash + RTT (probe-rs)",
+			"label": "Flash + RTT (pick crate, probe-rs)",
 			"type": "shell",
 			"command": "cargo",
 			"args": [
 				"run",
 				"-p",
-				"rp235x",
+				"${input:firmwareCrate}",
 				"--target",
 				"thumbv8m.main-none-eabihf"
 			],
@@ -39,6 +39,37 @@
 			"problemMatcher": [
 				"$rustc"
 			]
+		},
+		{
+			"label": "RTT attach (pick crate, probe-rs)",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip",
+				"RP2350",
+				"target/thumbv8m.main-none-eabihf/debug/${input:firmwareCrate}"
+			],
+			"options": {
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		}
+	],
+	"inputs": [
+		{
+			"id": "firmwareCrate",
+			"type": "pickString",
+			"description": "Select firmware crate",
+			"options": [
+				"rp235x",
+				"radio",
+				"gs",
+				"test"
+			],
+			"default": "rp235x"
 		}
 	]
 }

@@ -1,0 +1,98 @@
+// common/src/mavlink2/mod.rs
+#![allow(dead_code)]
+#![allow(async_fn_in_trait)]
+
+use defmt::{debug, warn};
+use mavio::{Frame, V2};
+use mavio::error::FrameError;
+
+use crate::lora::link::{LoRaLink, LinkError, Sx1262Interface};
+use crate::utils::delay::DelayMs;
+
+/// Public re-exports so higher layers can use mavio types directly.
+pub mod prelude {
+    pub use mavio::{Frame, V2};
+    pub use mavio::dialects;
+    pub use crate::mavlink2::{MavError, send_frame_over_lora, recv_frame_over_lora};
+}
+
+/// Error type for the MAVLink2-over-LoRa layer.
+#[derive(Debug, defmt::Format)]
+pub enum MavError {
+    /// Underlying LoRaLink error (reliability / radio).
+    Link(LinkError),
+    /// MAVLink frame is too large for LoRaLink MTU.
+    EncodeTooBig,
+    /// MAVLink frame (de)serialization error.
+    Frame(FrameError),
+}
+
+impl From<LinkError> for MavError {
+    fn from(e: LinkError) -> Self {
+        MavError::Link(e)
+    }
+}
+
+impl From<FrameError> for MavError {
+    fn from(e: FrameError) -> Self {
+        MavError::Frame(e)
+    }
+}
+
+/// Send a MAVLink2 frame over LoRaLink.
+///
+/// This:
+///   - Serializes the `Frame<V2>` into a stack buffer
+///   - Verifies it fits inside the LoRaLink MTU
+///   - Uses `LoRaLink::send` for reliable delivery
+pub async fn send_frame_over_lora<'a, RADIO>(
+    link: &mut LoRaLink<'a, RADIO>,
+    delay: &mut impl DelayMs,
+    frame: &Frame<V2>,
+) -> Result<(), MavError>
+where
+    RADIO: Sx1262Interface,
+{
+    let size = frame.size();
+    let mtu = LoRaLink::<RADIO>::MTU;
+
+    if size > mtu {
+        warn!(
+            "MavLoRa: frame too big for MTU (size={} mtu={})",
+            size, mtu
+        );
+        return Err(MavError::EncodeTooBig);
+    }
+
+    let mut buf = [0u8; 255]; // upper bound, LoRaLink will cap by MTU anyway
+    let written = frame.serialize(&mut buf[..mtu])?;
+    debug!("MavLoRa: sending MAVLink2 frame len={}", written);
+
+    link.send(delay, &buf[..written]).await.map_err(MavError::from)
+}
+
+/// Receive a MAVLink2 frame over LoRaLink.
+///
+/// This:
+///   - Blocks in `LoRaLink::recv` until a valid datagram arrives
+///   - Interprets the entire datagram as a single MAVLink2 frame
+///   - Deserializes into `Frame<V2>`
+pub async fn recv_frame_over_lora<'a, RADIO>(
+    link: &mut LoRaLink<'a, RADIO>,
+    delay: &mut impl DelayMs,
+    buf: &mut [u8],
+) -> Result<Frame<V2>, MavError>
+where
+    RADIO: Sx1262Interface,
+{
+    let len = link.recv(delay, buf).await.map_err(MavError::from)?;
+    // Safety: mavio marks deserialize as unsafe because bytes may be garbage.
+    // Here we accept that risk; on error we just map into MavError::Frame.
+    let frame = unsafe { Frame::<V2>::deserialize(&buf[..len]) }?;
+    debug!(
+        "MavLoRa: received MAVLink2 frame len={} msg_id={}",
+        len,
+        frame.message_id().0
+    );
+    Ok(frame)
+}
