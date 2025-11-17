@@ -1,8 +1,8 @@
-// src/lora/link.rs
+// common/src/lora/link.rs
 #![allow(dead_code)]
 #![allow(async_fn_in_trait)]
 
-use defmt::*;
+use defmt::{info, warn};
 use crate::drivers::sx1262::{Sx1262, RawRx, Result as RadioResult};
 use crate::utils::delay::DelayMs;
 
@@ -10,7 +10,7 @@ use crate::utils::delay::DelayMs;
 // Link Layer Types
 // -----------------------------------------------------------------------------
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, defmt::Format)]
 pub enum LinkError {
     Radio,
     Timeout,

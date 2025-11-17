@@ -1,3 +1,4 @@
+// device/gs/src/main.rs
 #![no_std]
 #![no_main]
 
@@ -12,7 +13,9 @@ use embassy_time::{Duration, Timer};
 
 use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
+use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
+use common::tasks::radio::{run_bidir_test, Role};
 
 // Simple delay
 struct EmbassyDelay;
@@ -21,10 +24,6 @@ impl DelayMs for EmbassyDelay {
         Timer::after(Duration::from_millis(ms.into())).await;
     }
 }
-
-// Frame types
-const KIND_PING: u8 = 0x01;
-const KIND_PONG: u8 = 0x02;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -46,13 +45,10 @@ async fn main(_spawner: Spawner) {
         spi_cfg,
     );
 
-    let nss = Output::new(p.PIN_5, Level::High);
+    let nss   = Output::new(p.PIN_5, Level::High);
     let reset = Output::new(p.PIN_1, Level::High);
-    let busy = Input::new(p.PIN_0, Pull::None);
-    let dio1 = Input::new(p.PIN_6, Pull::None);
-
-    // LED for visual indication (adjust pin as needed)
-    let mut led = Output::new(p.PIN_25, Level::Low);
+    let busy  = Input::new(p.PIN_0, Pull::None);
+    let dio1  = Input::new(p.PIN_6, Pull::None);
 
     // RF Switch (external TXEN/RXEN)
     struct ExtSw {
@@ -94,42 +90,16 @@ async fn main(_spawner: Spawner) {
 
     radio.init(&mut delay).await.unwrap();
 
-    info!("GS: PONG responder mode");
-    radio.start_rx_continuous(&mut delay).await.unwrap();
+    // Build link layer on top of Layer 0
+    let mut link = LoRaLink::new(&mut radio);
+    link.ack_timeout_ms = cfg.link_ack_timeout_ms;
+    link.retries        = cfg.link_retries;
 
-    let mut rx_buf = [0u8; 255];
+    info!(
+        "GS: LoRaLink bidirectional test mode (ack_timeout_ms={} retries={})",
+        link.ack_timeout_ms,
+        link.retries
+    );
 
-    loop {
-        if let Some(rx) = radio.poll_raw(&mut delay, &mut rx_buf).await.unwrap() {
-            if rx.len >= 2 {
-                let kind = rx_buf[0];
-                let seq = rx_buf[1];
-                info!(
-                    "GS RX kind=0x{:02X} seq={} len={} rssi={} snr_x4={}",
-                    kind, seq, rx.len, rx.rssi, rx.snr_x4
-                );
-
-                if kind == KIND_PING {
-                    // Blink LED: full RX+TX cycle on GS
-                    led.toggle();
-
-                    // Build PONG frame [kind, seq]
-                    let tx_payload = [KIND_PONG, seq];
-                    info!("GS: replying PONG seq={}", seq);
-                    if let Err(e) = radio.tx_raw(&mut delay, &tx_payload).await {
-                        warn!("GS tx_raw error: {:?}", e);
-                    }
-
-                    // Back to continuous RX
-                    if let Err(e) = radio.start_rx_continuous(&mut delay).await {
-                        warn!("GS start_rx_continuous error: {:?}", e);
-                    }
-                } else {
-                    warn!("GS: unexpected frame kind=0x{:02X}", kind);
-                }
-            }
-        }
-
-        delay.delay_ms(20).await;
-    }
+    run_bidir_test(&mut link, &mut delay, Role::Ground).await;
 }

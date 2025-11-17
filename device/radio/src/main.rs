@@ -1,3 +1,4 @@
+// device/radio/src/main.rs
 #![no_std]
 #![no_main]
 
@@ -12,21 +13,17 @@ use embassy_time::{Duration, Timer};
 
 use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
+use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
+use common::tasks::radio::{run_bidir_test, Role};
 
+// Simple embassy-based delay
 struct EmbassyDelay;
 impl DelayMs for EmbassyDelay {
     async fn delay_ms(&mut self, ms: u32) {
         Timer::after(Duration::from_millis(ms.into())).await;
     }
 }
-
-// Frame types
-const KIND_PING: u8 = 0x01;
-const KIND_PONG: u8 = 0x02;
-
-// How long to wait for a PONG after each PING (ms)
-const PONG_TIMEOUT_MS: u32 = 800;
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
@@ -48,15 +45,12 @@ async fn main(_spawner: Spawner) {
         spi_cfg,
     );
 
-    let nss = Output::new(p.PIN_5, Level::High);
+    let nss   = Output::new(p.PIN_5, Level::High);
     let reset = Output::new(p.PIN_1, Level::High);
-    let busy = Input::new(p.PIN_0, Pull::None);
-    let dio1 = Input::new(p.PIN_6, Pull::None);
+    let busy  = Input::new(p.PIN_0, Pull::None);
+    let dio1  = Input::new(p.PIN_6, Pull::None);
 
-    // LED for visual ping-pong success
-    let mut led = Output::new(p.PIN_25, Level::Low);
-
-    // RF Switch
+    // RF Switch (external TXEN/RXEN)
     struct ExtSw {
         tx: Output<'static>,
         rx: Output<'static>,
@@ -85,6 +79,7 @@ async fn main(_spawner: Spawner) {
         rx: Output::new(p.PIN_9, Level::Low),
     };
 
+    // Shared LoRa config (PHY + link policy)
     let cfg = LoRaConfig::preset_default();
     info!(
         "Radio LoRa cfg: f={} Hz sf={} bw_code={} cr_code={} sw=0x{:04X}",
@@ -96,60 +91,18 @@ async fn main(_spawner: Spawner) {
 
     radio.init(&mut delay).await.unwrap();
 
-    info!("Radio: PING initiator mode");
-    let mut rx_buf = [0u8; 255];
-    let mut seq: u8 = 0;
+    // Build link layer on top of Layer 0
+    let mut link = LoRaLink::new(&mut radio);
 
-    loop {
-        seq = seq.wrapping_add(1);
-        let tx_payload = [KIND_PING, seq];
+    // Use link policy from LoRaConfig (shared between layers)
+    link.ack_timeout_ms = cfg.link_ack_timeout_ms;
+    link.retries        = cfg.link_retries;
 
-        info!("Radio: sending PING seq={}", seq);
-        if let Err(e) = radio.tx_raw(&mut delay, &tx_payload).await {
-            warn!("Radio tx_raw error: {:?}", e);
-        }
+    info!(
+        "Radio: LoRaLink bidirectional test mode (ack_timeout_ms={} retries={})",
+        link.ack_timeout_ms,
+        link.retries
+    );
 
-        // Listen for matching PONG
-        if let Err(e) = radio.start_rx_continuous(&mut delay).await {
-            warn!("Radio start_rx_continuous error: {:?}", e);
-        }
-
-        let mut elapsed = 0u32;
-        let mut success = false;
-
-        while elapsed < PONG_TIMEOUT_MS {
-            if let Some(rx) = radio.poll_raw(&mut delay, &mut rx_buf).await.unwrap() {
-                if rx.len >= 2 {
-                    let kind = rx_buf[0];
-                    let rx_seq = rx_buf[1];
-                    info!(
-                        "Radio RX kind=0x{:02X} seq={} len={} rssi={} snr_x4={}",
-                        kind, rx_seq, rx.len, rx.rssi, rx.snr_x4
-                    );
-
-                    if kind == KIND_PONG && rx_seq == seq {
-                        // Full ping-pong success → blink LED
-                        led.toggle();
-                        info!("Radio: SUCCESS ping-pong seq={}", seq);
-                        success = true;
-                        break;
-                    } else {
-                        warn!(
-                            "Radio: unexpected frame kind=0x{:02X} seq={} (wanted PONG seq={})",
-                            kind, rx_seq, seq
-                        );
-                    }
-                }
-            }
-            delay.delay_ms(20).await;
-            elapsed += 20;
-        }
-
-        if !success {
-            warn!("Radio: NO PONG for seq={} within {} ms", seq, PONG_TIMEOUT_MS);
-        }
-
-        // Small gap between pings so we can see LED activity and logs
-        Timer::after(Duration::from_millis(1000)).await;
-    }
+    run_bidir_test(&mut link, &mut delay, Role::Radio).await;
 }
