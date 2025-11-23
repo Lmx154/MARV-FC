@@ -18,10 +18,11 @@ This document outlines the hardware configurations and pin assignments for the M
     - MISO: GP8
     - SCK: GP10
     - CS: GP9
-  - **I2C0**: BMP390
+  - **I2C0**: BMP390, ADXL375
     - SDA: GP12
     - SCL: GP13
     - BMP390 Address: 0x77
+    - ADXL375 Address: 0x??
   - **I2C1**: BMM350, Ublox NEO M9N GPS
     - SDA: GP6
     - SCL: GP7
