@@ -7,10 +7,10 @@
 - simulation
 
 TODO:
-use pio spi async for adxl375 driver
-use pio uart async for CP2102
-async spi SD blackbox storage logs and config
-flash high speed storage over qspi pio? 
-async communication w/ radio module
-ekf
-pid controller
+- use i2c async for adxl375 driver
+- create async usbcdc com for hil
+- async spi SD blackbox storage logs and config
+- flash high speed storage over qspi pio? 
+- async communication w/ radio module
+- ekf
+- pid controller

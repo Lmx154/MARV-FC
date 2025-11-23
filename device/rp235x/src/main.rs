@@ -17,6 +17,8 @@ use common::tasks::sensors::{
     run_neom9n_task,
     DataSink,
 };
+use common::utils::i2cscanner::scan_i2c_bus_default;
+
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output, Input};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
@@ -215,6 +217,33 @@ async fn main(spawner: Spawner) {
     let i2c1_mutex = I2C1_MUTEX.init(Mutex::new(i2c1));
     let i2c_for_bmm = SharedI2c { bus: i2c1_mutex };
     let i2c_for_gps = SharedI2c { bus: i2c1_mutex };
+
+    // ----- I2C bus scans at startup (for debug / bring-up / menus) -----
+    {
+        info!("I2C0 scan: starting (0x08-0x77)...");
+        let mut bus0 = SharedI2c0 { bus: i2c0_mutex };
+        let scan0 = scan_i2c_bus_default(&mut bus0).await;
+        if scan0.is_empty() {
+            warn!("I2C0 scan: no devices found in 0x08-0x77");
+        } else {
+            info!("I2C0 scan: found {} device(s)", scan0.count);
+            for addr in scan0.iter() {
+                info!("  I2C0 device @ 0x{:02X}", addr);
+            }
+        }
+
+        info!("I2C1 scan: starting (0x08-0x77)...");
+        let mut bus1 = SharedI2c { bus: i2c1_mutex };
+        let scan1 = scan_i2c_bus_default(&mut bus1).await;
+        if scan1.is_empty() {
+            warn!("I2C1 scan: no devices found in 0x08-0x77");
+        } else {
+            info!("I2C1 scan: found {} device(s)", scan1.count);
+            for addr in scan1.iter() {
+                info!("  I2C1 device @ 0x{:02X}", addr);
+            }
+        }
+    }
 
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088)).unwrap();
