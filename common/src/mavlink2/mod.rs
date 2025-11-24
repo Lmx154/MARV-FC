@@ -7,6 +7,7 @@ use mavio::Frame;
 use mavio::error::FrameError;
 use mavio::protocol::V2;
 
+use crate::coms::uart_coms::{self, AsyncUartBus, UartComError};
 use crate::lora::link::{LoRaLink, LinkError, Sx1262Interface};
 use crate::utils::delay::DelayMs;
 
@@ -15,14 +16,21 @@ pub mod prelude {
     pub use mavio::Frame;
     pub use mavio::protocol::V2;
     pub use mavio::dialects;
-    pub use crate::mavlink2::{MavError, send_frame_over_lora, recv_frame_over_lora};
+    pub use crate::mavlink2::{
+        MavError, recv_frame_over_lora, recv_frame_over_uart, send_frame_over_lora,
+        send_frame_over_uart,
+    };
+    pub use crate::mavlink2::msg::*;
 }
 
+pub mod msg;
 /// Error type for the MAVLink2-over-LoRa layer.
 #[derive(Debug, defmt::Format)]
 pub enum MavError {
     /// Underlying LoRaLink error (reliability / radio).
     Link(LinkError),
+    /// UART/serial transport error.
+    Serial,
     /// MAVLink frame is too large for LoRaLink MTU.
     EncodeTooBig,
     /// MAVLink frame (de)serialization error.
@@ -93,4 +101,45 @@ where
     let frame = unsafe { Frame::<V2>::deserialize(&buf[..len]) }?;
     debug!("MavLoRa: received MAVLink2 frame len={}", len);
     Ok(frame)
+}
+
+/// Send a MAVLink2 frame over a generic async UART.
+pub async fn send_frame_over_uart<U>(
+    uart: &mut U,
+    frame: &Frame<V2>,
+    scratch: &mut [u8],
+) -> Result<(), MavError>
+where
+    U: AsyncUartBus,
+    U::Error: defmt::Format,
+{
+    match uart_coms::send_frame_over_uart(uart, frame, scratch).await {
+        Ok(()) => Ok(()),
+        Err(UartComError::Transport(e)) => {
+            warn!("MavUART: transport error {}", e);
+            Err(MavError::Serial)
+        }
+        Err(UartComError::BadMagic(_)) | Err(UartComError::Frame) => Err(MavError::Frame),
+        Err(UartComError::FrameTooBig) => Err(MavError::EncodeTooBig),
+    }
+}
+
+/// Receive a MAVLink2 frame from a generic async UART.
+pub async fn recv_frame_over_uart<U>(
+    uart: &mut U,
+    scratch: &mut [u8],
+) -> Result<Frame<V2>, MavError>
+where
+    U: AsyncUartBus,
+    U::Error: defmt::Format,
+{
+    match uart_coms::recv_frame_over_uart(uart, scratch).await {
+        Ok(frame) => Ok(frame),
+        Err(UartComError::Transport(e)) => {
+            warn!("MavUART: transport error {}", e);
+            Err(MavError::Serial)
+        }
+        Err(UartComError::BadMagic(_)) | Err(UartComError::Frame) => Err(MavError::Frame),
+        Err(UartComError::FrameTooBig) => Err(MavError::EncodeTooBig),
+    }
 }

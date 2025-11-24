@@ -8,35 +8,43 @@ use common::drivers::bmm350::{Bmm350, BMM350_ADDR};
 use common::drivers::bmp390::{Bmp390, BMP3X_ADDR_SDO_HIGH};
 use common::drivers::bmm350::RawMag;
 use common::drivers::neom9n::{NeoM9n, UBLOX_I2C_ADDR, GpsData};
-use common::drivers::adxl375::{Adxl375, Adxl375Raw};
+use common::tasks::coms::{
+    build_telemetry_frame, MavEndpointConfig, TelemetrySample, TelemetrySource,
+};
 use common::tasks::sensors::{
-    run_adxl375_task,
     run_bmi088_task,
     run_bmm350_task,
     run_bmp390_task,
     run_neom9n_task,
     DataSink,
 };
+use common::coms::uart_coms::{AsyncUartBus, MAVLINK_MAX_FRAME};
+use common::mavlink2;
 use common::utils::i2cscanner::scan_i2c_bus_default;
 
 use embassy_executor::Spawner;
-use embassy_rp::gpio::{Level, Output, Input};
+use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, Async as I2cAsync};
+use embassy_rp::uart::{Config as UartConfig, Uart, InterruptHandler as UartInterruptHandler, Async as UartAsync};
 use embassy_time::{Timer, Instant};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 // Bind I2C0/I2C1 interrupts for async I2C drivers
-use embassy_rp::i2c::InterruptHandler;
+use embassy_rp::i2c::InterruptHandler as I2cInterruptHandler;
 embassy_rp::bind_interrupts!(struct Irqs {
-    I2C0_IRQ => InterruptHandler<embassy_rp::peripherals::I2C0>;
-    I2C1_IRQ => InterruptHandler<embassy_rp::peripherals::I2C1>;
+    I2C0_IRQ => I2cInterruptHandler<embassy_rp::peripherals::I2C0>;
+    I2C1_IRQ => I2cInterruptHandler<embassy_rp::peripherals::I2C1>;
+});
+
+embassy_rp::bind_interrupts!(struct UartIrqs {
+    UART0_IRQ => UartInterruptHandler<embassy_rp::peripherals::UART0>;
 });
 
 // ADXL375 I2C address (adjust if ALT_ADDRESS wiring differs)
-const ADXL375_ADDR: u8 = 0x53;
+// const ADXL375_ADDR: u8 = 0x53;
 
 // Provide an async delay adapter for generic drivers
 struct EmbassyDelay;
@@ -77,6 +85,39 @@ static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
     baro: BaroData { t_c_x100: 0, p_pa: 0, seq: 0 },
     gps: GpsState { fix: None, seq: 0 },
 });
+
+fn clamp_i16(v: i32) -> i16 {
+    v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+struct StateTelemetrySource;
+
+impl TelemetrySource for StateTelemetrySource {
+    async fn latest(&self) -> TelemetrySample {
+        let snap = STATE.lock().await.clone();
+        let (lat, lon, alt, sats, fix) = if let Some(f) = snap.gps.fix {
+            (f.latitude, f.longitude, f.altitude, f.satellites, f.fix_type)
+        } else {
+            (0, 0, 0, 0, 0)
+        };
+        TelemetrySample {
+            accel: snap.imu.accel,
+            gyro: snap.imu.gyro,
+            mag: [
+                clamp_i16(snap.mag.xyz[0]),
+                clamp_i16(snap.mag.xyz[1]),
+                clamp_i16(snap.mag.xyz[2]),
+            ],
+            baro_p_pa: snap.baro.p_pa,
+            baro_t_cx10: clamp_i16((snap.baro.t_c_x100 / 10) as i32),
+            gps_lat_e7: lat,
+            gps_lon_e7: lon,
+            gps_alt_mm: alt,
+            gps_sat: sats,
+            gps_fix: fix,
+        }
+    }
+}
 
 // Shared I2C0/I2C1 bus managers for multiple I2C devices
 type I2c0Type = I2c<'static, embassy_rp::peripherals::I2C0, I2cAsync>;
@@ -147,6 +188,21 @@ impl<'a> embedded_hal_async::i2c::I2c for SharedI2c<'a> {
     }
 }
 
+// Generic async UART trait implementation for the RP UART peripheral.
+struct RpUart<'d>(Uart<'d, UartAsync>);
+
+impl<'d> AsyncUartBus for RpUart<'d> {
+    type Error = embassy_rp::uart::Error;
+
+    async fn write(&mut self, bytes: &[u8]) -> core::result::Result<(), Self::Error> {
+        Uart::write(&mut self.0, bytes).await
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> core::result::Result<(), Self::Error> {
+        Uart::read(&mut self.0, buf).await
+    }
+}
+
 // Program metadata for `picotool info`.
 #[unsafe(link_section = ".bi_entries")]
 #[used]
@@ -204,7 +260,7 @@ async fn main(spawner: Spawner) {
     let i2c0 = I2c::new_async(p.I2C0, i2c0_scl, i2c0_sda, Irqs, i2c0_cfg);
     let i2c0_mutex = I2C0_MUTEX.init(Mutex::new(i2c0));
     let i2c_for_bmp = SharedI2c0 { bus: i2c0_mutex };
-    let i2c_for_adxl = SharedI2c0 { bus: i2c0_mutex };
+    // let i2c_for_adxl = SharedI2c0 { bus: i2c0_mutex };
 
     // ----- I2C1 (BMM350 magnetometer, GPS) -----
     // Hardware pins from hardware.md:
@@ -217,6 +273,20 @@ async fn main(spawner: Spawner) {
     let i2c1_mutex = I2C1_MUTEX.init(Mutex::new(i2c1));
     let i2c_for_bmm = SharedI2c { bus: i2c1_mutex };
     let i2c_for_gps = SharedI2c { bus: i2c1_mutex };
+
+    // ----- UART0 (FC -> Radio) -----
+    // TX: GP14, RX: GP15
+    let mut uart_cfg = UartConfig::default();
+    uart_cfg.baudrate = 115_200;
+    let uart_fc_radio = RpUart(Uart::new(
+        p.UART0,
+        p.PIN_14,
+        p.PIN_15,
+        UartIrqs,
+        p.DMA_CH2,
+        p.DMA_CH3,
+        uart_cfg,
+    ));
 
     // ----- I2C bus scans at startup (for debug / bring-up / menus) -----
     {
@@ -245,13 +315,15 @@ async fn main(spawner: Spawner) {
         }
     }
 
+    let mav_cfg = MavEndpointConfig { sys_id: 1, comp_id: 1 };
+
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088)).unwrap();
     spawner.spawn(mag_task(i2c_for_bmm)).unwrap();
     spawner.spawn(baro_task(i2c_for_bmp)).unwrap();
-    spawner.spawn(adxl_task(i2c_for_adxl)).unwrap();
     spawner.spawn(gps_task(i2c_for_gps)).unwrap();
     spawner.spawn(logger_task(led)).unwrap();
+    spawner.spawn(uart_tx_task(uart_fc_radio, mav_cfg)).unwrap();
 }
 
 // ----- Data sinks to bridge generic tasks into shared state -----
@@ -263,15 +335,6 @@ impl DataSink<Bmi088Raw> for ImuSink {
         guard.imu.accel = data.accel;
         guard.imu.gyro = data.gyro;
         guard.imu.seq = guard.imu.seq.wrapping_add(1);
-    }
-}
-
-struct HighGSink;
-impl DataSink<Adxl375Raw> for HighGSink {
-    async fn publish(&mut self, data: Adxl375Raw) {
-        let mut guard = STATE.lock().await;
-        guard.highg.accel = data.accel;
-        guard.highg.seq = guard.highg.seq.wrapping_add(1);
     }
 }
 
@@ -339,17 +402,17 @@ async fn baro_task(i2c_dev: SharedI2c0<'static>) {
     run_bmp390_task(&mut bmp, &mut delay, &mut sink, 4).await;
 }
 
-#[embassy_executor::task]
-async fn adxl_task(i2c_dev: SharedI2c0<'static>) {
-    let mut delay = EmbassyDelay;
-    info!("ADXL375: starting task on I2C0 @0x{:02X}", ADXL375_ADDR);
-    // INT pin not wired (or ignored) here, so we use a dummy type and None
-    let mut accel: Adxl375<SharedI2c0<'static>, Input<'static>> =
-        Adxl375::new(i2c_dev, ADXL375_ADDR, None);
-    let mut sink = HighGSink;
-    // e.g. 1 ms interval (~1 kHz logical pacing; actual ODR set in driver init)
-    run_adxl375_task(&mut accel, &mut delay, &mut sink, 1).await;
-}
+// #[embassy_executor::task]
+// async fn adxl_task(i2c_dev: SharedI2c0<'static>) {
+//     let mut delay = EmbassyDelay;
+//     info!("ADXL375: starting task on I2C0 @0x{:02X}", ADXL375_ADDR);
+//     // INT pin not wired (or ignored) here, so we use a dummy type and None
+//     let mut accel: Adxl375<SharedI2c0<'static>, Input<'static>> =
+//         Adxl375::new(i2c_dev, ADXL375_ADDR, None);
+//     let mut sink = HighGSink;
+//     // e.g. 1 ms interval (~1 kHz logical pacing; actual ODR set in driver init)
+//     run_adxl375_task(&mut accel, &mut delay, &mut sink, 1).await;
+// }
 
 #[embassy_executor::task]
 async fn logger_task(mut led: Output<'static>) {
@@ -438,6 +501,30 @@ async fn logger_task(mut led: Output<'static>) {
         led.set_low();
         Timer::after_micros(800).await; // total 1ms period
         n = n.wrapping_add(1);
+    }
+}
+
+#[embassy_executor::task]
+async fn uart_tx_task(mut uart: RpUart<'static>, cfg: MavEndpointConfig) {
+    let mut seq: u8 = 0;
+    let mut scratch = [0u8; MAVLINK_MAX_FRAME];
+    let source = StateTelemetrySource;
+    loop {
+        let sample = source.latest().await;
+        if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
+            seq = seq.wrapping_add(1);
+            match mavlink2::send_frame_over_uart(&mut uart, &frame, &mut scratch).await {
+                Ok(()) => {
+                    debug!("UART telemetry sent seq={}", frame.sequence());
+                }
+                Err(e) => {
+                    warn!("UART telemetry send failed: {:?}", e);
+                }
+            }
+        } else {
+            warn!("UART telemetry encode failed (buffer too small)");
+        }
+        Timer::after_millis(100).await;
     }
 }
 

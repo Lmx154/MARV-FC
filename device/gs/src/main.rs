@@ -14,7 +14,8 @@ use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
 use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
-use common::tasks::radio::{run_mavlink_text_demo, Role, MavEndpointConfig};
+use common::tasks::radio::{run_mavlink_text_demo, Role};
+use common::tasks::coms::MavEndpointConfig;
 
 // Simple delay
 struct EmbassyDelay;

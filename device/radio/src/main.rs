@@ -8,19 +8,41 @@ use panic_probe as _;
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Input, Output, Level, Pull};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
+use embassy_rp::uart::{Config as UartConfig, Uart, InterruptHandler as UartInterruptHandler, Async as UartAsync};
 use embassy_time::{Duration, Timer};
 
 use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
-use common::lora::link::LoRaLink;
+use common::lora::link::{LoRaLink, Sx1262Interface};
+use common::mavlink2;
 use common::utils::delay::DelayMs;
-use common::tasks::radio::{run_mavlink_text_demo, Role, MavEndpointConfig};
+use common::tasks::coms::{TelemetrySample, statustext_to_str};
+use common::mavlink2::prelude::dialects::common::Common;
+use common::coms::uart_coms::{AsyncUartBus, MAVLINK_MAX_FRAME};
 
 // Simple embassy-based delay
 struct EmbassyDelay;
 impl DelayMs for EmbassyDelay {
     async fn delay_ms(&mut self, ms: u32) {
         Timer::after(Duration::from_millis(ms.into())).await;
+    }
+}
+
+embassy_rp::bind_interrupts!(struct UartIrqs {
+    UART0_IRQ => UartInterruptHandler<embassy_rp::peripherals::UART0>;
+});
+
+struct RpUart<'d>(Uart<'d, UartAsync>);
+
+impl<'d> AsyncUartBus for RpUart<'d> {
+    type Error = embassy_rp::uart::Error;
+
+    async fn write(&mut self, bytes: &[u8]) -> core::result::Result<(), Self::Error> {
+        Uart::write(&mut self.0, bytes).await
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> core::result::Result<(), Self::Error> {
+        Uart::read(&mut self.0, buf).await
     }
 }
 
@@ -91,18 +113,84 @@ async fn main(_spawner: Spawner) {
 
     let mut link = LoRaLink::new(&mut radio);
     link.ack_timeout_ms = cfg.link_ack_timeout_ms;
-    link.retries        = cfg.link_retries;
-
+    link.retries = cfg.link_retries;
     info!(
-        "Radio: LoRaLink MAVLink text demo (ack_timeout_ms={} retries={})",
+        "Radio: LoRaLink bridge (ack_timeout_ms={} retries={})",
         link.ack_timeout_ms,
         link.retries
     );
 
-    let mav_cfg = MavEndpointConfig {
-        sys_id: 42,
-        comp_id: 1,
-    };
+    // UART0 (Radio <-> FC) on GP12 (TX) / GP13 (RX)
+    let mut uart_cfg = UartConfig::default();
+    uart_cfg.baudrate = 115_200;
+    let mut uart = RpUart(Uart::new(
+        p.UART0,
+        p.PIN_12,
+        p.PIN_13,
+        UartIrqs,
+        p.DMA_CH2,
+        p.DMA_CH3,
+        uart_cfg,
+    ));
 
-    run_mavlink_text_demo(&mut link, &mut delay, Role::Radio, mav_cfg).await;
+    let mut uart_buf = [0u8; MAVLINK_MAX_FRAME];
+    uart_bridge_loop(&mut uart, &mut uart_buf, &mut link, &mut delay).await;
+}
+
+async fn uart_bridge_loop<'a, RADIO>(
+    uart: &mut RpUart<'static>,
+    scratch: &mut [u8; MAVLINK_MAX_FRAME],
+    link: &mut LoRaLink<'a, RADIO>,
+    delay: &mut EmbassyDelay,
+) where
+    RADIO: Sx1262Interface,
+{
+    loop {
+        let frame = match mavlink2::recv_frame_over_uart(uart, scratch).await {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("UART RX error: {:?}", e);
+                continue;
+            }
+        };
+
+        match frame.decode::<Common>() {
+            Ok(Common::Statustext(msg)) => {
+                let text = statustext_to_str(&msg);
+                info!(
+                    "UART RX sys={} comp={} seq={}: {}",
+                    frame.system_id(),
+                    frame.component_id(),
+                    frame.sequence(),
+                    text
+                );
+            }
+            Ok(Common::EncapsulatedData(pkt)) => {
+                if let Some(sample) = TelemetrySample::decode(&pkt.data) {
+                    info!(
+                        "UART RX tel seq={} acc[{},{},{}] gyro[{},{},{}] mag[{},{},{}] P:{} Pa T:{}x10C GPS lat {} lon {} alt {}mm sat {} fix {}",
+                        pkt.seqnr,
+                        sample.accel[0], sample.accel[1], sample.accel[2],
+                        sample.gyro[0], sample.gyro[1], sample.gyro[2],
+                        sample.mag[0], sample.mag[1], sample.mag[2],
+                        sample.baro_p_pa,
+                        sample.baro_t_cx10,
+                        sample.gps_lat_e7,
+                        sample.gps_lon_e7,
+                        sample.gps_alt_mm,
+                        sample.gps_sat,
+                        sample.gps_fix,
+                    );
+                } else {
+                    warn!("UART RX: telemetry decode error");
+                }
+            }
+            Ok(_) => warn!("UART RX: unsupported MAVLink Common message"),
+            Err(_) => warn!("UART RX: MAV decode error"),
+        }
+
+        if let Err(e) = mavlink2::send_frame_over_lora(link, delay, &frame).await {
+            warn!("LoRa forward error: {:?}", e);
+        }
+    }
 }

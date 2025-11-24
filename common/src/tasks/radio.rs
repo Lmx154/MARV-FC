@@ -6,25 +6,22 @@ use defmt::{info, warn};
 use crate::lora::link::{LoRaLink, Sx1262Interface, LinkError};
 use crate::utils::delay::DelayMs;
 use crate::mavlink2::{self, MavError};
+use crate::tasks::coms::{
+    build_statustext, build_statustext_frame, statustext_to_str, MavEndpointConfig,
+    TelemetrySample,
+};
 
 use mavio::Frame;
 use mavio::protocol::V2;
-use mavio::dialects::common::{Common, messages};
+use mavio::dialects::common::Common;
 
 /// Role for this node in the simple demo.
 #[derive(Clone, Copy, Debug)]
 pub enum Role {
-    /// Radio node – periodically sends text messages.
+    /// Radio node - periodically sends text messages.
     Radio,
-    /// Ground node – receives and logs text messages.
+    /// Ground node - receives and logs text messages.
     Ground,
-}
-
-/// Config for MAVLink endpoint (MAV system + component IDs).
-#[derive(Clone, Copy)]
-pub struct MavEndpointConfig {
-    pub sys_id: u8,
-    pub comp_id: u8,
 }
 
 /// Entry point for a **small, human-readable link test**.
@@ -78,7 +75,7 @@ async fn run_radio_talker<'a, RADIO>(
         };
 
         let status_msg = build_statustext(msg_str);
-        let frame = build_common_frame(cfg, seq, Common::Statustext(status_msg));
+        let frame = build_statustext_frame(cfg, seq, status_msg);
 
         match mavlink2::send_frame_over_lora(link, delay, &frame).await {
             Ok(()) => {
@@ -144,10 +141,32 @@ async fn run_gs_listener<'a, RADIO>(
                     text,
                 );
             }
+            Ok(Common::EncapsulatedData(pkt)) => {
+                let raw_head = &pkt.data[..TelemetrySample::WIRE_LEN];
+                match TelemetrySample::decode(raw_head) {
+                    Some(s) => info!(
+                        "GsTask: Telemetry seq={} acc[{},{},{}] gyro[{},{},{}] mag[{},{},{}] P:{}Pa T:{}x10C GPS lat {} lon {} alt {}mm sat {} fix {}",
+                        pkt.seqnr,
+                        s.accel[0], s.accel[1], s.accel[2],
+                        s.gyro[0], s.gyro[1], s.gyro[2],
+                        s.mag[0], s.mag[1], s.mag[2],
+                        s.baro_p_pa,
+                        s.baro_t_cx10,
+                        s.gps_lat_e7,
+                        s.gps_lon_e7,
+                        s.gps_alt_mm,
+                        s.gps_sat,
+                        s.gps_fix,
+                    ),
+                    None => warn!(
+                        "GsTask: Telemetry decode failed seq={} head={:?}",
+                        pkt.seqnr,
+                        raw_head
+                    ),
+                }
+            }
             Ok(_other) => {
-                warn!(
-                    "GsTask: received Common MAVLink message we don't handle yet"
-                );
+                warn!("GsTask: received Common MAVLink message we don't handle yet");
             }
             Err(_e) => {
                 warn!("GsTask: MAV decode error");
@@ -159,54 +178,3 @@ async fn run_gs_listener<'a, RADIO>(
 // -------------------------------------------------------------------------
 // Small helpers: build / interpret STATUSTEXT
 // -------------------------------------------------------------------------
-
-fn build_statustext(s: &str) -> messages::Statustext {
-    use mavio::dialects::common::enums::MavSeverity;
-
-    let mut text_bytes = [0u8; 50];
-    let raw = s.as_bytes();
-    let copy_len = core::cmp::min(raw.len(), text_bytes.len());
-    text_bytes[..copy_len].copy_from_slice(&raw[..copy_len]);
-
-    messages::Statustext {
-        severity: MavSeverity::Info,
-        text: text_bytes,
-        id: 0,
-        chunk_seq: 0,
-    }
-}
-
-/// Build a MAVLink2 Frame<V2> with a `common::Common` message.
-///
-/// For now we only support `Common::Statustext`.
-fn build_common_frame(
-    cfg: MavEndpointConfig,
-    seq: u8,
-    msg: Common,
-) -> Frame<V2> {
-    match msg {
-        Common::Statustext(st) => {
-            Frame::builder()
-                .version(V2)
-                .system_id(cfg.sys_id.into())
-                .component_id(cfg.comp_id.into())
-                .sequence(seq.into())
-                .message(&st)
-                .expect("MAV: build Statustext frame")
-                .build()
-        }
-        _ => {
-            panic!("build_common_frame: only Statustext is supported for now");
-        }
-    }
-}
-
-/// Convert STATUSTEXT payload back into &str-like view for logging.
-fn statustext_to_str(msg: &messages::Statustext) -> &str {
-    let end = msg
-        .text
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(msg.text.len());
-    core::str::from_utf8(&msg.text[..end]).unwrap_or("<non-utf8>")
-}
