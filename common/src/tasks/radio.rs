@@ -16,6 +16,19 @@ use mavio::Frame;
 use mavio::protocol::V2;
 use mavio::dialects::common::Common;
 
+/// Raw telemetry event extracted from `EncapsulatedData`.
+#[derive(Clone, Copy)]
+pub struct TelemetryEvent {
+    pub seq: u16,
+    pub sample: TelemetrySample,
+}
+
+/// Hook for consumers that want raw telemetry packets instead of defmt-only logs.
+/// Kept non-async so it remains object-safe.
+pub trait TelemetrySink {
+    fn handle(&mut self, seq: u16, sample: TelemetrySample);
+}
+
 /// Role for this node in the simple demo.
 #[derive(Clone, Copy, Debug)]
 pub enum Role {
@@ -38,12 +51,13 @@ pub async fn run_mavlink_text_demo<'a, RADIO>(
     delay: &mut impl DelayMs,
     role: Role,
     cfg: MavEndpointConfig,
+    telemetry_sink: Option<&mut dyn TelemetrySink>,
 ) where
     RADIO: Sx1262Interface,
 {
     match role {
         Role::Radio => run_radio_talker(link, delay, cfg).await,
-        Role::Ground => run_gs_listener(link, delay).await,
+        Role::Ground => run_gs_listener(link, delay, telemetry_sink).await,
     }
 }
 
@@ -107,6 +121,7 @@ async fn run_radio_talker<'a, RADIO>(
 async fn run_gs_listener<'a, RADIO>(
     link: &mut LoRaLink<'a, RADIO>,
     delay: &mut impl DelayMs,
+    mut telemetry_sink: Option<&mut dyn TelemetrySink>,
 ) where
     RADIO: Sx1262Interface,
 {
@@ -146,20 +161,26 @@ async fn run_gs_listener<'a, RADIO>(
             Ok(Common::EncapsulatedData(pkt)) => {
                 let raw_head = &pkt.data[..TelemetrySample::WIRE_LEN];
                 match TelemetrySample::decode(raw_head) {
-                    Some(s) => info!(
-                        "GsTask: Telemetry seq={} acc[{},{},{}] gyro[{},{},{}] mag[{},{},{}] P:{}Pa T:{}x10C GPS lat {} lon {} alt {}mm sat {} fix {}",
-                        pkt.seqnr,
-                        s.accel[0], s.accel[1], s.accel[2],
-                        s.gyro[0], s.gyro[1], s.gyro[2],
-                        s.mag[0], s.mag[1], s.mag[2],
-                        s.baro_p_pa,
-                        s.baro_t_cx10,
-                        s.gps_lat_e7,
-                        s.gps_lon_e7,
-                        s.gps_alt_mm,
-                        s.gps_sat,
-                        s.gps_fix,
-                    ),
+                    Some(s) => {
+                        info!(
+                            "GsTask: Telemetry seq={} acc[{},{},{}] gyro[{},{},{}] mag[{},{},{}] P:{}Pa T:{}x10C GPS lat {} lon {} alt {}mm sat {} fix {}",
+                            pkt.seqnr,
+                            s.accel[0], s.accel[1], s.accel[2],
+                            s.gyro[0], s.gyro[1], s.gyro[2],
+                            s.mag[0], s.mag[1], s.mag[2],
+                            s.baro_p_pa,
+                            s.baro_t_cx10,
+                            s.gps_lat_e7,
+                            s.gps_lon_e7,
+                            s.gps_alt_mm,
+                            s.gps_sat,
+                            s.gps_fix,
+                        );
+
+                        if let Some(sink) = telemetry_sink.as_deref_mut() {
+                            sink.handle(pkt.seqnr, s);
+                        }
+                    }
                     None => warn!(
                         "GsTask: Telemetry decode failed seq={} head={:?}",
                         pkt.seqnr,

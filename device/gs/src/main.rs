@@ -17,15 +17,23 @@ use embassy_usb::{
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use core::cmp::min;
+use core::fmt::Write as FmtWrite;
 
 use common::drivers::sx1262::*;
 use common::lora::lora_config::LoRaConfig;
 use common::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
 use common::tasks::radio::{run_mavlink_text_demo, Role};
-use common::tasks::coms::MavEndpointConfig;
+use common::tasks::coms::{MavEndpointConfig, TelemetrySample, build_telemetry_frame};
+use common::tasks::radio::{TelemetrySink, TelemetryEvent};
 use common::coms::usb_cdc::AsyncUsbCdc;
 use common::coms::usb_cdc;
+use common::coms::uart_coms::MAVLINK_MAX_FRAME;
+use embassy_sync::channel::Channel;
+use embassy_sync::channel::Receiver;
+use embassy_sync::channel::Sender;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
+use heapless::String;
 
 embassy_rp::bind_interrupts!(struct UsbIrqs {
     USBCTRL_IRQ => UsbInterruptHandler<embassy_rp::peripherals::USB>;
@@ -36,6 +44,19 @@ static USB_CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_MSOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+static TELEMETRY_CH: Channel<RawMutex, TelemetryEvent, 8> = Channel::new();
+
+struct TelemetryForwarder {
+    tx: Sender<'static, RawMutex, TelemetryEvent, 8>,
+}
+
+impl TelemetrySink for TelemetryForwarder {
+    fn handle(&mut self, seq: u16, sample: TelemetrySample) {
+        if let Err(_e) = self.tx.try_send(TelemetryEvent { seq, sample }) {
+            warn!("Telemetry channel full");
+        }
+    }
+}
 
 struct UsbCdc<'d> {
     class: CdcAcmClass<'d, UsbDriver<'d, embassy_rp::peripherals::USB>>,
@@ -79,25 +100,67 @@ async fn usb_task(
 }
 
 #[embassy_executor::task]
-async fn usb_echo_task(mut serial: UsbCdc<'static>) {
+async fn usb_bridge_task(
+    mut serial: UsbCdc<'static>,
+    tel_rx: Receiver<'static, RawMutex, TelemetryEvent, 8>,
+    mav_cfg: MavEndpointConfig,
+) {
     let mut rx_buf = [0u8; 64];
-    let mut scratch = [0u8; 96];
+    let mut scratch = [0u8; 192];
+    let mut frame_buf = [0u8; MAVLINK_MAX_FRAME];
+    let mut tel_rx = tel_rx;
 
-    let _ = usb_cdc::write_line(&mut serial, "USB CDC echo ready", &mut scratch).await;
+    let _ = usb_cdc::write_line(&mut serial, "USB CDC echo+telemetry ready", &mut scratch).await;
 
     loop {
-        match serial.read_packet(&mut rx_buf).await {
-            Ok(n) if n > 0 => {
-                let msg = core::str::from_utf8(&rx_buf[..n]).unwrap_or("<non-utf8>");
-                let reply = if msg.trim() == "ping" { "pong" } else { "ack" };
+        // Race telemetry vs host commands so neither starves.
+        let tel_fut = tel_rx.receive();
+        let usb_fut = serial.read_packet(&mut rx_buf);
+        match embassy_futures::select::select(tel_fut, usb_fut).await {
+            embassy_futures::select::Either::First(ev) => {
+                let s: TelemetrySample = ev.sample;
 
-                let _ = usb_cdc::write_line(&mut serial, reply, &mut scratch).await;
+                // Human-readable line.
+                let mut line: String<192> = String::new();
+                let _ = FmtWrite::write_fmt(
+                    &mut line,
+                    format_args!(
+                        "TEL seq={} acc[{},{},{}] gyro[{},{},{}] mag[{},{},{}] P:{}Pa T:{}x10C GPS lat {} lon {} alt {}mm sat {} fix {}",
+                        ev.seq,
+                        s.accel[0], s.accel[1], s.accel[2],
+                        s.gyro[0], s.gyro[1], s.gyro[2],
+                        s.mag[0], s.mag[1], s.mag[2],
+                        s.baro_p_pa,
+                        s.baro_t_cx10,
+                        s.gps_lat_e7,
+                        s.gps_lon_e7,
+                        s.gps_alt_mm,
+                        s.gps_sat,
+                        s.gps_fix
+                    ),
+                );
+                let _ = usb_cdc::write_line(&mut serial, line.as_str(), &mut scratch).await;
+
+                // Raw MAVLink frame for host decoding (EncapsulatedData).
+                if let Some(frame) = build_telemetry_frame(mav_cfg, (ev.seq & 0xFF) as u8, &s) {
+                    if let Ok(len) = frame.serialize(&mut frame_buf) {
+                        let _ = serial.write(&frame_buf[..len]).await;
+                    }
+                }
             }
-            Ok(_) => {}
-            Err(e) => {
-                let _ = usb_cdc::write_line(&mut serial, "usb read err", &mut scratch).await;
-                warn!("USB CDC read error: {:?}", e);
-            }
+            embassy_futures::select::Either::Second(res) => match res {
+                Ok(n) if n > 0 => {
+                    let msg = core::str::from_utf8(&rx_buf[..n]).unwrap_or("<non-utf8>");
+                    let reply = if msg.trim() == "ping" { "pong" } else { "ack" };
+
+                    let _ = usb_cdc::write_line(&mut serial, reply, &mut scratch).await;
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    let _ = usb_cdc::write_line(&mut serial, "usb read err", &mut scratch).await;
+                    warn!("USB CDC read error: {:?}", e);
+                }
+            },
         }
     }
 }
@@ -115,6 +178,11 @@ async fn main(spawner: Spawner) {
     info!("GS Boot");
 
     let p = embassy_rp::init(Default::default());
+
+    let mav_cfg = MavEndpointConfig {
+        sys_id: 1,
+        comp_id: 1,
+    };
 
     // USB CDC (for forwarding telemetry to host).
     let usb_driver = UsbDriver::new(p.USB, UsbIrqs);
@@ -144,7 +212,12 @@ async fn main(spawner: Spawner) {
     info!("GS USB: waiting for host connection...");
     usb_serial.wait_connection().await;
     info!("GS USB: host connected");
-    spawner.spawn(usb_echo_task(usb_serial)).unwrap();
+    let tel_rx = TELEMETRY_CH.receiver();
+    spawner.spawn(usb_bridge_task(usb_serial, tel_rx, mav_cfg)).unwrap();
+
+    let mut tel_sink = TelemetryForwarder {
+        tx: TELEMETRY_CH.sender(),
+    };
 
     // SPI
     let mut spi_cfg = SpiConfig::default();
@@ -215,10 +288,12 @@ async fn main(spawner: Spawner) {
         link.retries
     );
 
-    let mav_cfg = MavEndpointConfig {
-        sys_id: 1,
-        comp_id: 1,
-    };
-
-    run_mavlink_text_demo(&mut link, &mut delay, Role::Ground, mav_cfg).await;
+    run_mavlink_text_demo(
+        &mut link,
+        &mut delay,
+        Role::Ground,
+        mav_cfg,
+        Some(&mut tel_sink),
+    )
+    .await;
 }
