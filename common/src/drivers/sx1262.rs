@@ -7,6 +7,7 @@ use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::spi::SpiBus;
 
 use crate::lora::lora_config::LoRaConfig;
+use crate::log_config;
 use crate::utils::delay::DelayMs;
 
 // ========================================================================
@@ -86,7 +87,7 @@ where
 
     #[inline]
     fn log_irq(label: &str, irq: u16) {
-        if irq == 0 {
+        if irq == 0 || !log_config::LOG_PHY_IRQS {
             return;
         }
         info!(
@@ -302,7 +303,9 @@ where
     ) -> Result<()> {
         let cfg = self.cfg;
 
-        info!("SX1262 Init…");
+        if log_config::LOG_PHY_TRAFFIC {
+            info!("SX1262 Init…");
+        }
 
         // Reset pulse
         self.reset.set_low().map_err(|_| Sx1262Error::Cs)?;
@@ -376,7 +379,9 @@ where
         // Default RF path to RX
         self.rf_sw.set(RfState::Rx);
 
-        info!("SX1262 Init OK");
+        if log_config::LOG_PHY_TRAFFIC {
+            info!("SX1262 Init OK");
+        }
         Ok(())
     }
 
@@ -394,7 +399,9 @@ where
         }
 
         let len = payload.len() as u8;
-        info!("TX: len={} (LoRa)", len);
+        if log_config::LOG_PHY_TRAFFIC {
+            info!("TX: len={} (LoRa)", len);
+        }
 
         // Standby RC before TX
         self.write_cmd(delay, 0x80, &[0x00]).await?;
@@ -456,7 +463,9 @@ where
                 )
                 .await?;
 
-                info!("TX done -> entering RX");
+                if log_config::LOG_PHY_TRAFFIC {
+                    info!("TX done -> entering RX");
+                }
                 return Ok(());
             }
 
@@ -521,7 +530,9 @@ where
         // Continuous RX
         self.write_cmd(delay, 0x82, &[0xFF, 0xFF, 0xFF])
             .await?;
-        info!("Started RX (continuous)");
+        if log_config::LOG_PHY_TRAFFIC {
+            info!("Started RX (continuous)");
+        }
         Ok(())
     }
 
@@ -542,16 +553,16 @@ where
         let crc_err      = irq & Self::IRQ_CRC_ERR        != 0;
         let timeout      = irq & Self::IRQ_TIMEOUT        != 0;
 
-        if timeout {
+        if timeout && log_config::LOG_PHY_IRQS {
             debug!("RX timeout IRQ observed");
         }
-        if header_err {
+        if header_err && log_config::LOG_PHY_ERRORS {
             warn!("Header error IRQ observed");
         }
-        if crc_err {
+        if crc_err && log_config::LOG_PHY_ERRORS {
             warn!("CRC error IRQ observed");
         }
-        if header_valid && !done {
+        if header_valid && !done && log_config::LOG_PHY_IRQS {
             debug!("Header valid before RxDone (partial reception)");
         }
 

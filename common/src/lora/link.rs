@@ -4,6 +4,7 @@
 
 use defmt::{info, warn};
 use crate::drivers::sx1262::{Sx1262, RawRx, Result as RadioResult};
+use crate::log_config;
 use crate::utils::delay::DelayMs;
 
 // -----------------------------------------------------------------------------
@@ -19,6 +20,89 @@ pub enum LinkError {
 }
 
 pub type Result<T> = core::result::Result<T, LinkError>;
+
+// -------------------------------------------------------------------------
+// Light-weight link observability + pacing
+// -------------------------------------------------------------------------
+
+/// Most recent RSSI/SNR figures observed on RX (data or ACK).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LinkStats {
+    pub last_rssi_dbm: Option<i16>,
+    pub last_snr_x4: Option<i16>,
+}
+
+impl LinkStats {
+    fn observe_rx(&mut self, raw: &RawRx) {
+        self.last_rssi_dbm = Some(raw.rssi);
+        self.last_snr_x4 = Some(raw.snr_x4);
+    }
+}
+
+/// Simple gap controller to slow down TX when link quality is poor and speed
+/// back up when it looks healthy.
+#[derive(Clone, Copy, Debug)]
+pub struct TxPacer {
+    pub min_gap_ms: u32,
+    pub max_gap_ms: u32,
+    pub step_ms: u32,
+    pub snr_good_x4: i16,
+    pub snr_bad_x4: i16,
+    current_gap_ms: u32,
+}
+
+impl TxPacer {
+    pub const fn new(
+        min_gap_ms: u32,
+        max_gap_ms: u32,
+        step_ms: u32,
+        snr_good_x4: i16,
+        snr_bad_x4: i16,
+    ) -> Self {
+        Self {
+            min_gap_ms,
+            max_gap_ms,
+            step_ms,
+            snr_good_x4,
+            snr_bad_x4,
+            current_gap_ms: min_gap_ms,
+        }
+    }
+
+    pub fn on_ack(&mut self, stats: &LinkStats) {
+        if let Some(snr_x4) = stats.last_snr_x4 {
+            if snr_x4 >= self.snr_good_x4 {
+                self.current_gap_ms =
+                    (self.current_gap_ms.saturating_sub(self.step_ms)).max(self.min_gap_ms);
+                return;
+            }
+            if snr_x4 <= self.snr_bad_x4 {
+                self.current_gap_ms =
+                    (self.current_gap_ms + self.step_ms).min(self.max_gap_ms);
+                return;
+            }
+        }
+
+        // No SNR yet: gently ease toward min to avoid stalling.
+        self.current_gap_ms =
+            (self.current_gap_ms.saturating_sub(self.step_ms)).max(self.min_gap_ms);
+    }
+
+    pub fn on_timeout(&mut self) {
+        self.current_gap_ms = (self.current_gap_ms + self.step_ms).min(self.max_gap_ms);
+    }
+
+    pub fn recommended_gap_ms(&self) -> u32 {
+        self.current_gap_ms
+    }
+}
+
+impl Default for TxPacer {
+    fn default() -> Self {
+        // snr_x4 is SNR * 4. Good ~10 dB, bad ~0 dB by default.
+        Self::new(500, 1500, 200, 40, 0)
+    }
+}
 
 /// LoRaLink header format
 ///
@@ -79,6 +163,12 @@ pub struct LoRaLink<'a, RADIO> {
 
     /// How many times to retry if ACK not received
     pub retries: usize,
+
+    /// Last-observed RSSI/SNR from the radio.
+    stats: LinkStats,
+
+    /// Simple TX pacing helper (tune in LoRaConfig if desired).
+    pub pacer: TxPacer,
 }
 
 impl<'a, RADIO> LoRaLink<'a, RADIO>
@@ -93,6 +183,16 @@ where
         Self::MTU
     }
 
+    /// Suggested inter-TX delay based on recent link quality observations.
+    pub fn recommended_tx_gap_ms(&self) -> u32 {
+        self.pacer.recommended_gap_ms()
+    }
+
+    /// Last observed RSSI/SNR values.
+    pub fn stats(&self) -> LinkStats {
+        self.stats
+    }
+
     pub fn new(radio: &'a mut RADIO) -> Self {
         Self {
             radio,
@@ -100,6 +200,8 @@ where
             expected_seq: 1,
             ack_timeout_ms: 200,
             retries: 4,
+            stats: LinkStats::default(),
+            pacer: TxPacer::default(),
         }
     }
 
@@ -148,7 +250,9 @@ where
 
         // TX + WAIT FOR ACK
         for attempt in 0..=self.retries {
-            info!("LoRaLink TX seq={} attempt={}", seq, attempt + 1);
+            if log_config::LOG_LINK_TRAFFIC {
+                info!("LoRaLink TX seq={} attempt={}", seq, attempt + 1);
+            }
 
             self.radio
                 .tx_raw(
@@ -175,10 +279,15 @@ where
                     .await
                     .map_err(|_| LinkError::Radio)?
                 {
+                    self.stats.observe_rx(&rx);
+
                     if rx.len >= LinkHeader::SIZE as u8 {
                         if let Some(h) = LinkHeader::decode(&buf[..4]) {
                             if (h.flags & FLAG_ACK) != 0 && h.ack == seq {
-                                info!("LoRaLink ACK received for seq={}", seq);
+                                if log_config::LOG_LINK_ACKS {
+                                    info!("LoRaLink ACK received for seq={}", seq);
+                                }
+                                self.pacer.on_ack(&self.stats);
                                 return Ok(());
                             }
                         }
@@ -196,6 +305,7 @@ where
             );
         }
 
+        self.pacer.on_timeout();
         Err(LinkError::Timeout)
     }
 
@@ -241,6 +351,7 @@ where
             Some(r) => r,
             None => return Ok(None),
         };
+        self.stats.observe_rx(&raw);
 
         if raw.len < LinkHeader::SIZE as u8 {
             // Too short to be a valid frame; drop.
@@ -252,6 +363,12 @@ where
             return Ok(None);
         };
 
+        // ACK frames are control traffic for send() and should not surface
+        // to higher layers (e.g. MAVLink decoding). Drop them here.
+        if (h.flags & FLAG_ACK) != 0 {
+            return Ok(None);
+        }
+
         let payload_len = h.len as usize;
         if payload_len > buf.len() || payload_len + LinkHeader::SIZE > raw.len as usize {
             return Err(LinkError::CorruptFrame);
@@ -259,11 +376,13 @@ where
 
         // Expected sequence?
         if h.seq != self.expected_seq {
-            warn!(
-                "LoRaLink: out-of-order seq={} expected={}",
-                h.seq,
-                self.expected_seq
-            );
+            if log_config::LOG_LINK_ORDER_WARN {
+                warn!(
+                    "LoRaLink: out-of-order seq={} expected={}",
+                    h.seq,
+                    self.expected_seq
+                );
+            }
         } else {
             self.expected_seq = self.expected_seq.wrapping_add(1);
         }
@@ -282,7 +401,9 @@ where
         };
         ack_header.encode(&mut ack_frame);
 
-        info!("LoRaLink: Sending ACK for seq={}", h.seq);
+        if log_config::LOG_LINK_ACKS {
+            info!("LoRaLink: Sending ACK for seq={}", h.seq);
+        }
         self.radio
             .tx_raw(delay, &ack_frame)
             .await
@@ -294,7 +415,9 @@ where
             .start_rx_continuous(delay)
             .await
             .map_err(|_| LinkError::Radio)?;
-        info!("LoRaLink: ACK TX done -> entered RX");
+        if log_config::LOG_LINK_ACKS {
+            info!("LoRaLink: ACK TX done -> entered RX");
+        }
 
         Ok(Some(payload_len))
     }

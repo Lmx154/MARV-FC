@@ -10,6 +10,7 @@ use crate::tasks::coms::{
     build_statustext, build_statustext_frame, statustext_to_str, MavEndpointConfig,
     TelemetrySample,
 };
+use crate::log_config;
 
 use mavio::Frame;
 use mavio::protocol::V2;
@@ -93,8 +94,9 @@ async fn run_radio_talker<'a, RADIO>(
             }
         }
 
-        // Small pause (not a torture-test anymore).
-        delay.delay_ms(500).await;
+        // Small pause (not a torture-test anymore). Allow link pacing to adapt.
+        let pause_ms = link.recommended_tx_gap_ms();
+        delay.delay_ms(pause_ms).await;
     }
 }
 
@@ -169,7 +171,9 @@ async fn run_gs_listener<'a, RADIO>(
                 warn!("GsTask: received Common MAVLink message we don't handle yet");
             }
             Err(_e) => {
-                warn!("GsTask: MAV decode error");
+                if log_config::LOG_MAV_DECODE_WARN {
+                    warn!("GsTask: MAV decode error");
+                }
             }
         }
     }
