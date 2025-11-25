@@ -32,7 +32,7 @@ pub enum Role {
 ///   - GS:    receives frames, decodes as `common::Common` and logs text.
 ///
 /// All traffic still flows Radio <-> GS over:
-///   SX1262 (Layer 0) → LoRaLink (Layer 1) → MAVLink2 (Layer 2).
+///   SX1262 (Layer 0) � LoRaLink (Layer 1) � MAVLink2 (Layer 2).
 pub async fn run_mavlink_text_demo<'a, RADIO>(
     link: &mut LoRaLink<'a, RADIO>,
     delay: &mut impl DelayMs,
