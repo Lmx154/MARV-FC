@@ -25,6 +25,7 @@ use common::utils::delay::DelayMs;
 use common::tasks::radio::{run_mavlink_text_demo, Role};
 use common::tasks::coms::MavEndpointConfig;
 use common::coms::usb_cdc::AsyncUsbCdc;
+use common::coms::usb_cdc;
 
 embassy_rp::bind_interrupts!(struct UsbIrqs {
     USBCTRL_IRQ => UsbInterruptHandler<embassy_rp::peripherals::USB>;
@@ -44,6 +45,10 @@ struct UsbCdc<'d> {
 impl<'d> UsbCdc<'d> {
     async fn wait_connection(&mut self) {
         self.class.wait_connection().await;
+    }
+
+    async fn read_packet(&mut self, buf: &mut [u8]) -> core::result::Result<usize, EndpointError> {
+        self.class.read_packet(buf).await
     }
 }
 
@@ -71,6 +76,30 @@ async fn usb_task(
     mut device: UsbDevice<'static, UsbDriver<'static, embassy_rp::peripherals::USB>>,
 ) {
     device.run().await;
+}
+
+#[embassy_executor::task]
+async fn usb_echo_task(mut serial: UsbCdc<'static>) {
+    let mut rx_buf = [0u8; 64];
+    let mut scratch = [0u8; 96];
+
+    let _ = usb_cdc::write_line(&mut serial, "USB CDC echo ready", &mut scratch).await;
+
+    loop {
+        match serial.read_packet(&mut rx_buf).await {
+            Ok(n) if n > 0 => {
+                let msg = core::str::from_utf8(&rx_buf[..n]).unwrap_or("<non-utf8>");
+                let reply = if msg.trim() == "ping" { "pong" } else { "ack" };
+
+                let _ = usb_cdc::write_line(&mut serial, reply, &mut scratch).await;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                let _ = usb_cdc::write_line(&mut serial, "usb read err", &mut scratch).await;
+                warn!("USB CDC read error: {:?}", e);
+            }
+        }
+    }
 }
 
 // Simple delay
@@ -115,6 +144,7 @@ async fn main(spawner: Spawner) {
     info!("GS USB: waiting for host connection...");
     usb_serial.wait_connection().await;
     info!("GS USB: host connected");
+    spawner.spawn(usb_echo_task(usb_serial)).unwrap();
 
     // SPI
     let mut spi_cfg = SpiConfig::default();
