@@ -29,6 +29,11 @@ pub trait TelemetrySink {
     fn handle(&mut self, seq: u16, sample: TelemetrySample);
 }
 
+/// Raw MAVLink frame sink: forward serialized bytes without decoding.
+pub trait RawFrameSink {
+    fn handle(&mut self, frame_bytes: &[u8]);
+}
+
 /// Role for this node in the simple demo.
 #[derive(Clone, Copy, Debug)]
 pub enum Role {
@@ -52,12 +57,13 @@ pub async fn run_mavlink_text_demo<'a, RADIO>(
     role: Role,
     cfg: MavEndpointConfig,
     telemetry_sink: Option<&mut dyn TelemetrySink>,
+    raw_sink: Option<&mut dyn RawFrameSink>,
 ) where
     RADIO: Sx1262Interface,
 {
     match role {
         Role::Radio => run_radio_talker(link, delay, cfg).await,
-        Role::Ground => run_gs_listener(link, delay, telemetry_sink).await,
+        Role::Ground => run_gs_listener(link, delay, telemetry_sink, raw_sink).await,
     }
 }
 
@@ -122,6 +128,7 @@ async fn run_gs_listener<'a, RADIO>(
     link: &mut LoRaLink<'a, RADIO>,
     delay: &mut impl DelayMs,
     mut telemetry_sink: Option<&mut dyn TelemetrySink>,
+    mut raw_sink: Option<&mut dyn RawFrameSink>,
 ) where
     RADIO: Sx1262Interface,
 {
@@ -146,6 +153,14 @@ async fn run_gs_listener<'a, RADIO>(
                 continue;
             }
         };
+
+        // Optionally forward the raw serialized frame without decoding.
+        if let Some(raw) = raw_sink.as_deref_mut() {
+            let mut ser_buf = [0u8; crate::coms::uart_coms::MAVLINK_MAX_FRAME];
+            if let Ok(len) = frame.serialize(&mut ser_buf) {
+                raw.handle(&ser_buf[..len]);
+            }
+        }
 
         match frame.decode::<Common>() {
             Ok(Common::Statustext(msg)) => {

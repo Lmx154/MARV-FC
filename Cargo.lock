@@ -1617,6 +1617,7 @@ dependencies = [
  "heapless 0.8.0",
  "panic-probe",
  "portable-atomic",
+ "smart-leds",
  "static_cell",
 ]
 

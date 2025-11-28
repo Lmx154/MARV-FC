@@ -24,14 +24,17 @@ use common::utils::i2cscanner::scan_i2c_bus_default;
 
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, Async as I2cAsync};
+use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
+use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
+use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::uart::{Config as UartConfig, Uart, InterruptHandler as UartInterruptHandler, Async as UartAsync};
 use embassy_time::{Timer, Instant};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
+use smart_leds::RGB8;
 // Bind I2C0/I2C1 interrupts for async I2C drivers
 use embassy_rp::i2c::InterruptHandler as I2cInterruptHandler;
 embassy_rp::bind_interrupts!(struct Irqs {
@@ -41,6 +44,10 @@ embassy_rp::bind_interrupts!(struct Irqs {
 
 embassy_rp::bind_interrupts!(struct UartIrqs {
     UART0_IRQ => UartInterruptHandler<embassy_rp::peripherals::UART0>;
+});
+
+embassy_rp::bind_interrupts!(struct PioIrqs {
+    PIO0_IRQ_0 => PioInterruptHandler<embassy_rp::peripherals::PIO0>;
 });
 
 // ADXL375 I2C address (adjust if ALT_ADDRESS wiring differs)
@@ -230,8 +237,16 @@ async fn main(spawner: Spawner) {
     let cs_accel = Output::new(p.PIN_1, Level::High);
     let cs_gyro = Output::new(p.PIN_4, Level::High);
 
-    // LED for status indication
-    let led = Output::new(p.PIN_16, Level::Low);
+    // SK6812/WS2812-style addressable LED on GP16 using PIO0 SM0 + DMA CH4
+    let mut pio0 = Pio::new(p.PIO0, PioIrqs);
+    let ws2812_program = PioWs2812Program::new(&mut pio0.common);
+    let ws2812 = PioWs2812::<_, 0, 1>::new(
+        &mut pio0.common,
+        pio0.sm0,
+        p.DMA_CH4,
+        p.PIN_16,
+        &ws2812_program,
+    );
 
     // Configure SPI with 10 MHz for maximum performance stress test
     let mut spi_config = SpiConfig::default();
@@ -322,7 +337,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(mag_task(i2c_for_bmm)).unwrap();
     spawner.spawn(baro_task(i2c_for_bmp)).unwrap();
     spawner.spawn(gps_task(i2c_for_gps)).unwrap();
-    spawner.spawn(logger_task(led)).unwrap();
+    spawner.spawn(logger_task(ws2812)).unwrap();
     spawner.spawn(uart_tx_task(uart_fc_radio, mav_cfg)).unwrap();
 }
 
@@ -415,8 +430,10 @@ async fn baro_task(i2c_dev: SharedI2c0<'static>) {
 // }
 
 #[embassy_executor::task]
-async fn logger_task(mut led: Output<'static>) {
+async fn logger_task(mut led: PioWs2812<'static, embassy_rp::peripherals::PIO0, 0, 1>) {
     let mut n: u32 = 0;
+    let mut colors = [RGB8 { r: 0, g: 0, b: 0 }; 1];
+    let mut led_on = false;
     // Track previous counters and time to compute real per-second rates
     let mut prev_imu_seq: u32 = 0;
     let mut prev_highg_seq: u32 = 0;
@@ -495,11 +512,14 @@ async fn logger_task(mut led: Output<'static>) {
             prev_t = Instant::now();
         }
 
-        // Simple heartbeat
-        led.set_high();
-        Timer::after_micros(200).await;
-        led.set_low();
-        Timer::after_micros(800).await; // total 1ms period
+        // Simple heartbeat on addressable LED: brief green blink at ~2 Hz
+        let pulse = (n & 0xFF) < 50;
+        if pulse != led_on {
+            led_on = pulse;
+            colors[0] = if led_on { RGB8 { r: 0, g: 16, b: 0 } } else { RGB8 { r: 0, g: 0, b: 0 } };
+            led.write(&colors).await;
+        }
+        Timer::after_micros(1000).await;
         n = n.wrapping_add(1);
     }
 }
