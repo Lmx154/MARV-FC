@@ -124,29 +124,148 @@ impl TimeSource for SdTime {
     }
 }
 
-fn sd_write_read_demo(
+#[derive(Copy, Clone, Debug, defmt::Format)]
+struct FcConfig {
+    led_color: [u8; 3],
+    imu_hz: u16,
+    mag_hz: u16,
+    baro_hz: u16,
+    gps_hz: u16,
+}
+
+impl FcConfig {
+    const fn default() -> Self {
+        Self {
+            led_color: [0, 16, 0], // dim green
+            imu_hz: 1000,
+            mag_hz: 25,
+            baro_hz: 250,
+            gps_hz: 20,
+        }
+    }
+}
+
+fn load_config_from_sd(
     bus: Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
     cs: Output<'static>,
-) -> Result<(), embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
+) -> Result<FcConfig, embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
     // Use a dummy CS for the SPI device; real CS is passed to SdCard for spec-compliant toggling.
     let spi_dev = ExclusiveDevice::new(bus, DummyCsPin, SdDelay).unwrap();
     let sdcard = embedded_sdmmc::sdcard::SdCard::new(spi_dev, cs, SdDelay);
     let mut volume_mgr: VolumeManager<_, _> = VolumeManager::new(sdcard, SdTime);
     let mut volume0 = volume_mgr.open_volume(VolumeIdx(0))?;
     let mut root_dir = volume0.open_root_dir()?;
-    let mut file = root_dir.open_file_in_dir("BLACKBOX.TXT", FsMode::ReadWriteCreateOrTruncate)?;
+    {
+        let res = root_dir.open_file_in_dir("CONFIG.TXT", FsMode::ReadOnly);
+        if let Ok(mut file) = res {
+            let mut buf = [0u8; 256];
+            let n = file.read(&mut buf)?;
+            return Ok(parse_config_file(&buf[..n]));
+        }
+    }
 
-    // Write a single payload to avoid leftover bytes from previous content.
-    let payload = b"boot=pico\nmode=bringup\n";
+    let defaults = FcConfig::default();
+    let mut file = root_dir.open_file_in_dir("CONFIG.TXT", FsMode::ReadWriteCreateOrTruncate)?;
+    let bytes = defaults_to_bytes();
+    file.write(bytes)?;
     file.seek_from_start(0)?;
-    file.write(payload)?;
-    file.seek_from_start(0)?;
+    Ok(defaults)
+}
 
-    let mut buf = [0u8; 64];
-    let n = file.read(&mut buf)?;
-    let msg = core::str::from_utf8(&buf[..n]).unwrap_or("<??>");
-    info!("SD: BLACKBOX.TXT read back {} bytes: {}", n, msg);
-    Ok(())
+fn parse_config_file(raw: &[u8]) -> FcConfig {
+    let mut cfg = FcConfig::default();
+    for line in raw.split(|&b| b == b'\n') {
+        let line = trim(line);
+        if line.is_empty() || line.starts_with(b"#") {
+            continue;
+        }
+        if let Some(rgb) = parse_rgb(line, b"led_color=") {
+            cfg.led_color = rgb;
+        } else if let Some(v) = parse_u16(line, b"imu_hz=") {
+            cfg.imu_hz = v.max(1);
+        } else if let Some(v) = parse_u16(line, b"mag_hz=") {
+            cfg.mag_hz = v.max(1);
+        } else if let Some(v) = parse_u16(line, b"baro_hz=") {
+            cfg.baro_hz = v.max(1);
+        } else if let Some(v) = parse_u16(line, b"gps_hz=") {
+            cfg.gps_hz = v.max(1);
+        }
+    }
+    cfg
+}
+
+fn trim(mut s: &[u8]) -> &[u8] {
+    while let Some((first, rest)) = s.split_first() {
+        if !first.is_ascii_whitespace() {
+            break;
+        }
+        s = rest;
+    }
+    while let Some((last, rest)) = s.split_last() {
+        if !last.is_ascii_whitespace() {
+            break;
+        }
+        s = rest;
+    }
+    s
+}
+
+fn parse_u16(line: &[u8], prefix: &[u8]) -> Option<u16> {
+    if !line.starts_with(prefix) {
+        return None;
+    }
+    let digits = &line[prefix.len()..];
+    let mut val: u32 = 0;
+    for &b in digits {
+        if b < b'0' || b > b'9' {
+            return Some(val as u16);
+        }
+        val = val.saturating_mul(10).saturating_add((b - b'0') as u32);
+    }
+    Some(val as u16)
+}
+
+fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
+    if hz == 0 {
+        return max_ms;
+    }
+    let ms = 1000 / hz as u32;
+    ms.clamp(min_ms, max_ms).max(1)
+}
+
+fn defaults_to_bytes() -> &'static [u8] {
+    // Static string to avoid allocations; adjust if defaults change.
+    // Matches FcConfig::default() values.
+    b"led_color=0,16,0\nimu_hz=1000\nmag_hz=25\nbaro_hz=250\ngps_hz=20\n"
+}
+
+fn parse_rgb(line: &[u8], prefix: &[u8]) -> Option<[u8; 3]> {
+    if !line.starts_with(prefix) {
+        return None;
+    }
+    let mut parts = [0u8; 3];
+    let mut idx = 0usize;
+    let mut acc: u16 = 0;
+    for &b in &line[prefix.len()..] {
+        if b == b',' {
+            if idx >= 3 {
+                return None;
+            }
+            parts[idx] = acc.min(255) as u8;
+            idx += 1;
+            acc = 0;
+        } else if b.is_ascii_digit() {
+            acc = acc.saturating_mul(10).saturating_add((b - b'0') as u16);
+        } else {
+            break;
+        }
+    }
+    if idx == 2 {
+        parts[2] = acc.min(255) as u8;
+        Some(parts)
+    } else {
+        None
+    }
 }
 
 struct StateTelemetrySource;
@@ -331,10 +450,21 @@ async fn main(spawner: Spawner) {
         sd_spi_cfg,
     );
 
-    match sd_write_read_demo(sd_bus, sd_cs) {
-        Ok(_) => info!("SD: BLACKBOX.TXT written and verified"),
-        Err(e) => warn!("SD: smoke test failed: {:?}", e),
-    }
+    let config = match load_config_from_sd(sd_bus, sd_cs) {
+        Ok(cfg) => {
+            info!("Config loaded from SD: {:?}", cfg);
+            cfg
+        }
+        Err(e) => {
+            warn!("Config load failed, using defaults: {:?}", e);
+            FcConfig::default()
+        }
+    };
+
+    let imu_interval_ms = hz_to_period_ms(config.imu_hz, 1, 1000);
+    let mag_interval_ms = hz_to_period_ms(config.mag_hz, 10, 1000);
+    let baro_interval_ms = hz_to_period_ms(config.baro_hz, 2, 1000);
+    let gps_interval_ms = hz_to_period_ms(config.gps_hz, 20, 2000);
 
     // Create BMI088 instance; initialization happens inside the task
     let imu_bmi088 = Bmi088::new(spi, cs_accel, cs_gyro);
@@ -407,11 +537,12 @@ async fn main(spawner: Spawner) {
     let mav_cfg = MavEndpointConfig { sys_id: 1, comp_id: 1 };
 
     // Spawn sensor tasks
-    spawner.spawn(imu_task(imu_bmi088)).unwrap();
-    spawner.spawn(mag_task(i2c_for_bmm)).unwrap();
-    spawner.spawn(baro_task(i2c_for_bmp)).unwrap();
-    spawner.spawn(gps_task(i2c_for_gps)).unwrap();
-    spawner.spawn(logger_task(ws2812)).unwrap();
+    spawner.spawn(imu_task(imu_bmi088, imu_interval_ms)).unwrap();
+    spawner.spawn(mag_task(i2c_for_bmm, mag_interval_ms)).unwrap();
+    spawner.spawn(baro_task(i2c_for_bmp, baro_interval_ms)).unwrap();
+    spawner.spawn(gps_task(i2c_for_gps, gps_interval_ms)).unwrap();
+    let led_color = RGB8 { r: config.led_color[0], g: config.led_color[1], b: config.led_color[2] };
+    spawner.spawn(logger_task(ws2812, led_color)).unwrap();
     spawner.spawn(uart_tx_task(uart_fc_radio, mav_cfg)).unwrap();
 }
 
@@ -463,32 +594,32 @@ async fn imu_task(
         Spi<'static, embassy_rp::peripherals::SPI0, embassy_rp::spi::Async>,
         Output<'static>,
         Output<'static>
-    >
+    >,
+    interval_ms: u32,
 ) {
     let mut delay = EmbassyDelay;
     let mut sink = ImuSink;
-    // 1 ms interval (~1 kHz pacing)
-    run_bmi088_task(&mut imu, &mut delay, &mut sink, 1).await;
+    run_bmi088_task(&mut imu, &mut delay, &mut sink, interval_ms).await;
 }
 
 #[embassy_executor::task]
-async fn mag_task(i2c_dev: SharedI2c<'static>) {
+async fn mag_task(i2c_dev: SharedI2c<'static>, interval_ms: u32) {
     let mut delay = EmbassyDelay;
     info!("BMM350: starting task on I2C1 @0x{:02X}", BMM350_ADDR);
     let mut mag = Bmm350::new(i2c_dev, BMM350_ADDR);
     mag.set_debug(false);
     let mut sink = MagSink;
-    run_bmm350_task(&mut mag, &mut delay, &mut sink, 40).await; // ~25 Hz pacing
+    run_bmm350_task(&mut mag, &mut delay, &mut sink, interval_ms).await;
 }
 
 #[embassy_executor::task]
-async fn baro_task(i2c_dev: SharedI2c0<'static>) {
+async fn baro_task(i2c_dev: SharedI2c0<'static>, interval_ms: u32) {
     let mut delay = EmbassyDelay;
     info!("BMP390: starting task on I2C0 @0x{:02X}", BMP3X_ADDR_SDO_HIGH);
     let mut bmp = Bmp390::new(i2c_dev, BMP3X_ADDR_SDO_HIGH);
     bmp.set_debug(false);
     let mut sink = BaroSink;
-    run_bmp390_task(&mut bmp, &mut delay, &mut sink, 4).await;
+    run_bmp390_task(&mut bmp, &mut delay, &mut sink, interval_ms).await;
 }
 
 // #[embassy_executor::task]
@@ -504,7 +635,10 @@ async fn baro_task(i2c_dev: SharedI2c0<'static>) {
 // }
 
 #[embassy_executor::task]
-async fn logger_task(mut led: PioWs2812<'static, embassy_rp::peripherals::PIO0, 0, 1>) {
+async fn logger_task(
+    mut led: PioWs2812<'static, embassy_rp::peripherals::PIO0, 0, 1>,
+    base_color: RGB8,
+) {
     let mut n: u32 = 0;
     let mut colors = [RGB8 { r: 0, g: 0, b: 0 }; 1];
     let mut led_on = false;
@@ -586,11 +720,11 @@ async fn logger_task(mut led: PioWs2812<'static, embassy_rp::peripherals::PIO0, 
             prev_t = Instant::now();
         }
 
-        // Simple heartbeat on addressable LED: brief green blink at ~2 Hz
+        // Simple heartbeat on addressable LED: brief blink at ~2 Hz using configured color
         let pulse = (n & 0xFF) < 50;
         if pulse != led_on {
             led_on = pulse;
-            colors[0] = if led_on { RGB8 { r: 0, g: 16, b: 0 } } else { RGB8 { r: 0, g: 0, b: 0 } };
+            colors[0] = if led_on { base_color } else { RGB8 { r: 0, g: 0, b: 0 } };
             led.write(&colors).await;
         }
         Timer::after_micros(1000).await;
@@ -623,12 +757,11 @@ async fn uart_tx_task(mut uart: RpUart<'static>, cfg: MavEndpointConfig) {
 }
 
 #[embassy_executor::task]
-async fn gps_task(i2c_dev: SharedI2c<'static>) {
+async fn gps_task(i2c_dev: SharedI2c<'static>, interval_ms: u32) {
     let mut delay = EmbassyDelay;
     info!("NEO-M9N: starting task on I2C1 @0x{:02X}", UBLOX_I2C_ADDR);
     let mut gps = NeoM9n::new(i2c_dev, UBLOX_I2C_ADDR);
     gps.set_debug(false);
     let mut sink = GpsSink;
-    // ~20 Hz polling; device may output ~10 Hz by default
-    run_neom9n_task(&mut gps, &mut delay, &mut sink, 50).await;
+    run_neom9n_task(&mut gps, &mut delay, &mut sink, interval_ms).await;
 }

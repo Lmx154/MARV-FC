@@ -8,8 +8,28 @@ MARV is an avionics system aimed at growing my understanding of avionics system 
 - tasks
 - simulation
 
+## SD card config (CONFIG.TXT)
+
+At boot the FC reads a simple key/value file `CONFIG.TXT` on the SD card (root). Current keys:
+
+- `led_color` (RGB as comma-separated bytes, e.g. `0,16,0` for dim green)
+- `imu_hz` (BMI088 sample rate in Hz)
+- `mag_hz` (BMM350 sample rate in Hz)
+- `baro_hz` (BMP390 sample rate in Hz)
+- `gps_hz` (GPS poll rate in Hz)
+
+Example:
+```
+led_color=0,16,0
+imu_hz=1000
+mag_hz=25
+baro_hz=250
+gps_hz=20
+```
+
+Missing keys fall back to defaults. Config is applied once at boot before tasks start.
+
 TODO:
-- async spi SD blackbox storage logs and config
 
 - create parameter based system
 
