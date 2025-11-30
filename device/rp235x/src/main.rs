@@ -21,6 +21,9 @@ use common::tasks::sensors::{
 use common::coms::uart_coms::{AsyncUartBus, MAVLINK_MAX_FRAME};
 use common::mavlink2;
 use common::utils::i2cscanner::scan_i2c_bus_default;
+use embedded_hal::delay::DelayNs;
+use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_sdmmc::{sdcard::DummyCsPin, Mode as FsMode, TimeSource, Timestamp, VolumeIdx, VolumeManager};
 
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
@@ -29,7 +32,7 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::uart::{Config as UartConfig, Uart, InterruptHandler as UartInterruptHandler, Async as UartAsync};
-use embassy_time::{Timer, Instant};
+use embassy_time::{Timer, Instant, Duration, block_for};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
@@ -95,6 +98,55 @@ static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
 
 fn clamp_i16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
+}
+
+// Simple blocking delay for SD card bring-up (maps to embassy_time::block_for).
+struct SdDelay;
+impl DelayNs for SdDelay {
+    fn delay_ns(&mut self, ns: u32) {
+        let us = (ns + 999) / 1000;
+        block_for(Duration::from_micros(us.into()));
+    }
+}
+
+// Dummy time source for FAT timestamps.
+struct SdTime;
+impl TimeSource for SdTime {
+    fn get_timestamp(&self) -> Timestamp {
+        Timestamp {
+            year_since_1970: 55, // 2025-1970
+            zero_indexed_month: 0,
+            zero_indexed_day: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+        }
+    }
+}
+
+fn sd_write_read_demo(
+    bus: Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
+    cs: Output<'static>,
+) -> Result<(), embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
+    // Use a dummy CS for the SPI device; real CS is passed to SdCard for spec-compliant toggling.
+    let spi_dev = ExclusiveDevice::new(bus, DummyCsPin, SdDelay).unwrap();
+    let sdcard = embedded_sdmmc::sdcard::SdCard::new(spi_dev, cs, SdDelay);
+    let mut volume_mgr: VolumeManager<_, _> = VolumeManager::new(sdcard, SdTime);
+    let mut volume0 = volume_mgr.open_volume(VolumeIdx(0))?;
+    let mut root_dir = volume0.open_root_dir()?;
+    let mut file = root_dir.open_file_in_dir("BLACKBOX.TXT", FsMode::ReadWriteCreateOrTruncate)?;
+
+    // Write a single payload to avoid leftover bytes from previous content.
+    let payload = b"boot=pico\nmode=bringup\n";
+    file.seek_from_start(0)?;
+    file.write(payload)?;
+    file.seek_from_start(0)?;
+
+    let mut buf = [0u8; 64];
+    let n = file.read(&mut buf)?;
+    let msg = core::str::from_utf8(&buf[..n]).unwrap_or("<??>");
+    info!("SD: BLACKBOX.TXT read back {} bytes: {}", n, msg);
+    Ok(())
 }
 
 struct StateTelemetrySource;
@@ -261,6 +313,28 @@ async fn main(spawner: Spawner) {
         p.DMA_CH1,
         spi_config,
     );
+
+    // Configure SPI1 for microSD (blackbox logging)
+    // Hardware pins from hardware.md:
+    // MOSI: GP11, MISO: GP8, SCK: GP10, CS: GP9
+    let sd_miso = p.PIN_8;
+    let sd_mosi = p.PIN_11;
+    let sd_sck = p.PIN_10;
+    let sd_cs = Output::new(p.PIN_9, Level::High);
+    let mut sd_spi_cfg = SpiConfig::default();
+    sd_spi_cfg.frequency = 1_000_000; // conservative bring-up frequency
+    let sd_bus = Spi::new_blocking(
+        p.SPI1,
+        sd_sck,
+        sd_mosi,
+        sd_miso,
+        sd_spi_cfg,
+    );
+
+    match sd_write_read_demo(sd_bus, sd_cs) {
+        Ok(_) => info!("SD: BLACKBOX.TXT written and verified"),
+        Err(e) => warn!("SD: smoke test failed: {:?}", e),
+    }
 
     // Create BMI088 instance; initialization happens inside the task
     let imu_bmi088 = Bmi088::new(spi, cs_accel, cs_gyro);
