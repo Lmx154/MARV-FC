@@ -57,6 +57,7 @@ pub mod estimators;
 pub mod tasks;
 pub mod types;
 pub mod utils;
+pub mod config;
 pub mod lora;
 pub mod mavlink2;
 pub mod coms;

@@ -3,6 +3,7 @@
 // Firmware entrypoint; only device-specific wiring lives here
 
 use defmt::*;
+use common::config::Config as AppConfig;
 use common::drivers::bmi088::{Bmi088, Bmi088Raw};
 use common::drivers::bmm350::{Bmm350, BMM350_ADDR};
 use common::drivers::bmp390::{Bmp390, BMP3X_ADDR_SDO_HIGH};
@@ -124,31 +125,10 @@ impl TimeSource for SdTime {
     }
 }
 
-#[derive(Copy, Clone, Debug, defmt::Format)]
-struct FcConfig {
-    led_color: [u8; 3],
-    imu_hz: u16,
-    mag_hz: u16,
-    baro_hz: u16,
-    gps_hz: u16,
-}
-
-impl FcConfig {
-    const fn default() -> Self {
-        Self {
-            led_color: [0, 16, 0], // dim green
-            imu_hz: 1000,
-            mag_hz: 25,
-            baro_hz: 250,
-            gps_hz: 20,
-        }
-    }
-}
-
 fn load_config_from_sd(
     bus: Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
     cs: Output<'static>,
-) -> Result<FcConfig, embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
+) -> Result<AppConfig, embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
     // Use a dummy CS for the SPI device; real CS is passed to SdCard for spec-compliant toggling.
     let spi_dev = ExclusiveDevice::new(bus, DummyCsPin, SdDelay).unwrap();
     let sdcard = embedded_sdmmc::sdcard::SdCard::new(spi_dev, cs, SdDelay);
@@ -160,69 +140,16 @@ fn load_config_from_sd(
         if let Ok(mut file) = res {
             let mut buf = [0u8; 256];
             let n = file.read(&mut buf)?;
-            return Ok(parse_config_file(&buf[..n]));
+            return Ok(AppConfig::from_bytes(&buf[..n]));
         }
     }
 
-    let defaults = FcConfig::default();
+    let defaults = AppConfig::default();
     let mut file = root_dir.open_file_in_dir("CONFIG.TXT", FsMode::ReadWriteCreateOrTruncate)?;
-    let bytes = defaults_to_bytes();
-    file.write(bytes)?;
+    let bytes = defaults.to_bytes();
+    file.write(bytes.as_bytes())?;
     file.seek_from_start(0)?;
     Ok(defaults)
-}
-
-fn parse_config_file(raw: &[u8]) -> FcConfig {
-    let mut cfg = FcConfig::default();
-    for line in raw.split(|&b| b == b'\n') {
-        let line = trim(line);
-        if line.is_empty() || line.starts_with(b"#") {
-            continue;
-        }
-        if let Some(rgb) = parse_rgb(line, b"led_color=") {
-            cfg.led_color = rgb;
-        } else if let Some(v) = parse_u16(line, b"imu_hz=") {
-            cfg.imu_hz = v.max(1);
-        } else if let Some(v) = parse_u16(line, b"mag_hz=") {
-            cfg.mag_hz = v.max(1);
-        } else if let Some(v) = parse_u16(line, b"baro_hz=") {
-            cfg.baro_hz = v.max(1);
-        } else if let Some(v) = parse_u16(line, b"gps_hz=") {
-            cfg.gps_hz = v.max(1);
-        }
-    }
-    cfg
-}
-
-fn trim(mut s: &[u8]) -> &[u8] {
-    while let Some((first, rest)) = s.split_first() {
-        if !first.is_ascii_whitespace() {
-            break;
-        }
-        s = rest;
-    }
-    while let Some((last, rest)) = s.split_last() {
-        if !last.is_ascii_whitespace() {
-            break;
-        }
-        s = rest;
-    }
-    s
-}
-
-fn parse_u16(line: &[u8], prefix: &[u8]) -> Option<u16> {
-    if !line.starts_with(prefix) {
-        return None;
-    }
-    let digits = &line[prefix.len()..];
-    let mut val: u32 = 0;
-    for &b in digits {
-        if b < b'0' || b > b'9' {
-            return Some(val as u16);
-        }
-        val = val.saturating_mul(10).saturating_add((b - b'0') as u32);
-    }
-    Some(val as u16)
 }
 
 fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
@@ -233,40 +160,6 @@ fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
     ms.clamp(min_ms, max_ms).max(1)
 }
 
-fn defaults_to_bytes() -> &'static [u8] {
-    // Static string to avoid allocations; adjust if defaults change.
-    // Matches FcConfig::default() values.
-    b"led_color=0,16,0\nimu_hz=1000\nmag_hz=25\nbaro_hz=250\ngps_hz=20\n"
-}
-
-fn parse_rgb(line: &[u8], prefix: &[u8]) -> Option<[u8; 3]> {
-    if !line.starts_with(prefix) {
-        return None;
-    }
-    let mut parts = [0u8; 3];
-    let mut idx = 0usize;
-    let mut acc: u16 = 0;
-    for &b in &line[prefix.len()..] {
-        if b == b',' {
-            if idx >= 3 {
-                return None;
-            }
-            parts[idx] = acc.min(255) as u8;
-            idx += 1;
-            acc = 0;
-        } else if b.is_ascii_digit() {
-            acc = acc.saturating_mul(10).saturating_add((b - b'0') as u16);
-        } else {
-            break;
-        }
-    }
-    if idx == 2 {
-        parts[2] = acc.min(255) as u8;
-        Some(parts)
-    } else {
-        None
-    }
-}
 
 struct StateTelemetrySource;
 
@@ -457,7 +350,7 @@ async fn main(spawner: Spawner) {
         }
         Err(e) => {
             warn!("Config load failed, using defaults: {:?}", e);
-            FcConfig::default()
+            AppConfig::default()
         }
     };
 
