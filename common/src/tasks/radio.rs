@@ -3,7 +3,7 @@
 #![allow(async_fn_in_trait)]
 
 use defmt::{info, warn};
-use crate::lora::link::{LoRaLink, Sx1262Interface, LinkError};
+use crate::coms::transport::lora::link::{LinkError, LoRaLink, Sx1262Interface};
 use crate::utils::delay::DelayMs;
 use crate::mavlink2::{self, MavError};
 use crate::tasks::coms::{
@@ -156,7 +156,7 @@ async fn run_gs_listener<'a, RADIO>(
 
         // Optionally forward the raw serialized frame without decoding.
         if let Some(raw) = raw_sink.as_deref_mut() {
-            let mut ser_buf = [0u8; crate::coms::uart_coms::MAVLINK_MAX_FRAME];
+            let mut ser_buf = [0u8; crate::coms::transport::uart::MAVLINK_MAX_FRAME];
             if let Ok(len) = frame.serialize(&mut ser_buf) {
                 raw.handle(&ser_buf[..len]);
             }

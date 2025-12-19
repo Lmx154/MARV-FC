@@ -15,7 +15,7 @@
 //! - `handle_param_request_read()` - Process PARAM_REQUEST_READ
 //! - `handle_param_set()` - Process PARAM_SET and update registry
 //!
-//! See `mavlink2::integration_example` for complete usage patterns.
+//! See `protocol::mavlink` for MAVLink parameter protocol helpers.
 //!
 //! ## Quick Start
 //!
@@ -29,7 +29,7 @@
 //!     configure_sensor(rate);
 //! }
 //!
-//! // 3. Wire into MAVLink handler (see mavlink2::integration_example)
+//! // 3. Wire into MAVLink handler (see `protocol::mavlink`)
 //! match msg {
 //!     Common::ParamRequestList(_) => { /* send all params */ }
 //!     Common::ParamRequestRead(_) => { /* send one param */ }

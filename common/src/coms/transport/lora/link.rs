@@ -222,11 +222,7 @@ where
     ///  - TX data frame
     ///  - Wait for ACK
     ///  - Retry up to self.retries
-    pub async fn send(
-        &mut self,
-        delay: &mut impl DelayMs,
-        payload: &[u8],
-    ) -> Result<()> {
+    pub async fn send(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> Result<()> {
         if payload.len() > Self::MTU {
             return Err(LinkError::TooLarge);
         }
@@ -245,8 +241,7 @@ where
         };
 
         header.encode(&mut frame);
-        frame[LinkHeader::SIZE..LinkHeader::SIZE + payload.len()]
-            .copy_from_slice(payload);
+        frame[LinkHeader::SIZE..LinkHeader::SIZE + payload.len()].copy_from_slice(payload);
 
         // TX + WAIT FOR ACK
         for attempt in 0..=self.retries {
@@ -255,10 +250,7 @@ where
             }
 
             self.radio
-                .tx_raw(
-                    delay,
-                    &frame[..header.len as usize + LinkHeader::SIZE],
-                )
+                .tx_raw(delay, &frame[..header.len as usize + LinkHeader::SIZE])
                 .await
                 .map_err(|_| LinkError::Radio)?;
 
@@ -312,11 +304,7 @@ where
     /// Blocking receive: waits until a valid frame and returns its payload len.
     ///
     /// This is built on top of `try_recv`, which does a single poll step.
-    pub async fn recv(
-        &mut self,
-        delay: &mut impl DelayMs,
-        buf: &mut [u8],
-    ) -> Result<usize> {
+    pub async fn recv(&mut self, delay: &mut impl DelayMs, buf: &mut [u8]) -> Result<usize> {
         loop {
             if let Some(len) = self.try_recv(delay, buf).await? {
                 return Ok(len);
@@ -378,7 +366,7 @@ where
         if h.seq != self.expected_seq {
             if log_config::LOG_LINK_ORDER_WARN {
                 warn!(
-                    "LoRaLink: out-of-order seq={} expected={}",
+                    "LoRaLink: out-of-order seq={} expected={} ",
                     h.seq,
                     self.expected_seq
                 );
@@ -428,16 +416,9 @@ where
 // -----------------------------------------------------------------------------
 
 pub trait Sx1262Interface {
-    async fn tx_raw(
-        &mut self,
-        delay: &mut impl DelayMs,
-        payload: &[u8],
-    ) -> RadioResult<()>;
+    async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()>;
 
-    async fn start_rx_continuous(
-        &mut self,
-        delay: &mut impl DelayMs,
-    ) -> RadioResult<()>;
+    async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()>;
 
     async fn poll_raw(
         &mut self,
@@ -447,8 +428,7 @@ pub trait Sx1262Interface {
 }
 
 // Blanket implementation
-impl<SPI, NSS, RESET, BUSY, DIO1, SW> Sx1262Interface
-    for Sx1262<SPI, NSS, RESET, BUSY, DIO1, SW>
+impl<SPI, NSS, RESET, BUSY, DIO1, SW> Sx1262Interface for Sx1262<SPI, NSS, RESET, BUSY, DIO1, SW>
 where
     SPI: embedded_hal_async::spi::SpiBus<u8>,
     NSS: embedded_hal::digital::OutputPin,
@@ -457,18 +437,11 @@ where
     DIO1: embedded_hal::digital::InputPin,
     SW: crate::drivers::sx1262::RfSwitch,
 {
-    async fn tx_raw(
-        &mut self,
-        delay: &mut impl DelayMs,
-        payload: &[u8],
-    ) -> RadioResult<()> {
+    async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()> {
         self.tx_raw(delay, payload).await
     }
 
-    async fn start_rx_continuous(
-        &mut self,
-        delay: &mut impl DelayMs,
-    ) -> RadioResult<()> {
+    async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()> {
         self.start_rx_continuous(delay).await
     }
 
@@ -517,11 +490,7 @@ impl<R> Sx1262Interface for FaultyRadio<R>
 where
     R: Sx1262Interface,
 {
-    async fn tx_raw(
-        &mut self,
-        delay: &mut impl DelayMs,
-        payload: &[u8],
-    ) -> RadioResult<()> {
+    async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()> {
         // Heuristic: small (len == 4) frames are ACKs
         let is_ack = payload.len() == LinkHeader::SIZE;
 
@@ -537,10 +506,7 @@ where
         self.inner.tx_raw(delay, payload).await
     }
 
-    async fn start_rx_continuous(
-        &mut self,
-        delay: &mut impl DelayMs,
-    ) -> RadioResult<()> {
+    async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()> {
         self.inner.start_rx_continuous(delay).await
     }
 

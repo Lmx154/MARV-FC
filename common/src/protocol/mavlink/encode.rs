@@ -2,10 +2,10 @@
 //! Keep all MAVLink framing and payload building in this module for reuse.
 #![allow(async_fn_in_trait)]
 
+use mavio::dialects::common::enums::MavParamType;
+use mavio::dialects::common::messages;
 use mavio::Frame;
 use mavio::protocol::V2;
-use mavio::dialects::common::messages;
-use mavio::dialects::common::enums::MavParamType;
 
 use crate::params::{ParamType, ParamValue, ParamRegistry, PARAM_NAME_MAX};
 
@@ -51,11 +51,7 @@ pub fn statustext_to_str(msg: &messages::Statustext) -> &str {
 }
 
 /// Build a MAVLink2 `Frame<V2>` carrying a `Common::Statustext`.
-pub fn build_statustext_frame(
-    cfg: MavEndpointConfig,
-    seq: u8,
-    msg: messages::Statustext,
-) -> Frame<V2> {
+pub fn build_statustext_frame(cfg: MavEndpointConfig, seq: u8, msg: messages::Statustext) -> Frame<V2> {
     Frame::builder()
         .version(V2)
         .system_id(cfg.sys_id.into())
@@ -76,11 +72,11 @@ pub fn build_heartbeat() -> messages::Heartbeat {
 
     messages::Heartbeat {
         custom_mode: 0,
-        type_: MavType::FixedWing, // Or Quadrotor, depends on your platform
+        type_: MavType::FixedWing,
         autopilot: MavAutopilot::Generic,
         base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
         system_status: MavState::Active,
-        mavlink_version: 3, // MAVLink 2.0 uses version 3
+        mavlink_version: 3,
     }
 }
 
@@ -102,8 +98,6 @@ pub fn build_heartbeat_frame(cfg: MavEndpointConfig, seq: u8) -> Frame<V2> {
 // ---------------------------------------------------------------------------
 
 /// Versioned, compact telemetry snapshot meant for UART/LoRa forwarding.
-///
-/// Keep this small so it fits well within MAVLink MTU and is easy to decode.
 #[derive(Clone, Copy, Default)]
 pub struct TelemetrySample {
     pub accel: [i16; 3],
@@ -120,7 +114,7 @@ pub struct TelemetrySample {
 
 impl TelemetrySample {
     pub const FORMAT_VERSION: u8 = 1;
-    pub const WIRE_LEN: usize = 39; // bytes encoded below
+    pub const WIRE_LEN: usize = 39;
 
     /// Encode into little-endian bytes; returns length used.
     pub fn encode(&self, out: &mut [u8]) -> Option<usize> {
@@ -227,7 +221,7 @@ pub fn build_telemetry_frame(
     let Some(_len) = sample.encode(&mut payload) else {
         return None;
     };
-    // Zero-fill remaining bytes; receiver uses fixed size decode.
+
     let msg = messages::EncapsulatedData {
         seqnr: seq as u16,
         data: payload,
@@ -252,7 +246,7 @@ pub fn build_telemetry_frame(
 /// Map our `ParamType` to MAVLink's `MavParamType`.
 pub fn param_type_to_mav(ty: ParamType) -> MavParamType {
     match ty {
-        ParamType::Bool => MavParamType::Uint8, // Represent bool as uint8 (0/1)
+        ParamType::Bool => MavParamType::Uint8,
         ParamType::I32 => MavParamType::Int32,
         ParamType::U32 => MavParamType::Uint32,
         ParamType::F32 => MavParamType::Real32,
@@ -264,9 +258,8 @@ pub fn param_type_to_mav(ty: ParamType) -> MavParamType {
 pub fn encode_param_id(name: &str) -> [u8; PARAM_NAME_MAX] {
     let mut out = [0u8; PARAM_NAME_MAX];
     let bytes = name.as_bytes();
-    let len = core::cmp::min(bytes.len(), PARAM_NAME_MAX - 1); // Leave room for null terminator
+    let len = core::cmp::min(bytes.len(), PARAM_NAME_MAX - 1);
     out[..len].copy_from_slice(&bytes[..len]);
-    // Remaining bytes already zero (null-terminated + padded)
     out
 }
 
@@ -277,13 +270,10 @@ pub fn decode_param_id(param_id: &[u8; PARAM_NAME_MAX]) -> &str {
 }
 
 /// Build a PARAM_VALUE message from the registry at a given index.
-pub fn build_param_value_msg(
-    registry: &ParamRegistry,
-    idx: u16,
-) -> Option<messages::ParamValue> {
+pub fn build_param_value_msg(registry: &ParamRegistry, idx: u16) -> Option<messages::ParamValue> {
     let def = registry.def_by_index(idx)?;
     let val = registry.get_by_index(idx)?;
-    
+
     Some(messages::ParamValue {
         param_value: val.as_mavlink_f32(),
         param_count: registry.count(),
@@ -301,7 +291,7 @@ pub fn build_param_value_frame(
     idx: u16,
 ) -> Option<Frame<V2>> {
     let msg = build_param_value_msg(registry, idx)?;
-    
+
     Some(
         Frame::builder()
             .version(V2)
@@ -315,100 +305,38 @@ pub fn build_param_value_frame(
 }
 
 /// Parse a PARAM_SET message and attempt to set the parameter in the registry.
-/// Returns the parameter index if successful, or None if not found / type mismatch.
-pub fn handle_param_set(
-    registry: &mut ParamRegistry,
-    msg: &messages::ParamSet,
-) -> Option<u16> {
+/// Returns the parameter index if successful.
+pub fn handle_param_set(registry: &mut ParamRegistry, msg: &messages::ParamSet) -> Option<u16> {
     let name = decode_param_id(&msg.param_id);
-    
-    // Find the parameter by name
+
     let idx = registry.find_index_by_name(name)?;
     let def = registry.def_by_index(idx)?;
-    
-    // Convert the f32 value back to the appropriate type
-    // For integer types, we must reinterpret the bits, not convert the value
+
     let new_value = match def.ty {
-        ParamType::Bool => {
-            let v = msg.param_value != 0.0;
-            ParamValue::Bool(v)
-        }
+        ParamType::Bool => ParamValue::Bool(msg.param_value != 0.0),
         ParamType::I32 => ParamValue::I32(msg.param_value.to_bits() as i32),
         ParamType::U32 => ParamValue::U32(msg.param_value.to_bits()),
         ParamType::F32 => ParamValue::F32(msg.param_value),
     };
-    
-    // Set the value (this validates type match internally)
+
     registry.set_by_index(idx, new_value).ok()?;
-    
+
     Some(idx)
 }
 
 /// Handle PARAM_REQUEST_READ - returns the index to send back.
 /// Supports both index-based and name-based lookups.
-pub fn handle_param_request_read(
-    registry: &ParamRegistry,
-    msg: &messages::ParamRequestRead,
-) -> Option<u16> {
+pub fn handle_param_request_read(registry: &ParamRegistry, msg: &messages::ParamRequestRead) -> Option<u16> {
     if msg.param_index >= 0 {
-        // Index-based request
         let idx = msg.param_index as u16;
-        if idx < registry.count() {
-            Some(idx)
-        } else {
-            None
-        }
+        if idx < registry.count() { Some(idx) } else { None }
     } else {
-        // Name-based request (param_index == -1)
         let name = decode_param_id(&msg.param_id);
         registry.find_index_by_name(name)
     }
 }
 
-// ---------------------------------------------------------------------------
-// Example integration pattern (for reference in device firmware)
-// ---------------------------------------------------------------------------
-
-/// Example: Process an incoming MAVLink frame and handle parameter protocol messages.
-/// 
-/// Usage in your device firmware:
-/// ```ignore
-/// use mavio::dialects::common::Common;
-/// 
-/// match frame.decode::<Common>() {
-///     Ok(Common::ParamRequestList(msg)) => {
-///         // Send all parameters
-///         for idx in 0..params.count() {
-///             if let Some(reply) = build_param_value_frame(cfg, seq, &params, idx) {
-///                 send_frame(reply).await;
-///                 seq = seq.wrapping_add(1);
-///             }
-///         }
-///     }
-///     Ok(Common::ParamRequestRead(msg)) => {
-///         if let Some(idx) = handle_param_request_read(&params, &msg) {
-///             if let Some(reply) = build_param_value_frame(cfg, seq, &params, idx) {
-///                 send_frame(reply).await;
-///                 seq = seq.wrapping_add(1);
-///             }
-///         }
-///     }
-///     Ok(Common::ParamSet(msg)) => {
-///         if let Some(idx) = handle_param_set(&mut params, &msg) {
-///             // Send ACK by echoing the updated value back
-///             if let Some(reply) = build_param_value_frame(cfg, seq, &params, idx) {
-///                 send_frame(reply).await;
-///                 seq = seq.wrapping_add(1);
-///             }
-///         }
-///     }
-///     Ok(Common::Statustext(_)) => { /* handle statustext */ }
-///     Ok(Common::Heartbeat(_)) => { /* handle heartbeat */ }
-///     // ... other messages
-///     _ => {}
-/// }
-/// ```
 #[allow(dead_code)]
 pub fn parameter_protocol_example() {
-    // This function exists only for documentation purposes
+    // This function exists only for documentation purposes.
 }

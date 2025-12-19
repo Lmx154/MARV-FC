@@ -1,27 +1,30 @@
 //! MAVLink message handlers
-//! 
-//! Pure protocol handling - no hardware or runtime dependencies
+//!
+//! Pure protocol handling - no hardware or runtime dependencies.
 
-use crate::mavlink2::msg::{
-    build_param_value_frame, handle_param_request_read, handle_param_set,
-};
-use crate::mavlink2::prelude::{dialects::common::Common, Frame, V2};
+use mavio::Frame;
+use mavio::protocol::V2;
+use mavio::dialects::common::Common;
+
 use crate::params::ParamRegistry;
-use crate::tasks::coms::MavEndpointConfig;
 
-/// Result of handling a MAVLink message
+use crate::protocol::mavlink::encode::{
+    build_param_value_frame, handle_param_request_read, handle_param_set, MavEndpointConfig,
+};
+
+/// Result of handling a MAVLink message.
 pub enum MessageHandlerResult {
-    /// Send a response frame
+    /// Send a response frame.
     SendFrame(Frame<V2>),
-    /// Send all parameters (PARAM_REQUEST_LIST)
+    /// Send all parameters (PARAM_REQUEST_LIST).
     SendAllParams,
-    /// No response needed
+    /// No response needed.
     NoResponse,
-    /// Message not recognized
+    /// Message not recognized.
     Unhandled,
 }
 
-/// Handle incoming PARAM_REQUEST_LIST message
+/// Handle incoming PARAM_REQUEST_LIST message.
 pub fn handle_param_request_list(
     msg: &Common,
     cfg: MavEndpointConfig,
@@ -42,7 +45,7 @@ pub fn handle_param_request_list(
     }
 }
 
-/// Handle incoming PARAM_REQUEST_READ message
+/// Handle incoming PARAM_REQUEST_READ message.
 pub fn handle_param_request_read_msg(
     msg: &Common,
     cfg: MavEndpointConfig,
@@ -67,8 +70,8 @@ pub fn handle_param_request_read_msg(
     MessageHandlerResult::NoResponse
 }
 
-/// Handle incoming PARAM_SET message
-/// Returns (result, dirty_flag) where dirty_flag indicates if parameter was modified
+/// Handle incoming PARAM_SET message.
+/// Returns (result, dirty_flag) where dirty_flag indicates if parameter was modified.
 pub fn handle_param_set_msg(
     msg: &Common,
     cfg: MavEndpointConfig,
@@ -87,28 +90,24 @@ pub fn handle_param_set_msg(
         if let Some(idx) = handle_param_set(params, req) {
             // ACK by sending back the updated value
             if let Some(reply) = build_param_value_frame(cfg, seq, params, idx) {
-                return (MessageHandlerResult::SendFrame(reply), true); // Parameter was modified
+                return (MessageHandlerResult::SendFrame(reply), true);
             }
         }
     }
     (MessageHandlerResult::NoResponse, false)
 }
 
-/// Handle incoming HEARTBEAT message
-pub fn handle_heartbeat_msg(
-    _frame: &Frame<V2>,
-) -> MessageHandlerResult {
+/// Handle incoming HEARTBEAT message.
+pub fn handle_heartbeat_msg(_frame: &Frame<V2>) -> MessageHandlerResult {
     MessageHandlerResult::NoResponse
 }
 
-/// Handle incoming STATUSTEXT message
-pub fn handle_statustext_msg(
-    _msg: &Common,
-) -> MessageHandlerResult {
+/// Handle incoming STATUSTEXT message.
+pub fn handle_statustext_msg(_msg: &Common) -> MessageHandlerResult {
     MessageHandlerResult::NoResponse
 }
 
-/// Dispatch incoming MAVLink message to appropriate handler
+/// Dispatch incoming MAVLink message to appropriate handler.
 pub fn dispatch_mavlink_message(
     frame: Frame<V2>,
     cfg: MavEndpointConfig,
@@ -116,22 +115,12 @@ pub fn dispatch_mavlink_message(
     params: &mut ParamRegistry,
 ) -> (MessageHandlerResult, bool) {
     match frame.decode::<Common>() {
-        Ok(msg @ Common::ParamRequestList(_)) => {
-            (handle_param_request_list(&msg, cfg, params), false)
-        }
-        Ok(msg @ Common::ParamRequestRead(_)) => {
-            (handle_param_request_read_msg(&msg, cfg, seq, params), false)
-        }
-        Ok(msg @ Common::ParamSet(_)) => {
-            handle_param_set_msg(&msg, cfg, seq, params)
-        }
+        Ok(msg @ Common::ParamRequestList(_)) => (handle_param_request_list(&msg, cfg, params), false),
+        Ok(msg @ Common::ParamRequestRead(_)) => (handle_param_request_read_msg(&msg, cfg, seq, params), false),
+        Ok(msg @ Common::ParamSet(_)) => handle_param_set_msg(&msg, cfg, seq, params),
         Ok(Common::Heartbeat(_)) => (handle_heartbeat_msg(&frame), false),
         Ok(msg @ Common::Statustext(_)) => (handle_statustext_msg(&msg), false),
-        Ok(_) => {
-            (MessageHandlerResult::Unhandled, false)
-        }
-        Err(_) => {
-            (MessageHandlerResult::Unhandled, false)
-        }
+        Ok(_) => (MessageHandlerResult::Unhandled, false),
+        Err(_) => (MessageHandlerResult::Unhandled, false),
     }
 }
