@@ -20,7 +20,19 @@ use common::tasks::sensors::{
     DataSink,
 };
 use common::coms::uart_coms::{AsyncUartBus, MAVLINK_MAX_FRAME};
-use common::mavlink2;
+use common::mavlink2::{self};
+use common::mavlink2::msg::{
+    build_param_value_frame,
+    handle_param_request_read,
+    handle_param_set,
+    build_statustext,
+    build_statustext_frame,
+    build_heartbeat_frame,
+};
+use common::mavlink2::prelude::{dialects::common::Common};
+#[allow(unused_imports)]
+use common::mavlink2::prelude::{Frame, V2};
+use common::params::{ParamRegistry, ParamId};
 use common::utils::i2cscanner::scan_i2c_bus_default;
 use embedded_hal::delay::DelayNs;
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -33,12 +45,19 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::uart::{Config as UartConfig, Uart, InterruptHandler as UartInterruptHandler, Async as UartAsync};
+use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
+use embassy_usb::{
+    class::cdc_acm::{CdcAcmClass, State as CdcAcmState},
+    driver::EndpointError,
+    Builder, Config as UsbConfig, UsbDevice,
+};
 use embassy_time::{Timer, Instant, Duration, block_for};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
 use static_cell::StaticCell;
 use smart_leds::RGB8;
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 // Bind I2C0/I2C1 interrupts for async I2C drivers
 use embassy_rp::i2c::InterruptHandler as I2cInterruptHandler;
 embassy_rp::bind_interrupts!(struct Irqs {
@@ -53,6 +72,50 @@ embassy_rp::bind_interrupts!(struct UartIrqs {
 embassy_rp::bind_interrupts!(struct PioIrqs {
     PIO0_IRQ_0 => PioInterruptHandler<embassy_rp::peripherals::PIO0>;
 });
+
+embassy_rp::bind_interrupts!(struct UsbIrqs {
+    USBCTRL_IRQ => UsbInterruptHandler<embassy_rp::peripherals::USB>;
+});
+
+static USB_CDC_STATE: StaticCell<CdcAcmState<'static>> = StaticCell::new();
+static USB_CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+static USB_BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+static USB_MSOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
+static USB_CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
+
+// Parameter persistence tracking
+static PARAMS_DIRTY: AtomicBool = AtomicBool::new(false);
+static PARAMS_LAST_MODIFIED: AtomicU32 = AtomicU32::new(0);
+
+// USB-CDC wrapper for MAVLink
+struct UsbCdc<'d> {
+    class: CdcAcmClass<'d, UsbDriver<'d, embassy_rp::peripherals::USB>>,
+    max_packet: usize,
+}
+
+impl<'d> UsbCdc<'d> {
+    async fn wait_connection(&mut self) {
+        self.class.wait_connection().await;
+    }
+
+    async fn read_packet(&mut self, buf: &mut [u8]) -> Result<usize, EndpointError> {
+        self.class.read_packet(buf).await
+    }
+
+    async fn write(&mut self, bytes: &[u8]) -> Result<(), EndpointError> {
+        let mut remaining = bytes;
+        while !remaining.is_empty() {
+            let n = core::cmp::min(remaining.len(), self.max_packet);
+            self.class.write_packet(&remaining[..n]).await?;
+            remaining = &remaining[n..];
+        }
+        // Short packet to flush if we ended on a packet boundary
+        if !bytes.is_empty() && bytes.len() % self.max_packet == 0 {
+            self.class.write_packet(&[]).await?;
+        }
+        Ok(())
+    }
+}
 
 // ADXL375 I2C address (adjust if ALT_ADDRESS wiring differs)
 // const ADXL375_ADDR: u8 = 0x53;
@@ -97,6 +160,9 @@ static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
     gps: GpsState { fix: None, seq: 0 },
 });
 
+// Parameter registry - shared between UART RX and TX tasks
+static PARAMS: StaticCell<Mutex<RawMutex, ParamRegistry>> = StaticCell::new();
+
 fn clamp_i16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
 }
@@ -125,6 +191,7 @@ impl TimeSource for SdTime {
     }
 }
 
+#[allow(dead_code)]
 fn load_config_from_sd(
     bus: Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
     cs: Output<'static>,
@@ -150,6 +217,119 @@ fn load_config_from_sd(
     file.write(bytes.as_bytes())?;
     file.seek_from_start(0)?;
     Ok(defaults)
+}
+
+/// Load parameters from SD card PARAMS.TXT file
+fn load_params_from_sd(
+    volume_mgr: &mut VolumeManager<
+        embedded_sdmmc::sdcard::SdCard<
+            ExclusiveDevice<Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>, DummyCsPin, SdDelay>,
+            Output<'static>,
+            SdDelay
+        >,
+        SdTime
+    >,
+    params: &mut ParamRegistry,
+) -> Result<usize, embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
+    let mut volume0 = volume_mgr.open_volume(VolumeIdx(0))?;
+    let mut root_dir = volume0.open_root_dir()?;
+    
+    let res = root_dir.open_file_in_dir("PARAMS.TXT", FsMode::ReadOnly);
+    if let Ok(mut file) = res {
+        let mut buf = [0u8; 2048]; // Enough for ~40 parameters
+        let n = file.read(&mut buf)?;
+        if let Ok(count) = params.deserialize_from_text(&buf[..n]) {
+            return Ok(count);
+        }
+    }
+    
+    Ok(0) // No file found or parse error - use defaults
+}
+
+/// Load both config and parameters from SD card in one go
+fn load_config_and_params_from_sd(
+    bus: Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
+    cs: Output<'static>,
+    params: &mut ParamRegistry,
+) -> Result<(AppConfig, usize), embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
+    let spi_dev = ExclusiveDevice::new(bus, DummyCsPin, SdDelay).unwrap();
+    let sdcard = embedded_sdmmc::sdcard::SdCard::new(spi_dev, cs, SdDelay);
+    let mut volume_mgr: VolumeManager<_, _> = VolumeManager::new(sdcard, SdTime);
+    
+    // Load config first
+    let config = {
+        let mut volume0 = volume_mgr.open_volume(VolumeIdx(0))?;
+        let mut root_dir = volume0.open_root_dir()?;
+        
+        let config_result = root_dir.open_file_in_dir("CONFIG.TXT", FsMode::ReadOnly);
+        let config = match config_result {
+            Ok(mut file) => {
+                let mut buf = [0u8; 256];
+                let n = file.read(&mut buf)?;
+                drop(file); // Explicitly drop before next borrow
+                AppConfig::from_bytes(&buf[..n])
+            }
+            Err(_) => {
+                drop(config_result); // Drop the Result to release root_dir borrow
+                // Create default config file
+                let defaults = AppConfig::default();
+                let mut file = root_dir.open_file_in_dir("CONFIG.TXT", FsMode::ReadWriteCreateOrTruncate)?;
+                let bytes = defaults.to_bytes();
+                file.write(bytes.as_bytes())?;
+                drop(file);
+                defaults
+            }
+        };
+        config
+    };
+    
+    // Load parameters second
+    let param_count = load_params_from_sd(&mut volume_mgr, params)?;
+    
+    Ok((config, param_count))
+}
+
+/// Save parameters to SD card PARAMS.TXT file
+/// This function recreates the SPI1 peripheral temporarily for the save operation
+fn save_params_to_sd_blocking(
+    params: &ParamRegistry,
+) -> Result<(), &'static str> {
+    // Safety: We're temporarily taking the SPI1 peripheral
+    // This only works because we know the SPI1 is not being used elsewhere
+    // The peripheral will be consumed and dropped after this function
+    let p = unsafe { embassy_rp::Peripherals::steal() };
+    
+    // Reconfigure SPI1 pins for SD card access
+    let sd_miso = p.PIN_8;
+    let sd_mosi = p.PIN_11;
+    let sd_sck = p.PIN_10;
+    let sd_cs = Output::new(p.PIN_9, Level::High);
+    
+    let mut sd_spi_cfg = SpiConfig::default();
+    sd_spi_cfg.frequency = 1_000_000;
+    
+    let sd_bus = Spi::new_blocking(
+        p.SPI1,
+        sd_sck,
+        sd_mosi,
+        sd_miso,
+        sd_spi_cfg,
+    );
+    
+    let spi_dev = ExclusiveDevice::new(sd_bus, DummyCsPin, SdDelay).unwrap();
+    let sdcard = embedded_sdmmc::sdcard::SdCard::new(spi_dev, sd_cs, SdDelay);
+    let mut volume_mgr: VolumeManager<_, _> = VolumeManager::new(sdcard, SdTime);
+    let mut volume0 = volume_mgr.open_volume(VolumeIdx(0)).map_err(|_| "Failed to open volume")?;
+    let mut root_dir = volume0.open_root_dir().map_err(|_| "Failed to open root dir")?;
+    
+    let mut buf = [0u8; 2048];
+    let len = params.serialize_to_text(&mut buf).map_err(|_| "Failed to serialize params")?;
+    
+    let mut file = root_dir.open_file_in_dir("PARAMS.TXT", FsMode::ReadWriteCreateOrTruncate)
+        .map_err(|_| "Failed to open PARAMS.TXT")?;
+    file.write(&buf[..len]).map_err(|_| "Failed to write params")?;
+    
+    Ok(())
 }
 
 fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
@@ -343,14 +523,21 @@ async fn main(spawner: Spawner) {
         sd_spi_cfg,
     );
 
-    let config = match load_config_from_sd(sd_bus, sd_cs) {
-        Ok(cfg) => {
+    // Load both config and parameters from SD card
+    let mut param_registry = ParamRegistry::new();
+    let (config, _) = match load_config_and_params_from_sd(sd_bus, sd_cs, &mut param_registry) {
+        Ok((cfg, count)) => {
             info!("Config loaded from SD: {:?}", cfg);
-            cfg
+            if count > 0 {
+                info!("Loaded {} parameters from SD card", count);
+            } else {
+                info!("No PARAMS.TXT found, using parameter defaults");
+            }
+            (cfg, count)
         }
         Err(e) => {
-            warn!("Config load failed, using defaults: {:?}", e);
-            AppConfig::default()
+            warn!("SD card load failed, using defaults: {:?}", e);
+            (AppConfig::default(), 0)
         }
     };
 
@@ -400,6 +587,30 @@ async fn main(spawner: Spawner) {
         uart_cfg,
     ));
 
+    // ----- USB-CDC (primary configuration interface) -----
+    let usb_driver = UsbDriver::new(p.USB, UsbIrqs);
+    let mut usb_config = UsbConfig::new(0xC0DE, 0x4001);
+    usb_config.manufacturer = Some("MARV-FC");
+    usb_config.product = Some("Flight Computer");
+    usb_config.serial_number = Some("FC001");
+    usb_config.max_packet_size_0 = 64;
+    usb_config.max_power = 100;
+
+    let cdc_state = USB_CDC_STATE.init(CdcAcmState::new());
+    let cfg_desc = USB_CONFIG_DESCRIPTOR.init([0u8; 256]);
+    let bos_desc = USB_BOS_DESCRIPTOR.init([0u8; 256]);
+    let msos_desc = USB_MSOS_DESCRIPTOR.init([0u8; 256]);
+    let control_buf = USB_CONTROL_BUF.init([0u8; 64]);
+
+    let mut usb_builder = Builder::new(usb_driver, usb_config, cfg_desc, bos_desc, msos_desc, control_buf);
+    let cdc = CdcAcmClass::new(&mut usb_builder, cdc_state, 64);
+    let max_packet = cdc.max_packet_size() as usize;
+    let usb_dev = usb_builder.build();
+    let mut usb_cdc = UsbCdc {
+        class: cdc,
+        max_packet,
+    };
+
     // ----- I2C bus scans at startup (for debug / bring-up / menus) -----
     {
         info!("I2C0 scan: starting (0x08-0x77)...");
@@ -427,16 +638,39 @@ async fn main(spawner: Spawner) {
         }
     }
 
-    let mav_cfg = MavEndpointConfig { sys_id: 1, comp_id: 1 };
+    // Initialize parameter registry with loaded values
+    let params = PARAMS.init(Mutex::new(param_registry));
+    
+    // Create MAVLink endpoint config from params
+    let params_guard = params.lock().await;
+    let sys_id = params_guard.u32(ParamId::SysId) as u8;
+    let comp_id = params_guard.u32(ParamId::CompId) as u8;
+    // Get LED color from parameters
+    let led_r = params_guard.u32(ParamId::LedColorR).min(255) as u8;
+    let led_g = params_guard.u32(ParamId::LedColorG).min(255) as u8;
+    let led_b = params_guard.u32(ParamId::LedColorB).min(255) as u8;
+    drop(params_guard);
+    let mav_cfg = MavEndpointConfig { sys_id, comp_id };
+    info!("MAVLink endpoint: sys_id={} comp_id={}", mav_cfg.sys_id, mav_cfg.comp_id);
+    info!("LED color: R={} G={} B={}", led_r, led_g, led_b);
+
+    // Start USB device task
+    spawner.spawn(usb_device_task(usb_dev)).unwrap();
+    
+    // Wait for USB connection before starting other tasks
+    info!("USB: Waiting for host connection...");
+    usb_cdc.wait_connection().await;
+    info!("USB: Host connected");
 
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088, imu_interval_ms)).unwrap();
     spawner.spawn(mag_task(i2c_for_bmm, mag_interval_ms)).unwrap();
     spawner.spawn(baro_task(i2c_for_bmp, baro_interval_ms)).unwrap();
     spawner.spawn(gps_task(i2c_for_gps, gps_interval_ms)).unwrap();
-    let led_color = RGB8 { r: config.led_color[0], g: config.led_color[1], b: config.led_color[2] };
+    let led_color = RGB8 { r: led_r, g: led_g, b: led_b };
     spawner.spawn(logger_task(ws2812, led_color)).unwrap();
-    spawner.spawn(uart_tx_task(uart_fc_radio, mav_cfg)).unwrap();
+    spawner.spawn(usb_mavlink_task(usb_cdc, mav_cfg, params)).unwrap();
+    spawner.spawn(uart_telemetry_task(uart_fc_radio, mav_cfg)).unwrap();
 }
 
 // ----- Data sinks to bridge generic tasks into shared state -----
@@ -625,27 +859,245 @@ async fn logger_task(
     }
 }
 
+// USB device task - runs the USB stack
 #[embassy_executor::task]
-async fn uart_tx_task(mut uart: RpUart<'static>, cfg: MavEndpointConfig) {
+async fn usb_device_task(
+    mut device: UsbDevice<'static, UsbDriver<'static, embassy_rp::peripherals::USB>>,
+) {
+    device.run().await;
+}
+
+// USB-CDC MAVLink task with parameter protocol support
+#[embassy_executor::task]
+async fn usb_mavlink_task(
+    mut usb: UsbCdc<'static>,
+    cfg: MavEndpointConfig,
+    params: &'static Mutex<RawMutex, ParamRegistry>,
+) {
+    info!("USB-CDC: Starting bidirectional MAVLink task");
+    
+    // Send initial status text
     let mut seq: u8 = 0;
-    let mut scratch = [0u8; MAVLINK_MAX_FRAME];
+    let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
+    let mut rx_buf = [0u8; MAVLINK_MAX_FRAME];
+    
+    let status = build_statustext("MARV-FC ready");
+    let frame = build_statustext_frame(cfg, seq, status);
+    seq = seq.wrapping_add(1);
+    if let Ok(len) = frame.serialize(&mut tx_buf) {
+        let _ = usb.write(&tx_buf[..len]).await;
+    }
+    
     let source = StateTelemetrySource;
+    let mut last_telemetry = Instant::now();
+    let mut last_heartbeat = Instant::now();
+    
     loop {
+        // Non-blocking check for incoming MAVLink frames via USB
+        let recv_result = embassy_futures::select::select(
+            usb.read_packet(&mut rx_buf),
+            Timer::after_millis(10),
+        ).await;
+        
+        match recv_result {
+            embassy_futures::select::Either::First(Ok(n)) if n > 0 => {
+                // Try to decode as MAVLink frame
+                let frame_result = unsafe { Frame::<V2>::deserialize(&rx_buf[..n]) };
+                if let Ok(frame) = frame_result {
+                    // Process incoming frame
+                    match frame.decode::<Common>() {
+                        Ok(Common::ParamRequestList(req)) => {
+                            if req.target_system != 0 && req.target_system != cfg.sys_id {
+                                continue;
+                            }
+                            if req.target_component != 0 && req.target_component != cfg.comp_id {
+                                continue;
+                            }
+                            
+                            info!("MAVLink: PARAM_REQUEST_LIST - sending {} params", {
+                                let p = params.lock().await;
+                                p.count()
+                            });
+                            
+                            let p = params.lock().await;
+                            for idx in 0..p.count() {
+                                if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
+                                    seq = seq.wrapping_add(1);
+                                    if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                        let _ = usb.write(&tx_buf[..len]).await;
+                                    }
+                                }
+                            }
+                            drop(p);
+                            info!("MAVLink: PARAM_REQUEST_LIST complete");
+                        }
+                        Ok(Common::ParamRequestRead(req)) => {
+                            if req.target_system != 0 && req.target_system != cfg.sys_id {
+                                continue;
+                            }
+                            if req.target_component != 0 && req.target_component != cfg.comp_id {
+                                continue;
+                            }
+                            
+                            let p = params.lock().await;
+                            if let Some(idx) = handle_param_request_read(&p, &req) {
+                                if let Some(def) = p.def_by_index(idx) {
+                                    info!("MAVLink: PARAM_REQUEST_READ #{} ({})", idx, def.name);
+                                }
+                                if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
+                                    seq = seq.wrapping_add(1);
+                                    if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                        let _ = usb.write(&tx_buf[..len]).await;
+                                    }
+                                }
+                            }
+                            drop(p);
+                        }
+                    
+                    Ok(Common::ParamSet(req)) => {
+                        if req.target_system != cfg.sys_id {
+                            continue;
+                        }
+                        if req.target_component != cfg.comp_id {
+                            continue;
+                        }
+                        
+                        let mut p = params.lock().await;
+                        if let Some(idx) = handle_param_set(&mut p, &req) {
+                            if let Some(def) = p.def_by_index(idx) {
+                                if let Some(val) = p.get_by_index(idx) {
+                                    info!("MAVLink: PARAM_SET {} = {}", def.name, val);
+                                }
+                            }
+                            
+                            // Mark parameters as dirty and update timestamp
+                            PARAMS_DIRTY.store(true, Ordering::Relaxed);
+                            PARAMS_LAST_MODIFIED.store(
+                                Instant::now().as_millis() as u32,
+                                Ordering::Relaxed
+                            );
+                            
+                            // ACK by sending back the updated value
+                            if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
+                                seq = seq.wrapping_add(1);
+                                if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                    let _ = usb.write(&tx_buf[..len]).await;
+                                }
+                            }
+                        } else {
+                            warn!("MAVLink: PARAM_SET failed");
+                        }
+                        drop(p);
+                    }
+                    
+                    Ok(Common::Heartbeat(_)) => {
+                        debug!("MAVLink: HEARTBEAT from sys={} comp={}",
+                              frame.system_id(), frame.component_id());
+                    }
+                    
+                    Ok(Common::Statustext(msg)) => {
+                        let end = msg.text.iter().position(|&b| b == 0).unwrap_or(msg.text.len());
+                        if let Ok(text) = core::str::from_utf8(&msg.text[..end]) {
+                            info!("MAVLink: STATUSTEXT: {}", text);
+                        }
+                    }
+                    
+                    Ok(_) => {
+                        debug!("MAVLink: Unhandled message type");
+                    }
+                    
+                    Err(_) => {
+                        debug!("MAVLink: Decode error");
+                    }
+                }
+            }
+        }
+        embassy_futures::select::Either::First(Ok(_)) => {
+            // Received 0 bytes or empty packet - ignore
+        }
+        embassy_futures::select::Either::First(Err(_)) => {
+            // USB read error
+            debug!("USB: Read error");
+        }
+        embassy_futures::select::Either::Second(_) => {
+            // Timeout - no incoming data, send telemetry if needed
+        }
+    }
+        
+        // Send telemetry at configured rate
+        let p = params.lock().await;
+        let telem_rate_hz = p.u32(ParamId::TelemRateHz).max(1).min(1000);
+        drop(p);
+        let telem_interval_ms = 1000 / telem_rate_hz;
+        
+        if last_telemetry.elapsed().as_millis() >= telem_interval_ms as u64 {
+            let sample = source.latest().await;
+            if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
+                seq = seq.wrapping_add(1);
+                if let Ok(len) = frame.serialize(&mut tx_buf) {
+                    let _ = usb.write(&tx_buf[..len]).await;
+                }
+                last_telemetry = Instant::now();
+            }
+        }
+        
+        // Send heartbeat at 1 Hz (required by Mission Planner)
+        if last_heartbeat.elapsed().as_millis() >= 1000 {
+            let frame = build_heartbeat_frame(cfg, seq);
+            seq = seq.wrapping_add(1);
+            if let Ok(len) = frame.serialize(&mut tx_buf) {
+                let _ = usb.write(&tx_buf[..len]).await;
+            }
+            last_heartbeat = Instant::now();
+        }
+        
+        // Debounced parameter save: wait 5 seconds after last modification
+        if PARAMS_DIRTY.load(Ordering::Relaxed) {
+            let last_mod = PARAMS_LAST_MODIFIED.load(Ordering::Relaxed);
+            let now_ms = Instant::now().as_millis() as u32;
+            
+            // If 5 seconds have passed since last modification, save to SD
+            if now_ms.wrapping_sub(last_mod) >= 5000 {
+                info!("Saving parameters to SD card...");
+                
+                // Lock params and save
+                let p = params.lock().await;
+                match save_params_to_sd_blocking(&p) {
+                    Ok(()) => {
+                        info!("Parameters saved successfully");
+                        PARAMS_DIRTY.store(false, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        warn!("Failed to save parameters: {}", e);
+                        // Keep dirty flag set to retry later
+                    }
+                }
+                drop(p);
+            }
+        }
+    }
+}
+
+// Separate task for radio telemetry - UART one-way telemetry to radio module
+#[embassy_executor::task]
+async fn uart_telemetry_task(
+    mut uart: RpUart<'static>,
+    cfg: MavEndpointConfig,
+) {
+    info!("UART: Starting one-way telemetry task for radio");
+    let source = StateTelemetrySource;
+    let mut seq: u8 = 0;
+    let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
+    
+    loop {
+        Timer::after_millis(100).await; // 10 Hz telemetry
+        
         let sample = source.latest().await;
         if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
             seq = seq.wrapping_add(1);
-            match mavlink2::send_frame_over_uart(&mut uart, &frame, &mut scratch).await {
-                Ok(()) => {
-                    debug!("UART telemetry sent seq={}", frame.sequence());
-                }
-                Err(e) => {
-                    warn!("UART telemetry send failed: {:?}", e);
-                }
-            }
-        } else {
-            warn!("UART telemetry encode failed (buffer too small)");
+            // Send to radio via UART - best effort, ignore errors
+            let _ = mavlink2::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
         }
-        Timer::after_millis(100).await;
     }
 }
 

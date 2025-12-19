@@ -5,6 +5,9 @@
 use mavio::Frame;
 use mavio::protocol::V2;
 use mavio::dialects::common::messages;
+use mavio::dialects::common::enums::MavParamType;
+
+use crate::params::{ParamType, ParamValue, ParamRegistry, PARAM_NAME_MAX};
 
 /// MAVLink endpoint identity (system + component IDs).
 #[derive(Clone, Copy)]
@@ -60,6 +63,37 @@ pub fn build_statustext_frame(
         .sequence(seq.into())
         .message(&msg)
         .expect("MAV: build Statustext frame")
+        .build()
+}
+
+// ---------------------------------------------------------------------------
+// HEARTBEAT helpers
+// ---------------------------------------------------------------------------
+
+/// Build a HEARTBEAT message for a flight controller.
+pub fn build_heartbeat() -> messages::Heartbeat {
+    use mavio::dialects::common::enums::{MavAutopilot, MavModeFlag, MavState, MavType};
+
+    messages::Heartbeat {
+        custom_mode: 0,
+        type_: MavType::FixedWing, // Or Quadrotor, depends on your platform
+        autopilot: MavAutopilot::Generic,
+        base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
+        system_status: MavState::Active,
+        mavlink_version: 3, // MAVLink 2.0 uses version 3
+    }
+}
+
+/// Build a MAVLink2 `Frame<V2>` carrying a `Common::Heartbeat`.
+pub fn build_heartbeat_frame(cfg: MavEndpointConfig, seq: u8) -> Frame<V2> {
+    let msg = build_heartbeat();
+    Frame::builder()
+        .version(V2)
+        .system_id(cfg.sys_id.into())
+        .component_id(cfg.comp_id.into())
+        .sequence(seq.into())
+        .message(&msg)
+        .expect("MAV: build Heartbeat frame")
         .build()
 }
 
@@ -209,4 +243,172 @@ pub fn build_telemetry_frame(
             .expect("MAV: build EncapsulatedData frame")
             .build(),
     )
+}
+
+// ---------------------------------------------------------------------------
+// Parameter Protocol (PARAM_REQUEST_LIST, PARAM_REQUEST_READ, PARAM_SET, PARAM_VALUE)
+// ---------------------------------------------------------------------------
+
+/// Map our `ParamType` to MAVLink's `MavParamType`.
+pub fn param_type_to_mav(ty: ParamType) -> MavParamType {
+    match ty {
+        ParamType::Bool => MavParamType::Uint8, // Represent bool as uint8 (0/1)
+        ParamType::I32 => MavParamType::Int32,
+        ParamType::U32 => MavParamType::Uint32,
+        ParamType::F32 => MavParamType::Real32,
+    }
+}
+
+/// Encode a parameter name into MAVLink's fixed-size [u8; 16] array.
+/// Null-terminates and pads with zeros.
+pub fn encode_param_id(name: &str) -> [u8; PARAM_NAME_MAX] {
+    let mut out = [0u8; PARAM_NAME_MAX];
+    let bytes = name.as_bytes();
+    let len = core::cmp::min(bytes.len(), PARAM_NAME_MAX - 1); // Leave room for null terminator
+    out[..len].copy_from_slice(&bytes[..len]);
+    // Remaining bytes already zero (null-terminated + padded)
+    out
+}
+
+/// Decode a MAVLink param_id[16] back into a &str (up to first null or end of array).
+pub fn decode_param_id(param_id: &[u8; PARAM_NAME_MAX]) -> &str {
+    let end = param_id.iter().position(|&b| b == 0).unwrap_or(PARAM_NAME_MAX);
+    core::str::from_utf8(&param_id[..end]).unwrap_or("")
+}
+
+/// Build a PARAM_VALUE message from the registry at a given index.
+pub fn build_param_value_msg(
+    registry: &ParamRegistry,
+    idx: u16,
+) -> Option<messages::ParamValue> {
+    let def = registry.def_by_index(idx)?;
+    let val = registry.get_by_index(idx)?;
+    
+    Some(messages::ParamValue {
+        param_value: val.as_mavlink_f32(),
+        param_count: registry.count(),
+        param_index: idx,
+        param_id: encode_param_id(def.name),
+        param_type: param_type_to_mav(def.ty),
+    })
+}
+
+/// Build a PARAM_VALUE frame for a single parameter.
+pub fn build_param_value_frame(
+    cfg: MavEndpointConfig,
+    seq: u8,
+    registry: &ParamRegistry,
+    idx: u16,
+) -> Option<Frame<V2>> {
+    let msg = build_param_value_msg(registry, idx)?;
+    
+    Some(
+        Frame::builder()
+            .version(V2)
+            .system_id(cfg.sys_id.into())
+            .component_id(cfg.comp_id.into())
+            .sequence(seq.into())
+            .message(&msg)
+            .expect("MAV: build ParamValue frame")
+            .build(),
+    )
+}
+
+/// Parse a PARAM_SET message and attempt to set the parameter in the registry.
+/// Returns the parameter index if successful, or None if not found / type mismatch.
+pub fn handle_param_set(
+    registry: &mut ParamRegistry,
+    msg: &messages::ParamSet,
+) -> Option<u16> {
+    let name = decode_param_id(&msg.param_id);
+    
+    // Find the parameter by name
+    let idx = registry.find_index_by_name(name)?;
+    let def = registry.def_by_index(idx)?;
+    
+    // Convert the f32 value back to the appropriate type
+    // For integer types, we must reinterpret the bits, not convert the value
+    let new_value = match def.ty {
+        ParamType::Bool => {
+            let v = msg.param_value != 0.0;
+            ParamValue::Bool(v)
+        }
+        ParamType::I32 => ParamValue::I32(msg.param_value.to_bits() as i32),
+        ParamType::U32 => ParamValue::U32(msg.param_value.to_bits()),
+        ParamType::F32 => ParamValue::F32(msg.param_value),
+    };
+    
+    // Set the value (this validates type match internally)
+    registry.set_by_index(idx, new_value).ok()?;
+    
+    Some(idx)
+}
+
+/// Handle PARAM_REQUEST_READ - returns the index to send back.
+/// Supports both index-based and name-based lookups.
+pub fn handle_param_request_read(
+    registry: &ParamRegistry,
+    msg: &messages::ParamRequestRead,
+) -> Option<u16> {
+    if msg.param_index >= 0 {
+        // Index-based request
+        let idx = msg.param_index as u16;
+        if idx < registry.count() {
+            Some(idx)
+        } else {
+            None
+        }
+    } else {
+        // Name-based request (param_index == -1)
+        let name = decode_param_id(&msg.param_id);
+        registry.find_index_by_name(name)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Example integration pattern (for reference in device firmware)
+// ---------------------------------------------------------------------------
+
+/// Example: Process an incoming MAVLink frame and handle parameter protocol messages.
+/// 
+/// Usage in your device firmware:
+/// ```ignore
+/// use mavio::dialects::common::Common;
+/// 
+/// match frame.decode::<Common>() {
+///     Ok(Common::ParamRequestList(msg)) => {
+///         // Send all parameters
+///         for idx in 0..params.count() {
+///             if let Some(reply) = build_param_value_frame(cfg, seq, &params, idx) {
+///                 send_frame(reply).await;
+///                 seq = seq.wrapping_add(1);
+///             }
+///         }
+///     }
+///     Ok(Common::ParamRequestRead(msg)) => {
+///         if let Some(idx) = handle_param_request_read(&params, &msg) {
+///             if let Some(reply) = build_param_value_frame(cfg, seq, &params, idx) {
+///                 send_frame(reply).await;
+///                 seq = seq.wrapping_add(1);
+///             }
+///         }
+///     }
+///     Ok(Common::ParamSet(msg)) => {
+///         if let Some(idx) = handle_param_set(&mut params, &msg) {
+///             // Send ACK by echoing the updated value back
+///             if let Some(reply) = build_param_value_frame(cfg, seq, &params, idx) {
+///                 send_frame(reply).await;
+///                 seq = seq.wrapping_add(1);
+///             }
+///         }
+///     }
+///     Ok(Common::Statustext(_)) => { /* handle statustext */ }
+///     Ok(Common::Heartbeat(_)) => { /* handle heartbeat */ }
+///     // ... other messages
+///     _ => {}
+/// }
+/// ```
+#[allow(dead_code)]
+pub fn parameter_protocol_example() {
+    // This function exists only for documentation purposes
 }

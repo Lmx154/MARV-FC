@@ -51,6 +51,8 @@ mod defmt_test_logger {
     static __DEFMT_MARKER_ERROR_END: u8 = 0;
 }
 
+pub mod params;
+pub mod commands;
 pub mod drivers;
 pub mod filters;
 pub mod estimators;
