@@ -17,20 +17,18 @@ use embassy_usb::{
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 use core::cmp::min;
+use heapless::Vec;
 
 use common::drivers::sx1262::*;
-use common::lora::lora_config::LoRaConfig;
-use common::lora::link::LoRaLink;
+use common::coms::transport::lora::lora_config::LoRaConfig;
+use common::coms::transport::lora::link::LoRaLink;
 use common::utils::delay::DelayMs;
-use common::tasks::radio::{run_mavlink_text_demo, Role};
 use common::tasks::coms::MavEndpointConfig;
 use common::coms::usb_cdc::AsyncUsbCdc;
 use common::coms::usb_cdc;
-use common::coms::uart_coms::MAVLINK_MAX_FRAME;
-use common::tasks::radio::RawFrameSink;
+use common::coms::transport::uart::MAVLINK_MAX_FRAME;
 use embassy_sync::channel::Channel;
 use embassy_sync::channel::Receiver;
-use embassy_sync::channel::Sender;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 
 embassy_rp::bind_interrupts!(struct UsbIrqs {
@@ -42,25 +40,13 @@ static USB_CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_MSOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
 static USB_CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-type FrameMsg = heapless::Vec<u8, MAVLINK_MAX_FRAME>;
+type FrameMsg = Vec<u8, MAVLINK_MAX_FRAME>;
 static FRAME_CH: Channel<RawMutex, FrameMsg, 4> = Channel::new();
 
-struct RawUsbFrameSink {
-    tx: Sender<'static, RawMutex, FrameMsg, 4>,
-}
+// Host -> LoRa (commands/params/etc)
+static USB_TO_LORA_CH: Channel<RawMutex, FrameMsg, 8> = Channel::new();
 
-impl RawFrameSink for RawUsbFrameSink {
-    fn handle(&mut self, frame_bytes: &[u8]) {
-        let mut msg: FrameMsg = FrameMsg::new();
-        if msg.extend_from_slice(frame_bytes).is_err() {
-            warn!("Frame too large for USB channel");
-            return;
-        }
-        if let Err(_e) = self.tx.try_send(msg) {
-            warn!("USB frame channel full");
-        }
-    }
-}
+// (LoRa -> USB forwarding uses FRAME_CH directly.)
 
 struct UsbCdc<'d> {
     class: CdcAcmClass<'d, UsbDriver<'d, embassy_rp::peripherals::USB>>,
@@ -110,7 +96,11 @@ async fn usb_bridge_task(
 ) {
     let mut rx_buf = [0u8; 64];
     let mut scratch = [0u8; 128];
-    let mut frame_rx = frame_rx;
+    let frame_rx = frame_rx;
+
+    // Accumulate raw bytes from USB until we can extract whole MAVLink2 frames.
+    // Capacity is intentionally bounded; on overflow we drop oldest bytes.
+    let mut stream_buf: Vec<u8, 512> = Vec::new();
 
     let _ = usb_cdc::write_line(&mut serial, "USB CDC bridge ready", &mut scratch).await;
 
@@ -124,10 +114,16 @@ async fn usb_bridge_task(
             }
             embassy_futures::select::Either::Second(res) => match res {
                 Ok(n) if n > 0 => {
-                    let msg = core::str::from_utf8(&rx_buf[..n]).unwrap_or("<non-utf8>");
-                    let reply = if msg.trim() == "ping" { "pong" } else { "ack" };
+                    // Binary bridge: do NOT emit ASCII replies (they corrupt MAVLink streams).
+                    if push_bytes_with_drop_oldest(&mut stream_buf, &rx_buf[..n]).is_err() {
+                        warn!("USB RX: stream buffer overflow");
+                    }
 
-                    let _ = usb_cdc::write_line(&mut serial, reply, &mut scratch).await;
+                    while let Some(frame) = try_pop_mavlink2_frame(&mut stream_buf) {
+                        if USB_TO_LORA_CH.sender().try_send(frame).is_err() {
+                            warn!("USB->LoRa queue full (dropping)");
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -137,6 +133,67 @@ async fn usb_bridge_task(
             },
         }
     }
+}
+
+fn push_bytes_with_drop_oldest<const N: usize>(
+    buf: &mut Vec<u8, N>,
+    data: &[u8],
+) -> core::result::Result<(), ()> {
+    for &b in data {
+        if buf.push(b).is_err() {
+            // Drop oldest byte to make room.
+            if !buf.is_empty() {
+                buf.remove(0);
+            }
+            if buf.push(b).is_err() {
+                return Err(());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn try_pop_mavlink2_frame<const N: usize>(buf: &mut Vec<u8, N>) -> Option<FrameMsg> {
+    const MAGIC: u8 = 0xFD;
+    const HEADER_LEN: usize = 10;
+    const CRC_LEN: usize = 2;
+    const SIG_LEN: usize = 13;
+
+    // Find magic.
+    let start = buf.iter().position(|&b| b == MAGIC)?;
+    if start != 0 {
+        // Discard leading noise bytes.
+        for _ in 0..start {
+            buf.remove(0);
+        }
+    }
+
+    if buf.len() < HEADER_LEN {
+        return None;
+    }
+
+    let payload_len = buf[1] as usize;
+    let incompat_flags = buf[2];
+    let sig_len = if (incompat_flags & 0x01) != 0 { SIG_LEN } else { 0 };
+    let frame_len = HEADER_LEN + payload_len + CRC_LEN + sig_len;
+
+    if buf.len() < frame_len {
+        return None;
+    }
+
+    let mut out: FrameMsg = FrameMsg::new();
+    if out.extend_from_slice(&buf[..frame_len]).is_err() {
+        // Frame too big for MAVLINK_MAX_FRAME (should not happen).
+        for _ in 0..frame_len {
+            buf.remove(0);
+        }
+        return None;
+    }
+
+    for _ in 0..frame_len {
+        buf.remove(0);
+    }
+    Some(out)
 }
 
 // Simple delay
@@ -188,10 +245,6 @@ async fn main(spawner: Spawner) {
     info!("GS USB: host connected");
     let frame_rx = FRAME_CH.receiver();
     spawner.spawn(usb_bridge_task(usb_serial, frame_rx)).unwrap();
-
-    let mut raw_sink = RawUsbFrameSink {
-        tx: FRAME_CH.sender(),
-    };
 
     // SPI
     let mut spi_cfg = SpiConfig::default();
@@ -257,18 +310,65 @@ async fn main(spawner: Spawner) {
     link.retries        = cfg.link_retries;
 
     info!(
-        "GS: LoRaLink MAVLink text demo (ack_timeout_ms={} retries={})",
+        "GS: LoRaLink MAVLink bridge (ack_timeout_ms={} retries={})",
         link.ack_timeout_ms,
         link.retries
     );
 
-    run_mavlink_text_demo(
-        &mut link,
-        &mut delay,
-        Role::Ground,
-        mav_cfg,
-        None,
-        Some(&mut raw_sink),
-    )
-    .await;
+    if let Err(e) = link.start_rx(&mut delay).await {
+        warn!("GS: start_rx failed: {:?}", e);
+    }
+
+    gs_lora_loop(&mut link, &mut delay, mav_cfg).await;
+}
+
+async fn gs_lora_loop<'a, RADIO>(
+    link: &mut LoRaLink<'a, RADIO>,
+    delay: &mut EmbassyDelay,
+    _cfg: MavEndpointConfig,
+) where
+    RADIO: common::coms::transport::lora::link::Sx1262Interface,
+{
+    let mut rx_buf = [0u8; 255];
+    let mut tx_gate = common::coms::scheduler::TxGate::new();
+
+    let usb_to_lora_rx = USB_TO_LORA_CH.receiver();
+
+    loop {
+        // Poll LoRa RX frequently, but allow outbound USB traffic to preempt.
+        let tx_fut = usb_to_lora_rx.receive();
+        let tick_fut = Timer::after(Duration::from_millis(2));
+
+        match embassy_futures::select::select(tx_fut, tick_fut).await {
+            embassy_futures::select::Either::First(msg) => {
+                let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                let min_gap_ms = link.recommended_tx_gap_ms();
+                let wait_ms = tx_gate.time_until_allowed_ms(now_ms, min_gap_ms);
+                if wait_ms != 0 {
+                    delay.delay_ms(wait_ms).await;
+                }
+
+                if let Err(e) = link.send(delay, &msg).await {
+                    warn!("GS LoRa TX error: {:?}", e);
+                } else {
+                    let now_ms = embassy_time::Instant::now().as_millis() as u32;
+                    tx_gate.on_tx(now_ms);
+                }
+            }
+            embassy_futures::select::Either::Second(()) => {
+                match link.try_recv(delay, &mut rx_buf).await {
+                    Ok(Some(len)) => {
+                        let mut out: FrameMsg = FrameMsg::new();
+                        if out.extend_from_slice(&rx_buf[..len]).is_ok() {
+                            if FRAME_CH.sender().try_send(out).is_err() {
+                                warn!("LoRa->USB queue full (dropping)");
+                            }
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => warn!("GS LoRa RX error: {:?}", e),
+                }
+            }
+        }
+    }
 }

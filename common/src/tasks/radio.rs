@@ -115,8 +115,7 @@ async fn run_radio_talker<'a, RADIO>(
         }
 
         // Small pause (not a torture-test anymore). Allow link pacing to adapt.
-        let pause_ms = link.recommended_tx_gap_ms();
-        delay.delay_ms(pause_ms).await;
+        delay.delay_ms(link.recommended_tx_gap_ms()).await;
     }
 }
 

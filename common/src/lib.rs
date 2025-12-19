@@ -65,3 +65,4 @@ pub mod mavlink2;
 pub mod coms;
 pub mod log_config;
 pub mod protocol;
+pub mod telemetry;

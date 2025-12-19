@@ -172,9 +172,12 @@ pub enum ParamId {
     LedColorR,
     LedColorG,
     LedColorB,
+
+    // --- Radio / LoRa link ---
+    RadioTelemRateHz,
 }
 
-pub const PARAM_COUNT: usize = (ParamId::LedColorB as usize) + 1;
+pub const PARAM_COUNT: usize = (ParamId::RadioTelemRateHz as usize) + 1;
 
 /// The single parameter definition table (authoritative).
 pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
@@ -226,6 +229,9 @@ pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
     ParamDef::new("LED_COLOR_R",   ParamType::U32,  ParamValue::U32(0)),
     ParamDef::new("LED_COLOR_G",   ParamType::U32,  ParamValue::U32(50)),
     ParamDef::new("LED_COLOR_B",   ParamType::U32,  ParamValue::U32(0)),
+
+    // --- Radio / LoRa link ---
+    ParamDef::new("RAD_TEL_HZ",    ParamType::U32,  ParamValue::U32(10)),
 ];
 
 /// Runtime storage for parameter values.

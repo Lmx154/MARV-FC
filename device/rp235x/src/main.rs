@@ -34,6 +34,7 @@ use common::mavlink2::msg::{
 use common::mavlink2::handlers::{dispatch_mavlink_message, MessageHandlerResult};
 use common::mavlink2::prelude::{Frame, V2};
 use common::params::{ParamRegistry, ParamId};
+use common::coms::scheduler::LinkScheduler;
 use common::utils::i2cscanner::scan_i2c_bus_default;
 
 use embassy_executor::Spawner;
@@ -53,6 +54,7 @@ use embassy_time::{Timer, Instant};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
+use embassy_futures::select;
 use static_cell::StaticCell;
 use smart_leds::RGB8;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -503,7 +505,7 @@ async fn main(spawner: Spawner) {
     let led_color = RGB8 { r: led_r, g: led_g, b: led_b };
     spawner.spawn(logger_task(ws2812, led_color)).unwrap();
     spawner.spawn(usb_mavlink_task(usb_cdc, mav_cfg, params)).unwrap();
-    spawner.spawn(uart_telemetry_task(uart_fc_radio, mav_cfg)).unwrap();
+    spawner.spawn(uart_mavlink_task(uart_fc_radio, mav_cfg, params)).unwrap();
 }
 
 // ----- Data sinks to bridge generic tasks into shared state -----
@@ -709,21 +711,31 @@ async fn usb_mavlink_task(
 ) {
     info!("USB-CDC: Starting bidirectional MAVLink task");
     
-    // Send initial status text
+    // Send initial status text (if enabled)
     let mut seq: u8 = 0;
     let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
     let mut rx_buf = [0u8; MAVLINK_MAX_FRAME];
-    
-    let status = build_statustext("MARV-FC ready");
-    let frame = build_statustext_frame(cfg, seq, status);
-    seq = seq.wrapping_add(1);
-    if let Ok(len) = frame.serialize(&mut tx_buf) {
-        let _ = usb.write(&tx_buf[..len]).await;
+
+    {
+        let p = params.lock().await;
+        let statustext_en = p.bool(ParamId::StatustextEn);
+        drop(p);
+
+        if statustext_en {
+            let status = build_statustext("MARV-FC ready");
+            let frame = build_statustext_frame(cfg, seq, status);
+            seq = seq.wrapping_add(1);
+            if let Ok(len) = frame.serialize(&mut tx_buf) {
+                let _ = usb.write(&tx_buf[..len]).await;
+            }
+        }
     }
     
     let source = StateTelemetrySource;
-    let mut last_telemetry = Instant::now();
-    let mut last_heartbeat = Instant::now();
+
+    // Per-link scheduler: USB typically fast (default TEL_RATE_HZ=50), heartbeat at 1Hz.
+    let now_ms = Instant::now().as_millis() as u32;
+    let mut sched = LinkScheduler::new(now_ms, 1, 50);
     
     loop {
         // Non-blocking check for incoming MAVLink frames via USB
@@ -788,32 +800,37 @@ async fn usb_mavlink_task(
                 // Timeout - no incoming data
             }
         }
-        
-        // Send telemetry at configured rate
-        let p = params.lock().await;
-        let telem_rate_hz = p.u32(ParamId::TelemRateHz).max(1).min(1000);
-        drop(p);
-        let telem_interval_ms = 1000 / telem_rate_hz;
-        
-        if last_telemetry.elapsed().as_millis() >= telem_interval_ms as u64 {
+
+        // Scheduler-driven periodic sends (telemetry + heartbeat).
+        let now_ms = Instant::now().as_millis() as u32;
+        {
+            let p = params.lock().await;
+            let telem_rate_hz = p.u32(ParamId::TelemRateHz).min(1000);
+            let hb_en = p.bool(ParamId::HeartbeatEn);
+            drop(p);
+
+            sched.set_telemetry_hz(now_ms, telem_rate_hz);
+            sched.set_heartbeat_enabled(hb_en);
+        }
+
+        let decision = sched.poll(now_ms);
+
+        if decision.send_telemetry {
             let sample = source.latest().await;
             if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
                 seq = seq.wrapping_add(1);
                 if let Ok(len) = frame.serialize(&mut tx_buf) {
                     let _ = usb.write(&tx_buf[..len]).await;
                 }
-                last_telemetry = Instant::now();
             }
         }
-        
-        // Send heartbeat at 1 Hz (required by Mission Planner)
-        if last_heartbeat.elapsed().as_millis() >= 1000 {
+
+        if decision.send_heartbeat {
             let frame = build_heartbeat_frame(cfg, seq);
             seq = seq.wrapping_add(1);
             if let Ok(len) = frame.serialize(&mut tx_buf) {
                 let _ = usb.write(&tx_buf[..len]).await;
             }
-            last_heartbeat = Instant::now();
         }
         
         // Debounced parameter save: wait 5 seconds after last modification
@@ -843,25 +860,94 @@ async fn usb_mavlink_task(
     }
 }
 
-// Separate task for radio telemetry - UART one-way telemetry to radio module
+// UART MAVLink task (FC <-> radio):
+// - RX/command handling has priority.
+// - Telemetry is sent only when link is idle.
 #[embassy_executor::task]
-async fn uart_telemetry_task(
+async fn uart_mavlink_task(
     mut uart: RpUart<'static>,
     cfg: MavEndpointConfig,
+    params: &'static Mutex<RawMutex, ParamRegistry>,
 ) {
-    info!("UART: Starting one-way telemetry task for radio");
+    info!("UART: Starting bidirectional MAVLink task for radio");
     let source = StateTelemetrySource;
     let mut seq: u8 = 0;
     let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
-    
+    let mut rx_scratch = [0u8; MAVLINK_MAX_FRAME];
+
+    let now_ms = Instant::now().as_millis() as u32;
+    let mut sched = LinkScheduler::new(now_ms, 1, 10);
+    // Radio UART link: keep heartbeat off by default (USB provides GCS heartbeat).
+    sched.set_heartbeat_enabled(false);
+
     loop {
-        Timer::after_millis(100).await; // 10 Hz telemetry
-        
-        let sample = source.latest().await;
-        if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
-            seq = seq.wrapping_add(1);
-            // Send to radio via UART - best effort, ignore errors
-            let _ = mavlink2::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+        // Give RX priority. If we see no RX traffic for a short window,
+        // we'll use the idle time to send telemetry.
+        let rx_fut = mavlink2::recv_frame_over_uart(&mut uart, &mut rx_scratch);
+        let idle_fut = Timer::after_millis(30);
+
+        match select::select(rx_fut, idle_fut).await {
+            select::Either::First(res) => {
+                let frame = match res {
+                    Ok(f) => f,
+                    Err(e) => {
+                        warn!("UART: RX error: {:?}", e);
+                        continue;
+                    }
+                };
+
+                // Handle command immediately.
+                let mut p = params.lock().await;
+                let (result, params_changed) = dispatch_mavlink_message(frame, cfg, seq, &mut p);
+
+                match result {
+                    MessageHandlerResult::SendFrame(reply) => {
+                        seq = seq.wrapping_add(1);
+                        let _ = mavlink2::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
+                    }
+                    MessageHandlerResult::SendAllParams => {
+                        info!("UART: PARAM_REQUEST_LIST - sending {} params", p.count());
+                        for idx in 0..p.count() {
+                            if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
+                                seq = seq.wrapping_add(1);
+                                let _ = mavlink2::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
+                            }
+                        }
+                        info!("UART: PARAM_REQUEST_LIST complete");
+                    }
+                    MessageHandlerResult::NoResponse | MessageHandlerResult::Unhandled => {}
+                }
+                drop(p);
+
+                if params_changed {
+                    PARAMS_DIRTY.store(true, Ordering::Relaxed);
+                    PARAMS_LAST_MODIFIED.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
+                }
+
+                // On active command traffic, skip telemetry this iteration.
+                continue;
+            }
+            select::Either::Second(_) => {
+                // Idle window elapsed: ok to send telemetry if due.
+            }
+        }
+
+        let now_ms = Instant::now().as_millis() as u32;
+        {
+            let p = params.lock().await;
+            let radio_telem_hz = p.u32(ParamId::RadioTelemRateHz).min(1000);
+            drop(p);
+            sched.set_telemetry_hz(now_ms, radio_telem_hz);
+        }
+
+        let decision = sched.poll(now_ms);
+        if decision.send_telemetry {
+            let sample = source.latest().await;
+            if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
+                seq = seq.wrapping_add(1);
+                // Send to radio via UART - best effort, ignore errors.
+                let _ = mavlink2::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+            }
         }
     }
 }
