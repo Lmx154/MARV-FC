@@ -25,6 +25,7 @@ pub mod prelude {
 
 pub mod msg;
 pub mod param_handler;
+pub mod handlers;
 /// Error type for the MAVLink2-over-LoRa layer.
 #[derive(Debug, defmt::Format)]
 pub enum MavError {
