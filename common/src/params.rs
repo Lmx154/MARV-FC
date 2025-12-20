@@ -10,7 +10,7 @@
 //!
 //! ## MAVLink Integration
 //!
-//! The `mavlink2::msg` module provides handlers for the parameter protocol:
+//! The `protocol::mavlink::encode` module provides helpers for the parameter protocol:
 //! - `build_param_value_frame()` - Build PARAM_VALUE responses
 //! - `handle_param_request_read()` - Process PARAM_REQUEST_READ
 //! - `handle_param_set()` - Process PARAM_SET and update registry

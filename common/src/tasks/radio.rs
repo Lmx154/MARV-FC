@@ -5,7 +5,7 @@
 use defmt::{info, warn};
 use crate::coms::transport::lora::link::{LinkError, LoRaLink, Sx1262Interface};
 use crate::utils::delay::DelayMs;
-use crate::mavlink2::{self, MavError};
+use crate::protocol::mavlink::{self, MavError};
 use crate::tasks::coms::{
     build_statustext, build_statustext_frame, statustext_to_str, MavEndpointConfig,
     TelemetrySample,
@@ -98,7 +98,7 @@ async fn run_radio_talker<'a, RADIO>(
         let status_msg = build_statustext(msg_str);
         let frame = build_statustext_frame(cfg, seq, status_msg);
 
-        match mavlink2::send_frame_over_lora(link, delay, &frame).await {
+        match mavlink::send_frame_over_lora(link, delay, &frame).await {
             Ok(()) => {
                 info!(
                     "RadioTask: sent STATUSTEXT seq={} text=\"{}\"",
@@ -140,7 +140,7 @@ async fn run_gs_listener<'a, RADIO>(
     let mut rx_buf = [0u8; 255];
 
     loop {
-        let frame: Frame<V2> = match mavlink2::recv_frame_over_lora(link, delay, &mut rx_buf).await
+        let frame: Frame<V2> = match mavlink::recv_frame_over_lora(link, delay, &mut rx_buf).await
         {
             Ok(f) => f,
             Err(MavError::Link(LinkError::Timeout)) => {

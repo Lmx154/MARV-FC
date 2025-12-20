@@ -60,8 +60,6 @@ pub mod tasks;
 pub mod types;
 pub mod utils;
 pub mod config;
-pub mod lora;
-pub mod mavlink2;
 pub mod coms;
 pub mod log_config;
 pub mod protocol;

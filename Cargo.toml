@@ -16,5 +16,15 @@ default-members = [
 ]
 
 [profile.release]
-# Enable generation of debug symbols even on release builds
-debug = true
+# Optimize for size (embedded firmware)
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+
+# Keep full DWARF debuginfo so probe-rs can show file/line locations in RTT logs.
+# Note: DWARF/debug sections are not flashed, so this does not increase programmed size.
+debug = 2
+
+# Helps ensure consistent, smaller builds.
+incremental = false

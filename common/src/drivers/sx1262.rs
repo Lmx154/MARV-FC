@@ -6,7 +6,7 @@ use defmt::{info, warn, debug};
 use embedded_hal::digital::{InputPin, OutputPin};
 use embedded_hal_async::spi::SpiBus;
 
-use crate::lora::lora_config::LoRaConfig;
+use crate::coms::transport::lora::lora_config::LoRaConfig;
 use crate::log_config;
 use crate::utils::delay::DelayMs;
 

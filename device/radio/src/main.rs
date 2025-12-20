@@ -20,10 +20,10 @@ use common::drivers::sx1262::*;
 use common::coms::scheduler::TxGate;
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::link::{LoRaLink, Sx1262Interface};
-use common::mavlink2;
+use common::protocol::mavlink;
 use common::utils::delay::DelayMs;
 use common::tasks::coms::{TelemetrySample, statustext_to_str};
-use common::mavlink2::prelude::dialects::common::Common;
+use common::protocol::mavlink::prelude::dialects::common::Common;
 use common::coms::transport::uart::{AsyncUartBus, MAVLINK_MAX_FRAME};
 
 type FrameMsg = Vec<u8, MAVLINK_MAX_FRAME>;
@@ -165,7 +165,7 @@ async fn uart_task(mut uart: RpUart<'static>) {
     let lora_to_uart_rx = LORA_TO_UART.receiver();
 
     loop {
-        let rx_fut = mavlink2::recv_frame_over_uart(&mut uart, &mut scratch);
+        let rx_fut = mavlink::recv_frame_over_uart(&mut uart, &mut scratch);
         let tx_fut = lora_to_uart_rx.receive();
 
         match embassy_futures::select::select(rx_fut, tx_fut).await {

@@ -24,15 +24,15 @@ use common::tasks::sensors::{
     DataSink,
 };
 use common::coms::uart_coms::{AsyncUartBus, MAVLINK_MAX_FRAME};
-use common::mavlink2::{self};
-use common::mavlink2::msg::{
+use common::protocol::mavlink as mavlink;
+use common::protocol::mavlink::encode::{
     build_param_value_frame,
     build_statustext,
     build_statustext_frame,
     build_heartbeat_frame,
 };
-use common::mavlink2::handlers::{dispatch_mavlink_message, MessageHandlerResult};
-use common::mavlink2::prelude::{Frame, V2};
+use common::protocol::mavlink::handlers::{dispatch_mavlink_message, MessageHandlerResult};
+use common::protocol::mavlink::prelude::{Frame, V2};
 use common::params::{ParamRegistry, ParamId};
 use common::coms::scheduler::LinkScheduler;
 use common::utils::i2cscanner::scan_i2c_bus_default;
@@ -456,7 +456,7 @@ async fn main(spawner: Spawner) {
         } else {
             info!("I2C0 scan: found {} device(s)", scan0.count);
             for addr in scan0.iter() {
-                info!("  I2C0 device @ 0x{:02X}", addr);
+                debug!("  I2C0 device @ 0x{:02X}", addr);
             }
         }
 
@@ -468,7 +468,7 @@ async fn main(spawner: Spawner) {
         } else {
             info!("I2C1 scan: found {} device(s)", scan1.count);
             for addr in scan1.iter() {
-                info!("  I2C1 device @ 0x{:02X}", addr);
+                debug!("  I2C1 device @ 0x{:02X}", addr);
             }
         }
     }
@@ -883,7 +883,7 @@ async fn uart_mavlink_task(
     loop {
         // Give RX priority. If we see no RX traffic for a short window,
         // we'll use the idle time to send telemetry.
-        let rx_fut = mavlink2::recv_frame_over_uart(&mut uart, &mut rx_scratch);
+        let rx_fut = mavlink::recv_frame_over_uart(&mut uart, &mut rx_scratch);
         let idle_fut = Timer::after_millis(30);
 
         match select::select(rx_fut, idle_fut).await {
@@ -903,14 +903,14 @@ async fn uart_mavlink_task(
                 match result {
                     MessageHandlerResult::SendFrame(reply) => {
                         seq = seq.wrapping_add(1);
-                        let _ = mavlink2::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
+                        let _ = mavlink::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
                     }
                     MessageHandlerResult::SendAllParams => {
                         info!("UART: PARAM_REQUEST_LIST - sending {} params", p.count());
                         for idx in 0..p.count() {
                             if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
                                 seq = seq.wrapping_add(1);
-                                let _ = mavlink2::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
+                                let _ = mavlink::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
                             }
                         }
                         info!("UART: PARAM_REQUEST_LIST complete");
@@ -946,7 +946,7 @@ async fn uart_mavlink_task(
             if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
                 seq = seq.wrapping_add(1);
                 // Send to radio via UART - best effort, ignore errors.
-                let _ = mavlink2::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+                let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
             }
         }
     }
