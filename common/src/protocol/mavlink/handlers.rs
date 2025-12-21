@@ -5,6 +5,7 @@
 use mavio::Frame;
 use mavio::protocol::V2;
 use mavio::dialects::common::Common;
+use mavio::dialects::ardupilotmega::Ardupilotmega;
 
 use crate::params::ParamRegistry;
 
@@ -22,6 +23,83 @@ pub enum MessageHandlerResult {
     NoResponse,
     /// Message not recognized.
     Unhandled,
+
+    /// Perform a device operation (I2C/SPI/etc) and reply.
+    DeviceOpRead(DeviceOpReadRequest),
+
+    /// Perform a device write operation (I2C/SPI/etc) and reply.
+    DeviceOpWrite(DeviceOpWriteRequest),
+}
+
+#[derive(Clone, Copy)]
+pub struct DeviceOpReadRequest {
+    pub request_id: u32,
+    pub bustype: u8,
+    pub bus: u8,
+    pub busname: [u8; 40],
+    pub address: u8,
+    pub regstart: u8,
+    pub count: u8,
+}
+
+#[derive(Clone, Copy)]
+pub struct DeviceOpWriteRequest {
+    pub request_id: u32,
+    pub bustype: u8,
+    pub bus: u8,
+    pub busname: [u8; 40],
+    pub address: u8,
+    pub regstart: u8,
+    pub count: u8,
+    pub data: [u8; 128],
+}
+
+fn handle_device_op(
+    msg: &Ardupilotmega,
+    cfg: MavEndpointConfig,
+) -> MessageHandlerResult {
+    match msg {
+        Ardupilotmega::DeviceOpRead(req) => {
+            // Validate target system/component (0 allows broadcast)
+            if req.target_system != 0 && req.target_system != cfg.sys_id {
+                return MessageHandlerResult::NoResponse;
+            }
+            if req.target_component != 0 && req.target_component != cfg.comp_id {
+                return MessageHandlerResult::NoResponse;
+            }
+
+            MessageHandlerResult::DeviceOpRead(DeviceOpReadRequest {
+                request_id: req.request_id,
+                bustype: req.bustype as u8,
+                bus: req.bus,
+                busname: req.busname,
+                address: req.address,
+                regstart: req.regstart,
+                count: req.count,
+            })
+        }
+        Ardupilotmega::DeviceOpWrite(req) => {
+            // Validate target system/component (0 allows broadcast)
+            if req.target_system != 0 && req.target_system != cfg.sys_id {
+                return MessageHandlerResult::NoResponse;
+            }
+            if req.target_component != 0 && req.target_component != cfg.comp_id {
+                return MessageHandlerResult::NoResponse;
+            }
+
+            MessageHandlerResult::DeviceOpWrite(DeviceOpWriteRequest {
+                request_id: req.request_id,
+                bustype: req.bustype as u8,
+                bus: req.bus,
+                busname: req.busname,
+                address: req.address,
+                regstart: req.regstart,
+                count: req.count,
+                data: req.data,
+            })
+        }
+        _ => MessageHandlerResult::Unhandled,
+    }
 }
 
 /// Handle incoming PARAM_REQUEST_LIST message.
@@ -114,6 +192,14 @@ pub fn dispatch_mavlink_message(
     seq: u8,
     params: &mut ParamRegistry,
 ) -> (MessageHandlerResult, bool) {
+    // First, try ArduPilotMega dialect for extra GCS tooling support (e.g. Mission Planner DEVICE_OP_*).
+    if let Ok(msg) = frame.decode::<Ardupilotmega>() {
+        let res = handle_device_op(&msg, cfg);
+        if !matches!(res, MessageHandlerResult::Unhandled) {
+            return (res, false);
+        }
+    }
+
     match frame.decode::<Common>() {
         Ok(msg @ Common::ParamRequestList(_)) => (handle_param_request_list(&msg, cfg, params), false),
         Ok(msg @ Common::ParamRequestRead(_)) => (handle_param_request_read_msg(&msg, cfg, seq, params), false),

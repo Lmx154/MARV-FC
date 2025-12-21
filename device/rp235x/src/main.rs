@@ -14,7 +14,7 @@ use common::drivers::bmp390::{Bmp390, BMP3X_ADDR_SDO_HIGH};
 use common::drivers::bmm350::RawMag;
 use common::drivers::neom9n::{NeoM9n, UBLOX_I2C_ADDR, GpsData};
 use common::tasks::coms::{
-    build_telemetry_frame, MavEndpointConfig, TelemetrySample, TelemetrySource,
+    MavEndpointConfig, TelemetrySample, TelemetrySource,
 };
 use common::tasks::sensors::{
     run_bmi088_task,
@@ -30,8 +30,12 @@ use common::protocol::mavlink::encode::{
     build_statustext,
     build_statustext_frame,
     build_heartbeat_frame,
+    build_device_op_read_reply_frame,
+    build_device_op_write_reply_frame,
+    build_frame_from_msg,
 };
 use common::protocol::mavlink::handlers::{dispatch_mavlink_message, MessageHandlerResult};
+use common::protocol::mavlink::telemetry::{MavlinkTelemetryBundle, MavlinkTelemetrySource};
 use common::protocol::mavlink::prelude::{Frame, V2};
 use common::params::{ParamRegistry, ParamId};
 use common::coms::scheduler::LinkScheduler;
@@ -50,6 +54,7 @@ use embassy_usb::{
     driver::EndpointError,
     Builder, Config as UsbConfig, UsbDevice,
 };
+use embedded_hal_async::i2c::I2c as _;
 use embassy_time::{Timer, Instant};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
@@ -201,6 +206,19 @@ impl TelemetrySource for StateTelemetrySource {
             gps_alt_mm: alt,
             gps_sat: sats,
             gps_fix: fix,
+        }
+    }
+}
+
+impl MavlinkTelemetrySource for StateTelemetrySource {
+    async fn bundle(&self, now_ms: u32, now_us: u64) -> MavlinkTelemetryBundle {
+        let sample = self.latest().await;
+        MavlinkTelemetryBundle {
+            sys_status: common::protocol::mavlink::encode::build_sys_status(now_ms, &sample),
+            raw_imu: common::protocol::mavlink::encode::build_raw_imu(now_us, &sample),
+            scaled_pressure: common::protocol::mavlink::encode::build_scaled_pressure(now_ms, &sample),
+            gps_raw_int: common::protocol::mavlink::encode::build_gps_raw_int(now_us, &sample),
+            attitude: common::protocol::mavlink::encode::build_attitude(now_ms),
         }
     }
 }
@@ -504,7 +522,9 @@ async fn main(spawner: Spawner) {
     spawner.spawn(gps_task(i2c_for_gps, gps_interval_ms)).unwrap();
     let led_color = RGB8 { r: led_r, g: led_g, b: led_b };
     spawner.spawn(logger_task(ws2812, led_color)).unwrap();
-    spawner.spawn(usb_mavlink_task(usb_cdc, mav_cfg, params)).unwrap();
+    spawner
+        .spawn(usb_mavlink_task(usb_cdc, mav_cfg, params, i2c0_mutex, i2c1_mutex))
+        .unwrap();
     spawner.spawn(uart_mavlink_task(uart_fc_radio, mav_cfg, params)).unwrap();
 }
 
@@ -708,6 +728,8 @@ async fn usb_mavlink_task(
     mut usb: UsbCdc<'static>,
     cfg: MavEndpointConfig,
     params: &'static Mutex<RawMutex, ParamRegistry>,
+    i2c0: &'static Mutex<RawMutex, I2c0Type>,
+    i2c1: &'static Mutex<RawMutex, I2c1Type>,
 ) {
     info!("USB-CDC: Starting bidirectional MAVLink task");
     
@@ -776,6 +798,119 @@ async fn usb_mavlink_task(
                         MessageHandlerResult::NoResponse | MessageHandlerResult::Unhandled => {
                             // Nothing to send
                         }
+                        MessageHandlerResult::DeviceOpRead(req) => {
+                            // Mission Planner uses DEVICE_OP_READ for I2C/SPI tooling, including the built-in I2C scan UI.
+                            // Implement I2C-only for now.
+                            const OP_OK: u8 = 0;
+                            const OP_BAD_BUS: u8 = 1;
+                            const OP_BAD_DEV: u8 = 2;
+                            const OP_BAD_RESPONSE: u8 = 4;
+                            const BUS_I2C: u8 = 0;
+
+                            let mut data = [0u8; 128];
+                            let mut data_len: usize = 0;
+
+                            let result_code = if req.bustype != BUS_I2C {
+                                OP_BAD_BUS
+                            } else {
+                                let addr = req.address;
+                                if req.count == 0 {
+                                    // Probe: use a 1-byte dummy write (matches our i2cscanner behavior).
+                                    let probe: [u8; 1] = [0x00];
+                                    let res = match req.bus {
+                                        0 => {
+                                            let mut bus = SharedI2c0 { bus: i2c0 };
+                                            bus.write(addr, &probe).await
+                                        }
+                                        1 => {
+                                            let mut bus = SharedI2c { bus: i2c1 };
+                                            bus.write(addr, &probe).await
+                                        }
+                                        _ => return,
+                                    };
+
+                                    match res {
+                                        Ok(()) => OP_OK,
+                                        Err(_) => OP_BAD_DEV,
+                                    }
+                                } else {
+                                    let n = core::cmp::min(req.count as usize, data.len());
+                                    let reg = [req.regstart];
+                                    let res = match req.bus {
+                                        0 => {
+                                            let mut bus = SharedI2c0 { bus: i2c0 };
+                                            bus.write_read(addr, &reg, &mut data[..n]).await
+                                        }
+                                        1 => {
+                                            let mut bus = SharedI2c { bus: i2c1 };
+                                            bus.write_read(addr, &reg, &mut data[..n]).await
+                                        }
+                                        _ => return,
+                                    };
+
+                                    match res {
+                                        Ok(()) => {
+                                            data_len = n;
+                                            OP_OK
+                                        }
+                                        Err(_) => OP_BAD_RESPONSE,
+                                    }
+                                }
+                            };
+
+                            let reply = build_device_op_read_reply_frame(
+                                cfg,
+                                seq,
+                                req.request_id,
+                                result_code,
+                                req.regstart,
+                                &data[..data_len],
+                            );
+                            seq = seq.wrapping_add(1);
+                            if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                let _ = usb.write(&tx_buf[..len]).await;
+                            }
+                        }
+                        MessageHandlerResult::DeviceOpWrite(req) => {
+                            // Minimal I2C write support for DEVICE_OP_WRITE (used by some MP tooling).
+                            const OP_OK: u8 = 0;
+                            const OP_BAD_BUS: u8 = 1;
+                            const OP_BAD_RESPONSE: u8 = 4;
+                            const BUS_I2C: u8 = 0;
+
+                            let result_code = if req.bustype != BUS_I2C {
+                                OP_BAD_BUS
+                            } else {
+                                let addr = req.address;
+                                let n = core::cmp::min(req.count as usize, 128);
+                                let mut payload = [0u8; 129];
+                                payload[0] = req.regstart;
+                                payload[1..1 + n].copy_from_slice(&req.data[..n]);
+
+                                let res = match req.bus {
+                                    0 => {
+                                        let mut bus = SharedI2c0 { bus: i2c0 };
+                                        bus.write(addr, &payload[..1 + n]).await
+                                    }
+                                    1 => {
+                                        let mut bus = SharedI2c { bus: i2c1 };
+                                        bus.write(addr, &payload[..1 + n]).await
+                                    }
+                                    _ => return,
+                                };
+
+                                match res {
+                                    Ok(()) => OP_OK,
+                                    Err(_) => OP_BAD_RESPONSE,
+                                }
+                            };
+
+                            let reply = build_device_op_write_reply_frame(cfg, seq, req.request_id, result_code);
+                            seq = seq.wrapping_add(1);
+                            if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                let _ = usb.write(&tx_buf[..len]).await;
+                            }
+                        }
                     }
                     drop(p);
                     
@@ -816,8 +951,18 @@ async fn usb_mavlink_task(
         let decision = sched.poll(now_ms);
 
         if decision.send_telemetry {
-            let sample = source.latest().await;
-            if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
+            let now_us = (now_ms as u64) * 1000;
+            let bundle = source.bundle(now_ms, now_us).await;
+
+            let frames = [
+                build_frame_from_msg(cfg, seq.wrapping_add(0), &bundle.sys_status),
+                build_frame_from_msg(cfg, seq.wrapping_add(1), &bundle.raw_imu),
+                build_frame_from_msg(cfg, seq.wrapping_add(2), &bundle.scaled_pressure),
+                build_frame_from_msg(cfg, seq.wrapping_add(3), &bundle.gps_raw_int),
+                build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
+            ];
+
+            for frame in frames.iter() {
                 seq = seq.wrapping_add(1);
                 if let Ok(len) = frame.serialize(&mut tx_buf) {
                     let _ = usb.write(&tx_buf[..len]).await;
@@ -916,6 +1061,9 @@ async fn uart_mavlink_task(
                         info!("UART: PARAM_REQUEST_LIST complete");
                     }
                     MessageHandlerResult::NoResponse | MessageHandlerResult::Unhandled => {}
+                    MessageHandlerResult::DeviceOpRead(_) | MessageHandlerResult::DeviceOpWrite(_) => {
+                        // Device ops are currently served only over USB (Mission Planner).
+                    }
                 }
                 drop(p);
 
@@ -942,11 +1090,21 @@ async fn uart_mavlink_task(
 
         let decision = sched.poll(now_ms);
         if decision.send_telemetry {
-            let sample = source.latest().await;
-            if let Some(frame) = build_telemetry_frame(cfg, seq, &sample) {
+            let now_us = (now_ms as u64) * 1000;
+            let bundle = source.bundle(now_ms, now_us).await;
+
+            let frames = [
+                build_frame_from_msg(cfg, seq.wrapping_add(0), &bundle.sys_status),
+                build_frame_from_msg(cfg, seq.wrapping_add(1), &bundle.raw_imu),
+                build_frame_from_msg(cfg, seq.wrapping_add(2), &bundle.scaled_pressure),
+                build_frame_from_msg(cfg, seq.wrapping_add(3), &bundle.gps_raw_int),
+                build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
+            ];
+
+            for frame in frames.iter() {
                 seq = seq.wrapping_add(1);
                 // Send to radio via UART - best effort, ignore errors.
-                let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+                let _ = mavlink::send_frame_over_uart(&mut uart, frame, &mut tx_buf).await;
             }
         }
     }

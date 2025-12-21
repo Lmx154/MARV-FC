@@ -6,6 +6,7 @@ use mavio::error::FrameError;
 pub mod encode;
 pub mod handlers;
 pub mod param_handler;
+pub mod telemetry;
 pub mod transport_lora;
 pub mod transport_uart;
 
