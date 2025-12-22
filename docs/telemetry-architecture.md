@@ -21,7 +21,7 @@ The goal is to keep the **data model**, **telemetry producers**, **MAVLink encod
 - `common/src/coms/uart_coms.rs`: async MAVLink framing over a generic async UART bus.
 - `common/src/coms/transport/uart.rs`: canonical location for async UART MAVLink framing.
 - `common/src/coms/usb_cdc.rs`: async write-only USB CDC abstraction.
-- `common/src/coms/transport/lora/link.rs`: reliable LoRa “datagrams” (`LoRaLink`) with ARQ + pacing + MTU.
+- `common/src/coms/transport/lora/link.rs`: LoRa “datagrams” (`LoRaLink`) with MTU + basic stats (no link-level ARQ).
   - (A compatibility shim still exists at `common/src/lora/mod.rs` for older imports.)
 
 ### MAVLink
@@ -386,7 +386,7 @@ Only if/when needed:
 Keep:
 - `ParamRegistry` as the single source of truth.
 - `CommandDef` table as the single source of truth.
-- LoRa ARQ + pacing logic (it’s already the right direction).
+- LoRa deterministic tick MAC + QoS queues (this is the right direction for low jitter).
 
 Change next:
 - Move LoRa under `coms/transport` so layering becomes obvious.

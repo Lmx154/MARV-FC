@@ -2,8 +2,9 @@
 //! Keep all MAVLink framing and payload building in this module for reuse.
 #![allow(async_fn_in_trait)]
 
-use mavio::dialects::common::enums::MavParamType;
-use mavio::dialects::common::enums::{GpsFixType, MavSysStatusSensor};
+use mavio::dialects::common::enums::{
+    GpsFixType, MavAutopilot, MavCmd, MavParamType, MavResult, MavSysStatusSensor, MavType,
+};
 use mavio::dialects::common::messages;
 use mavio::dialects::ardupilotmega as apm;
 use mavio::Frame;
@@ -11,6 +12,7 @@ use mavio::Message;
 use mavio::protocol::V2;
 
 use crate::params::{ParamType, ParamValue, ParamRegistry, PARAM_NAME_MAX};
+use crate::policies::fc_state::FcStateSnapshot;
 
 /// MAVLink endpoint identity (system + component IDs).
 #[derive(Clone, Copy)]
@@ -32,6 +34,53 @@ pub fn build_frame_from_msg<M: Message>(cfg: MavEndpointConfig, seq: u8, msg: &M
         .message(msg)
         .expect("MAV: build frame")
         .build()
+}
+
+// ---------------------------------------------------------------------------
+// RADIO_STATUS helpers (link-quality reporting)
+// ---------------------------------------------------------------------------
+
+fn clamp_i8(v: i16) -> i8 {
+    v.clamp(i8::MIN as i16, i8::MAX as i16) as i8
+}
+
+/// Build a MAVLink2 `RADIO_STATUS` frame.
+///
+/// Notes:
+/// - MAVLink `RADIO_STATUS` does not have a dedicated SNR field.
+/// - We encode SNR (in dB, derived from `snr_x4/4`) into the `noise` field as a pragmatic
+///   way to surface link quality in common GCS tooling.
+/// - The remaining fields (`remrssi`, `remnoise`, `rxerrors`, `fixed`) are intentionally
+///   provided by the caller so firmwares can pack additional link/MAC metrics without
+///   introducing a custom dialect message.
+pub fn build_radio_status_frame(
+    cfg: MavEndpointConfig,
+    seq: u8,
+    last_rssi_dbm: Option<i16>,
+    last_snr_x4: Option<i16>,
+    remrssi: u8,
+    txbuf_pct: u8,
+    remnoise: u8,
+    rxerrors: u16,
+    fixed: u16,
+) -> Frame<V2> {
+    // `mavio` represents MAVLink int8_t fields as `u8` (raw byte storage).
+    // Convert signed values to their two's-complement byte form.
+    let rssi = clamp_i8(last_rssi_dbm.unwrap_or(0)) as u8;
+    let snr_db = clamp_i8(last_snr_x4.unwrap_or(0) / 4) as u8;
+
+    let msg = messages::RadioStatus {
+        rssi,
+        remrssi,
+        txbuf: txbuf_pct,
+        // Encoded SNR (dB) for visibility (see note above).
+        noise: snr_db,
+        remnoise,
+        rxerrors,
+        fixed,
+    };
+
+    build_frame_from_msg(cfg, seq, &msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -84,18 +133,31 @@ pub fn build_statustext_frame(cfg: MavEndpointConfig, seq: u8, msg: messages::St
 // HEARTBEAT helpers
 // ---------------------------------------------------------------------------
 
-/// Build a HEARTBEAT message for a flight controller.
-pub fn build_heartbeat() -> messages::Heartbeat {
-    use mavio::dialects::common::enums::{MavAutopilot, MavModeFlag, MavState, MavType};
+/// Static identification fields for HEARTBEAT.
+#[derive(Clone, Copy, Debug)]
+pub struct HeartbeatConfig {
+    pub vehicle_type: MavType,
+    pub autopilot: MavAutopilot,
+}
 
+impl Default for HeartbeatConfig {
+    fn default() -> Self {
+        Self {
+            vehicle_type: MavType::Quadrotor,
+            // Mission Planner UI compatibility is better when we identify as ArduPilot.
+            autopilot: MavAutopilot::Ardupilotmega,
+        }
+    }
+}
+
+/// Build a HEARTBEAT message from the current FC state.
+pub fn build_heartbeat(state: &FcStateSnapshot, hb_cfg: HeartbeatConfig) -> messages::Heartbeat {
     messages::Heartbeat {
-        custom_mode: 0,
-        // Mission Planner expects ArduPilot-like behavior for many built-in panels.
-        // We can still keep our own flight stack, but advertising APM improves UI compatibility.
-        type_: MavType::Quadrotor,
-        autopilot: MavAutopilot::Ardupilotmega,
-        base_mode: MavModeFlag::CUSTOM_MODE_ENABLED,
-        system_status: MavState::Active,
+        custom_mode: state.custom_mode,
+        type_: hb_cfg.vehicle_type,
+        autopilot: hb_cfg.autopilot,
+        base_mode: state.base_mode,
+        system_status: state.system_status,
         mavlink_version: 3,
     }
 }
@@ -289,8 +351,13 @@ pub fn build_attitude_frame(cfg: MavEndpointConfig, seq: u8, now_ms: u32) -> Fra
 }
 
 /// Build a MAVLink2 `Frame<V2>` carrying a `Common::Heartbeat`.
-pub fn build_heartbeat_frame(cfg: MavEndpointConfig, seq: u8) -> Frame<V2> {
-    let msg = build_heartbeat();
+pub fn build_heartbeat_frame(
+    cfg: MavEndpointConfig,
+    seq: u8,
+    state: &FcStateSnapshot,
+    hb_cfg: HeartbeatConfig,
+) -> Frame<V2> {
+    let msg = build_heartbeat(state, hb_cfg);
     Frame::builder()
         .version(V2)
         .system_id(cfg.sys_id.into())
@@ -298,6 +365,37 @@ pub fn build_heartbeat_frame(cfg: MavEndpointConfig, seq: u8) -> Frame<V2> {
         .sequence(seq.into())
         .message(&msg)
         .expect("MAV: build Heartbeat frame")
+        .build()
+}
+
+// ---------------------------------------------------------------------------
+// COMMAND_ACK helpers
+// ---------------------------------------------------------------------------
+
+pub fn build_command_ack_frame(
+    cfg: MavEndpointConfig,
+    seq: u8,
+    command: MavCmd,
+    result: MavResult,
+    target_system: u8,
+    target_component: u8,
+) -> Frame<V2> {
+    let msg = messages::CommandAck {
+        command,
+        result,
+        progress: 0,
+        result_param2: 0,
+        target_system,
+        target_component,
+    };
+
+    Frame::builder()
+        .version(V2)
+        .system_id(cfg.sys_id.into())
+        .component_id(cfg.comp_id.into())
+        .sequence(seq.into())
+        .message(&msg)
+        .expect("MAV: build CommandAck frame")
         .build()
 }
 
@@ -474,32 +572,19 @@ pub trait TelemetrySource {
     async fn latest(&self) -> TelemetrySample;
 }
 
-/// Build an EncapsulatedData MAVLink frame carrying the compact telemetry payload.
+/// Build a "FAST telemetry" MAVLink frame.
+///
+/// Previously this used `ENCAPSULATED_DATA`, but that cannot fit inside the
+/// wireless inner MTU (236 bytes) once the MAC header is present.
+///
+/// For now we use a standard `RAW_IMU` message as a compact carrier.
 pub fn build_telemetry_frame(
     cfg: MavEndpointConfig,
     seq: u8,
+    now_us: u64,
     sample: &TelemetrySample,
 ) -> Option<Frame<V2>> {
-    let mut payload = [0u8; 253];
-    let Some(_len) = sample.encode(&mut payload) else {
-        return None;
-    };
-
-    let msg = messages::EncapsulatedData {
-        seqnr: seq as u16,
-        data: payload,
-    };
-
-    Some(
-        Frame::builder()
-            .version(V2)
-            .system_id(cfg.sys_id.into())
-            .component_id(cfg.comp_id.into())
-            .sequence(seq.into())
-            .message(&msg)
-            .expect("MAV: build EncapsulatedData frame")
-            .build(),
-    )
+    Some(build_raw_imu_frame(cfg, seq, now_us, sample))
 }
 
 // ---------------------------------------------------------------------------

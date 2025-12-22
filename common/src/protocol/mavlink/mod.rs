@@ -5,12 +5,18 @@ use mavio::error::FrameError;
 
 pub mod encode;
 pub mod handlers;
+pub mod link_authority;
+pub mod link_mac_config;
+pub mod link_metrics;
+pub mod rf_reconfig;
 pub mod param_handler;
 pub mod telemetry;
 pub mod transport_lora;
 pub mod transport_uart;
 
-pub use transport_lora::{recv_frame_over_lora, send_frame_over_lora};
+pub use transport_lora::{
+    recv_frame_over_lora, recv_frame_over_lora_mac, send_frame_over_lora, send_frame_over_lora_mac,
+};
 pub use transport_uart::{recv_frame_over_uart, send_frame_over_uart};
 
 /// Public re-exports so higher layers can use mavio types directly.
@@ -20,7 +26,8 @@ pub mod prelude {
     pub use mavio::Frame;
 
     pub use crate::protocol::mavlink::{
-        recv_frame_over_lora, recv_frame_over_uart, send_frame_over_lora, send_frame_over_uart,
+        recv_frame_over_lora, recv_frame_over_lora_mac, recv_frame_over_uart, send_frame_over_lora,
+        send_frame_over_lora_mac, send_frame_over_uart,
         MavError,
     };
 

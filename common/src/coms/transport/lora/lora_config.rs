@@ -26,10 +26,6 @@ pub struct LoRaConfig {
     pub crc_on: bool,
     pub invert_iq: bool,
     pub sync_word: u16,
-
-    // LoRa Link Layer (not used yet, but kept for later)
-    pub link_ack_timeout_ms: u32,
-    pub link_retries: usize,
 }
 
 impl LoRaConfig {
@@ -61,9 +57,6 @@ impl LoRaConfig {
             // Public LoRa sync word 0x3444 (exact legacy setting)
             // You can later change to MAVLink private (0x1424) on BOTH ends.
             sync_word: 0x3444,
-
-            link_ack_timeout_ms: 200,
-            link_retries: 4,
         }
     }
 

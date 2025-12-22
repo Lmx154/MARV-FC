@@ -4,6 +4,7 @@
 
 use defmt::{info, warn};
 use crate::drivers::sx1262::{Sx1262, RawRx, Result as RadioResult};
+use crate::coms::transport::lora::lora_config::LoRaConfig;
 use crate::log_config;
 use crate::utils::delay::DelayMs;
 
@@ -22,7 +23,7 @@ pub enum LinkError {
 pub type Result<T> = core::result::Result<T, LinkError>;
 
 // -------------------------------------------------------------------------
-// Light-weight link observability + pacing
+// Light-weight link observability
 // -------------------------------------------------------------------------
 
 /// Most recent RSSI/SNR figures observed on RX (data or ACK).
@@ -30,94 +31,32 @@ pub type Result<T> = core::result::Result<T, LinkError>;
 pub struct LinkStats {
     pub last_rssi_dbm: Option<i16>,
     pub last_snr_x4: Option<i16>,
+    pub rx_packets: u32,
+    pub tx_packets: u32,
 }
 
 impl LinkStats {
     fn observe_rx(&mut self, raw: &RawRx) {
         self.last_rssi_dbm = Some(raw.rssi);
         self.last_snr_x4 = Some(raw.snr_x4);
-    }
-}
-
-/// Simple gap controller to slow down TX when link quality is poor and speed
-/// back up when it looks healthy.
-#[derive(Clone, Copy, Debug)]
-pub struct TxPacer {
-    pub min_gap_ms: u32,
-    pub max_gap_ms: u32,
-    pub step_ms: u32,
-    pub snr_good_x4: i16,
-    pub snr_bad_x4: i16,
-    current_gap_ms: u32,
-}
-
-impl TxPacer {
-    pub const fn new(
-        min_gap_ms: u32,
-        max_gap_ms: u32,
-        step_ms: u32,
-        snr_good_x4: i16,
-        snr_bad_x4: i16,
-    ) -> Self {
-        Self {
-            min_gap_ms,
-            max_gap_ms,
-            step_ms,
-            snr_good_x4,
-            snr_bad_x4,
-            current_gap_ms: min_gap_ms,
-        }
-    }
-
-    pub fn on_ack(&mut self, stats: &LinkStats) {
-        if let Some(snr_x4) = stats.last_snr_x4 {
-            if snr_x4 >= self.snr_good_x4 {
-                self.current_gap_ms =
-                    (self.current_gap_ms.saturating_sub(self.step_ms)).max(self.min_gap_ms);
-                return;
-            }
-            if snr_x4 <= self.snr_bad_x4 {
-                self.current_gap_ms =
-                    (self.current_gap_ms + self.step_ms).min(self.max_gap_ms);
-                return;
-            }
-        }
-
-        // No SNR yet: gently ease toward min to avoid stalling.
-        self.current_gap_ms =
-            (self.current_gap_ms.saturating_sub(self.step_ms)).max(self.min_gap_ms);
-    }
-
-    pub fn on_timeout(&mut self) {
-        self.current_gap_ms = (self.current_gap_ms + self.step_ms).min(self.max_gap_ms);
-    }
-
-    pub fn recommended_gap_ms(&self) -> u32 {
-        self.current_gap_ms
-    }
-}
-
-impl Default for TxPacer {
-    fn default() -> Self {
-        // snr_x4 is SNR * 4. Good ~10 dB, bad ~0 dB by default.
-        Self::new(500, 1500, 200, 40, 0)
+        self.rx_packets = self.rx_packets.wrapping_add(1);
     }
 }
 
 /// LoRaLink header format
 ///
 /// Byte 0: seq
-/// Byte 1: ack
-/// Byte 2: flags
-/// Byte 3: len
+/// Byte 1: flags
+/// Byte 2: len
+/// Byte 3: reserved (0)
 ///
 /// Then payload bytes.
 #[derive(Clone, Copy)]
 pub struct LinkHeader {
     pub seq: u8,
-    pub ack: u8,
     pub flags: u8,
     pub len: u8,
+    pub reserved: u8,
 }
 
 impl LinkHeader {
@@ -125,9 +64,9 @@ impl LinkHeader {
 
     pub fn encode(&self, out: &mut [u8]) {
         out[0] = self.seq;
-        out[1] = self.ack;
-        out[2] = self.flags;
-        out[3] = self.len;
+        out[1] = self.flags;
+        out[2] = self.len;
+        out[3] = self.reserved;
     }
 
     pub fn decode(buf: &[u8]) -> Option<Self> {
@@ -136,39 +75,31 @@ impl LinkHeader {
         }
         Some(Self {
             seq: buf[0],
-            ack: buf[1],
-            flags: buf[2],
-            len: buf[3],
+            flags: buf[1],
+            len: buf[2],
+            reserved: buf[3],
         })
     }
 }
 
-// Flags
-pub const FLAG_ACK: u8 = 0x01;
+// Flags (reserved for future use). Kept for wire compatibility.
+pub const FLAG_NO_ACK: u8 = 0x02;
 
 // -----------------------------------------------------------------------------
 // LoRaLink Implementation
 // -----------------------------------------------------------------------------
 
-/// LoRaLink Layer — Reliable, async datagrams.
+/// LoRaLink Layer — async datagrams (no link-level ARQ).
 ///
-/// Relies on SX1262 raw driver underneath.
+/// This is intentionally best-effort: reliability (if needed) is handled above the link.
+/// Relies on the SX1262 raw driver underneath.
 pub struct LoRaLink<'a, RADIO> {
     radio: &'a mut RADIO,
     next_seq: u8,
     expected_seq: u8,
 
-    /// How long to wait for ACK after TX
-    pub ack_timeout_ms: u32,
-
-    /// How many times to retry if ACK not received
-    pub retries: usize,
-
     /// Last-observed RSSI/SNR from the radio.
     stats: LinkStats,
-
-    /// Simple TX pacing helper (tune in LoRaConfig if desired).
-    pub pacer: TxPacer,
 }
 
 impl<'a, RADIO> LoRaLink<'a, RADIO>
@@ -183,11 +114,6 @@ where
         Self::MTU
     }
 
-    /// Suggested inter-TX delay based on recent link quality observations.
-    pub fn recommended_tx_gap_ms(&self) -> u32 {
-        self.pacer.recommended_gap_ms()
-    }
-
     /// Last observed RSSI/SNR values.
     pub fn stats(&self) -> LinkStats {
         self.stats
@@ -198,10 +124,7 @@ where
             radio,
             next_seq: 1,
             expected_seq: 1,
-            ack_timeout_ms: 200,
-            retries: 4,
             stats: LinkStats::default(),
-            pacer: TxPacer::default(),
         }
     }
 
@@ -212,17 +135,34 @@ where
             .map_err(|_| LinkError::Radio)
     }
 
+    /// Apply a new radio configuration at runtime.
+    ///
+    /// Intended for staged RF reconfiguration.
+    pub async fn apply_radio_config(
+        &mut self,
+        delay: &mut impl DelayMs,
+        cfg: LoRaConfig,
+    ) -> Result<()> {
+        self.radio
+            .apply_lora_config(delay, cfg)
+            .await
+            .map_err(|_| LinkError::Radio)
+    }
+
     // -------------------------------------------------------------------------
     // Public API
     // -------------------------------------------------------------------------
 
-    /// Send a reliable frame (payload only).
+    /// Send an unreliable frame (payload only).
     ///
-    /// Stop-and-wait ARQ:
+    /// Best-effort:
     ///  - TX data frame
-    ///  - Wait for ACK
-    ///  - Retry up to self.retries
-    pub async fn send(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> Result<()> {
+    ///  - No ACK, no retries
+    pub async fn send_unreliable(
+        &mut self,
+        delay: &mut impl DelayMs,
+        payload: &[u8],
+    ) -> Result<()> {
         if payload.len() > Self::MTU {
             return Err(LinkError::TooLarge);
         }
@@ -230,75 +170,34 @@ where
         let seq = self.next_seq;
         self.next_seq = seq.wrapping_add(1);
 
-        // Construct packet
         let mut frame = [0u8; 255];
-
         let header = LinkHeader {
             seq,
-            ack: 0,
-            flags: 0,
+            flags: FLAG_NO_ACK,
             len: payload.len() as u8,
+            reserved: 0,
         };
-
         header.encode(&mut frame);
         frame[LinkHeader::SIZE..LinkHeader::SIZE + payload.len()].copy_from_slice(payload);
 
-        // TX + WAIT FOR ACK
-        for attempt in 0..=self.retries {
-            if log_config::LOG_LINK_TRAFFIC {
-                info!("LoRaLink TX seq={} attempt={}", seq, attempt + 1);
-            }
-
-            self.radio
-                .tx_raw(delay, &frame[..header.len as usize + LinkHeader::SIZE])
-                .await
-                .map_err(|_| LinkError::Radio)?;
-
-            // After TX, immediately switch to RX
-            self.radio
-                .start_rx_continuous(delay)
-                .await
-                .map_err(|_| LinkError::Radio)?;
-
-            // Wait for ACK
-            let mut elapsed = 0;
-            let mut buf = [0u8; 255];
-
-            while elapsed < self.ack_timeout_ms {
-                if let Some(rx) = self
-                    .radio
-                    .poll_raw(delay, &mut buf)
-                    .await
-                    .map_err(|_| LinkError::Radio)?
-                {
-                    self.stats.observe_rx(&rx);
-
-                    if rx.len >= LinkHeader::SIZE as u8 {
-                        if let Some(h) = LinkHeader::decode(&buf[..4]) {
-                            if (h.flags & FLAG_ACK) != 0 && h.ack == seq {
-                                if log_config::LOG_LINK_ACKS {
-                                    info!("LoRaLink ACK received for seq={}", seq);
-                                }
-                                self.pacer.on_ack(&self.stats);
-                                return Ok(());
-                            }
-                        }
-                    }
-                }
-
-                delay.delay_ms(10).await;
-                elapsed += 10;
-            }
-
-            warn!(
-                "LoRaLink: ACK timeout seq={} (attempt {})",
-                seq,
-                attempt + 1
-            );
+        if log_config::LOG_LINK_TRAFFIC {
+            info!("LoRaLink TX (unreliable) seq={} len={}", seq, payload.len());
         }
 
-        self.pacer.on_timeout();
-        Err(LinkError::Timeout)
+        self.radio
+            .tx_raw(delay, &frame[..header.len as usize + LinkHeader::SIZE])
+            .await
+            .map_err(|_| LinkError::Radio)?;
+
+        self.stats.tx_packets = self.stats.tx_packets.wrapping_add(1);
+
+        // Return to RX after TX.
+        self.radio
+            .start_rx_continuous(delay)
+            .await
+            .map_err(|_| LinkError::Radio)?;
+
+        Ok(())
     }
 
     /// Blocking receive: waits until a valid frame and returns its payload len.
@@ -351,12 +250,6 @@ where
             return Ok(None);
         };
 
-        // ACK frames are control traffic for send() and should not surface
-        // to higher layers (e.g. MAVLink decoding). Drop them here.
-        if (h.flags & FLAG_ACK) != 0 {
-            return Ok(None);
-        }
-
         let payload_len = h.len as usize;
         if payload_len > buf.len() || payload_len + LinkHeader::SIZE > raw.len as usize {
             return Err(LinkError::CorruptFrame);
@@ -379,34 +272,6 @@ where
         buf[..payload_len]
             .copy_from_slice(&rx_buf[LinkHeader::SIZE..LinkHeader::SIZE + payload_len]);
 
-        // Send ACK
-        let mut ack_frame = [0u8; LinkHeader::SIZE];
-        let ack_header = LinkHeader {
-            seq: 0,
-            ack: h.seq,
-            flags: FLAG_ACK,
-            len: 0,
-        };
-        ack_header.encode(&mut ack_frame);
-
-        if log_config::LOG_LINK_ACKS {
-            info!("LoRaLink: Sending ACK for seq={}", h.seq);
-        }
-        self.radio
-            .tx_raw(delay, &ack_frame)
-            .await
-            .map_err(|_| LinkError::Radio)?;
-
-        // IMPORTANT: After transmitting an ACK, return to RX mode so we
-        // continue to receive future frames.
-        self.radio
-            .start_rx_continuous(delay)
-            .await
-            .map_err(|_| LinkError::Radio)?;
-        if log_config::LOG_LINK_ACKS {
-            info!("LoRaLink: ACK TX done -> entered RX");
-        }
-
         Ok(Some(payload_len))
     }
 }
@@ -419,6 +284,12 @@ pub trait Sx1262Interface {
     async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()>;
 
     async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()>;
+
+    async fn apply_lora_config(
+        &mut self,
+        delay: &mut impl DelayMs,
+        cfg: LoRaConfig,
+    ) -> RadioResult<()>;
 
     async fn poll_raw(
         &mut self,
@@ -445,6 +316,14 @@ where
         self.start_rx_continuous(delay).await
     }
 
+    async fn apply_lora_config(
+        &mut self,
+        delay: &mut impl DelayMs,
+        cfg: LoRaConfig,
+    ) -> RadioResult<()> {
+        self.apply_lora_config(delay, cfg).await
+    }
+
     async fn poll_raw(
         &mut self,
         delay: &mut impl DelayMs,
@@ -466,18 +345,15 @@ pub struct FaultyRadio<R> {
     inner: R,
     drop_every_nth_rx: u8,
     rx_count: u8,
-    drop_every_nth_ack: u8,
-    ack_count: u8,
 }
 
 impl<R> FaultyRadio<R> {
     pub fn new(inner: R, drop_rx_every: u8, drop_ack_every: u8) -> Self {
+        let _ = drop_ack_every;
         Self {
             inner,
             drop_every_nth_rx: drop_rx_every,
             rx_count: 0,
-            drop_every_nth_ack: drop_ack_every,
-            ack_count: 0,
         }
     }
 
@@ -491,23 +367,19 @@ where
     R: Sx1262Interface,
 {
     async fn tx_raw(&mut self, delay: &mut impl DelayMs, payload: &[u8]) -> RadioResult<()> {
-        // Heuristic: small (len == 4) frames are ACKs
-        let is_ack = payload.len() == LinkHeader::SIZE;
-
-        if is_ack && self.drop_every_nth_ack != 0 {
-            self.ack_count = self.ack_count.wrapping_add(1);
-            if self.ack_count % self.drop_every_nth_ack == 0 {
-                warn!("FaultyRadio: DROPPING ACK TX");
-                // Pretend success, but do nothing (ACK lost on air).
-                return Ok(());
-            }
-        }
-
         self.inner.tx_raw(delay, payload).await
     }
 
     async fn start_rx_continuous(&mut self, delay: &mut impl DelayMs) -> RadioResult<()> {
         self.inner.start_rx_continuous(delay).await
+    }
+
+    async fn apply_lora_config(
+        &mut self,
+        delay: &mut impl DelayMs,
+        cfg: LoRaConfig,
+    ) -> RadioResult<()> {
+        self.inner.apply_lora_config(delay, cfg).await
     }
 
     async fn poll_raw(

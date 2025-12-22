@@ -30,14 +30,22 @@ use common::protocol::mavlink::encode::{
     build_statustext,
     build_statustext_frame,
     build_heartbeat_frame,
+    build_telemetry_frame,
+    HeartbeatConfig,
     build_device_op_read_reply_frame,
     build_device_op_write_reply_frame,
     build_frame_from_msg,
 };
+use common::protocol::mavlink::link_authority::{
+    build_link_authority_frame, LAS_STATE_ARMED, LAS_STATE_DISARMED,
+};
 use common::protocol::mavlink::handlers::{dispatch_mavlink_message, MessageHandlerResult};
+use common::protocol::mavlink::link_mac_config::build_link_mac_config_command_frame;
+use common::coms::transport::lora::mac::LinkMacConfig;
 use common::protocol::mavlink::telemetry::{MavlinkTelemetryBundle, MavlinkTelemetrySource};
 use common::protocol::mavlink::prelude::{Frame, V2};
 use common::params::{ParamRegistry, ParamId};
+use common::policies::fc_state::{FcState, FcStatePolicy};
 use common::coms::scheduler::LinkScheduler;
 use common::utils::i2cscanner::scan_i2c_bus_default;
 
@@ -167,6 +175,7 @@ static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
 
 // Parameter registry - shared between UART RX and TX tasks
 static PARAMS: StaticCell<Mutex<RawMutex, ParamRegistry>> = StaticCell::new();
+static FC_STATE: StaticCell<Mutex<RawMutex, FcState>> = StaticCell::new();
 
 fn clamp_i16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
@@ -178,6 +187,17 @@ fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
     }
     let ms = 1000 / hz as u32;
     ms.clamp(min_ms, max_ms).max(1)
+}
+
+fn fc_policy_from_params(params: &ParamRegistry) -> FcStatePolicy {
+    FcStatePolicy {
+        usb_forces_config: params.bool(ParamId::FcModeUsbForcesConfig),
+        allow_arm_in_config: params.bool(ParamId::FcArmAllowedInConfig),
+    }
+}
+
+fn fc_heartbeat_hz(params: &ParamRegistry) -> u32 {
+    params.u32(ParamId::FcStateHeartbeatHz).max(1)
 }
 
 
@@ -459,7 +479,7 @@ async fn main(spawner: Spawner) {
     let cdc = CdcAcmClass::new(&mut usb_builder, cdc_state, 64);
     let max_packet = cdc.max_packet_size() as usize;
     let usb_dev = usb_builder.build();
-    let mut usb_cdc = UsbCdc {
+    let usb_cdc = UsbCdc {
         class: cdc,
         max_packet,
     };
@@ -493,6 +513,7 @@ async fn main(spawner: Spawner) {
 
     // Initialize parameter registry with loaded values
     let params = PARAMS.init(Mutex::new(param_registry));
+    let fc_state = FC_STATE.init(Mutex::new(FcState::new()));
     
     // Create MAVLink endpoint config from params
     let params_guard = params.lock().await;
@@ -509,11 +530,6 @@ async fn main(spawner: Spawner) {
 
     // Start USB device task
     spawner.spawn(usb_device_task(usb_dev)).unwrap();
-    
-    // Wait for USB connection before starting other tasks
-    info!("USB: Waiting for host connection...");
-    usb_cdc.wait_connection().await;
-    info!("USB: Host connected");
 
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088, imu_interval_ms)).unwrap();
@@ -523,9 +539,18 @@ async fn main(spawner: Spawner) {
     let led_color = RGB8 { r: led_r, g: led_g, b: led_b };
     spawner.spawn(logger_task(ws2812, led_color)).unwrap();
     spawner
-        .spawn(usb_mavlink_task(usb_cdc, mav_cfg, params, i2c0_mutex, i2c1_mutex))
+        .spawn(usb_mavlink_task(
+            usb_cdc,
+            mav_cfg,
+            params,
+            fc_state,
+            i2c0_mutex,
+            i2c1_mutex,
+        ))
         .unwrap();
-    spawner.spawn(uart_mavlink_task(uart_fc_radio, mav_cfg, params)).unwrap();
+    spawner
+        .spawn(uart_mavlink_task(uart_fc_radio, mav_cfg, params, fc_state))
+        .unwrap();
 }
 
 // ----- Data sinks to bridge generic tasks into shared state -----
@@ -728,279 +753,386 @@ async fn usb_mavlink_task(
     mut usb: UsbCdc<'static>,
     cfg: MavEndpointConfig,
     params: &'static Mutex<RawMutex, ParamRegistry>,
+    fc_state: &'static Mutex<RawMutex, FcState>,
     i2c0: &'static Mutex<RawMutex, I2c0Type>,
     i2c1: &'static Mutex<RawMutex, I2c1Type>,
 ) {
     info!("USB-CDC: Starting bidirectional MAVLink task");
-    
-    // Send initial status text (if enabled)
+    let source = StateTelemetrySource;
+    let hb_cfg = HeartbeatConfig::default();
+
     let mut seq: u8 = 0;
     let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
     let mut rx_buf = [0u8; MAVLINK_MAX_FRAME];
 
-    {
-        let p = params.lock().await;
-        let statustext_en = p.bool(ParamId::StatustextEn);
-        drop(p);
-
-        if statustext_en {
-            let status = build_statustext("MARV-FC ready");
-            let frame = build_statustext_frame(cfg, seq, status);
-            seq = seq.wrapping_add(1);
-            if let Ok(len) = frame.serialize(&mut tx_buf) {
-                let _ = usb.write(&tx_buf[..len]).await;
-            }
-        }
-    }
-    
-    let source = StateTelemetrySource;
-
     // Per-link scheduler: USB typically fast (default TEL_RATE_HZ=50), heartbeat at 1Hz.
     let now_ms = Instant::now().as_millis() as u32;
     let mut sched = LinkScheduler::new(now_ms, 1, 50);
-    
+
     loop {
-        // Non-blocking check for incoming MAVLink frames via USB
-        let recv_result = embassy_futures::select::select(
-            usb.read_packet(&mut rx_buf),
-            Timer::after_millis(10),
-        ).await;
-        
-        match recv_result {
-            embassy_futures::select::Either::First(Ok(n)) if n > 0 => {
-                // Try to decode as MAVLink frame
-                let frame_result = unsafe { Frame::<V2>::deserialize(&rx_buf[..n]) };
-                if let Ok(frame) = frame_result {
-                    // Lock params once and dispatch to handler
-                    let mut p = params.lock().await;
-                    let (result, params_changed) = dispatch_mavlink_message(frame, cfg, seq, &mut p);
-                    
-                    // Handle result
-                    match result {
-                        MessageHandlerResult::SendFrame(reply) => {
-                            seq = seq.wrapping_add(1);
-                            if let Ok(len) = reply.serialize(&mut tx_buf) {
-                                let _ = usb.write(&tx_buf[..len]).await;
+        info!("USB: Waiting for host connection...");
+        usb.wait_connection().await;
+        info!("USB: Host connected");
+
+        // Apply USB-connected policy and emit state + ready text if enabled.
+        {
+            let p = params.lock().await;
+            let statustext_en = p.bool(ParamId::StatustextEn);
+            let policy = fc_policy_from_params(&p);
+            let mut link_failed = false;
+
+            {
+                let mut state = fc_state.lock().await;
+                if let Some(snapshot) = state.set_usb_connected(true, policy) {
+                    if statustext_en {
+                        let status = build_statustext(snapshot.status_text());
+                        let frame = build_statustext_frame(cfg, seq, status);
+                        seq = seq.wrapping_add(1);
+                        if let Ok(len) = frame.serialize(&mut tx_buf) {
+                            if let Err(e) = usb.write(&tx_buf[..len]).await {
+                                if matches!(e, EndpointError::Disabled) {
+                                    link_failed = true;
+                                }
                             }
                         }
-                        MessageHandlerResult::SendAllParams => {
-                            info!("MAVLink: PARAM_REQUEST_LIST - sending {} params", p.count());
-                            for idx in 0..p.count() {
-                                if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
-                                    seq = seq.wrapping_add(1);
-                                    if let Ok(len) = reply.serialize(&mut tx_buf) {
-                                        let _ = usb.write(&tx_buf[..len]).await;
+                    }
+                }
+            }
+
+            if statustext_en {
+                let status = build_statustext("MARV-FC ready");
+                let frame = build_statustext_frame(cfg, seq, status);
+                seq = seq.wrapping_add(1);
+                if let Ok(len) = frame.serialize(&mut tx_buf) {
+                    if let Err(e) = usb.write(&tx_buf[..len]).await {
+                        if matches!(e, EndpointError::Disabled) {
+                            link_failed = true;
+                        }
+                    }
+                }
+            }
+
+            drop(p);
+
+            if link_failed {
+                let mut state = fc_state.lock().await;
+                let _ = state.set_usb_connected(false, policy);
+                continue;
+            }
+        }
+
+        loop {
+            let recv_result = embassy_futures::select::select(
+                usb.read_packet(&mut rx_buf),
+                Timer::after_millis(10),
+            )
+            .await;
+
+            let mut link_alive = true;
+
+            match recv_result {
+                embassy_futures::select::Either::First(Ok(n)) if n > 0 => {
+                    if let Ok(frame) = unsafe { Frame::<V2>::deserialize(&rx_buf[..n]) } {
+                        let mut p = params.lock().await;
+                        let policy = fc_policy_from_params(&p);
+                        let statustext_en = p.bool(ParamId::StatustextEn);
+                        let mut state = fc_state.lock().await;
+                        let (result, params_changed) = dispatch_mavlink_message(
+                            frame,
+                            cfg,
+                            seq,
+                            &mut p,
+                            &mut state,
+                            policy,
+                            statustext_en,
+                        );
+                        drop(state);
+
+                        match result {
+                            MessageHandlerResult::SendFrame(reply) => {
+                                seq = seq.wrapping_add(1);
+                                if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                    if let Err(e) = usb.write(&tx_buf[..len]).await {
+                                        if matches!(e, EndpointError::Disabled) {
+                                            link_alive = false;
+                                        }
                                     }
                                 }
                             }
-                            info!("MAVLink: PARAM_REQUEST_LIST complete");
-                        }
-                        MessageHandlerResult::NoResponse | MessageHandlerResult::Unhandled => {
-                            // Nothing to send
-                        }
-                        MessageHandlerResult::DeviceOpRead(req) => {
-                            // Mission Planner uses DEVICE_OP_READ for I2C/SPI tooling, including the built-in I2C scan UI.
-                            // Implement I2C-only for now.
-                            const OP_OK: u8 = 0;
-                            const OP_BAD_BUS: u8 = 1;
-                            const OP_BAD_DEV: u8 = 2;
-                            const OP_BAD_RESPONSE: u8 = 4;
-                            const BUS_I2C: u8 = 0;
+                            MessageHandlerResult::SendFrames(frames) => {
+                                for frame in frames.into_iter() {
+                                    seq = seq.wrapping_add(1);
+                                    if let Ok(len) = frame.serialize(&mut tx_buf) {
+                                        if let Err(e) = usb.write(&tx_buf[..len]).await {
+                                            if matches!(e, EndpointError::Disabled) {
+                                                link_alive = false;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            MessageHandlerResult::SendAllParams => {
+                                info!("MAVLink: PARAM_REQUEST_LIST - sending {} params", p.count());
+                                for idx in 0..p.count() {
+                                    if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
+                                        seq = seq.wrapping_add(1);
+                                        if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                            if let Err(e) = usb.write(&tx_buf[..len]).await {
+                                                if matches!(e, EndpointError::Disabled) {
+                                                    link_alive = false;
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                info!("MAVLink: PARAM_REQUEST_LIST complete");
+                            }
+                            MessageHandlerResult::NoResponse | MessageHandlerResult::Unhandled => {}
+                            MessageHandlerResult::DeviceOpRead(req) => {
+                                // Mission Planner uses DEVICE_OP_READ for I2C/SPI tooling, including the built-in I2C scan UI.
+                                // Implement I2C-only for now.
+                                const OP_OK: u8 = 0;
+                                const OP_BAD_BUS: u8 = 1;
+                                const OP_BAD_DEV: u8 = 2;
+                                const OP_BAD_RESPONSE: u8 = 4;
+                                const BUS_I2C: u8 = 0;
 
-                            let mut data = [0u8; 128];
-                            let mut data_len: usize = 0;
+                                let mut data = [0u8; 128];
+                                let mut data_len: usize = 0;
 
-                            let result_code = if req.bustype != BUS_I2C {
-                                OP_BAD_BUS
-                            } else {
-                                let addr = req.address;
-                                if req.count == 0 {
-                                    // Probe: use a 1-byte dummy write (matches our i2cscanner behavior).
-                                    let probe: [u8; 1] = [0x00];
+                                let result_code = if req.bustype != BUS_I2C {
+                                    OP_BAD_BUS
+                                } else {
+                                    let addr = req.address;
+                                    if req.count == 0 {
+                                        // Probe: use a 1-byte dummy write (matches our i2cscanner behavior).
+                                        let probe: [u8; 1] = [0x00];
+                                        let res = match req.bus {
+                                            0 => {
+                                                let mut bus = SharedI2c0 { bus: i2c0 };
+                                                bus.write(addr, &probe).await
+                                            }
+                                            1 => {
+                                                let mut bus = SharedI2c { bus: i2c1 };
+                                                bus.write(addr, &probe).await
+                                            }
+                                            _ => return,
+                                        };
+
+                                        match res {
+                                            Ok(()) => OP_OK,
+                                            Err(_) => OP_BAD_DEV,
+                                        }
+                                    } else {
+                                        let n = core::cmp::min(req.count as usize, data.len());
+                                        let reg = [req.regstart];
+                                        let res = match req.bus {
+                                            0 => {
+                                                let mut bus = SharedI2c0 { bus: i2c0 };
+                                                bus.write_read(addr, &reg, &mut data[..n]).await
+                                            }
+                                            1 => {
+                                                let mut bus = SharedI2c { bus: i2c1 };
+                                                bus.write_read(addr, &reg, &mut data[..n]).await
+                                            }
+                                            _ => return,
+                                        };
+
+                                        match res {
+                                            Ok(()) => {
+                                                data_len = n;
+                                                OP_OK
+                                            }
+                                            Err(_) => OP_BAD_RESPONSE,
+                                        }
+                                    }
+                                };
+
+                                let reply = build_device_op_read_reply_frame(
+                                    cfg,
+                                    seq,
+                                    req.request_id,
+                                    result_code,
+                                    req.regstart,
+                                    &data[..data_len],
+                                );
+                                seq = seq.wrapping_add(1);
+                                if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                    if let Err(e) = usb.write(&tx_buf[..len]).await {
+                                        if matches!(e, EndpointError::Disabled) {
+                                            link_alive = false;
+                                        }
+                                    }
+                                }
+                            }
+                            MessageHandlerResult::DeviceOpWrite(req) => {
+                                // Minimal I2C write support for DEVICE_OP_WRITE (used by some MP tooling).
+                                const OP_OK: u8 = 0;
+                                const OP_BAD_BUS: u8 = 1;
+                                const OP_BAD_RESPONSE: u8 = 4;
+                                const BUS_I2C: u8 = 0;
+
+                                let result_code = if req.bustype != BUS_I2C {
+                                    OP_BAD_BUS
+                                } else {
+                                    let addr = req.address;
+                                    let n = core::cmp::min(req.count as usize, 128);
+                                    let mut payload = [0u8; 129];
+                                    payload[0] = req.regstart;
+                                    payload[1..1 + n].copy_from_slice(&req.data[..n]);
+
                                     let res = match req.bus {
                                         0 => {
                                             let mut bus = SharedI2c0 { bus: i2c0 };
-                                            bus.write(addr, &probe).await
+                                            bus.write(addr, &payload[..1 + n]).await
                                         }
                                         1 => {
                                             let mut bus = SharedI2c { bus: i2c1 };
-                                            bus.write(addr, &probe).await
+                                            bus.write(addr, &payload[..1 + n]).await
                                         }
                                         _ => return,
                                     };
 
                                     match res {
                                         Ok(()) => OP_OK,
-                                        Err(_) => OP_BAD_DEV,
-                                    }
-                                } else {
-                                    let n = core::cmp::min(req.count as usize, data.len());
-                                    let reg = [req.regstart];
-                                    let res = match req.bus {
-                                        0 => {
-                                            let mut bus = SharedI2c0 { bus: i2c0 };
-                                            bus.write_read(addr, &reg, &mut data[..n]).await
-                                        }
-                                        1 => {
-                                            let mut bus = SharedI2c { bus: i2c1 };
-                                            bus.write_read(addr, &reg, &mut data[..n]).await
-                                        }
-                                        _ => return,
-                                    };
-
-                                    match res {
-                                        Ok(()) => {
-                                            data_len = n;
-                                            OP_OK
-                                        }
                                         Err(_) => OP_BAD_RESPONSE,
                                     }
-                                }
-                            };
-
-                            let reply = build_device_op_read_reply_frame(
-                                cfg,
-                                seq,
-                                req.request_id,
-                                result_code,
-                                req.regstart,
-                                &data[..data_len],
-                            );
-                            seq = seq.wrapping_add(1);
-                            if let Ok(len) = reply.serialize(&mut tx_buf) {
-                                let _ = usb.write(&tx_buf[..len]).await;
-                            }
-                        }
-                        MessageHandlerResult::DeviceOpWrite(req) => {
-                            // Minimal I2C write support for DEVICE_OP_WRITE (used by some MP tooling).
-                            const OP_OK: u8 = 0;
-                            const OP_BAD_BUS: u8 = 1;
-                            const OP_BAD_RESPONSE: u8 = 4;
-                            const BUS_I2C: u8 = 0;
-
-                            let result_code = if req.bustype != BUS_I2C {
-                                OP_BAD_BUS
-                            } else {
-                                let addr = req.address;
-                                let n = core::cmp::min(req.count as usize, 128);
-                                let mut payload = [0u8; 129];
-                                payload[0] = req.regstart;
-                                payload[1..1 + n].copy_from_slice(&req.data[..n]);
-
-                                let res = match req.bus {
-                                    0 => {
-                                        let mut bus = SharedI2c0 { bus: i2c0 };
-                                        bus.write(addr, &payload[..1 + n]).await
-                                    }
-                                    1 => {
-                                        let mut bus = SharedI2c { bus: i2c1 };
-                                        bus.write(addr, &payload[..1 + n]).await
-                                    }
-                                    _ => return,
                                 };
 
-                                match res {
-                                    Ok(()) => OP_OK,
-                                    Err(_) => OP_BAD_RESPONSE,
+                                let reply =
+                                    build_device_op_write_reply_frame(cfg, seq, req.request_id, result_code);
+                                seq = seq.wrapping_add(1);
+                                if let Ok(len) = reply.serialize(&mut tx_buf) {
+                                    if let Err(e) = usb.write(&tx_buf[..len]).await {
+                                        if matches!(e, EndpointError::Disabled) {
+                                            link_alive = false;
+                                        }
+                                    }
                                 }
-                            };
-
-                            let reply = build_device_op_write_reply_frame(cfg, seq, req.request_id, result_code);
-                            seq = seq.wrapping_add(1);
-                            if let Ok(len) = reply.serialize(&mut tx_buf) {
-                                let _ = usb.write(&tx_buf[..len]).await;
                             }
+                        }
+                        drop(p);
+
+                        if params_changed {
+                            PARAMS_DIRTY.store(true, Ordering::Relaxed);
+                            PARAMS_LAST_MODIFIED
+                                .store(Instant::now().as_millis() as u32, Ordering::Relaxed);
+                        }
+                    }
+                }
+                embassy_futures::select::Either::First(Ok(_)) => {
+                    // Received 0 bytes or empty packet - ignore
+                }
+                embassy_futures::select::Either::First(Err(e)) => {
+                    if matches!(e, EndpointError::Disabled) {
+                        link_alive = false;
+                    } else {
+                        debug!("USB: Read error");
+                    }
+                }
+                embassy_futures::select::Either::Second(_) => {
+                    // Timeout - no incoming data
+                }
+            }
+
+            if !link_alive {
+                break;
+            }
+
+            // Scheduler-driven periodic sends (telemetry + heartbeat).
+            let now_ms = Instant::now().as_millis() as u32;
+            {
+                let p = params.lock().await;
+                let telem_rate_hz = p.u32(ParamId::TelemRateHz).min(1000);
+                let hb_en = p.bool(ParamId::HeartbeatEn);
+                let hb_hz = fc_heartbeat_hz(&p);
+
+                sched.set_telemetry_hz(now_ms, telem_rate_hz);
+                sched.set_heartbeat_enabled(hb_en);
+                sched.set_heartbeat_hz(now_ms, hb_hz);
+            }
+
+            let decision = sched.poll(now_ms);
+
+            if decision.send_telemetry {
+                let now_us = (now_ms as u64) * 1000;
+                let bundle = source.bundle(now_ms, now_us).await;
+
+                let frames = [
+                    build_frame_from_msg(cfg, seq.wrapping_add(0), &bundle.sys_status),
+                    build_frame_from_msg(cfg, seq.wrapping_add(1), &bundle.raw_imu),
+                    build_frame_from_msg(cfg, seq.wrapping_add(2), &bundle.scaled_pressure),
+                    build_frame_from_msg(cfg, seq.wrapping_add(3), &bundle.gps_raw_int),
+                    build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
+                ];
+
+                for frame in frames.iter() {
+                    seq = seq.wrapping_add(1);
+                    if let Ok(len) = frame.serialize(&mut tx_buf) {
+                        if let Err(e) = usb.write(&tx_buf[..len]).await {
+                            if matches!(e, EndpointError::Disabled) {
+                                link_alive = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if decision.send_heartbeat {
+                let snapshot = {
+                    let state = fc_state.lock().await;
+                    state.snapshot()
+                };
+                let frame = build_heartbeat_frame(cfg, seq, &snapshot, hb_cfg);
+                seq = seq.wrapping_add(1);
+                if let Ok(len) = frame.serialize(&mut tx_buf) {
+                    if let Err(e) = usb.write(&tx_buf[..len]).await {
+                        if matches!(e, EndpointError::Disabled) {
+                            link_alive = false;
+                        }
+                    }
+                }
+            }
+            
+            // Debounced parameter save: wait 5 seconds after last modification
+            if PARAMS_DIRTY.load(Ordering::Relaxed) {
+                let last_mod = PARAMS_LAST_MODIFIED.load(Ordering::Relaxed);
+                let now_ms = Instant::now().as_millis() as u32;
+                
+                // If 5 seconds have passed since last modification, save to SD
+                if now_ms.wrapping_sub(last_mod) >= 5000 {
+                    info!("Saving parameters to SD card...");
+                    
+                    // Lock params and save
+                    let p = params.lock().await;
+                    match save_params_to_sd(&p) {
+                        Ok(()) => {
+                            info!("Parameters saved successfully");
+                            PARAMS_DIRTY.store(false, Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            warn!("Failed to save parameters: {}", e);
+                            // Keep dirty flag set to retry later
                         }
                     }
                     drop(p);
-                    
-                    // If parameter was changed, mark dirty for auto-save
-                    if params_changed {
-                        PARAMS_DIRTY.store(true, Ordering::Relaxed);
-                        PARAMS_LAST_MODIFIED.store(
-                            Instant::now().as_millis() as u32,
-                            Ordering::Relaxed
-                        );
-                    }
                 }
             }
-            embassy_futures::select::Either::First(Ok(_)) => {
-                // Received 0 bytes or empty packet - ignore
-            }
-            embassy_futures::select::Either::First(Err(_)) => {
-                // USB read error
-                debug!("USB: Read error");
-            }
-            embassy_futures::select::Either::Second(_) => {
-                // Timeout - no incoming data
+
+            if !link_alive {
+                break;
             }
         }
 
-        // Scheduler-driven periodic sends (telemetry + heartbeat).
-        let now_ms = Instant::now().as_millis() as u32;
+        // Mark USB disconnected so policy can drop back to IDLE.
         {
             let p = params.lock().await;
-            let telem_rate_hz = p.u32(ParamId::TelemRateHz).min(1000);
-            let hb_en = p.bool(ParamId::HeartbeatEn);
-            drop(p);
-
-            sched.set_telemetry_hz(now_ms, telem_rate_hz);
-            sched.set_heartbeat_enabled(hb_en);
-        }
-
-        let decision = sched.poll(now_ms);
-
-        if decision.send_telemetry {
-            let now_us = (now_ms as u64) * 1000;
-            let bundle = source.bundle(now_ms, now_us).await;
-
-            let frames = [
-                build_frame_from_msg(cfg, seq.wrapping_add(0), &bundle.sys_status),
-                build_frame_from_msg(cfg, seq.wrapping_add(1), &bundle.raw_imu),
-                build_frame_from_msg(cfg, seq.wrapping_add(2), &bundle.scaled_pressure),
-                build_frame_from_msg(cfg, seq.wrapping_add(3), &bundle.gps_raw_int),
-                build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
-            ];
-
-            for frame in frames.iter() {
-                seq = seq.wrapping_add(1);
-                if let Ok(len) = frame.serialize(&mut tx_buf) {
-                    let _ = usb.write(&tx_buf[..len]).await;
-                }
-            }
-        }
-
-        if decision.send_heartbeat {
-            let frame = build_heartbeat_frame(cfg, seq);
-            seq = seq.wrapping_add(1);
-            if let Ok(len) = frame.serialize(&mut tx_buf) {
-                let _ = usb.write(&tx_buf[..len]).await;
-            }
-        }
-        
-        // Debounced parameter save: wait 5 seconds after last modification
-        if PARAMS_DIRTY.load(Ordering::Relaxed) {
-            let last_mod = PARAMS_LAST_MODIFIED.load(Ordering::Relaxed);
-            let now_ms = Instant::now().as_millis() as u32;
-            
-            // If 5 seconds have passed since last modification, save to SD
-            if now_ms.wrapping_sub(last_mod) >= 5000 {
-                info!("Saving parameters to SD card...");
-                
-                // Lock params and save
-                let p = params.lock().await;
-                match save_params_to_sd(&p) {
-                    Ok(()) => {
-                        info!("Parameters saved successfully");
-                        PARAMS_DIRTY.store(false, Ordering::Relaxed);
-                    }
-                    Err(e) => {
-                        warn!("Failed to save parameters: {}", e);
-                        // Keep dirty flag set to retry later
-                    }
-                }
-                drop(p);
-            }
+            let policy = fc_policy_from_params(&p);
+            let mut state = fc_state.lock().await;
+            let _ = state.set_usb_connected(false, policy);
         }
     }
 }
@@ -1013,26 +1145,89 @@ async fn uart_mavlink_task(
     mut uart: RpUart<'static>,
     cfg: MavEndpointConfig,
     params: &'static Mutex<RawMutex, ParamRegistry>,
+    fc_state: &'static Mutex<RawMutex, FcState>,
 ) {
     info!("UART: Starting bidirectional MAVLink task for radio");
     let source = StateTelemetrySource;
+    let hb_cfg = HeartbeatConfig::default();
     let mut seq: u8 = 0;
     let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
     let mut rx_scratch = [0u8; MAVLINK_MAX_FRAME];
 
     let now_ms = Instant::now().as_millis() as u32;
     let mut sched = LinkScheduler::new(now_ms, 1, 10);
-    // Radio UART link: keep heartbeat off by default (USB provides GCS heartbeat).
-    sched.set_heartbeat_enabled(false);
+    let mut last_las_tx_ms: u32 = now_ms.wrapping_sub(1_000);
+
+    // Last link MAC config we pushed to the Radio/GS side.
+    let mut last_link_cfg: Option<LinkMacConfig> = None;
+    let mut last_link_cfg_tx_ms: u32 = now_ms;
 
     loop {
+        let now_ms = Instant::now().as_millis() as u32;
+        let (
+            fast_en,
+            fast_hz,
+            fast_max_bytes,
+            norm_en,
+            norm_hz,
+            norm_qmax,
+            tel_qos,
+            hb_en,
+            hb_hz,
+            las_max_age_ms,
+            link_cfg,
+        ) = {
+            let p = params.lock().await;
+            let fast_en = p.bool(ParamId::TelFastEn);
+            let fast_hz = p.u32(ParamId::TelFastHz).min(1000);
+            let fast_max_bytes = p
+                .u32(ParamId::TelFastMaxB)
+                .min(MAVLINK_MAX_FRAME as u32)
+                .min(common::coms::transport::lora::mac::INNER_MTU as u32) as usize;
+            let norm_en = p.bool(ParamId::TelNormEn);
+            let norm_hz = p.u32(ParamId::TelNormMaxHz).min(1000);
+            let norm_qmax = p.u32(ParamId::TelNormQmax).min(16) as usize;
+            let tel_qos = p.u32(ParamId::TelQos).min(255) as u8;
+            let hb_en = p.bool(ParamId::HeartbeatEn);
+            let hb_hz = fc_heartbeat_hz(&p);
+            let las_max_age_ms = p.u32(ParamId::LasMaxAgeMs).min(u16::MAX as u32);
+            let link_cfg = LinkMacConfig::from_params(&p);
+            (
+                fast_en,
+                fast_hz,
+                fast_max_bytes,
+                norm_en,
+                norm_hz,
+                norm_qmax,
+                tel_qos,
+                hb_en,
+                hb_hz,
+                las_max_age_ms,
+                link_cfg,
+            )
+        };
+
+        sched.set_heartbeat_enabled(hb_en);
+        sched.set_heartbeat_hz(now_ms, hb_hz);
+        sched.set_fast_enabled(fast_en);
+        sched.set_fast_hz(now_ms, fast_hz);
+        sched.set_telemetry_hz(now_ms, if norm_en { norm_hz } else { 0 });
+        let las_interval_ms = (las_max_age_ms / 2).max(100);
+
         // Give RX priority. If we see no RX traffic for a short window,
         // we'll use the idle time to send telemetry.
+        let idle_timeout_ms = if fast_en && fast_hz != 0 {
+            hz_to_period_ms(fast_hz.min(u16::MAX as u32) as u16, 1, 30)
+        } else {
+            30
+        };
         let rx_fut = mavlink::recv_frame_over_uart(&mut uart, &mut rx_scratch);
-        let idle_fut = Timer::after_millis(30);
+        let idle_fut = Timer::after_millis(u64::from(idle_timeout_ms));
+        let mut rx_activity = false;
 
         match select::select(rx_fut, idle_fut).await {
             select::Either::First(res) => {
+                rx_activity = true;
                 let frame = match res {
                     Ok(f) => f,
                     Err(e) => {
@@ -1043,12 +1238,30 @@ async fn uart_mavlink_task(
 
                 // Handle command immediately.
                 let mut p = params.lock().await;
-                let (result, params_changed) = dispatch_mavlink_message(frame, cfg, seq, &mut p);
+                let policy = fc_policy_from_params(&p);
+                let statustext_en = p.bool(ParamId::StatustextEn);
+                let mut state = fc_state.lock().await;
+                let (result, params_changed) = dispatch_mavlink_message(
+                    frame,
+                    cfg,
+                    seq,
+                    &mut p,
+                    &mut state,
+                    policy,
+                    statustext_en,
+                );
+                drop(state);
 
                 match result {
                     MessageHandlerResult::SendFrame(reply) => {
                         seq = seq.wrapping_add(1);
                         let _ = mavlink::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
+                    }
+                    MessageHandlerResult::SendFrames(frames) => {
+                        for frame in frames.into_iter() {
+                            seq = seq.wrapping_add(1);
+                            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+                        }
                     }
                     MessageHandlerResult::SendAllParams => {
                         info!("UART: PARAM_REQUEST_LIST - sending {} params", p.count());
@@ -1071,9 +1284,6 @@ async fn uart_mavlink_task(
                     PARAMS_DIRTY.store(true, Ordering::Relaxed);
                     PARAMS_LAST_MODIFIED.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
                 }
-
-                // On active command traffic, skip telemetry this iteration.
-                continue;
             }
             select::Either::Second(_) => {
                 // Idle window elapsed: ok to send telemetry if due.
@@ -1081,15 +1291,23 @@ async fn uart_mavlink_task(
         }
 
         let now_ms = Instant::now().as_millis() as u32;
-        {
-            let p = params.lock().await;
-            let radio_telem_hz = p.u32(ParamId::RadioTelemRateHz).min(1000);
-            drop(p);
-            sched.set_telemetry_hz(now_ms, radio_telem_hz);
+        let decision = sched.poll(now_ms);
+
+        let allow_fast_during_rx = tel_qos == 0;
+        if decision.send_fast && fast_en && (allow_fast_during_rx || !rx_activity) {
+            if fast_max_bytes != 0 {
+                let now_us = (now_ms as u64) * 1000;
+                let sample = source.latest().await;
+                if let Some(frame) = build_telemetry_frame(cfg, seq, now_us, &sample) {
+                    if frame.size() <= fast_max_bytes {
+                        seq = seq.wrapping_add(1);
+                        let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+                    }
+                }
+            }
         }
 
-        let decision = sched.poll(now_ms);
-        if decision.send_telemetry {
+        if decision.send_telemetry && norm_en && !rx_activity {
             let now_us = (now_ms as u64) * 1000;
             let bundle = source.bundle(now_ms, now_us).await;
 
@@ -1101,11 +1319,58 @@ async fn uart_mavlink_task(
                 build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
             ];
 
-            for frame in frames.iter() {
+            let max_frames = norm_qmax.min(frames.len());
+            for frame in frames.iter().take(max_frames) {
                 seq = seq.wrapping_add(1);
                 // Send to radio via UART - best effort, ignore errors.
                 let _ = mavlink::send_frame_over_uart(&mut uart, frame, &mut tx_buf).await;
             }
+        }
+
+        if decision.send_heartbeat {
+            let snapshot = {
+                let state = fc_state.lock().await;
+                state.snapshot()
+            };
+            let frame = build_heartbeat_frame(cfg, seq, &snapshot, hb_cfg);
+            seq = seq.wrapping_add(1);
+            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+        }
+
+        if now_ms.wrapping_sub(last_las_tx_ms) >= las_interval_ms {
+            let snapshot = {
+                let state = fc_state.lock().await;
+                state.snapshot()
+            };
+            let las_state = if snapshot.armed {
+                LAS_STATE_ARMED
+            } else {
+                LAS_STATE_DISARMED
+            };
+            let max_age_ms = las_max_age_ms.max(1) as u16;
+            let frame = build_link_authority_frame(cfg, seq, 0, 0, las_state, max_age_ms);
+            seq = seq.wrapping_add(1);
+            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+            last_las_tx_ms = now_ms;
+        }
+
+        // Propagate link MAC config to the Radio/GS link without reflashing.
+        // We send on change (and also once at startup), at a low rate.
+        let now_ms = Instant::now().as_millis() as u32;
+        let should_send = match last_link_cfg {
+            None => true,
+            Some(prev) => prev.tick_hz != link_cfg.tick_hz
+                || prev.fast_max_bytes != link_cfg.fast_max_bytes
+                || prev.slot_mode != link_cfg.slot_mode,
+        };
+
+        if should_send && now_ms.wrapping_sub(last_link_cfg_tx_ms) >= 500 {
+            // Broadcast to any listener; Radio/GS will intercept and apply.
+            let frame = build_link_mac_config_command_frame(cfg, seq, 0, 0, link_cfg);
+            seq = seq.wrapping_add(1);
+            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+            last_link_cfg = Some(link_cfg);
+            last_link_cfg_tx_ms = now_ms;
         }
     }
 }

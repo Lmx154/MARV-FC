@@ -175,9 +175,42 @@ pub enum ParamId {
 
     // --- Radio / LoRa link ---
     RadioTelemRateHz,
+
+    // --- FC state / safety ---
+    FcModeUsbForcesConfig,
+    FcArmAllowedInConfig,
+    FcStateHeartbeatHz,
+
+    // --- Telemetry policy (fast/normal lanes) ---
+    TelFastEn,
+    TelFastHz,
+    TelFastMaxB,
+    TelNormEn,
+    TelNormMaxHz,
+    TelNormQmax,
+    TelAckTmoMs,
+    TelAckRtryMax,
+    TelQos,
+    TelAdaptEn,
+    TelSnrBad,
+    TelSnrGood,
+    TelAdaptHold,
+    // --- LoRa tick MAC configuration (applied to GS/Radio link MAC) ---
+    LinkTickHz,
+    LinkSlotMode,
+    LinkFastMaxB,
+    LasMaxAgeMs,
+
+    // --- LoRa RF (demodulation-affecting) configuration ---
+    // Stored on FC; applied by GS + Radio via staged RF reconfiguration.
+    LoraFreqKhz,
+    LoraSf,
+    LoraBwCode,
+    LoraCrCode,
+    LoraSyncWord,
 }
 
-pub const PARAM_COUNT: usize = (ParamId::RadioTelemRateHz as usize) + 1;
+pub const PARAM_COUNT: usize = (ParamId::LoraSyncWord as usize) + 1;
 
 /// The single parameter definition table (authoritative).
 pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
@@ -232,6 +265,42 @@ pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
 
     // --- Radio / LoRa link ---
     ParamDef::new("RAD_TEL_HZ",    ParamType::U32,  ParamValue::U32(10)),
+
+    // --- FC state / safety ---
+    ParamDef::new("FC_USB_FORCE_CFG", ParamType::Bool, ParamValue::Bool(true)),
+    ParamDef::new("FC_ARM_IN_CFG",    ParamType::Bool, ParamValue::Bool(false)),
+    ParamDef::new("FC_HB_HZ",         ParamType::U32,  ParamValue::U32(1)),
+
+    // --- Telemetry policy (fast/normal lanes) ---
+    ParamDef::new("TEL_FAST_EN",      ParamType::Bool, ParamValue::Bool(false)),
+    ParamDef::new("TEL_FAST_HZ",      ParamType::U32,  ParamValue::U32(100)),
+    ParamDef::new("TEL_FAST_MAXB",    ParamType::U32,  ParamValue::U32(120)),
+    ParamDef::new("TEL_NORM_EN",      ParamType::Bool, ParamValue::Bool(true)),
+    ParamDef::new("TEL_NORM_MAXHZ",   ParamType::U32,  ParamValue::U32(10)),
+    ParamDef::new("TEL_NORM_QMAX",    ParamType::U32,  ParamValue::U32(5)),
+    ParamDef::new("TEL_ACK_TMO_MS",   ParamType::U32,  ParamValue::U32(500)),
+    ParamDef::new("TEL_ACK_RTRY_MAX", ParamType::U32,  ParamValue::U32(3)),
+    ParamDef::new("TEL_QOS",          ParamType::U32,  ParamValue::U32(0)),
+    ParamDef::new("TEL_ADAPT_EN",     ParamType::Bool, ParamValue::Bool(false)),
+    ParamDef::new("TEL_SNR_BAD",      ParamType::I32,  ParamValue::I32(0)),
+    ParamDef::new("TEL_SNR_GOOD",     ParamType::I32,  ParamValue::I32(10)),
+    ParamDef::new("TEL_ADAPT_HOLD",   ParamType::U32,  ParamValue::U32(1000)),
+    // --- LoRa tick MAC configuration ---
+    // These values are stored durably on the FC (single source of truth).
+    // The GS pulls them via MAVLink PARAM_* and then applies them locally and
+    // distributes runtime config to the Radio via COMMAND_LONG (see protocol::mavlink::link_mac_config).
+    ParamDef::new("LINK_TICK_HZ",   ParamType::U32,  ParamValue::U32(50)),
+    ParamDef::new("LINK_SLOT_MD",   ParamType::U32,  ParamValue::U32(1)),
+    ParamDef::new("LINK_FAST_MB",   ParamType::U32,  ParamValue::U32(236)),
+    ParamDef::new("LAS_MAX_AGE_MS", ParamType::U32,  ParamValue::U32(1000)),
+
+    // --- LoRa RF (demodulation-affecting) configuration ---
+    // Encoding matches `protocol::mavlink::rf_reconfig::RfReconfigSettings`.
+    ParamDef::new("LORA_F_KHZ",      ParamType::U32,  ParamValue::U32(915_000)),
+    ParamDef::new("LORA_SF",         ParamType::U32,  ParamValue::U32(7)),
+    ParamDef::new("LORA_BW",         ParamType::U32,  ParamValue::U32(0)),
+    ParamDef::new("LORA_CR",         ParamType::U32,  ParamValue::U32(0)),
+    ParamDef::new("LORA_SW",         ParamType::U32,  ParamValue::U32(0x3444)),
 ];
 
 /// Runtime storage for parameter values.

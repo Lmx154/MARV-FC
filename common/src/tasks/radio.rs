@@ -114,8 +114,9 @@ async fn run_radio_talker<'a, RADIO>(
             }
         }
 
-        // Small pause (not a torture-test anymore). Allow link pacing to adapt.
-        delay.delay_ms(link.recommended_tx_gap_ms()).await;
+        // Small pause (not a torture-test anymore).
+        // The new wireless link is tick-MAC-driven; this demo uses a fixed interval.
+        delay.delay_ms(500).await;
     }
 }
 
@@ -201,6 +202,21 @@ async fn run_gs_listener<'a, RADIO>(
                         raw_head
                     ),
                 }
+            }
+            Ok(Common::RawImu(pkt)) => {
+                info!(
+                    "GsTask: RAW_IMU t={}us acc[{}, {}, {}] gyro[{}, {}, {}] mag[{}, {}, {}]",
+                    pkt.time_usec,
+                    pkt.xacc,
+                    pkt.yacc,
+                    pkt.zacc,
+                    pkt.xgyro,
+                    pkt.ygyro,
+                    pkt.zgyro,
+                    pkt.xmag,
+                    pkt.ymag,
+                    pkt.zmag,
+                );
             }
             Ok(_other) => {
                 warn!("GsTask: received Common MAVLink message we don't handle yet");

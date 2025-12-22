@@ -385,6 +385,45 @@ where
         Ok(())
     }
 
+    /// Apply a new LoRa configuration at runtime.
+    ///
+    /// This is intended for staged RF reconfiguration. It avoids a full reset pulse
+    /// and replays the essential LoRa setup commands.
+    pub async fn apply_lora_config(
+        &mut self,
+        delay: &mut impl DelayMs,
+        cfg: LoRaConfig,
+    ) -> Result<()> {
+        self.cfg = cfg;
+
+        // Standby XOSC before reprogramming LoRa settings.
+        self.write_cmd(delay, 0x80, &[0x01]).await?;
+
+        // LoRa mode
+        self.write_cmd(delay, 0x8A, &[0x01]).await?;
+
+        // RF Frequency
+        self.set_rf_freq(delay, self.cfg.freq_hz).await?;
+
+        // LoRa modulation params
+        self.write_cmd(delay, 0x8B, &self.cfg.mod_params()).await?;
+
+        // Packet params for RX (max payload)
+        self.write_cmd(delay, 0x8C, &self.cfg.pkt_params_rx()).await?;
+
+        // PA + TX params
+        self.write_cmd(delay, 0x95, &self.cfg.pa_config()).await?;
+        self.write_cmd(delay, 0x8E, &self.cfg.tx_params()).await?;
+
+        // Sync word (AFTER modulation + packet params)
+        self.write_registers(delay, 0x0740, &self.cfg.sync_word.to_be_bytes()).await?;
+
+        // Return to RX after reconfig.
+        self.start_rx_continuous(delay).await?;
+
+        Ok(())
+    }
+
     // ====================================================================
     //  RAW TX
     // ====================================================================
