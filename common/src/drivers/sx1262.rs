@@ -4,6 +4,7 @@
 
 use defmt::{info, warn, debug};
 use embedded_hal::digital::{InputPin, OutputPin};
+use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiBus;
 
 use crate::coms::transport::lora::lora_config::LoRaConfig;
@@ -27,6 +28,7 @@ pub enum Sx1262Error {
     Cs,
     Spi,
     InvalidParam,
+    Dio1,
 }
 
 pub type Result<T> = core::result::Result<T, Sx1262Error>;
@@ -52,7 +54,7 @@ where
     NSS: OutputPin,
     RESET: OutputPin,
     BUSY: InputPin,
-    DIO1: InputPin,
+    DIO1: InputPin + Wait,
     SW: RfSwitch,
 {
     spi: SPI,
@@ -70,7 +72,7 @@ where
     NSS: OutputPin,
     RESET: OutputPin,
     BUSY: InputPin,
-    DIO1: InputPin,
+    DIO1: InputPin + Wait,
     SW: RfSwitch,
 {
     // IRQ bit definitions (SX1262 datasheet)
@@ -258,6 +260,16 @@ where
     async fn get_irq(&mut self, delay: &mut impl DelayMs) -> Result<u16> {
         let b = self.read_cmd::<2>(delay, 0x12).await?;
         Ok(u16::from_be_bytes(b))
+    }
+
+    async fn wait_irq(&mut self, delay: &mut impl DelayMs) -> Result<u16> {
+        if !self.dio1.is_high().unwrap_or(true) {
+            self.dio1
+                .wait_for_rising_edge()
+                .await
+                .map_err(|_| Sx1262Error::Dio1)?;
+        }
+        self.get_irq(delay).await
     }
 
     async fn get_rx_buffer_status(
@@ -474,13 +486,13 @@ where
         self.write_cmd(delay, 0x83, &[0xFF, 0xFF, 0xFF])
             .await?;
 
-        // Poll IRQ for TxDone
-        let mut waited = 0u32;
+        // Wait for TxDone IRQ on DIO1
         loop {
-            let irq = self.get_irq(delay).await?;
-            if irq != 0 {
-                Self::log_irq("TX poll", irq);
+            let irq = self.wait_irq(delay).await?;
+            if irq == 0 {
+                continue;
             }
+            Self::log_irq("TX irq", irq);
 
             if irq & Self::IRQ_TX_DONE != 0 {
                 // Clear all bits we saw (including TxDone)
@@ -508,27 +520,13 @@ where
                 return Ok(());
             }
 
-            // Spurious IRQs during TX → clear them and continue
+            // Spurious IRQs during TX - clear them and continue
             let spurious = irq & !Self::IRQ_TX_DONE;
             if spurious != 0 {
                 warn!("Clearing spurious IRQs during TX: {:#05x}", spurious);
                 self.write_cmd(delay, 0x02, &spurious.to_be_bytes())
                     .await?;
             }
-
-            if waited > 3000 {
-                warn!("TX: timeout waiting for TxDone");
-                // Attempt to clear everything and go back to RX
-                self.write_cmd(delay, 0x02, &[0xFF, 0xFF])
-                    .await?;
-                self.rf_sw.set(RfState::Rx);
-                let pkt_rx = self.cfg.pkt_params_rx();
-                let _ = self.write_cmd(delay, 0x8C, &pkt_rx).await;
-                return Err(Sx1262Error::BusyTimeout);
-            }
-
-            delay.delay_ms(1).await;
-            waited += 1;
         }
     }
 
@@ -536,9 +534,15 @@ where
     //  RAW RX
     // ====================================================================
 
-    pub async fn start_rx_continuous(
+    fn rx_timeout_units(timeout_ms: u32) -> u32 {
+        let units = timeout_ms.saturating_mul(64);
+        units.min(0x00FF_FFFF)
+    }
+
+    pub async fn start_rx_window(
         &mut self,
         delay: &mut impl DelayMs,
+        timeout_ms: u32,
     ) -> Result<()> {
         // Standby XOSC
         self.write_cmd(delay, 0x80, &[0x01]).await?;
@@ -566,26 +570,34 @@ where
         // RF switch to RX
         self.rf_sw.set(RfState::Rx);
 
-        // Continuous RX
-        self.write_cmd(delay, 0x82, &[0xFF, 0xFF, 0xFF])
-            .await?;
+        // RX with timeout window (15.625 us units)
+        let t = Self::rx_timeout_units(timeout_ms);
+        let bytes = [(t >> 16) as u8, (t >> 8) as u8, t as u8];
+        self.write_cmd(delay, 0x82, &bytes).await?;
+
+        if log_config::LOG_PHY_TRAFFIC && timeout_ms != u32::MAX {
+            info!("Started RX window: {} ms", timeout_ms);
+        }
+        Ok(())
+    }
+
+    pub async fn start_rx_continuous(
+        &mut self,
+        delay: &mut impl DelayMs,
+    ) -> Result<()> {
+        self.start_rx_window(delay, u32::MAX).await?;
         if log_config::LOG_PHY_TRAFFIC {
             info!("Started RX (continuous)");
         }
         Ok(())
     }
 
-       pub async fn poll_raw(
+    async fn handle_rx_irq(
         &mut self,
         delay: &mut impl DelayMs,
         buf: &mut [u8],
+        irq: u16,
     ) -> Result<Option<RawRx>> {
-        let irq = self.get_irq(delay).await?;
-        if irq == 0 {
-            return Ok(None);
-        }
-        Self::log_irq("RX poll", irq);
-
         let done         = irq & Self::IRQ_RX_DONE        != 0;
         let header_valid = irq & Self::IRQ_HEADER_VALID   != 0;
         let header_err   = irq & Self::IRQ_HEADER_ERR     != 0;
@@ -606,7 +618,7 @@ where
         }
 
         // Any of these means the frame is unusable at the PHY level.
-        // Do NOT forward it upward – just clear IRQs and report "no frame".
+        // Do NOT forward it upward - just clear IRQs and report "no frame".
         if header_err || crc_err || timeout {
             self.write_cmd(delay, 0x02, &irq.to_be_bytes()).await?;
             return Ok(None);
@@ -633,6 +645,38 @@ where
             rssi,
             snr_x4,
         }))
+    }
+
+    pub async fn poll_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        buf: &mut [u8],
+    ) -> Result<Option<RawRx>> {
+        if !self.dio1.is_high().unwrap_or(true) {
+            return Ok(None);
+        }
+
+        let irq = self.get_irq(delay).await?;
+        if irq == 0 {
+            return Ok(None);
+        }
+        Self::log_irq("RX poll", irq);
+
+        self.handle_rx_irq(delay, buf, irq).await
+    }
+
+    pub async fn wait_raw(
+        &mut self,
+        delay: &mut impl DelayMs,
+        buf: &mut [u8],
+    ) -> Result<Option<RawRx>> {
+        let irq = self.wait_irq(delay).await?;
+        if irq == 0 {
+            return Ok(None);
+        }
+        Self::log_irq("RX irq", irq);
+
+        self.handle_rx_irq(delay, buf, irq).await
     }
 
 }

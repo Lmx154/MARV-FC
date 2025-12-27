@@ -29,7 +29,7 @@ pub struct LoRaConfig {
 }
 
 impl LoRaConfig {
-    /// EXACT known-good working preset (mirrors old driver).
+    /// EXACT known-good working preset.
     pub const fn preset_default() -> Self {
         Self {
             freq_hz: 915_000_000,
