@@ -195,6 +195,17 @@ where
         Ok(())
     }
 
+    pub async fn start_rx_single(&mut self, symbol_timeout: u16) -> Result<()> {
+        self.lora
+            .prepare_for_rx(
+                RxMode::Single(symbol_timeout),
+                &self.mod_params,
+                &self.rx_pkt_params,
+            )
+            .await?;
+        Ok(())
+    }
+
     pub async fn wait_raw(&mut self, buf: &mut [u8]) -> Result<Option<RawRx>> {
         let (len, status) = self.lora.rx(&self.rx_pkt_params, buf).await?;
         if len == 0 {

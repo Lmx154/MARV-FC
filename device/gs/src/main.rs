@@ -12,27 +12,45 @@ use embassy_rp::peripherals::SPI0;
 use embassy_rp::spi::{Async, Config as SpiConfig, Spi};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Delay, Duration, Instant, Timer};
 use static_cell::StaticCell;
 
 use common::coms::transport::lora::lora_config::LoRaConfig;
+use common::coms::transport::lora::phy::{
+    PhyChannels, PhyError, PhyService, PhyServiceConfig, TimeSource,
+};
 use common::drivers::sx1262::Sx1262;
 
-#[derive(Clone, Copy)]
-enum Role {
-    Tx,
-    Rx,
-}
-
-const ROLE: Role = Role::Tx; // flip to Role::Rx to swap roles
-const TX_INTERVAL_MS: u64 = 1_000;
+const TX_INTERVAL_MS: u64 = 200;
+const RX_TIMEOUT_SYMBOLS: u16 = 16;
+const TX_QUEUE_LEN: usize = 4;
+const RX_QUEUE_LEN: usize = 4;
 
 type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
 static SPI_BUS: StaticCell<SpiBus> = StaticCell::new();
+static PHY_CHANNELS: StaticCell<PhyChannels<TX_QUEUE_LEN, RX_QUEUE_LEN>> = StaticCell::new();
+
+type SpiDev = SpiDevice<'static, RawMutex, Spi<'static, SPI0, Async>, Output<'static>>;
+type PhyServiceImpl =
+    PhyService<'static, SpiDev, Output<'static>, Input<'static>, Delay, EmbassyTimeSource, TX_QUEUE_LEN, RX_QUEUE_LEN>;
+
+#[derive(Clone, Copy)]
+struct EmbassyTimeSource;
+
+impl TimeSource for EmbassyTimeSource {
+    fn now_ms(&self) -> u64 {
+        Instant::now().as_millis()
+    }
+}
+
+#[embassy_executor::task]
+async fn phy_service_task(mut service: PhyServiceImpl) -> ! {
+    service.run().await
+}
 
 #[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    info!("GS L1 ping-pong (SX1262)");
+async fn main(spawner: Spawner) {
+    info!("GS L2 ping-pong (SX1262)");
 
     let p = embassy_rp::init(Default::default());
 
@@ -66,7 +84,7 @@ async fn main(_spawner: Spawner) {
         cfg.freq_hz, cfg.sf, cfg.bw, cfg.cr, cfg.sync_word
     );
 
-    let mut radio = Sx1262::new(
+    let radio = Sx1262::new(
         spi_dev,
         reset,
         busy,
@@ -79,56 +97,60 @@ async fn main(_spawner: Spawner) {
     .await
     .unwrap();
 
-    match ROLE {
-        Role::Tx => {
-            let mut seq: u32 = 0;
-            loop {
-                seq = seq.wrapping_add(1);
-                match radio.tx_raw(b"PING").await {
-                    Ok(()) => info!("TX seq={} len=4", seq),
-                    Err(e) => warn!("TX error: {:?}", defmt::Debug2Format(&e)),
-                }
-                Timer::after(Duration::from_millis(TX_INTERVAL_MS)).await;
+    let channels = PHY_CHANNELS.init(PhyChannels::new());
+    let phy = channels.phy();
+    let queues = channels.service_queues();
+    let service = PhyService::new(
+        radio,
+        EmbassyTimeSource,
+        queues,
+        PhyServiceConfig {
+            rx_timeout_symbols: RX_TIMEOUT_SYMBOLS,
+        },
+    );
+
+    spawner.spawn(phy_service_task(service)).unwrap();
+
+    let mut seq: u32 = 0;
+    let mut pong_ok: u32 = 0;
+    let mut last_tx_ms: u64 = 0;
+
+    loop {
+        seq = seq.wrapping_add(1);
+        last_tx_ms = Instant::now().as_millis();
+        match phy.tx(b"PING").await {
+            Ok(()) => {}
+            Err(PhyError::PayloadTooLarge) => {
+                warn!("TX payload too large");
             }
         }
-        Role::Rx => {
-            if let Err(e) = radio.start_rx_continuous().await {
-                warn!("RX start error: {:?}", defmt::Debug2Format(&e));
-            }
+        info!("TX PING seq={}", seq);
 
-            let mut rx_buf = [0u8; 255];
-            let mut rx_ok: u32 = 0;
-            let mut rx_err: u32 = 0;
-            let mut ping_ok: u32 = 0;
-
-            loop {
-                match radio.wait_raw(&mut rx_buf).await {
-                    Ok(Some(pkt)) => {
-                        rx_ok = rx_ok.wrapping_add(1);
-                        let payload = &rx_buf[..pkt.len as usize];
-                        if payload == b"PING" {
-                            ping_ok = ping_ok.wrapping_add(1);
-                        } else {
-                            warn!("RX payload mismatch len={}", pkt.len);
-                        }
-
-                        info!(
-                            "RX ok={} ping_ok={} rssi={} snr_x4={}",
-                            rx_ok, ping_ok, pkt.rssi, pkt.snr_x4
-                        );
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        rx_err = rx_err.wrapping_add(1);
-                        warn!(
-                            "RX error count={} err={:?}",
-                            rx_err,
-                            defmt::Debug2Format(&e)
-                        );
-                        let _ = radio.start_rx_continuous().await;
-                    }
-                }
-            }
+        let rx = phy.rx().await;
+        if rx.bytes.as_slice() == b"PONG" {
+            pong_ok = pong_ok.wrapping_add(1);
+            let rtt_ms = rx.timestamp_ms.saturating_sub(last_tx_ms);
+            info!(
+                "RX PONG seq={} ok={} rtt_ms={} rssi={} snr={}",
+                seq, pong_ok, rtt_ms, rx.rssi, rx.snr
+            );
+        } else if rx.bytes.as_slice() == b"PING" {
+            warn!("RX unexpected PING len={}", rx.bytes.len());
+        } else {
+            let b0 = *rx.bytes.get(0).unwrap_or(&0);
+            let b1 = *rx.bytes.get(1).unwrap_or(&0);
+            let b2 = *rx.bytes.get(2).unwrap_or(&0);
+            let b3 = *rx.bytes.get(3).unwrap_or(&0);
+            warn!(
+                "RX unexpected len={} bytes={:02X} {:02X} {:02X} {:02X}",
+                rx.bytes.len(),
+                b0,
+                b1,
+                b2,
+                b3
+            );
         }
+
+        Timer::after(Duration::from_millis(TX_INTERVAL_MS)).await;
     }
 }
