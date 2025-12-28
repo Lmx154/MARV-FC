@@ -26,6 +26,9 @@ pub struct LoRaConfig {
     pub crc_on: bool,
     pub invert_iq: bool,
     pub sync_word: u16,
+
+    // RF switch wiring: some modules require TX/RX control pins swapped.
+    pub rf_switch_swap: bool,
 }
 
 impl LoRaConfig {
@@ -57,6 +60,9 @@ impl LoRaConfig {
             // Public LoRa sync word 0x3444 (exact legacy setting)
             // You can later change to MAVLink private (0x1424) on BOTH ends.
             sync_word: 0x3444,
+
+            // External RF switch wiring uses swapped TX/RX control lines.
+            rf_switch_swap: true,
         }
     }
 
