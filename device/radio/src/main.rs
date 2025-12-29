@@ -16,11 +16,9 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Instant, Timer};
 use static_cell::StaticCell;
 
-use common::coms::transport::lora::mac_codec::{
-    decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
-};
-use common::coms::transport::lora::mac_sync::{
-    MacSync, SyncEvent, SyncRole, DEFAULT_LOCK_TIMEOUT_MS,
+use common::coms::transport::lora::mac_codec::{decode_frame, FrameType};
+use common::coms::transport::lora::mac_scheduler::{
+    TickTracker, LinkEvent, DEFAULT_LOCK_TIMEOUT_MS,
 };
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
@@ -33,6 +31,9 @@ const TX_QUEUE_LEN: usize = 4;
 const RX_QUEUE_LEN: usize = 4;
 const LOCK_TIMEOUT_MS: u64 = DEFAULT_LOCK_TIMEOUT_MS;
 const SYNC_POLL_MS: u64 = 100;
+const TICK_PULSE_US: u64 = 50;
+const RX_PULSE_US: u64 = 50;
+const TICK_LOG_INTERVAL: u32 = 50;
 
 type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
 static SPI_BUS: StaticCell<SpiBus> = StaticCell::new();
@@ -58,7 +59,7 @@ async fn phy_service_task(mut service: PhyServiceImpl) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Radio L3 codec ping-pong (SX1262)");
+    info!("Radio L3 tick RX (SX1262)");
 
     let p = embassy_rp::init(Default::default());
 
@@ -85,8 +86,10 @@ async fn main(spawner: Spawner) {
 
     let rf_tx = Output::new(p.PIN_8, Level::Low);
     let rf_rx = Output::new(p.PIN_9, Level::Low);
+    let mut tick_pin = Output::new(p.PIN_16, Level::Low);
+    let mut rx_led = Output::new(p.PIN_25, Level::Low);
 
-    let cfg = LoRaConfig::preset_default();
+    let cfg = LoRaConfig::preset_fast();
     info!(
         "LoRa cfg: f={} Hz sf={} bw_code={} cr_code={} sw=0x{:04X}",
         cfg.freq_hz, cfg.sf, cfg.bw, cfg.cr, cfg.sync_word
@@ -119,66 +122,59 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(phy_service_task(service)).unwrap();
 
-    let mut sync = MacSync::new(SyncRole::Radio, LOCK_TIMEOUT_MS);
-    let mut ping_ok: u32 = 0;
-    let mut pong_ok: u32 = 0;
+    let mut tracker = TickTracker::new(LOCK_TIMEOUT_MS);
+    let mut tick_logs: u32 = 0;
     loop {
         let rx_fut = phy.rx();
         let poll_fut = Timer::after_millis(SYNC_POLL_MS);
         match select::select(rx_fut, poll_fut).await {
-            select::Either::First(rx) => match decode_frame(rx.bytes.as_slice()) {
-                Ok((header, payload)) => {
-                    let sync_result =
-                        sync.on_frame(rx.timestamp_ms, header.frame_type, header.tick_seq);
-                    if sync_result.event == SyncEvent::LockAcquired {
-                        info!(
-                            "SYNC LOCKED tick={} ping_rx={} pong_rx={}",
-                            header.tick_seq,
-                            sync.ping_rx(),
-                            sync.pong_rx()
-                        );
-                    }
-                    info!(
-                        "RX L3 hdr magic=0x{:04X} ver={} net=0x{:02X} tick={} type={} flags=0x{:02X} len={} rssi={} snr={}",
-                        header.magic,
-                        header.version,
-                        header.net_id,
-                        header.tick_seq,
-                        header.frame_type.name(),
-                        header.flags,
-                        payload.len(),
-                        rx.rssi,
-                        rx.snr
-                    );
-                    if sync_result.respond_pong {
-                        ping_ok = ping_ok.wrapping_add(1);
-                        let resp_header =
-                            FrameHeader::new(FrameType::AcqPong, header.tick_seq);
-                        let tx = encode_frame(&resp_header, &[]);
-                        if tx.len() < HEADER_LEN {
-                            warn!("TX encode error");
+            select::Either::First(rx) => {
+                rx_led.set_high();
+                Timer::after_micros(RX_PULSE_US).await;
+                rx_led.set_low();
+                match decode_frame(rx.bytes.as_slice()) {
+                    Ok((header, _payload)) => {
+                        if header.frame_type != FrameType::ControlUp {
+                            warn!(
+                                "RX unexpected frame type={} tick={}",
+                                header.frame_type.name(),
+                                header.tick_seq
+                            );
                             continue;
                         }
-                        if let Err(err) = phy.tx(tx.as_slice()).await {
-                            warn!("TX error: {:?}", defmt::Debug2Format(&err));
-                        } else {
-                            pong_ok = pong_ok.wrapping_add(1);
-                            info!("TX ACQ_PONG ping_ok={} pong_ok={}", ping_ok, pong_ok);
+                        tick_pin.set_high();
+                        Timer::after_micros(TICK_PULSE_US).await;
+                        tick_pin.set_low();
+
+                        let update = tracker.on_uplink(rx.timestamp_ms, header.tick_seq);
+                        if update.event == LinkEvent::LockAcquired {
+                            info!("SYNC LOCKED tick={}", header.tick_seq);
                         }
-                    } else {
-                        warn!(
-                            "RX unexpected frame type={} tick={}",
-                            header.frame_type.name(),
-                            header.tick_seq
-                        );
+                        if update.missed != 0 {
+                            warn!(
+                                "TICK gap missed={} total_missed={}",
+                                update.missed,
+                                tracker.missed_ticks()
+                            );
+                        }
+                        tick_logs = tick_logs.wrapping_add(1);
+                        if tick_logs % TICK_LOG_INTERVAL == 0 {
+                            info!(
+                                "TICK rx seq={} missed_total={} rssi={} snr={}",
+                                header.tick_seq,
+                                tracker.missed_ticks(),
+                                rx.rssi,
+                                rx.snr
+                            );
+                        }
+                    }
+                    Err(err) => {
+                        warn!("RX L3 decode error: {:?}", defmt::Debug2Format(&err));
                     }
                 }
-                Err(err) => {
-                    warn!("RX L3 decode error: {:?}", defmt::Debug2Format(&err));
-                }
-            },
+            }
             select::Either::Second(_) => {
-                if sync.poll(Instant::now().as_millis()) == SyncEvent::LockLost {
+                if tracker.poll(Instant::now().as_millis()) == LinkEvent::LockLost {
                     info!("SYNC LOST: timeout -> SEARCH");
                 }
             }

@@ -113,6 +113,7 @@ impl MacSync {
                     result.event = self.update_lock(now_ms, tick_seq);
                 }
             }
+            FrameType::ControlUp => {}
         }
 
         result

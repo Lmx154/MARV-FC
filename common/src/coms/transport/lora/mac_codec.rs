@@ -17,6 +17,7 @@ pub type FrameBytes = Vec<u8, MAX_PHY_PAYLOAD>;
 pub enum FrameType {
     AcqPing = 0x01,
     AcqPong = 0x02,
+    ControlUp = 0x10,
 }
 
 impl FrameType {
@@ -24,6 +25,7 @@ impl FrameType {
         match self {
             FrameType::AcqPing => "ACQ_PING",
             FrameType::AcqPong => "ACQ_PONG",
+            FrameType::ControlUp => "CONTROL_UP",
         }
     }
 }
@@ -100,6 +102,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(FrameHeader, &[u8]), DecodeError> {
     let frame_type = match bytes[6] {
         x if x == FrameType::AcqPing as u8 => FrameType::AcqPing,
         x if x == FrameType::AcqPong as u8 => FrameType::AcqPong,
+        x if x == FrameType::ControlUp as u8 => FrameType::ControlUp,
         other => return Err(DecodeError::UnknownFrameType(other)),
     };
     let flags = bytes[7];

@@ -33,7 +33,7 @@ pub struct LoRaConfig {
 
 impl LoRaConfig {
     /// EXACT known-good working preset.
-    pub const fn preset_default() -> Self {
+    pub const fn preset_known_good() -> Self {
         Self {
             freq_hz: 915_000_000,
 
@@ -62,6 +62,70 @@ impl LoRaConfig {
             sync_word: 0x3444,
 
             // External RF switch wiring uses swapped TX/RX control lines.
+            rf_switch_swap: true,
+        }
+    }
+
+    /// Backwards-compatible alias for the known-good preset.
+    pub const fn preset_default() -> Self {
+        Self::preset_known_good()
+    }
+
+    /// High-throughput preset for short-range bench testing.
+    pub const fn preset_fast() -> Self {
+        Self {
+            freq_hz: 915_000_000,
+
+            tcxo_enable: true,
+            tcxo_voltage: 0x02,
+            tcxo_delay_ms: 20,
+
+            use_dcdc: true,
+            tx_power: 0,
+
+            // Modulation: SF6 / BW500 / CR4/5 / LDRO off
+            sf: 6,
+            bw: 0x06,
+            cr: 0x01,
+            ldro: false,
+
+            // Shorter preamble for lower airtime.
+            preamble_len: 8,
+            explicit_header: true,
+            crc_on: true,
+            invert_iq: false,
+
+            sync_word: 0x3444,
+
+            rf_switch_swap: true,
+        }
+    }
+
+    /// Long-range preset for maximum link margin.
+    pub const fn preset_long_range() -> Self {
+        Self {
+            freq_hz: 915_000_000,
+
+            tcxo_enable: true,
+            tcxo_voltage: 0x02,
+            tcxo_delay_ms: 20,
+
+            use_dcdc: true,
+            tx_power: 14,
+
+            // Modulation: SF11 / BW125 / CR4/8 / LDRO on
+            sf: 11,
+            bw: 0x04,
+            cr: 0x04,
+            ldro: true,
+
+            preamble_len: 12,
+            explicit_header: true,
+            crc_on: true,
+            invert_iq: false,
+
+            sync_word: 0x3444,
+
             rf_switch_swap: true,
         }
     }
