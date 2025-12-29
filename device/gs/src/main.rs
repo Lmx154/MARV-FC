@@ -15,6 +15,9 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use static_cell::StaticCell;
 
+use common::coms::transport::lora::codec::{
+    decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
+};
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
     PhyChannels, PhyError, PhyService, PhyServiceConfig, TimeSource,
@@ -50,7 +53,7 @@ async fn phy_service_task(mut service: PhyServiceImpl) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("GS L2 ping-pong (SX1262)");
+    info!("GS L3 codec ping-pong (SX1262)");
 
     let p = embassy_rp::init(Default::default());
 
@@ -111,44 +114,62 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(phy_service_task(service)).unwrap();
 
-    let mut seq: u32 = 0;
+    let mut tick_seq: u16 = 0;
     let mut pong_ok: u32 = 0;
     let mut last_tx_ms: u64 = 0;
 
     loop {
-        seq = seq.wrapping_add(1);
+        tick_seq = tick_seq.wrapping_add(1);
+        let header = FrameHeader::new(FrameType::AcqPing, tick_seq);
+        let tx = encode_frame(&header, &[]);
+        if tx.len() < HEADER_LEN {
+            warn!("TX encode error");
+            Timer::after(Duration::from_millis(TX_INTERVAL_MS)).await;
+            continue;
+        }
+
         last_tx_ms = Instant::now().as_millis();
-        match phy.tx(b"PING").await {
+        match phy.tx(tx.as_slice()).await {
             Ok(()) => {}
             Err(PhyError::PayloadTooLarge) => {
                 warn!("TX payload too large");
             }
         }
-        info!("TX PING seq={}", seq);
+        info!("TX ACQ_PING tick={}", tick_seq);
 
         let rx = phy.rx().await;
-        if rx.bytes.as_slice() == b"PONG" {
-            pong_ok = pong_ok.wrapping_add(1);
-            let rtt_ms = rx.timestamp_ms.saturating_sub(last_tx_ms);
-            info!(
-                "RX PONG seq={} ok={} rtt_ms={} rssi={} snr={}",
-                seq, pong_ok, rtt_ms, rx.rssi, rx.snr
-            );
-        } else if rx.bytes.as_slice() == b"PING" {
-            warn!("RX unexpected PING len={}", rx.bytes.len());
-        } else {
-            let b0 = *rx.bytes.get(0).unwrap_or(&0);
-            let b1 = *rx.bytes.get(1).unwrap_or(&0);
-            let b2 = *rx.bytes.get(2).unwrap_or(&0);
-            let b3 = *rx.bytes.get(3).unwrap_or(&0);
-            warn!(
-                "RX unexpected len={} bytes={:02X} {:02X} {:02X} {:02X}",
-                rx.bytes.len(),
-                b0,
-                b1,
-                b2,
-                b3
-            );
+        match decode_frame(rx.bytes.as_slice()) {
+            Ok((header, payload)) => {
+                info!(
+                    "RX L3 hdr magic=0x{:04X} ver={} net=0x{:02X} tick={} type={} flags=0x{:02X} len={} rssi={} snr={}",
+                    header.magic,
+                    header.version,
+                    header.net_id,
+                    header.tick_seq,
+                    header.frame_type.name(),
+                    header.flags,
+                    payload.len(),
+                    rx.rssi,
+                    rx.snr
+                );
+                if header.frame_type == FrameType::AcqPong {
+                    pong_ok = pong_ok.wrapping_add(1);
+                    let rtt_ms = rx.timestamp_ms.saturating_sub(last_tx_ms);
+                    info!(
+                        "RX ACQ_PONG tick={} ok={} rtt_ms={}",
+                        header.tick_seq, pong_ok, rtt_ms
+                    );
+                } else {
+                    warn!(
+                        "RX unexpected frame type={} tick={}",
+                        header.frame_type.name(),
+                        header.tick_seq
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("RX L3 decode error: {:?}", defmt::Debug2Format(&err));
+            }
         }
 
         Timer::after(Duration::from_millis(TX_INTERVAL_MS)).await;

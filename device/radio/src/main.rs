@@ -15,6 +15,9 @@ use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Instant};
 use static_cell::StaticCell;
 
+use common::coms::transport::lora::codec::{
+    decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
+};
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
     PhyChannels, PhyService, PhyServiceConfig, TimeSource,
@@ -49,7 +52,7 @@ async fn phy_service_task(mut service: PhyServiceImpl) -> ! {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    info!("Radio L2 ping-pong (SX1262)");
+    info!("Radio L3 codec ping-pong (SX1262)");
 
     let p = embassy_rp::init(Default::default());
 
@@ -114,31 +117,45 @@ async fn main(spawner: Spawner) {
     let mut pong_ok: u32 = 0;
     loop {
         let rx = phy.rx().await;
-        if rx.bytes.as_slice() == b"PING" {
-            ping_ok = ping_ok.wrapping_add(1);
-            info!(
-                "RX PING ok={} rssi={} snr={}",
-                ping_ok, rx.rssi, rx.snr
-            );
-            if let Err(err) = phy.tx(b"PONG").await {
-                warn!("TX error: {:?}", defmt::Debug2Format(&err));
-            } else {
-                pong_ok = pong_ok.wrapping_add(1);
-                info!("TX PONG ok={}", pong_ok);
+        match decode_frame(rx.bytes.as_slice()) {
+            Ok((header, payload)) => {
+                info!(
+                    "RX L3 hdr magic=0x{:04X} ver={} net=0x{:02X} tick={} type={} flags=0x{:02X} len={} rssi={} snr={}",
+                    header.magic,
+                    header.version,
+                    header.net_id,
+                    header.tick_seq,
+                    header.frame_type.name(),
+                    header.flags,
+                    payload.len(),
+                    rx.rssi,
+                    rx.snr
+                );
+                if header.frame_type == FrameType::AcqPing {
+                    ping_ok = ping_ok.wrapping_add(1);
+                    let resp_header = FrameHeader::new(FrameType::AcqPong, header.tick_seq);
+                    let tx = encode_frame(&resp_header, &[]);
+                    if tx.len() < HEADER_LEN {
+                        warn!("TX encode error");
+                        continue;
+                    }
+                    if let Err(err) = phy.tx(tx.as_slice()).await {
+                        warn!("TX error: {:?}", defmt::Debug2Format(&err));
+                    } else {
+                        pong_ok = pong_ok.wrapping_add(1);
+                        info!("TX ACQ_PONG ping_ok={} pong_ok={}", ping_ok, pong_ok);
+                    }
+                } else {
+                    warn!(
+                        "RX unexpected frame type={} tick={}",
+                        header.frame_type.name(),
+                        header.tick_seq
+                    );
+                }
             }
-        } else {
-            let b0 = *rx.bytes.get(0).unwrap_or(&0);
-            let b1 = *rx.bytes.get(1).unwrap_or(&0);
-            let b2 = *rx.bytes.get(2).unwrap_or(&0);
-            let b3 = *rx.bytes.get(3).unwrap_or(&0);
-            warn!(
-                "RX unexpected len={} bytes={:02X} {:02X} {:02X} {:02X}",
-                rx.bytes.len(),
-                b0,
-                b1,
-                b2,
-                b3
-            );
+            Err(err) => {
+                warn!("RX L3 decode error: {:?}", defmt::Debug2Format(&err));
+            }
         }
     }
 }
