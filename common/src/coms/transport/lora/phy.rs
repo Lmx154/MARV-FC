@@ -28,6 +28,7 @@ pub struct RxIndication {
     pub rssi: i16,
     pub snr: i16,
     pub timestamp_ms: u64,
+    pub rx_done_instant_us: u64,
 }
 
 #[derive(Debug)]
@@ -36,12 +37,22 @@ pub enum PhyError {
 }
 
 pub trait TimeSource {
-    fn now_ms(&self) -> u64;
+    fn now_us(&self) -> u64;
+
+    fn now_ms(&self) -> u64 {
+        self.now_us() / 1000
+    }
 }
 
 impl TimeSource for () {
-    fn now_ms(&self) -> u64 {
+    fn now_us(&self) -> u64 {
         0
+    }
+}
+
+pub fn toa_us(profile: ProfileId, payload_len: usize) -> u64 {
+    match profile {
+        ProfileId::Default => LoRaConfig::preset_default().toa_us(payload_len),
     }
 }
 
@@ -192,6 +203,8 @@ where
                     self.handle_rx(pkt, &rx_buf).await;
                 }
                 Ok(None) => {}
+                Err(Sx1262Error::Radio(RadioError::CRCError)) => {}
+                Err(Sx1262Error::Radio(RadioError::HeaderError)) => {}
                 Err(Sx1262Error::Radio(RadioError::ReceiveTimeout)) => {}
                 Err(err) => {
                     defmt::warn!("phy rx error: {:?}", defmt::Debug2Format(&err));
@@ -228,12 +241,14 @@ where
         let mut bytes = Vec::<u8, MAX_PHY_PAYLOAD>::new();
         let payload = &buf[..pkt.len as usize];
         let _ = bytes.extend_from_slice(payload);
+        let rx_done_instant_us = self.time.now_us();
 
         let indication = RxIndication {
             bytes,
             rssi: pkt.rssi,
             snr: pkt.snr_x4 / 4,
-            timestamp_ms: self.time.now_ms(),
+            timestamp_ms: rx_done_instant_us / 1000,
+            rx_done_instant_us,
         };
 
         if self.rx.try_send(indication).is_err() {

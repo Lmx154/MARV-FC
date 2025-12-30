@@ -23,6 +23,7 @@ use static_cell::StaticCell;
 use common::coms::transport::lora::mac_codec::{
     decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
 };
+use common::coms::transport::lora::mac_scheduler::TickClock;
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
     PhyChannels, PhyError, PhyService, PhyServiceConfig, TimeSource,
@@ -30,17 +31,19 @@ use common::coms::transport::lora::phy::{
 use common::drivers::sx1262::Sx1262;
 
 const TICK_HZ: u32 = 50;
-const TICK_PERIOD_MS: u64 = 1000 / TICK_HZ as u64;
+const TICK_PERIOD_US: u64 = 1_000_000 / TICK_HZ as u64;
 const TICK_PULSE_US: u64 = 50;
 const RX_TIMEOUT_SYMBOLS: u16 = 16;
 const TX_QUEUE_LEN: usize = 4;
 const RX_QUEUE_LEN: usize = 4;
 const LED_BRIGHTNESS: u8 = 50;
-const LED_TX_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
-const LED_RX_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
+const LED_TICK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: LED_BRIGHTNESS };
+const LED_RX_OK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
+const LED_ERROR_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 const LED_QUEUE_LEN: usize = 16;
 const LED_PULSE_US: u64 = 2000;
+const TX_GUARD_US: u64 = 1_000;
 
 type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
 static SPI_BUS: StaticCell<SpiBus> = StaticCell::new();
@@ -54,16 +57,17 @@ type Ws2812 = PioWs2812<'static, embassy_rp::peripherals::PIO0, 0, 1>;
 
 #[derive(Clone, Copy)]
 enum LedEvent {
-    Tx,
-    Rx,
+    Tick,
+    RxOk,
+    Error,
 }
 
 #[derive(Clone, Copy)]
 struct EmbassyTimeSource;
 
 impl TimeSource for EmbassyTimeSource {
-    fn now_ms(&self) -> u64 {
-        Instant::now().as_millis()
+    fn now_us(&self) -> u64 {
+        Instant::now().as_micros()
     }
 }
 
@@ -85,8 +89,9 @@ async fn led_task(
     loop {
         let event = events.receive().await;
         let next = match event {
-            LedEvent::Tx => LED_TX_COLOR,
-            LedEvent::Rx => LED_RX_COLOR,
+            LedEvent::Tick => LED_TICK_COLOR,
+            LedEvent::RxOk => LED_RX_OK_COLOR,
+            LedEvent::Error => LED_ERROR_COLOR,
         };
         colors[0] = next;
         led.write(&colors).await;
@@ -175,19 +180,20 @@ async fn main(spawner: Spawner) {
     spawner.spawn(phy_service_task(service)).unwrap();
 
     let mut tick_seq: u16 = 0;
-    let mut next_tick_ms: u64 = Instant::now().as_millis();
+    let mut constraint_violations: u32 = 0;
+    let mut tick_clock = TickClock::new(Instant::now().as_micros(), TICK_PERIOD_US);
 
     loop {
-        let now_ms = Instant::now().as_millis();
-        let wait_ms = next_tick_ms.saturating_sub(now_ms);
+        let now_us = Instant::now().as_micros();
+        let wait_us = tick_clock.next_tick_boundary_us().saturating_sub(now_us);
         let rx_fut = phy.rx();
-        let wait_fut = Timer::after(Duration::from_millis(wait_ms));
+        let wait_fut = Timer::after(Duration::from_micros(wait_us));
 
         match select::select(rx_fut, wait_fut).await {
             select::Either::First(rx) => {
-                led_tx.send(LedEvent::Rx).await;
                 match decode_frame(rx.bytes.as_slice()) {
                     Ok((header, payload)) => {
+                        led_tx.send(LedEvent::RxOk).await;
                         warn!(
                             "RX unexpected frame type={} tick={} len={} rssi={} snr={}",
                             header.frame_type.name(),
@@ -198,21 +204,46 @@ async fn main(spawner: Spawner) {
                         );
                     }
                     Err(err) => {
+                        led_tx.send(LedEvent::Error).await;
                         warn!("RX L3 decode error: {:?}", defmt::Debug2Format(&err));
                     }
                 }
             }
             select::Either::Second(_) => {
+                let now_us = Instant::now().as_micros();
+                let Some(_tick_start_us) = tick_clock.poll(now_us) else {
+                    continue;
+                };
+                led_tx.send(LedEvent::Tick).await;
+                tick_pin.set_high();
+                Timer::after_micros(TICK_PULSE_US).await;
+                tick_pin.set_low();
+
                 tick_seq = tick_seq.wrapping_add(1);
                 let header = FrameHeader::new(FrameType::ControlUp, tick_seq);
                 let tx = encode_frame(&header, &[]);
                 if tx.len() < HEADER_LEN {
                     warn!("TX encode error");
                 } else {
-                    led_tx.send(LedEvent::Tx).await;
-                    tick_pin.set_high();
-                    Timer::after_micros(TICK_PULSE_US).await;
-                    tick_pin.set_low();
+                    let now_us = Instant::now().as_micros();
+                    let duration_us = cfg.toa_us(tx.len());
+                    let deadline_us = tick_clock.next_tick_boundary_us();
+                    let interval_us = deadline_us.saturating_sub(now_us);
+                    if now_us
+                        .saturating_add(duration_us)
+                        .saturating_add(TX_GUARD_US)
+                        > deadline_us
+                    {
+                        constraint_violations = constraint_violations.wrapping_add(1);
+                        led_tx.send(LedEvent::Error).await;
+                        warn!(
+                            "Refusing TX: ToA={}ms > Interval={}ms (violations={})",
+                            duration_us / 1000,
+                            interval_us / 1000,
+                            constraint_violations
+                        );
+                        continue;
+                    }
                     match phy.tx(tx.as_slice()).await {
                         Ok(()) => {}
                         Err(PhyError::PayloadTooLarge) => {
@@ -221,7 +252,6 @@ async fn main(spawner: Spawner) {
                     }
                     info!("TX CONTROL_UP tick={}", tick_seq);
                 }
-                next_tick_ms = Instant::now().as_millis().wrapping_add(TICK_PERIOD_MS);
             }
         }
     }

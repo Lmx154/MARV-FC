@@ -22,7 +22,7 @@ use static_cell::StaticCell;
 
 use common::coms::transport::lora::mac_codec::{decode_frame, FrameType};
 use common::coms::transport::lora::mac_scheduler::{
-    TickTracker, LinkEvent, DEFAULT_LOCK_TIMEOUT_MS,
+    TickClock, TickTracker, LinkEvent, DEFAULT_LOCK_TIMEOUT_MS,
 };
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
@@ -35,11 +35,15 @@ const TX_QUEUE_LEN: usize = 4;
 const RX_QUEUE_LEN: usize = 4;
 const LOCK_TIMEOUT_MS: u64 = DEFAULT_LOCK_TIMEOUT_MS;
 const SYNC_POLL_MS: u64 = 100;
+const TICK_HZ: u32 = 50;
+const TICK_PERIOD_US: u64 = 1_000_000 / TICK_HZ as u64;
+const TICK_PERIOD_MS: u64 = 1000 / TICK_HZ as u64;
 const TICK_PULSE_US: u64 = 50;
 const TICK_LOG_INTERVAL: u32 = 50;
 const LED_BRIGHTNESS: u8 = 50;
-const LED_RX_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
-const LED_TX_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
+const LED_TICK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: LED_BRIGHTNESS };
+const LED_RX_OK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
+const LED_ERROR_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 const LED_QUEUE_LEN: usize = 16;
 const LED_PULSE_US: u64 = 2000;
@@ -56,16 +60,17 @@ type Ws2812 = PioWs2812<'static, embassy_rp::peripherals::PIO0, 0, 1>;
 
 #[derive(Clone, Copy)]
 enum LedEvent {
-    Tx,
-    Rx,
+    Tick,
+    RxOk,
+    Error,
 }
 
 #[derive(Clone, Copy)]
 struct EmbassyTimeSource;
 
 impl TimeSource for EmbassyTimeSource {
-    fn now_ms(&self) -> u64 {
-        Instant::now().as_millis()
+    fn now_us(&self) -> u64 {
+        Instant::now().as_micros()
     }
 }
 
@@ -87,8 +92,9 @@ async fn led_task(
     loop {
         let event = events.receive().await;
         let next = match event {
-            LedEvent::Tx => LED_TX_COLOR,
-            LedEvent::Rx => LED_RX_COLOR,
+            LedEvent::Tick => LED_TICK_COLOR,
+            LedEvent::RxOk => LED_RX_OK_COLOR,
+            LedEvent::Error => LED_ERROR_COLOR,
         };
         colors[0] = next;
         led.write(&colors).await;
@@ -176,16 +182,20 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(phy_service_task(service)).unwrap();
 
-    let mut tracker = TickTracker::new(LOCK_TIMEOUT_MS);
+    let mut tracker = TickTracker::new(LOCK_TIMEOUT_MS, TICK_PERIOD_MS);
+    let mut tick_clock = TickClock::new(Instant::now().as_micros(), TICK_PERIOD_US);
     let mut tick_logs: u32 = 0;
     loop {
+        let now_us = Instant::now().as_micros();
+        let wait_us = tick_clock.next_tick_boundary_us().saturating_sub(now_us);
         let rx_fut = phy.rx();
+        let tick_fut = Timer::after_micros(wait_us);
         let poll_fut = Timer::after_millis(SYNC_POLL_MS);
-        match select::select(rx_fut, poll_fut).await {
-            select::Either::First(rx) => {
-                led_tx.send(LedEvent::Rx).await;
+        match select::select3(rx_fut, tick_fut, poll_fut).await {
+            select::Either3::First(rx) => {
                 match decode_frame(rx.bytes.as_slice()) {
                     Ok((header, _payload)) => {
+                        led_tx.send(LedEvent::RxOk).await;
                         if header.frame_type != FrameType::ControlUp {
                             warn!(
                                 "RX unexpected frame type={} tick={}",
@@ -194,11 +204,12 @@ async fn main(spawner: Spawner) {
                             );
                             continue;
                         }
-                        tick_pin.set_high();
-                        Timer::after_micros(TICK_PULSE_US).await;
-                        tick_pin.set_low();
+                        let toa_us = cfg.toa_us(rx.bytes.len());
+                        let tick_start_us = rx.rx_done_instant_us.saturating_sub(toa_us);
+                        tick_clock.align(tick_start_us);
 
-                        let update = tracker.on_uplink(rx.timestamp_ms, header.tick_seq);
+                        let update =
+                            tracker.on_uplink(rx.rx_done_instant_us / 1000, header.tick_seq);
                         if update.event == LinkEvent::LockAcquired {
                             info!("SYNC LOCKED tick={}", header.tick_seq);
                         }
@@ -207,6 +218,13 @@ async fn main(spawner: Spawner) {
                                 "TICK gap missed={} total_missed={}",
                                 update.missed,
                                 tracker.missed_ticks()
+                            );
+                        }
+                        if update.seq_anomaly != 0 {
+                            warn!(
+                                "TICK seq anomaly delta={} total_seq_anom={}",
+                                update.seq_anomaly,
+                                tracker.seq_anomaly_count()
                             );
                         }
                         tick_logs = tick_logs.wrapping_add(1);
@@ -221,11 +239,21 @@ async fn main(spawner: Spawner) {
                         }
                     }
                     Err(err) => {
+                        led_tx.send(LedEvent::Error).await;
                         warn!("RX L3 decode error: {:?}", defmt::Debug2Format(&err));
                     }
                 }
             }
-            select::Either::Second(_) => {
+            select::Either3::Second(_) => {
+                let now_us = Instant::now().as_micros();
+                if tick_clock.poll(now_us).is_some() {
+                    led_tx.send(LedEvent::Tick).await;
+                    tick_pin.set_high();
+                    Timer::after_micros(TICK_PULSE_US).await;
+                    tick_pin.set_low();
+                }
+            }
+            select::Either3::Third(_) => {
                 if tracker.poll(Instant::now().as_millis()) == LinkEvent::LockLost {
                     info!("SYNC LOST: timeout -> SEARCH");
                 }

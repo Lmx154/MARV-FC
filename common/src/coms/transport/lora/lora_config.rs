@@ -185,4 +185,119 @@ impl LoRaConfig {
         // 0x02 = 40us ramp (same as legacy driver)
         [pwr, 0x02]
     }
+
+    /// Compute LoRa time-on-air (microseconds) using Semtech SX126x formula.
+    pub fn toa_us(&self, payload_len: usize) -> u64 {
+        let bw_hz = match self.bw {
+            0x00 => 7_800,
+            0x08 => 10_400,
+            0x01 => 15_600,
+            0x09 => 20_800,
+            0x02 => 31_250,
+            0x0A => 41_700,
+            0x03 => 62_500,
+            0x04 => 125_000,
+            0x05 => 250_000,
+            0x06 => 500_000,
+            _ => return 0,
+        } as u64;
+
+        let cr = match self.cr {
+            0x01 => 1,
+            0x02 => 2,
+            0x03 => 3,
+            0x04 => 4,
+            _ => return 0,
+        } as i64;
+
+        let sf = self.sf as u32;
+        if sf < 5 || sf > 12 || bw_hz == 0 {
+            return 0;
+        }
+
+        let mut preamble_len = self.preamble_len;
+        if self.sf <= 6 && preamble_len < 12 {
+            preamble_len = 12;
+        }
+
+        let ih = if self.explicit_header { 0i64 } else { 1i64 };
+        let crc = if self.crc_on { 1i64 } else { 0i64 };
+        let de = if ((self.sf == 11 || self.sf == 12) && self.bw == 0x04)
+            || (self.sf == 12 && self.bw == 0x05)
+        {
+            1i64
+        } else {
+            0i64
+        };
+
+        let payload_len = payload_len.min(255) as i64;
+        let sf_i = self.sf as i64;
+        let payload_term = 8 * payload_len - 4 * sf_i + 28 + 16 * crc - 20 * ih;
+        let denom = 4 * (sf_i - 2 * de);
+        let mut payload_symb = 8i64;
+        if payload_term > 0 {
+            let ceil_div = (payload_term + denom - 1) / denom;
+            payload_symb += ceil_div * (cr + 4);
+        }
+
+        let tsym_num: u128 = (1_000_000u128) << sf;
+        let tsym_den: u128 = bw_hz as u128;
+        let preamble_quarters = (preamble_len as u128) * 4 + 17;
+        let total_quarters = preamble_quarters + (payload_symb as u128) * 4;
+        div_ceil(tsym_num * total_quarters, tsym_den * 4) as u64
+    }
+}
+
+fn div_ceil(n: u128, d: u128) -> u128 {
+    if d == 0 {
+        return 0;
+    }
+    (n + d - 1) / d
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LoRaConfig;
+
+    #[test]
+    fn toa_matches_sf7_example() {
+        let cfg = LoRaConfig {
+            sf: 7,
+            bw: 0x04,
+            cr: 0x01,
+            preamble_len: 8,
+            explicit_header: true,
+            crc_on: true,
+            ..LoRaConfig::preset_known_good()
+        };
+        assert_eq!(cfg.toa_us(12), 41_216);
+    }
+
+    #[test]
+    fn toa_matches_sf10_example() {
+        let cfg = LoRaConfig {
+            sf: 10,
+            bw: 0x04,
+            cr: 0x01,
+            preamble_len: 8,
+            explicit_header: true,
+            crc_on: true,
+            ..LoRaConfig::preset_known_good()
+        };
+        assert_eq!(cfg.toa_us(12), 288_768);
+    }
+
+    #[test]
+    fn toa_matches_sf12_ldro_example() {
+        let cfg = LoRaConfig {
+            sf: 12,
+            bw: 0x04,
+            cr: 0x01,
+            preamble_len: 8,
+            explicit_header: true,
+            crc_on: true,
+            ..LoRaConfig::preset_known_good()
+        };
+        assert_eq!(cfg.toa_us(12), 1_155_072);
+    }
 }
