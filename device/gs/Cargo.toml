@@ -22,6 +22,7 @@ cortex-m = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt = "0.7.0"
 critical-section = "1.1"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
+smart-leds = "0.4"
 
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
