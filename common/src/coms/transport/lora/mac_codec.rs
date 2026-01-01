@@ -18,6 +18,7 @@ pub enum FrameType {
     AcqPing = 0x01,
     AcqPong = 0x02,
     ControlUp = 0x10,
+    ControlDown = 0x11,
 }
 
 impl FrameType {
@@ -26,6 +27,7 @@ impl FrameType {
             FrameType::AcqPing => "ACQ_PING",
             FrameType::AcqPong => "ACQ_PONG",
             FrameType::ControlUp => "CONTROL_UP",
+            FrameType::ControlDown => "CONTROL_DOWN",
         }
     }
 }
@@ -103,6 +105,7 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(FrameHeader, &[u8]), DecodeError> {
         x if x == FrameType::AcqPing as u8 => FrameType::AcqPing,
         x if x == FrameType::AcqPong as u8 => FrameType::AcqPong,
         x if x == FrameType::ControlUp as u8 => FrameType::ControlUp,
+        x if x == FrameType::ControlDown as u8 => FrameType::ControlDown,
         other => return Err(DecodeError::UnknownFrameType(other)),
     };
     let flags = bytes[7];

@@ -20,13 +20,16 @@ use embassy_time::{Delay, Instant, Timer};
 use smart_leds::RGB8;
 use static_cell::StaticCell;
 
-use common::coms::transport::lora::mac_codec::{decode_frame, FrameType};
+use common::coms::transport::lora::mac_codec::{
+    decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
+};
 use common::coms::transport::lora::mac_scheduler::{
     TickClock, TickTracker, LinkEvent, DEFAULT_LOCK_TIMEOUT_MS,
 };
 use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
-    PhyChannels, PhyService, PhyServiceConfig, TimeSource,
+    toa_us, PhyChannels, PhyError, PhyService, PhyServiceConfig, ProfileId,
+    TimeSource,
 };
 use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 
@@ -40,6 +43,10 @@ const TICK_PERIOD_US: u64 = 1_000_000 / TICK_HZ as u64;
 const TICK_PERIOD_MS: u64 = 1000 / TICK_HZ as u64;
 const TICK_PULSE_US: u64 = 50;
 const TICK_LOG_INTERVAL: u32 = 50;
+const TX_GUARD_US: u64 = 1_000;
+const SLOT_RATIO_R: u16 = 5;
+const DL_TX_OFFSET_US: u64 = 2_500;
+const DOWNLINK_PAYLOAD_LEN: usize = 0;
 const LED_BRIGHTNESS: u8 = 50;
 const LED_TICK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: LED_BRIGHTNESS };
 const LED_RX_OK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
@@ -159,6 +166,8 @@ async fn main(spawner: Spawner) {
         "LoRa cfg: f={} Hz sf={} bw_code={} cr_code={} sw=0x{:04X}",
         cfg.freq_hz, cfg.sf, cfg.bw, cfg.cr, cfg.sync_word
     );
+    let active_profile =
+        ProfileId::from_config(&cfg).unwrap_or(ProfileId::Default);
 
     let radio = Sx1262::new(
         spi_dev,
@@ -190,6 +199,8 @@ async fn main(spawner: Spawner) {
     let mut tracker = TickTracker::new(LOCK_TIMEOUT_MS, TICK_PERIOD_MS);
     let mut tick_clock = TickClock::new(Instant::now().as_micros(), TICK_PERIOD_US);
     let mut tick_logs: u32 = 0;
+    let mut next_tick_seq: Option<u16> = None;
+    let mut constraint_violations: u32 = 0;
     loop {
         let now_us = Instant::now().as_micros();
         let wait_us = tick_clock.next_tick_boundary_us().saturating_sub(now_us);
@@ -209,9 +220,11 @@ async fn main(spawner: Spawner) {
                             );
                             continue;
                         }
-                        let toa_us = cfg.toa_us(rx.bytes.len());
-                        let tick_start_us = rx.rx_done_instant_us.saturating_sub(toa_us);
+                        let rx_toa_us = toa_us(active_profile, rx.bytes.len());
+                        let tick_start_us =
+                            rx.rx_done_instant_us.saturating_sub(rx_toa_us);
                         tick_clock.align(tick_start_us);
+                        next_tick_seq = Some(header.tick_seq.wrapping_add(1));
 
                         let update =
                             tracker.on_uplink(rx.rx_done_instant_us / 1000, header.tick_seq);
@@ -251,12 +264,59 @@ async fn main(spawner: Spawner) {
             }
             select::Either3::Second(_) => {
                 let now_us = Instant::now().as_micros();
-                if tick_clock.poll(now_us).is_some() {
-                    led_tx.send(LedEvent::Tick).await;
-                    tick_pin.set_high();
-                    Timer::after_micros(TICK_PULSE_US).await;
-                    tick_pin.set_low();
+                let Some(tick_start_us) = tick_clock.poll(now_us) else {
+                    continue;
+                };
+                led_tx.send(LedEvent::Tick).await;
+                tick_pin.set_high();
+                Timer::after_micros(TICK_PULSE_US).await;
+                tick_pin.set_low();
+
+                let Some(tick_seq) = next_tick_seq else {
+                    continue;
+                };
+                next_tick_seq = Some(tick_seq.wrapping_add(1));
+
+                if tick_seq % SLOT_RATIO_R != 0 {
+                    continue;
                 }
+
+                let payload = [0u8; DOWNLINK_PAYLOAD_LEN];
+                let header = FrameHeader::new(FrameType::ControlDown, tick_seq);
+                let tx = encode_frame(&header, &payload);
+                if tx.len() < HEADER_LEN {
+                    warn!("TX encode error");
+                    continue;
+                }
+
+                let window = tick_clock.window(tick_start_us, TX_GUARD_US);
+                let planned_tx_start_us =
+                    tick_start_us.saturating_add(DL_TX_OFFSET_US);
+                let now_us = Instant::now().as_micros();
+                let tx_start_us = planned_tx_start_us.max(now_us);
+                let duration_us = toa_us(active_profile, tx.len());
+                if !window.fits_tx(tx_start_us, duration_us) {
+                    constraint_violations = constraint_violations.wrapping_add(1);
+                    led_tx.send(LedEvent::Error).await;
+                    warn!(
+                        "Refusing DL TX: ToA={}ms > SlotBudget={}ms (violations={})",
+                        duration_us / 1000,
+                        window.budget_us_from(tx_start_us) / 1000,
+                        constraint_violations
+                    );
+                    continue;
+                }
+
+                if tx_start_us > now_us {
+                    Timer::after_micros(tx_start_us - now_us).await;
+                }
+                match phy.tx(tx.as_slice()).await {
+                    Ok(()) => {}
+                    Err(PhyError::PayloadTooLarge) => {
+                        warn!("TX payload too large");
+                    }
+                }
+                info!("TX CONTROL_DOWN tick={}", tick_seq);
             }
             select::Either3::Third(_) => {
                 if tracker.poll(Instant::now().as_millis()) == LinkEvent::LockLost {

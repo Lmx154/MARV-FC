@@ -114,6 +114,7 @@ impl MacSync {
                 }
             }
             FrameType::ControlUp => {}
+            FrameType::ControlDown => {}
         }
 
         result

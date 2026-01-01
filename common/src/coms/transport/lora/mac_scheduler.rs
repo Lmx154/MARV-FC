@@ -59,6 +59,23 @@ pub struct FitDecision {
     pub interval_us: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct TickWindow {
+    pub tick_start_us: u64,
+    pub tick_end_us: u64,
+    pub tx_deadline_us: u64,
+}
+
+impl TickWindow {
+    pub fn fits_tx(&self, tx_start_us: u64, duration_us: u64) -> bool {
+        tx_start_us.saturating_add(duration_us) <= self.tx_deadline_us
+    }
+
+    pub fn budget_us_from(&self, tx_start_us: u64) -> u64 {
+        self.tx_deadline_us.saturating_sub(tx_start_us)
+    }
+}
+
 impl TickClock {
     pub fn new(now_us: u64, period_us: u64) -> Self {
         let period_us = period_us.max(1);
@@ -85,6 +102,16 @@ impl TickClock {
             fits,
             deadline_us,
             interval_us,
+        }
+    }
+
+    pub fn window(&self, tick_start_us: u64, guard_us: u64) -> TickWindow {
+        let tick_end_us = tick_start_us.wrapping_add(self.period_us);
+        let tx_deadline_us = tick_end_us.saturating_sub(guard_us);
+        TickWindow {
+            tick_start_us,
+            tick_end_us,
+            tx_deadline_us,
         }
     }
 
