@@ -15,6 +15,30 @@ pub const DEFAULT_RX_QUEUE_LEN: usize = 8;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileId {
     Default,
+    Fast,
+    LongRange,
+}
+
+impl ProfileId {
+    pub fn config(self) -> LoRaConfig {
+        match self {
+            ProfileId::Default => LoRaConfig::preset_default(),
+            ProfileId::Fast => LoRaConfig::preset_fast(),
+            ProfileId::LongRange => LoRaConfig::preset_long_range(),
+        }
+    }
+
+    pub fn from_config(cfg: &LoRaConfig) -> Option<Self> {
+        if *cfg == LoRaConfig::preset_default() {
+            Some(ProfileId::Default)
+        } else if *cfg == LoRaConfig::preset_fast() {
+            Some(ProfileId::Fast)
+        } else if *cfg == LoRaConfig::preset_long_range() {
+            Some(ProfileId::LongRange)
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -51,9 +75,7 @@ impl TimeSource for () {
 }
 
 pub fn toa_us(profile: ProfileId, payload_len: usize) -> u64 {
-    match profile {
-        ProfileId::Default => LoRaConfig::preset_default().toa_us(payload_len),
-    }
+    profile.config().toa_us(payload_len)
 }
 
 pub struct PhyChannels<const TXQ: usize, const RXQ: usize> {
@@ -164,6 +186,8 @@ where
         queues: PhyServiceQueues<'a, TXQ, RXQ>,
         cfg: PhyServiceConfig,
     ) -> Self {
+        let active_profile =
+            ProfileId::from_config(radio.cfg()).unwrap_or(ProfileId::Default);
         Self {
             radio,
             tx: queues.tx,
@@ -171,7 +195,7 @@ where
             profile: queues.profile,
             time,
             cfg,
-            active_profile: ProfileId::Default,
+            active_profile,
         }
     }
 
@@ -214,21 +238,14 @@ where
     }
 
     async fn handle_profile(&mut self, profile: ProfileId) {
-        match profile {
-            ProfileId::Default => {
-                if let Err(err) = self
-                    .radio
-                    .apply_lora_config(LoRaConfig::preset_default())
-                    .await
-                {
-                    defmt::warn!(
-                        "phy profile apply error: {:?}",
-                        defmt::Debug2Format(&err)
-                    );
-                }
-                self.active_profile = profile;
-            }
+        let cfg = profile.config();
+        if let Err(err) = self.radio.apply_lora_config(cfg).await {
+            defmt::warn!(
+                "phy profile apply error: {:?}",
+                defmt::Debug2Format(&err)
+            );
         }
+        self.active_profile = profile;
     }
 
     async fn handle_tx(&mut self, req: TxRequest) {

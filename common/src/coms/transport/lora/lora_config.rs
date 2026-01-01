@@ -1,7 +1,7 @@
 // common/src/lora/lora_config.rs
 #![allow(dead_code)]
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct LoRaConfig {
     pub freq_hz: u32,
 

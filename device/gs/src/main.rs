@@ -232,19 +232,14 @@ async fn main(spawner: Spawner) {
                 } else {
                     let now_us = Instant::now().as_micros();
                     let duration_us = cfg.toa_us(tx.len());
-                    let deadline_us = tick_clock.next_tick_boundary_us();
-                    let interval_us = deadline_us.saturating_sub(now_us);
-                    if now_us
-                        .saturating_add(duration_us)
-                        .saturating_add(TX_GUARD_US)
-                        > deadline_us
-                    {
+                    let fit = tick_clock.check_fit(now_us, duration_us, TX_GUARD_US);
+                    if !fit.fits {
                         constraint_violations = constraint_violations.wrapping_add(1);
                         led_tx.send(LedEvent::Error).await;
                         warn!(
                             "Refusing TX: ToA={}ms > Interval={}ms (violations={})",
                             duration_us / 1000,
-                            interval_us / 1000,
+                            fit.interval_us / 1000,
                             constraint_violations
                         );
                         continue;

@@ -52,6 +52,13 @@ pub struct TickClock {
     next_tick_us: u64,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct FitDecision {
+    pub fits: bool,
+    pub deadline_us: u64,
+    pub interval_us: u64,
+}
+
 impl TickClock {
     pub fn new(now_us: u64, period_us: u64) -> Self {
         let period_us = period_us.max(1);
@@ -67,6 +74,18 @@ impl TickClock {
 
     pub fn next_tick_boundary_us(&self) -> u64 {
         self.next_tick_us
+    }
+
+    pub fn check_fit(&self, now_us: u64, duration_us: u64, guard_us: u64) -> FitDecision {
+        let deadline_us = self.next_tick_us;
+        let interval_us = deadline_us.saturating_sub(now_us);
+        let total_us = duration_us.saturating_add(guard_us);
+        let fits = now_us.saturating_add(total_us) <= deadline_us;
+        FitDecision {
+            fits,
+            deadline_us,
+            interval_us,
+        }
     }
 
     pub fn align(&mut self, tick_start_us: u64) {
