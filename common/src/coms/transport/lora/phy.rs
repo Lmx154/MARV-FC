@@ -241,7 +241,11 @@ where
         let mut bytes = Vec::<u8, MAX_PHY_PAYLOAD>::new();
         let payload = &buf[..pkt.len as usize];
         let _ = bytes.extend_from_slice(payload);
-        let rx_done_instant_us = self.time.now_us();
+        let rx_done_instant_us = if pkt.irq_instant_us != 0 {
+            pkt.irq_instant_us
+        } else {
+            self.time.now_us()
+        };
 
         let indication = RxIndication {
             bytes,

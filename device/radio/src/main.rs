@@ -28,7 +28,7 @@ use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
     PhyChannels, PhyService, PhyServiceConfig, TimeSource,
 };
-use common::drivers::sx1262::Sx1262;
+use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 
 const RX_TIMEOUT_SYMBOLS: u16 = 16;
 const TX_QUEUE_LEN: usize = 4;
@@ -74,6 +74,10 @@ impl TimeSource for EmbassyTimeSource {
     }
 }
 
+fn irq_timestamp_us() -> u64 {
+    Instant::now().as_micros()
+}
+
 embassy_rp::bind_interrupts!(struct PioIrqs {
     PIO0_IRQ_0 => PioInterruptHandler<embassy_rp::peripherals::PIO0>;
 });
@@ -109,6 +113,7 @@ async fn main(spawner: Spawner) {
     info!("Radio L3 tick RX (SX1262)");
 
     let p = embassy_rp::init(Default::default());
+    set_irq_timestamp_fn(irq_timestamp_us);
 
     let mut pio0 = Pio::new(p.PIO0, PioIrqs);
     let ws2812_program = PioWs2812Program::new(&mut pio0.common);

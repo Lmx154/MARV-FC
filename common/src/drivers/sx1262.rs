@@ -24,6 +24,7 @@ pub struct RawRx {
     pub len: u8,
     pub rssi: i16,
     pub snr_x4: i16,
+    pub irq_instant_us: u64,
 }
 
 #[derive(Debug)]
@@ -67,6 +68,10 @@ where
     mod_params: ModulationParams,
     rx_pkt_params: PacketParams,
     tx_pkt_params: PacketParams,
+}
+
+pub fn set_irq_timestamp_fn(f: fn() -> u64) {
+    lora_phy::set_irq_timestamp_fn(f);
 }
 
 impl<SPI, CTRL, WAIT, DLY> Sx1262<SPI, CTRL, WAIT, DLY>
@@ -211,10 +216,12 @@ where
         if len == 0 {
             return Ok(None);
         }
+        let irq_instant_us = lora_phy::last_irq_timestamp_us();
         Ok(Some(RawRx {
             len,
             rssi: status.rssi,
             snr_x4: status.snr.saturating_mul(4),
+            irq_instant_us,
         }))
     }
 }

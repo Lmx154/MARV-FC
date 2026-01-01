@@ -28,7 +28,7 @@ use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
     PhyChannels, PhyError, PhyService, PhyServiceConfig, TimeSource,
 };
-use common::drivers::sx1262::Sx1262;
+use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 
 const TICK_HZ: u32 = 50;
 const TICK_PERIOD_US: u64 = 1_000_000 / TICK_HZ as u64;
@@ -71,6 +71,10 @@ impl TimeSource for EmbassyTimeSource {
     }
 }
 
+fn irq_timestamp_us() -> u64 {
+    Instant::now().as_micros()
+}
+
 embassy_rp::bind_interrupts!(struct PioIrqs {
     PIO0_IRQ_0 => PioInterruptHandler<embassy_rp::peripherals::PIO0>;
 });
@@ -106,6 +110,7 @@ async fn main(spawner: Spawner) {
     info!("GS L3 tick uplink (SX1262)");
 
     let p = embassy_rp::init(Default::default());
+    set_irq_timestamp_fn(irq_timestamp_us);
 
     let mut pio0 = Pio::new(p.PIO0, PioIrqs);
     let ws2812_program = PioWs2812Program::new(&mut pio0.common);
