@@ -23,30 +23,30 @@ use static_cell::StaticCell;
 use common::coms::transport::lora::mac_codec::{
     decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
 };
+use common::coms::transport::lora::link_test_config::{
+    rx_timeout_symbols, ACTIVE as LINK_TEST,
+};
 use common::coms::transport::lora::mac_scheduler::{
     TickClock, TickTracker, LinkEvent, DEFAULT_LOCK_TIMEOUT_MS,
 };
-use common::coms::transport::lora::lora_config::LoRaConfig;
 use common::coms::transport::lora::phy::{
-    toa_us, PhyChannels, PhyError, PhyService, PhyServiceConfig, ProfileId,
-    TimeSource,
+    PhyChannels, PhyError, PhyService, PhyServiceConfig, TimeSource,
 };
 use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 
-const RX_TIMEOUT_SYMBOLS: u16 = 16;
 const TX_QUEUE_LEN: usize = 4;
 const RX_QUEUE_LEN: usize = 4;
 const LOCK_TIMEOUT_MS: u64 = DEFAULT_LOCK_TIMEOUT_MS;
 const SYNC_POLL_MS: u64 = 100;
-const TICK_HZ: u32 = 50;
-const TICK_PERIOD_US: u64 = 1_000_000 / TICK_HZ as u64;
-const TICK_PERIOD_MS: u64 = 1000 / TICK_HZ as u64;
+const TICK_HZ: u32 = LINK_TEST.tick_hz;
+const TICK_PERIOD_US: u64 = LINK_TEST.tick_period_us();
+const TICK_PERIOD_MS: u64 = LINK_TEST.tick_period_ms();
 const TICK_PULSE_US: u64 = 50;
 const TICK_LOG_INTERVAL: u32 = 50;
-const TX_GUARD_US: u64 = 1_000;
-const SLOT_RATIO_R: u16 = 5;
-const DL_TX_OFFSET_US: u64 = 2_500;
-const DOWNLINK_PAYLOAD_LEN: usize = 0;
+const TX_GUARD_US: u64 = LINK_TEST.tx_guard_us;
+const SLOT_RATIO_R: u16 = LINK_TEST.slot_ratio_r;
+const DL_TX_OFFSET_US: u64 = LINK_TEST.dl_tx_offset_us;
+const DOWNLINK_PAYLOAD_LEN: usize = LINK_TEST.downlink_payload_len;
 const LED_BRIGHTNESS: u8 = 50;
 const LED_TICK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: LED_BRIGHTNESS };
 const LED_RX_OK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
@@ -161,14 +161,11 @@ async fn main(spawner: Spawner) {
     let rf_rx = Output::new(p.PIN_9, Level::Low);
     let mut tick_pin = Output::new(p.PIN_16, Level::Low);
 
-    let cfg = LoRaConfig::preset_fast();
+    let cfg = LINK_TEST.lora;
     info!(
         "LoRa cfg: f={} Hz sf={} bw_code={} cr_code={} sw=0x{:04X}",
         cfg.freq_hz, cfg.sf, cfg.bw, cfg.cr, cfg.sync_word
     );
-    let active_profile =
-        ProfileId::from_config(&cfg).unwrap_or(ProfileId::Default);
-
     let radio = Sx1262::new(
         spi_dev,
         reset,
@@ -185,12 +182,13 @@ async fn main(spawner: Spawner) {
     let channels = PHY_CHANNELS.init(PhyChannels::new());
     let phy = channels.phy();
     let queues = channels.service_queues();
+    let rx_timeout_symbols = rx_timeout_symbols(LINK_TEST);
     let service = PhyService::new(
         radio,
         EmbassyTimeSource,
         queues,
         PhyServiceConfig {
-            rx_timeout_symbols: RX_TIMEOUT_SYMBOLS,
+            rx_timeout_symbols,
         },
     );
 
@@ -220,20 +218,23 @@ async fn main(spawner: Spawner) {
                             );
                             continue;
                         }
-                        let rx_toa_us = toa_us(active_profile, rx.bytes.len());
+                        let rx_toa_us = cfg.toa_us(rx.bytes.len());
                         let tick_start_us =
                             rx.rx_done_instant_us.saturating_sub(rx_toa_us);
                         tick_clock.align(tick_start_us);
                         next_tick_seq = Some(header.tick_seq.wrapping_add(1));
 
-                        let update =
-                            tracker.on_uplink(rx.rx_done_instant_us / 1000, header.tick_seq);
+                        let update = tracker.on_uplink_tdma(
+                            rx.rx_done_instant_us / 1000,
+                            header.tick_seq,
+                            SLOT_RATIO_R,
+                        );
                         if update.event == LinkEvent::LockAcquired {
                             info!("SYNC LOCKED tick={}", header.tick_seq);
                         }
                         if update.missed != 0 {
                             warn!(
-                                "TICK gap missed={} total_missed={}",
+                                "UL slot gap missed={} total_missed={}",
                                 update.missed,
                                 tracker.missed_ticks()
                             );
@@ -294,7 +295,7 @@ async fn main(spawner: Spawner) {
                     tick_start_us.saturating_add(DL_TX_OFFSET_US);
                 let now_us = Instant::now().as_micros();
                 let tx_start_us = planned_tx_start_us.max(now_us);
-                let duration_us = toa_us(active_profile, tx.len());
+                let duration_us = cfg.toa_us(tx.len());
                 if !window.fits_tx(tx_start_us, duration_us) {
                     constraint_violations = constraint_violations.wrapping_add(1);
                     led_tx.send(LedEvent::Error).await;

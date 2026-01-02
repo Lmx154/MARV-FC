@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use embassy_futures::select;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::channel::{Channel, Receiver, Sender};
 use heapless::Vec;
@@ -11,6 +12,7 @@ use crate::drivers::sx1262::{RawRx, Sx1262, Sx1262Error};
 pub const MAX_PHY_PAYLOAD: usize = 255;
 pub const DEFAULT_TX_QUEUE_LEN: usize = 4;
 pub const DEFAULT_RX_QUEUE_LEN: usize = 8;
+pub const DEFAULT_RX_CTRL_QUEUE_LEN: usize = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileId {
@@ -44,6 +46,11 @@ impl ProfileId {
 #[derive(Clone, Debug)]
 pub struct TxRequest {
     pub bytes: Vec<u8, MAX_PHY_PAYLOAD>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct RxControl {
+    pub timeout_symbols: u16,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +89,7 @@ pub struct PhyChannels<const TXQ: usize, const RXQ: usize> {
     pub tx: Channel<RawMutex, TxRequest, TXQ>,
     pub rx: Channel<RawMutex, RxIndication, RXQ>,
     pub profile: Channel<RawMutex, ProfileId, 1>,
+    pub rx_ctrl: Channel<RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
 }
 
 impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
@@ -90,6 +98,7 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
             tx: Channel::new(),
             rx: Channel::new(),
             profile: Channel::new(),
+            rx_ctrl: Channel::new(),
         }
     }
 
@@ -98,6 +107,7 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
             tx: self.tx.sender(),
             rx: self.rx.receiver(),
             profile: self.profile.sender(),
+            rx_ctrl: self.rx_ctrl.sender(),
         }
     }
 
@@ -106,6 +116,7 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
             tx: self.tx.receiver(),
             rx: self.rx.sender(),
             profile: self.profile.receiver(),
+            rx_ctrl: self.rx_ctrl.receiver(),
         }
     }
 }
@@ -115,6 +126,7 @@ pub struct Phy<'a, const TXQ: usize, const RXQ: usize> {
     tx: Sender<'a, RawMutex, TxRequest, TXQ>,
     rx: Receiver<'a, RawMutex, RxIndication, RXQ>,
     profile: Sender<'a, RawMutex, ProfileId, 1>,
+    rx_ctrl: Sender<'a, RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
 }
 
 impl<'a, const TXQ: usize, const RXQ: usize> Phy<'a, TXQ, RXQ> {
@@ -133,12 +145,19 @@ impl<'a, const TXQ: usize, const RXQ: usize> Phy<'a, TXQ, RXQ> {
     pub async fn apply_profile(&self, profile: ProfileId) {
         self.profile.send(profile).await;
     }
+
+    pub fn arm_rx(&self, timeout_symbols: u16) {
+        let _ = self
+            .rx_ctrl
+            .try_send(RxControl { timeout_symbols });
+    }
 }
 
 pub struct PhyServiceQueues<'a, const TXQ: usize, const RXQ: usize> {
     tx: Receiver<'a, RawMutex, TxRequest, TXQ>,
     rx: Sender<'a, RawMutex, RxIndication, RXQ>,
     profile: Receiver<'a, RawMutex, ProfileId, 1>,
+    rx_ctrl: Receiver<'a, RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
 }
 
 #[derive(Clone, Copy)]
@@ -166,6 +185,7 @@ where
     tx: Receiver<'a, RawMutex, TxRequest, TXQ>,
     rx: Sender<'a, RawMutex, RxIndication, RXQ>,
     profile: Receiver<'a, RawMutex, ProfileId, 1>,
+    rx_ctrl: Receiver<'a, RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
     time: TS,
     cfg: PhyServiceConfig,
     active_profile: ProfileId,
@@ -193,6 +213,7 @@ where
             tx: queues.tx,
             rx: queues.rx,
             profile: queues.profile,
+            rx_ctrl: queues.rx_ctrl,
             time,
             cfg,
             active_profile,
@@ -213,6 +234,15 @@ where
                 continue;
             }
 
+            if let Ok(ctrl) = self.rx_ctrl.try_receive() {
+                self.rx_once(ctrl.timeout_symbols, &mut rx_buf).await;
+                continue;
+            }
+
+            if self.cfg.rx_timeout_symbols == 0 {
+                continue;
+            }
+
             if let Err(err) = self
                 .radio
                 .start_rx_single(self.cfg.rx_timeout_symbols)
@@ -222,16 +252,18 @@ where
                 continue;
             }
 
-            match self.radio.wait_raw(&mut rx_buf).await {
-                Ok(Some(pkt)) => {
-                    self.handle_rx(pkt, &rx_buf).await;
+            let wait_fut = self.radio.wait_raw(&mut rx_buf);
+            let tx_fut = self.tx.receive();
+            let ctrl_fut = self.rx_ctrl.receive();
+            match select::select3(tx_fut, ctrl_fut, wait_fut).await {
+                select::Either3::First(req) => {
+                    self.handle_tx(req).await;
                 }
-                Ok(None) => {}
-                Err(Sx1262Error::Radio(RadioError::CRCError)) => {}
-                Err(Sx1262Error::Radio(RadioError::HeaderError)) => {}
-                Err(Sx1262Error::Radio(RadioError::ReceiveTimeout)) => {}
-                Err(err) => {
-                    defmt::warn!("phy rx error: {:?}", defmt::Debug2Format(&err));
+                select::Either3::Second(ctrl) => {
+                    self.rx_once(ctrl.timeout_symbols, &mut rx_buf).await;
+                }
+                select::Either3::Third(result) => {
+                    self.handle_rx_result(result, &rx_buf).await;
                 }
             }
         }
@@ -274,6 +306,39 @@ where
 
         if self.rx.try_send(indication).is_err() {
             defmt::warn!("phy rx drop: queue full");
+        }
+    }
+
+    async fn rx_once(&mut self, timeout_symbols: u16, rx_buf: &mut [u8; MAX_PHY_PAYLOAD]) {
+        if timeout_symbols == 0 {
+            return;
+        }
+
+        if let Err(err) = self.radio.start_rx_single(timeout_symbols).await {
+            defmt::warn!("phy rx start error: {:?}", defmt::Debug2Format(&err));
+            return;
+        }
+
+        let result = self.radio.wait_raw(rx_buf).await;
+        self.handle_rx_result(result, rx_buf).await;
+    }
+
+    async fn handle_rx_result(
+        &mut self,
+        result: Result<Option<RawRx>, Sx1262Error>,
+        rx_buf: &[u8; MAX_PHY_PAYLOAD],
+    ) {
+        match result {
+            Ok(Some(pkt)) => {
+                self.handle_rx(pkt, rx_buf).await;
+            }
+            Ok(None) => {}
+            Err(Sx1262Error::Radio(RadioError::CRCError)) => {}
+            Err(Sx1262Error::Radio(RadioError::HeaderError)) => {}
+            Err(Sx1262Error::Radio(RadioError::ReceiveTimeout)) => {}
+            Err(err) => {
+                defmt::warn!("phy rx error: {:?}", defmt::Debug2Format(&err));
+            }
         }
     }
 }

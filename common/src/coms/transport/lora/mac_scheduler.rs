@@ -223,6 +223,46 @@ impl TickTracker {
         update
     }
 
+    pub fn on_uplink_tdma(
+        &mut self,
+        now_ms: u64,
+        tick_seq: u16,
+        slot_ratio_r: u16,
+    ) -> TickUpdate {
+        let mut update = TickUpdate::default();
+
+        if let (Some(prev_seq), Some(last_ms)) = (self.last_tick_seq, self.last_rx_ms) {
+            let delta = tick_seq.wrapping_sub(prev_seq);
+            if delta == 0 {
+                self.dup_count = self.dup_count.wrapping_add(1);
+            } else {
+                let max_plausible = self.max_plausible_delta(now_ms, last_ms);
+                if delta > max_plausible {
+                    update.seq_anomaly = delta;
+                    self.seq_anomaly_count = self.seq_anomaly_count.wrapping_add(1);
+                } else if delta > 1 {
+                    let missed = self.missed_uplink_slots(prev_seq, tick_seq, slot_ratio_r);
+                    if missed != 0 {
+                        update.missed = missed;
+                        self.missed_ticks = self.missed_ticks.wrapping_add(missed as u32);
+                    }
+                }
+            }
+        }
+
+        self.last_tick_seq = Some(tick_seq);
+        self.last_rx_ms = Some(now_ms);
+        self.rx_count = self.rx_count.wrapping_add(1);
+
+        if self.state == LinkState::Search {
+            self.state = LinkState::Locked;
+            self.lock_count = self.lock_count.wrapping_add(1);
+            update.event = LinkEvent::LockAcquired;
+        }
+
+        update
+    }
+
     pub fn poll(&mut self, now_ms: u64) -> LinkEvent {
         if self.state != LinkState::Locked {
             return LinkEvent::None;
@@ -255,6 +295,41 @@ impl TickTracker {
             u16::MAX
         } else {
             max_with_slop as u16
+        }
+    }
+
+    fn missed_uplink_slots(
+        &self,
+        prev_seq: u16,
+        tick_seq: u16,
+        slot_ratio_r: u16,
+    ) -> u16 {
+        let delta = tick_seq.wrapping_sub(prev_seq);
+        if delta <= 1 {
+            return 0;
+        }
+
+        if slot_ratio_r <= 1 {
+            return delta - 1;
+        }
+
+        if delta > 2048 {
+            return delta - 1;
+        }
+
+        let mut uplinks = 0u16;
+        let mut seq = prev_seq;
+        for _ in 0..delta {
+            seq = seq.wrapping_add(1);
+            if (seq % slot_ratio_r) != 0 {
+                uplinks = uplinks.wrapping_add(1);
+            }
+        }
+
+        if uplinks == 0 {
+            0
+        } else {
+            uplinks - 1
         }
     }
 }
