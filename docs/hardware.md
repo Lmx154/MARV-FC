@@ -18,21 +18,17 @@ This document outlines the hardware configurations and pin assignments for the M
     - MISO: GP8
     - SCK: GP10
     - CS: GP9
-  - **I2C0**: BMP390, ADXL375
+  - **I2C0**: BMP390
     - SDA: GP12
     - SCL: GP13
     - BMP390 Address: 0x77
-    - ADXL375 Address: 0x??
   - **I2C1**: BMM350, Ublox NEO M9N GPS
     - SDA: GP6
     - SCL: GP7
     - BMM350 Address: 0x14
     - Ublox NEO M9N GPS Address: 0x42
-  - **RGB LED (Discrete, Common Cathode(Anode in PCB))**:
-    - R: GP17 
-    - G: GP18
-    - B: GP16
-    - Active High (drive pin HIGH to turn channel ON)
+  - **RGB LED (SK6812/WS2812-style addressable LED)**:
+    - GP16
   - **Buzzer (Active buzzer PWM)**:
     - GP5
   - **FC-RADIO Connection**: UART0
@@ -60,8 +56,6 @@ This document outlines the hardware configurations and pin assignments for the M
 
 
 
-
-
 ## Radio
 
 - **Microcontroller (MC)**: Raspberry Pi Pico 2 - RP2350A
@@ -83,10 +77,8 @@ This document outlines the hardware configurations and pin assignments for the M
     - TX: GP12 
     - RX: GP13 
 
-  - **RGB LED (Discrete, Common Anode in PCB)**:
-    - R: GP10
-    - G: GP11
-    - B: GP14
+  - **RGB LED (SK6812/WS2812-style addressable LED)**:
+    - GP14
 
 ## Ground Station (GS)
 
@@ -105,9 +97,8 @@ This document outlines the hardware configurations and pin assignments for the M
       - TXEN: GP8
       - RXEN: GP9
 
-    - **RGB LED (Discrete, Common Anode in PCB)**:
-      - R: GP17
-      - G: GP18
-      - B: GP16
+  - **RGB LED (SK6812/WS2812-style addressable LED)**:
+    - GP14
 
+# Pinouts do not matter for external sensors, so long as they are wired into the correct bus and the bus is specified during the sensor initialization. 
 

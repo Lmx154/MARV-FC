@@ -1,0 +1,119 @@
+<?xml version="1.0"?>
+<mavlink>
+  <!--
+    MARV-FC custom MAVLink dialect.
+
+    Goals:
+    - RF-efficient, fixed-size messages for "fast lane" traffic.
+    - Still standard MAVLink2 framing (routing/tooling stays MAVLink).
+
+    Notes:
+    - Payloads are fixed-size to keep airtime predictable.
+    - No MAVLink signing assumed.
+  -->
+
+  <version>4</version>
+  <dialect>0</dialect>
+
+  <messages>
+    <!--
+      FAST_RC
+
+      Purpose:
+      - High-rate operator intent/control setpoints.
+
+      Semantics:
+      - Best-effort (no ACK).
+      - Latest sample wins.
+
+      Encoding:
+      - seq increments per message (wrap ok)
+      - ch_count indicates how many channels are valid in the array.
+      - channels use "native" RC microseconds (1000..2000) or your chosen scaled mapping.
+
+      Fixed size:
+      - Always transmits 16 channels for predictability.
+    -->
+    <message id="42000" name="FAST_RC">
+      <description>RF-efficient packed RC/control setpoints (fixed size, newest-wins).</description>
+      <field type="uint8_t" name="seq">Sequence number (wrap ok).</field>
+      <field type="uint8_t" name="flags">Bitfield (arm intent/failsafe/link mode etc.).</field>
+      <field type="uint8_t" name="ch_count">Number of valid channels in channels[].</field>
+      <field type="uint16_t[16]" name="channels">Packed RC channels (typically 1000..2000 us).</field>
+    </message>
+
+    <!--
+      FAST_ATTITUDE_RATES
+
+      Purpose:
+      - High-rate "core" attitude + body rates for HUD/plots.
+
+      Semantics:
+      - Best-effort (no ACK).
+      - Latest sample wins.
+
+      Scaling:
+      - *_cd: centi-degrees (deg * 100)
+      - *_cds: centi-deg/s (deg/s * 100)
+    -->
+    <message id="42001" name="FAST_ATTITUDE_RATES">
+      <description>RF-efficient packed attitude and body rates (fixed size, newest-wins).</description>
+      <field type="uint8_t" name="seq">Sequence number (wrap ok).</field>
+      <field type="uint8_t" name="flags">Reserved for future use.</field>
+      <field type="int16_t" name="roll_cd">Roll angle (centi-degrees).</field>
+      <field type="int16_t" name="pitch_cd">Pitch angle (centi-degrees).</field>
+      <field type="int16_t" name="yaw_cd">Yaw angle (centi-degrees).</field>
+      <field type="int16_t" name="p_cds">Body roll rate p (centi-deg/s).</field>
+      <field type="int16_t" name="q_cds">Body pitch rate q (centi-deg/s).</field>
+      <field type="int16_t" name="r_cds">Body yaw rate r (centi-deg/s).</field>
+    </message>
+
+    <!--
+      MARV_LINK_AUTH
+
+      Purpose:
+      - Explicit Link Authority State input for RF safety gating.
+    -->
+    <message id="42002" name="MARV_LINK_AUTH">
+      <description>Explicit Link Authority State (no inference; used for RF safety gating).</description>
+      <field type="uint8_t" name="target_system">Target system (0=broadcast).</field>
+      <field type="uint8_t" name="target_component">Target component (0=broadcast).</field>
+      <field type="uint8_t" name="state">0=Unknown, 1=Disarmed, 2=Armed.</field>
+      <field type="uint16_t" name="max_age_ms">Max age before LAS is considered stale (ms).</field>
+    </message>
+
+    <!--
+      MARV_LINK_METRICS
+
+      Purpose:
+      - Full link counters for validation and field debugging.
+    -->
+    <message id="42003" name="MARV_LINK_METRICS">
+      <description>Full link counters and status for wireless link observability.</description>
+      <field type="uint32_t" name="rx_packets">Total LoRaLink RX packets.</field>
+      <field type="uint32_t" name="tx_packets">Total LoRaLink TX packets.</field>
+      <field type="uint32_t" name="q_fast">FAST queue depth (0/1).</field>
+      <field type="uint32_t" name="q_reliable">RELIABLE queue depth.</field>
+      <field type="uint32_t" name="q_normal">NORMAL queue depth.</field>
+      <field type="uint32_t" name="enq_fast">FAST enqueued count.</field>
+      <field type="uint32_t" name="enq_reliable">RELIABLE enqueued count.</field>
+      <field type="uint32_t" name="enq_normal">NORMAL enqueued count.</field>
+      <field type="uint32_t" name="tx_fast">FAST TX/dequeue count.</field>
+      <field type="uint32_t" name="tx_reliable">RELIABLE TX/dequeue count.</field>
+      <field type="uint32_t" name="tx_normal">NORMAL TX/dequeue count.</field>
+      <field type="uint32_t" name="drop_fast_replaced">FAST replaced (newest-wins) count.</field>
+      <field type="uint32_t" name="drop_reliable_overflow">RELIABLE overflow drops.</field>
+      <field type="uint32_t" name="drop_normal_overflow">NORMAL overflow drops.</field>
+      <field type="uint32_t" name="drop_too_large">Inner MTU drops.</field>
+      <field type="uint32_t" name="missed_master_ticks">Missed master MAC ticks (PER proxy).</field>
+      <field type="uint32_t" name="missed_fast_seq_rx">Missed FAST seq on RF RX.</field>
+      <field type="uint32_t" name="missed_fast_seq_tx">Missed FAST seq on UART RX.</field>
+      <field type="uint32_t" name="tx_inhibit_desync">TX inhibited due to MAC desync.</field>
+      <field type="uint32_t" name="rf_txn_state">RF reconfig state (0=Idle,1=Staged,2=Committed,3=ApplyPending).</field>
+      <field type="uint32_t" name="rf_last_result">RF reconfig last result (0=None,1=Ok,2=Denied,3=Failed,4=Timeout).</field>
+      <field type="uint32_t" name="rf_apply_at_tick">RF apply tick sequence (0 if none).</field>
+      <field type="uint32_t" name="tick_hz">MAC tick rate (Hz).</field>
+      <field type="uint32_t" name="slot_mode">MAC slot mode (0=UuuD,1=UdUd,2=Uddd).</field>
+    </message>
+  </messages>
+</mavlink>

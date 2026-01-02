@@ -7,6 +7,7 @@
 			"command": "cargo",
 			"args": [
 				"build",
+				"--release",
 				"-p",
 				"${input:firmwareCrate}",
 				"--target",
@@ -26,6 +27,7 @@
 			"command": "cargo",
 			"args": [
 				"run",
+				"--release",
 				"-p",
 				"${input:firmwareCrate}",
 				"--target",
@@ -48,7 +50,7 @@
 				"attach",
 				"--chip",
 				"RP2350",
-				"target/thumbv8m.main-none-eabihf/debug/${input:firmwareCrate}"
+				"target/thumbv8m.main-none-eabihf/release/${input:firmwareCrate}"
 			],
 			"options": {
 				"env": {
