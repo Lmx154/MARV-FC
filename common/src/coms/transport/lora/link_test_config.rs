@@ -160,7 +160,7 @@ const LORA_SF10_BW125_CR46: LoRaConfig = LoRaConfig {
 pub const FAST_TEST_CONFIG: LinkTestConfig = LinkTestConfig {
     lora: LoRaConfig::preset_fast(),
     tick_hz: 50,
-    slot_ratio_r: 5,
+    slot_ratio_r: 10,
     tx_guard_us: 1_000,
     dl_tx_offset_us: 2_500,
     rx_ready_guard_us: 800,

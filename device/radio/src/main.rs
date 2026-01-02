@@ -24,7 +24,7 @@ use common::coms::transport::lora::mac_codec::{
     decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
 };
 use common::coms::transport::lora::link_test_config::{
-    rx_timeout_symbols, ACTIVE as LINK_TEST,
+    slot_rx_symbols, ACTIVE as LINK_TEST,
 };
 use common::coms::transport::lora::mac_scheduler::{
     TickClock, TickTracker, LinkEvent, DEFAULT_LOCK_TIMEOUT_MS,
@@ -182,7 +182,7 @@ async fn main(spawner: Spawner) {
     let channels = PHY_CHANNELS.init(PhyChannels::new());
     let phy = channels.phy();
     let queues = channels.service_queues();
-    let rx_timeout_symbols = rx_timeout_symbols(LINK_TEST);
+    let rx_timeout_symbols = slot_rx_symbols(LINK_TEST);
     let service = PhyService::new(
         radio,
         EmbassyTimeSource,
