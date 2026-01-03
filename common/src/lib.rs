@@ -62,7 +62,7 @@ pub mod config;
 pub mod coms;
 pub mod log_config;
 // Higher-level stack modules are disabled during L1 bring-up.
-// Re-enable once integration testing resumes.
-// pub mod protocol;
+// Protocol is enabled for control-link framing; others remain off.
+pub mod protocol;
 // pub mod telemetry;
 // pub mod policies;
