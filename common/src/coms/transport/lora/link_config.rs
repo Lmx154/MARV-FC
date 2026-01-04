@@ -31,8 +31,9 @@ impl LinkConfig {
 pub const SHARED_RF: RfConfig = super::rf_presets::ACTIVE;
 
 // Drone vs rocket differences live in MAC schedule/payload sizing for now.
-pub const DRONE_MAC: MacConfig = super::mac_config::ACTIVE;
-pub const ROCKET_MAC: MacConfig = super::mac_config::ACTIVE;
+// These presets are derived from vehicle packetization, so keep them distinct.
+pub const DRONE_MAC: MacConfig = super::mac_config::DRONE_MAC;
+pub const ROCKET_MAC: MacConfig = super::mac_config::ROCKET_MAC;
 
 pub const DRONE: LinkConfig = LinkConfig::new(SHARED_RF, DRONE_MAC);
 pub const ROCKET: LinkConfig = LinkConfig::new(SHARED_RF, ROCKET_MAC);

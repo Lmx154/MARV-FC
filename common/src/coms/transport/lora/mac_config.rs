@@ -1,7 +1,10 @@
 //! MAC layer schedule/payload config with derived timing helpers.
 use super::mac_codec::HEADER_LEN;
+use super::mac_presets;
 use super::rf_config::RfConfig;
 
+// NOTE: These fields are selected from vehicle-specific packet sizes and lane
+// targets, so presets must remain per-vehicle even if values match.
 #[derive(Clone, Copy, Debug)]
 pub struct MacConfig {
     pub tick_hz: u32,
@@ -28,6 +31,8 @@ impl MacConfig {
 }
 
 pub fn rx_timeout_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
+    // Not shareable: this helper absorbs per-vehicle packet sizes and schedule
+    // policy (payload lengths, tick rate, guards, offsets, readiness window).
     if !mac.rx_timeout_auto {
         return mac.rx_timeout_symbols;
     }
@@ -70,6 +75,7 @@ pub fn rx_timeout_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
 }
 
 pub fn slot_rx_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
+    // Not shareable: the slot window depends on per-vehicle schedule settings.
     let symbol_us = lora_symbol_time_us(rf);
     if symbol_us == 0 {
         return mac.rx_timeout_symbols;
@@ -122,18 +128,13 @@ fn div_ceil_u128(n: u128, d: u128) -> u128 {
     (n + d - 1) / d
 }
 
+// Explicit per-vehicle and test presets (kept separate even if values match).
+pub const DRONE_MAC: MacConfig = mac_presets::DRONE_MAC;
+pub const ROCKET_MAC: MacConfig = mac_presets::ROCKET_MAC;
+pub const TEST_MAC: MacConfig = mac_presets::TEST_MAC;
+
 // Schedule/payload presets (pair with matching rf_presets values).
-pub const FAST_TEST_CONFIG: MacConfig = MacConfig {
-    tick_hz: 50,
-    slot_ratio_r: 10,
-    tx_guard_us: 1_000,
-    dl_tx_offset_us: 2_500,
-    rx_ready_guard_us: 800,
-    rx_timeout_symbols: 16,
-    rx_timeout_auto: true,
-    uplink_payload_len: 8,
-    downlink_payload_len: 8,
-};
+pub const FAST_TEST_CONFIG: MacConfig = TEST_MAC;
 
 // SF7/BW500 @ 50 Hz: "fast mid" with better margin than SF6.
 pub const FAST_SF7_BW500_50HZ: MacConfig = MacConfig {
@@ -227,4 +228,4 @@ pub const LONG_TEST_CONFIG: MacConfig = MacConfig {
 };
 
 // Toggle this to switch MAC profiles at runtime.
-pub const ACTIVE: MacConfig = FAST_TEST_CONFIG;
+pub const ACTIVE: MacConfig = DRONE_MAC;

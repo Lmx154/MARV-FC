@@ -35,6 +35,13 @@ path.
 - Drone: uses control + command on uplink, telemetry on downlink.
 - Rocket: uses command on uplink, telemetry on downlink.
 
+## Config shareability rule
+
+- Share only RF/PHY settings that are intrinsic and not derived from vehicle
+  packetization or lane requirements.
+- Treat all MAC schedule/payload values as per-vehicle; if derived from
+  rocket/drone-specific parameters, they are not shareable even if equal.
+
 ## GS state machine (tick master)
 
 ### States

@@ -2,6 +2,7 @@
 pub mod rf_config;
 pub mod rf_presets;
 pub mod mac_config;
+pub mod mac_presets;
 pub mod link_config;
 pub mod phy_service;
 pub mod mac_codec;

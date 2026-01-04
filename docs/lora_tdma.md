@@ -246,6 +246,19 @@ Given the current code:
 
 There is no lane-level TDMA; only uplink vs downlink slots.
 
+## Shareability rule (rocket vs drone)
+
+Use this rule when deciding what can be shared:
+- A value is *shareable* only if it is intrinsic to RF/PHY behavior and not
+  derived from vehicle-specific packets, lanes, or traffic requirements.
+- If a value must be derived from a rocket/drone-specific parameter (even if the
+  resulting number matches on both vehicles), it is *not* shareable.
+
+Implications:
+- RF presets can be shared if chosen independently of vehicle traffic needs.
+- All MAC schedule/payload values (and derived timing) are per-vehicle because
+  they are driven by packet sizes and lane priorities.
+
 ## Desired firmware behavior (requested target)
 
 This section describes the target behavior you want for both GS and radio
@@ -294,8 +307,10 @@ This is a logical lane decision; it does not change the physical RF config.
 ## Shared RF config vs different MAC schedules
 
 What is now possible:
-- You can share the exact same `RfConfig` between rocket and drone.
-- You can select different `MacConfig` presets per vehicle at build time.
+- You can share the exact same `RfConfig` between rocket and drone, but only if
+  it is not derived from vehicle-specific packetization.
+- You should treat `MacConfig` presets as per-vehicle regardless of numeric
+  equality, since they are derived from packet sizes and lane policies.
 
 What is not yet implemented:
 - Runtime negotiation or on-air switching of RF/MAC configs.

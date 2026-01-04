@@ -22,6 +22,12 @@ radio, and GS.
 - Command: `CommandFrame`, reliable commands with a robust ACK system.
   - Direction: GS -> radio (ground control station commands).
 
+## Config implications (rocket vs drone)
+
+- The packet mix and payload sizes differ by vehicle (rocket vs drone).
+- Any RF/MAC setting that is derived from those packet requirements is per-vehicle
+  and should not be shared, even if the numeric values happen to match.
+
 ## Data model
 
 ### Packet families

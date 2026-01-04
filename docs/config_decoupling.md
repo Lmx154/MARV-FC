@@ -200,6 +200,20 @@ So the dependency is one-way:
 - RfConfig (plus payload length) constrains valid tick rates and slot timing.
 - MacConfig does not change RfConfig.
 
+## Shareability rule (rocket vs drone)
+
+When evaluating what can be shared across vehicles, use this rule:
+- A value is *shareable* only if it is intrinsic to the RF/PHY hardware and is
+  not derived from vehicle-specific packets, lanes, or traffic requirements.
+- If a value must be derived from a rocket/drone-specific parameter (even if the
+  resulting number matches on both vehicles), it is *not* shareable.
+
+Implications:
+- RF/PHY presets are shareable as long as they are not computed from vehicle
+  traffic needs.
+- All MAC schedule/payload values (and any derived timing) are per-vehicle
+  because they are driven by packet sizes, lane priorities, and rate targets.
+
 ## What this means for decoupling (current state)
 
 The split is now implemented:
@@ -218,8 +232,7 @@ What remains coupled today:
    for a given RF/MAC pair so unsafe combos fail fast.
 2) Wire runtime selection so GS can choose a pair (or separate RF + MAC configs)
    and command the radio to switch at a known tick boundary.
-3) Decide which RF presets are truly shared across rocket and drone and move
-   vehicle-specific differences into MAC config (payload sizes, slot ratio,
-   tick rate) or higher-layer lane policy.
-4) Add explicit drone/rocket MAC presets in `link_config.rs` once payload sizing
-   and lane policy are finalized.
+3) Keep RF presets shareable only when they are not derived from vehicle
+   packetization; otherwise they are per-vehicle.
+4) Treat all MAC presets as per-vehicle (rocket vs drone), even if the values
+   happen to match, to avoid coupling through packet-specific derivations.
