@@ -1,18 +1,19 @@
-use super::link_test_config::LinkTestConfig;
-use super::lora_config::LoRaConfig;
+//! Link-level derived timing profile built from RF + MAC for MAC engines.
+use super::mac_codec::HEADER_LEN;
+use super::mac_config::MacConfig;
+use super::rf_config::RfConfig;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LinkProfile {
-    pub lora: LoRaConfig,
     pub tick_hz: u32,
     pub slot_ratio_r: u16,
     pub tx_guard_us: u64,
     pub dl_tx_offset_us: u64,
     pub rx_ready_guard_us: u64,
-    pub rx_timeout_symbols: u16,
-    pub rx_timeout_auto: bool,
     pub uplink_payload_len: usize,
     pub downlink_payload_len: usize,
+    pub uplink_toa_us: u64,
+    pub downlink_toa_us: u64,
 }
 
 impl LinkProfile {
@@ -26,39 +27,23 @@ impl LinkProfile {
         1000u64 / hz as u64
     }
 
-    pub const fn from_test(cfg: LinkTestConfig) -> Self {
+    pub fn from_configs(rf: RfConfig, mac: MacConfig) -> Self {
+        let uplink_len = frame_len(mac.uplink_payload_len);
+        let downlink_len = frame_len(mac.downlink_payload_len);
         Self {
-            lora: cfg.lora,
-            tick_hz: cfg.tick_hz,
-            slot_ratio_r: cfg.slot_ratio_r,
-            tx_guard_us: cfg.tx_guard_us,
-            dl_tx_offset_us: cfg.dl_tx_offset_us,
-            rx_ready_guard_us: cfg.rx_ready_guard_us,
-            rx_timeout_symbols: cfg.rx_timeout_symbols,
-            rx_timeout_auto: cfg.rx_timeout_auto,
-            uplink_payload_len: cfg.uplink_payload_len,
-            downlink_payload_len: cfg.downlink_payload_len,
-        }
-    }
-
-    pub fn as_test_config(&self) -> LinkTestConfig {
-        LinkTestConfig {
-            lora: self.lora,
-            tick_hz: self.tick_hz,
-            slot_ratio_r: self.slot_ratio_r,
-            tx_guard_us: self.tx_guard_us,
-            dl_tx_offset_us: self.dl_tx_offset_us,
-            rx_ready_guard_us: self.rx_ready_guard_us,
-            rx_timeout_symbols: self.rx_timeout_symbols,
-            rx_timeout_auto: self.rx_timeout_auto,
-            uplink_payload_len: self.uplink_payload_len,
-            downlink_payload_len: self.downlink_payload_len,
+            tick_hz: mac.tick_hz,
+            slot_ratio_r: mac.slot_ratio_r,
+            tx_guard_us: mac.tx_guard_us,
+            dl_tx_offset_us: mac.dl_tx_offset_us,
+            rx_ready_guard_us: mac.rx_ready_guard_us,
+            uplink_payload_len: mac.uplink_payload_len,
+            downlink_payload_len: mac.downlink_payload_len,
+            uplink_toa_us: rf.toa_us(uplink_len),
+            downlink_toa_us: rf.toa_us(downlink_len),
         }
     }
 }
 
-impl From<LinkTestConfig> for LinkProfile {
-    fn from(cfg: LinkTestConfig) -> Self {
-        Self::from_test(cfg)
-    }
+fn frame_len(payload_len: usize) -> usize {
+    HEADER_LEN + payload_len
 }

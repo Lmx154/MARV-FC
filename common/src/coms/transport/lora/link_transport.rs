@@ -1,3 +1,4 @@
+//! Link-level packet selection and ARQ; independent of RF/MAC timing.
 use heapless::Vec;
 
 use crate::protocol::packet::{

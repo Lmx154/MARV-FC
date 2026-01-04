@@ -12,8 +12,8 @@ use common::coms::transport::lora::mac_codec::{
 use common::coms::transport::lora::mac_scheduler::{
     LinkEvent, TickClock, TickTracker, DEFAULT_LOCK_TIMEOUT_MS,
 };
-use common::coms::transport::lora::phy::{Phy, PhyError, RxIndication};
-use common::coms::transport::lora::transport::{LoraTransport, RxMeta};
+use common::coms::transport::lora::phy_service::{Phy, PhyError, RxIndication};
+use common::coms::transport::lora::link_transport::{LoraTransport, RxMeta};
 use common::protocol::packet::{decode_packet, encode_packet_fixed, Packet, PacketType};
 
 pub const LED_QUEUE_LEN: usize = 16;
@@ -140,7 +140,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
                     return;
                 }
 
-                let rx_toa_us = self.profile.lora.toa_us(rx.bytes.len());
+                let rx_toa_us = self.profile.uplink_toa_us;
                 let tick_start_us = rx.rx_done_instant_us.saturating_sub(rx_toa_us);
                 self.tick_clock.align(tick_start_us);
                 self.next_tick_seq = Some(header.tick_seq.wrapping_add(1));
@@ -254,7 +254,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         let planned_tx_start_us = tick_start_us.saturating_add(self.profile.dl_tx_offset_us);
         let now_us = Instant::now().as_micros();
         let tx_start_us = planned_tx_start_us.max(now_us);
-        let duration_us = self.profile.lora.toa_us(tx.len());
+        let duration_us = self.profile.downlink_toa_us;
         if !window.fits_tx(tx_start_us, duration_us) {
             self.constraint_violations = self.constraint_violations.wrapping_add(1);
             self.send_led(LedEvent::Error).await;

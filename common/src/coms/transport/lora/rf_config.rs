@@ -1,4 +1,4 @@
-// common/src/lora/lora_config.rs
+//! RF layer config type, PHY parameters, and time-on-air math.
 #![allow(dead_code)]
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +30,8 @@ pub struct LoRaConfig {
     // RF switch wiring: some modules require TX/RX control pins swapped.
     pub rf_switch_swap: bool,
 }
+
+pub type RfConfig = LoRaConfig;
 
 impl LoRaConfig {
     /// EXACT known-good working preset.

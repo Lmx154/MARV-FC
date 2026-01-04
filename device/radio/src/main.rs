@@ -21,14 +21,11 @@ use embassy_time::{Delay, Instant, Timer};
 use smart_leds::RGB8;
 use static_cell::StaticCell;
 
-use common::coms::transport::lora::link_profile::LinkProfile;
-use common::coms::transport::lora::link_test_config::{
-    slot_rx_symbols, ACTIVE as LINK_TEST,
-};
-use common::coms::transport::lora::phy::{
+use common::coms::transport::lora::link_config::ACTIVE as LINK_CONFIG;
+use common::coms::transport::lora::phy_service::{
     PhyChannels, PhyService, PhyServiceConfig, TimeSource,
 };
-use common::coms::transport::lora::transport::LoraTransport;
+use common::coms::transport::lora::link_transport::LoraTransport;
 use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 
 use crate::mac_engine::{LedEvent, MacEngine, MacEngineConfig, LED_QUEUE_LEN};
@@ -160,10 +157,11 @@ async fn main(spawner: Spawner) {
     let rf_rx = Output::new(p.PIN_9, Level::Low);
     let tick_pin = Output::new(p.PIN_16, Level::Low);
 
-    let cfg = LINK_TEST.lora;
+    let link_cfg = LINK_CONFIG;
+    let rf_cfg = link_cfg.rf;
     info!(
         "LoRa cfg: f={} Hz sf={} bw_code={} cr_code={} sw=0x{:04X}",
-        cfg.freq_hz, cfg.sf, cfg.bw, cfg.cr, cfg.sync_word
+        rf_cfg.freq_hz, rf_cfg.sf, rf_cfg.bw, rf_cfg.cr, rf_cfg.sync_word
     );
     let radio = Sx1262::new(
         spi_dev,
@@ -172,7 +170,7 @@ async fn main(spawner: Spawner) {
         dio1,
         rf_tx,
         rf_rx,
-        cfg,
+        rf_cfg,
         Delay,
     )
     .await
@@ -181,7 +179,7 @@ async fn main(spawner: Spawner) {
     let channels = PHY_CHANNELS.init(PhyChannels::new());
     let phy = channels.phy();
     let queues = channels.service_queues();
-    let rx_timeout_symbols = slot_rx_symbols(LINK_TEST);
+    let rx_timeout_symbols = link_cfg.slot_rx_symbols();
     let service = PhyService::new(
         radio,
         EmbassyTimeSource,
@@ -193,7 +191,7 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(phy_service_task(service)).unwrap();
 
-    let profile = LinkProfile::from(LINK_TEST);
+    let profile = link_cfg.profile();
     let transport = LoraTransport::default();
     let mut engine = MacEngine::new(
         phy,

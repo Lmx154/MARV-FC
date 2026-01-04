@@ -1,4 +1,4 @@
-//phase 4
+//! MAC layer acquisition sync (ping/pong) state machine.
 use super::mac_codec::FrameType;
 
 pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 1000;

@@ -17,7 +17,7 @@ use lora_phy::sx126x::{
 };
 use lora_phy::LoRa;
 
-use crate::coms::transport::lora::lora_config::LoRaConfig;
+use crate::coms::transport::lora::rf_config::LoRaConfig;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RawRx {

@@ -10,8 +10,8 @@ use common::coms::transport::lora::mac_codec::{
     decode_frame, encode_frame, FrameHeader, FrameType, HEADER_LEN,
 };
 use common::coms::transport::lora::mac_scheduler::TickClock;
-use common::coms::transport::lora::phy::{Phy, PhyError, RxIndication};
-use common::coms::transport::lora::transport::{LoraTransport, RxMeta};
+use common::coms::transport::lora::phy_service::{Phy, PhyError, RxIndication};
+use common::coms::transport::lora::link_transport::{LoraTransport, RxMeta};
 use common::protocol::packet::{decode_packet, encode_packet_fixed, Packet, PacketType};
 
 pub const LED_QUEUE_LEN: usize = 16;
@@ -221,7 +221,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
 
         let window = self.tick_clock.window(tick_start_us, self.profile.tx_guard_us);
         let tx_start_us = Instant::now().as_micros();
-        let duration_us = self.profile.lora.toa_us(tx.len());
+        let duration_us = self.profile.uplink_toa_us;
         if !window.fits_tx(tx_start_us, duration_us) {
             self.constraint_violations = self.constraint_violations.wrapping_add(1);
             self.send_led(LedEvent::Error).await;

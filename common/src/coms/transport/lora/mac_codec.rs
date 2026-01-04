@@ -1,6 +1,7 @@
+//! MAC layer on-air frame codec and constants.
 use heapless::Vec;
 
-use super::phy::MAX_PHY_PAYLOAD;
+use super::phy_service::MAX_PHY_PAYLOAD;
 
 // On-air header uses little-endian encoding for multi-byte fields.
 pub const MAGIC: u16 = 0x4D52;

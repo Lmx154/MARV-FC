@@ -1,3 +1,4 @@
+//! MAC layer tick scheduling, fit checks, and lock tracking.
 pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 1000;
 pub const DEFAULT_TICK_SLOP_TICKS: u16 = 2;
 

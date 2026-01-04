@@ -1,9 +1,9 @@
-use super::lora_config::LoRaConfig;
+//! MAC layer schedule/payload config with derived timing helpers.
 use super::mac_codec::HEADER_LEN;
+use super::rf_config::RfConfig;
 
-#[derive(Clone, Copy)]
-pub struct LinkTestConfig {
-    pub lora: LoRaConfig,
+#[derive(Clone, Copy, Debug)]
+pub struct MacConfig {
     pub tick_hz: u32,
     pub slot_ratio_r: u16,
     pub tx_guard_us: u64,
@@ -15,7 +15,7 @@ pub struct LinkTestConfig {
     pub downlink_payload_len: usize,
 }
 
-impl LinkTestConfig {
+impl MacConfig {
     pub const fn tick_period_us(self) -> u64 {
         let hz = if self.tick_hz == 0 { 1 } else { self.tick_hz };
         1_000_000u64 / hz as u64
@@ -27,30 +27,30 @@ impl LinkTestConfig {
     }
 }
 
-pub fn rx_timeout_symbols(cfg: LinkTestConfig) -> u16 {
-    if !cfg.rx_timeout_auto {
-        return cfg.rx_timeout_symbols;
+pub fn rx_timeout_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
+    if !mac.rx_timeout_auto {
+        return mac.rx_timeout_symbols;
     }
 
-    let symbol_us = lora_symbol_time_us(cfg.lora);
+    let symbol_us = lora_symbol_time_us(rf);
     if symbol_us == 0 {
-        return cfg.rx_timeout_symbols;
+        return mac.rx_timeout_symbols;
     }
 
-    let uplink_len = HEADER_LEN + cfg.uplink_payload_len;
-    let downlink_len = HEADER_LEN + cfg.downlink_payload_len;
-    let uplink_toa_us = cfg.lora.toa_us(uplink_len);
-    let downlink_toa_us = cfg.lora.toa_us(downlink_len);
-    let tick_period_us = cfg.tick_period_us();
+    let uplink_len = HEADER_LEN + mac.uplink_payload_len;
+    let downlink_len = HEADER_LEN + mac.downlink_payload_len;
+    let uplink_toa_us = rf.toa_us(uplink_len);
+    let downlink_toa_us = rf.toa_us(downlink_len);
+    let tick_period_us = mac.tick_period_us();
 
     let max_tx_delay_us = tick_period_us
-        .saturating_sub(cfg.tx_guard_us)
+        .saturating_sub(mac.tx_guard_us)
         .saturating_sub(uplink_toa_us);
 
-    let target_rx_us = cfg
+    let target_rx_us = mac
         .dl_tx_offset_us
         .saturating_add(downlink_toa_us)
-        .saturating_add(cfg.rx_ready_guard_us);
+        .saturating_add(mac.rx_ready_guard_us);
 
     let rx_us = if max_tx_delay_us == 0 {
         target_rx_us.min(tick_period_us)
@@ -62,28 +62,28 @@ pub fn rx_timeout_symbols(cfg: LinkTestConfig) -> u16 {
     if symbols < 4 {
         symbols = 4;
     }
-    if symbols < cfg.rx_timeout_symbols {
-        cfg.rx_timeout_symbols
+    if symbols < mac.rx_timeout_symbols {
+        mac.rx_timeout_symbols
     } else {
         symbols
     }
 }
 
-pub fn slot_rx_symbols(cfg: LinkTestConfig) -> u16 {
-    let symbol_us = lora_symbol_time_us(cfg.lora);
+pub fn slot_rx_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
+    let symbol_us = lora_symbol_time_us(rf);
     if symbol_us == 0 {
-        return cfg.rx_timeout_symbols;
+        return mac.rx_timeout_symbols;
     }
 
-    let slot_us = cfg.tick_period_us().saturating_sub(cfg.tx_guard_us);
+    let slot_us = mac.tick_period_us().saturating_sub(mac.tx_guard_us);
     let mut symbols = div_ceil_u64(slot_us.max(1), symbol_us) as u16;
-    if symbols < cfg.rx_timeout_symbols {
-        symbols = cfg.rx_timeout_symbols;
+    if symbols < mac.rx_timeout_symbols {
+        symbols = mac.rx_timeout_symbols;
     }
     symbols
 }
 
-fn lora_symbol_time_us(cfg: LoRaConfig) -> u64 {
+fn lora_symbol_time_us(cfg: RfConfig) -> u64 {
     let bw_hz = match cfg.bw {
         0x00 => 7_800,
         0x08 => 10_400,
@@ -122,43 +122,8 @@ fn div_ceil_u128(n: u128, d: u128) -> u128 {
     (n + d - 1) / d
 }
 
-// Fast-mid profile: better margin than SF6, still high throughput.
-const LORA_SF7_BW500_CR45: LoRaConfig = LoRaConfig {
-    sf: 7,
-    bw: 0x06,
-    cr: 0x01,
-    ..LoRaConfig::preset_fast()
-};
-
-// Fast profile: default bench throughput preset (SF6/BW500/CR4/5).
-const LORA_SF6_BW500_CR45: LoRaConfig = LoRaConfig::preset_fast();
-
-// Max bandwidth LoRa (short-range / stress testing).
-const LORA_SF5_BW500_CR45: LoRaConfig = LoRaConfig {
-    sf: 5,
-    bw: 0x06,
-    cr: 0x01,
-    ..LoRaConfig::preset_fast()
-};
-
-// Robust mid-range profile.
-const LORA_SF9_BW250_CR46: LoRaConfig = LoRaConfig {
-    sf: 9,
-    bw: 0x05,
-    cr: 0x02,
-    ..LoRaConfig::preset_fast()
-};
-
-// Long-range-ish profile (slower, larger link budget).
-const LORA_SF10_BW125_CR46: LoRaConfig = LoRaConfig {
-    sf: 10,
-    bw: 0x04,
-    cr: 0x02,
-    ..LoRaConfig::preset_fast()
-};
-
-pub const FAST_TEST_CONFIG: LinkTestConfig = LinkTestConfig {
-    lora: LoRaConfig::preset_fast(),
+// Schedule/payload presets (pair with matching rf_presets values).
+pub const FAST_TEST_CONFIG: MacConfig = MacConfig {
     tick_hz: 50,
     slot_ratio_r: 10,
     tx_guard_us: 1_000,
@@ -171,8 +136,7 @@ pub const FAST_TEST_CONFIG: LinkTestConfig = LinkTestConfig {
 };
 
 // SF7/BW500 @ 50 Hz: "fast mid" with better margin than SF6.
-pub const FAST_SF7_BW500_50HZ: LinkTestConfig = LinkTestConfig {
-    lora: LORA_SF7_BW500_CR45,
+pub const FAST_SF7_BW500_50HZ: MacConfig = MacConfig {
     tick_hz: 50,
     slot_ratio_r: 5,
     tx_guard_us: 1_000,
@@ -185,8 +149,7 @@ pub const FAST_SF7_BW500_50HZ: LinkTestConfig = LinkTestConfig {
 };
 
 // SF6/BW500 @ 100 Hz: higher refresh with tiny frames.
-pub const FAST_SF6_BW500_100HZ_TINY: LinkTestConfig = LinkTestConfig {
-    lora: LORA_SF6_BW500_CR45,
+pub const FAST_SF6_BW500_100HZ_TINY: MacConfig = MacConfig {
     tick_hz: 100,
     slot_ratio_r: 5,
     tx_guard_us: 1_000,
@@ -199,8 +162,7 @@ pub const FAST_SF6_BW500_100HZ_TINY: LinkTestConfig = LinkTestConfig {
 };
 
 // SF5/BW500 @ 150 Hz: aggressive refresh, minimal margin.
-pub const FAST_SF5_BW500_150HZ_TINY: LinkTestConfig = LinkTestConfig {
-    lora: LORA_SF5_BW500_CR45,
+pub const FAST_SF5_BW500_150HZ_TINY: MacConfig = MacConfig {
     tick_hz: 150,
     slot_ratio_r: 5,
     tx_guard_us: 500,
@@ -213,8 +175,7 @@ pub const FAST_SF5_BW500_150HZ_TINY: LinkTestConfig = LinkTestConfig {
 };
 
 // SF5/BW500 @ 200 Hz: extreme test, essentially header-only frames.
-pub const FAST_SF5_BW500_200HZ_MIN: LinkTestConfig = LinkTestConfig {
-    lora: LORA_SF5_BW500_CR45,
+pub const FAST_SF5_BW500_200HZ_MIN: MacConfig = MacConfig {
     tick_hz: 200,
     slot_ratio_r: 5,
     tx_guard_us: 500,
@@ -227,8 +188,7 @@ pub const FAST_SF5_BW500_200HZ_MIN: LinkTestConfig = LinkTestConfig {
 };
 
 // SF9/BW250 @ 10 Hz: robust mid-range telemetry.
-pub const ROBUST_SF9_BW250_10HZ: LinkTestConfig = LinkTestConfig {
-    lora: LORA_SF9_BW250_CR46,
+pub const ROBUST_SF9_BW250_10HZ: MacConfig = MacConfig {
     tick_hz: 10,
     slot_ratio_r: 5,
     tx_guard_us: 1_000,
@@ -241,8 +201,7 @@ pub const ROBUST_SF9_BW250_10HZ: LinkTestConfig = LinkTestConfig {
 };
 
 // SF10/BW125 @ 2 Hz: slow, higher link budget.
-pub const RANGE_SF10_BW125_2HZ: LinkTestConfig = LinkTestConfig {
-    lora: LORA_SF10_BW125_CR46,
+pub const RANGE_SF10_BW125_2HZ: MacConfig = MacConfig {
     tick_hz: 2,
     slot_ratio_r: 5,
     tx_guard_us: 1_000,
@@ -255,8 +214,7 @@ pub const RANGE_SF10_BW125_2HZ: LinkTestConfig = LinkTestConfig {
 };
 
 // SF11/BW125/CR4/8 @ 1 Hz: maximum range preset (very slow).
-pub const LONG_TEST_CONFIG: LinkTestConfig = LinkTestConfig {
-    lora: LoRaConfig::preset_long_range(),
+pub const LONG_TEST_CONFIG: MacConfig = MacConfig {
     tick_hz: 1,
     slot_ratio_r: 5,
     tx_guard_us: 1_000,
@@ -268,5 +226,5 @@ pub const LONG_TEST_CONFIG: LinkTestConfig = LinkTestConfig {
     downlink_payload_len: 8,
 };
 
-// Toggle this to switch profiles for both GS and Radio during testing.
-pub const ACTIVE: LinkTestConfig = FAST_TEST_CONFIG;
+// Toggle this to switch MAC profiles at runtime.
+pub const ACTIVE: MacConfig = FAST_TEST_CONFIG;

@@ -1,3 +1,4 @@
+//! PHY service loop, radio I/O, and profile switching.
 #![allow(dead_code)]
 
 use embassy_futures::select;
@@ -6,7 +7,7 @@ use embassy_sync::channel::{Channel, Receiver, Sender};
 use heapless::Vec;
 use lora_phy::mod_params::RadioError;
 
-use super::lora_config::LoRaConfig;
+use super::rf_config::LoRaConfig;
 use crate::drivers::sx1262::{RawRx, Sx1262, Sx1262Error};
 
 pub const MAX_PHY_PAYLOAD: usize = 255;
