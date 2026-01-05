@@ -13,7 +13,11 @@ pub enum PacketType {
     Command = 0x02,
     LinkStats = 0x10,
     Ack = 0x11,
-    Telemetry = 0x12,
+    TelemetryImu = 0x12,
+    TelemetryBaro = 0x13,
+    TelemetryMag = 0x14,
+    TelemetryGps = 0x15,
+    TelemetrySystem = 0x16,
 }
 
 impl PacketType {
@@ -24,7 +28,11 @@ impl PacketType {
             0x02 => Some(PacketType::Command),
             0x10 => Some(PacketType::LinkStats),
             0x11 => Some(PacketType::Ack),
-            0x12 => Some(PacketType::Telemetry),
+            0x12 => Some(PacketType::TelemetryImu),
+            0x13 => Some(PacketType::TelemetryBaro),
+            0x14 => Some(PacketType::TelemetryMag),
+            0x15 => Some(PacketType::TelemetryGps),
+            0x16 => Some(PacketType::TelemetrySystem),
             _ => None,
         }
     }
@@ -36,7 +44,11 @@ impl PacketType {
             PacketType::Command => "COMMAND",
             PacketType::LinkStats => "LINK_STATS",
             PacketType::Ack => "ACK",
-            PacketType::Telemetry => "TELEMETRY",
+            PacketType::TelemetryImu => "TELEMETRY_IMU",
+            PacketType::TelemetryBaro => "TELEMETRY_BARO",
+            PacketType::TelemetryMag => "TELEMETRY_MAG",
+            PacketType::TelemetryGps => "TELEMETRY_GPS",
+            PacketType::TelemetrySystem => "TELEMETRY_SYSTEM",
         }
     }
 }
@@ -115,6 +127,161 @@ impl LinkStats {
             rssi: i16::from_le_bytes([bytes[0], bytes[1]]),
             snr: i16::from_le_bytes([bytes[2], bytes[3]]),
             lq: bytes[4],
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelemetryImu {
+    pub accel: [i16; 3],
+    pub gyro: [i16; 3],
+}
+
+impl TelemetryImu {
+    pub fn encode(&self) -> Vec<u8, MAX_PACKET_PAYLOAD> {
+        let mut out = Vec::new();
+        for v in self.accel {
+            let _ = out.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in self.gyro {
+            let _ = out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() < 12 {
+            return Err(DecodeError::BadLength);
+        }
+        Ok(TelemetryImu {
+            accel: [
+                i16::from_le_bytes([bytes[0], bytes[1]]),
+                i16::from_le_bytes([bytes[2], bytes[3]]),
+                i16::from_le_bytes([bytes[4], bytes[5]]),
+            ],
+            gyro: [
+                i16::from_le_bytes([bytes[6], bytes[7]]),
+                i16::from_le_bytes([bytes[8], bytes[9]]),
+                i16::from_le_bytes([bytes[10], bytes[11]]),
+            ],
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelemetryBaro {
+    pub pressure_pa: i32,
+    pub temp_c_x10: i16,
+}
+
+impl TelemetryBaro {
+    pub fn encode(&self) -> Vec<u8, MAX_PACKET_PAYLOAD> {
+        let mut out = Vec::new();
+        let _ = out.extend_from_slice(&self.pressure_pa.to_le_bytes());
+        let _ = out.extend_from_slice(&self.temp_c_x10.to_le_bytes());
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() < 6 {
+            return Err(DecodeError::BadLength);
+        }
+        Ok(TelemetryBaro {
+            pressure_pa: i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            temp_c_x10: i16::from_le_bytes([bytes[4], bytes[5]]),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelemetryMag {
+    pub mag: [i16; 3],
+}
+
+impl TelemetryMag {
+    pub fn encode(&self) -> Vec<u8, MAX_PACKET_PAYLOAD> {
+        let mut out = Vec::new();
+        for v in self.mag {
+            let _ = out.extend_from_slice(&v.to_le_bytes());
+        }
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() < 6 {
+            return Err(DecodeError::BadLength);
+        }
+        Ok(TelemetryMag {
+            mag: [
+                i16::from_le_bytes([bytes[0], bytes[1]]),
+                i16::from_le_bytes([bytes[2], bytes[3]]),
+                i16::from_le_bytes([bytes[4], bytes[5]]),
+            ],
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelemetryGps {
+    pub lat: i32,
+    pub lon: i32,
+    pub alt_mm: i32,
+    pub sats: u8,
+    pub fix: u8,
+}
+
+impl TelemetryGps {
+    pub fn encode(&self) -> Vec<u8, MAX_PACKET_PAYLOAD> {
+        let mut out = Vec::new();
+        let _ = out.extend_from_slice(&self.lat.to_le_bytes());
+        let _ = out.extend_from_slice(&self.lon.to_le_bytes());
+        let _ = out.extend_from_slice(&self.alt_mm.to_le_bytes());
+        let _ = out.push(self.sats);
+        let _ = out.push(self.fix);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() < 14 {
+            return Err(DecodeError::BadLength);
+        }
+        Ok(TelemetryGps {
+            lat: i32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            lon: i32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+            alt_mm: i32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]),
+            sats: bytes[12],
+            fix: bytes[13],
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TelemetrySystem {
+    pub vbat_mv: u16,
+    pub temp_c: i8,
+    pub arm_status: u8,
+    pub rssi_uplink: i8,
+}
+
+impl TelemetrySystem {
+    pub fn encode(&self) -> Vec<u8, MAX_PACKET_PAYLOAD> {
+        let mut out = Vec::new();
+        let _ = out.extend_from_slice(&self.vbat_mv.to_le_bytes());
+        let _ = out.push(self.temp_c as u8);
+        let _ = out.push(self.arm_status);
+        let _ = out.push(self.rssi_uplink as u8);
+        out
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        if bytes.len() < 5 {
+            return Err(DecodeError::BadLength);
+        }
+        Ok(TelemetrySystem {
+            vbat_mv: u16::from_le_bytes([bytes[0], bytes[1]]),
+            temp_c: bytes[2] as i8,
+            arm_status: bytes[3],
+            rssi_uplink: bytes[4] as i8,
         })
     }
 }

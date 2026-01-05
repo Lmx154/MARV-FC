@@ -24,7 +24,7 @@ pub const DRONE_MAC: MacConfig = MacConfig {
     rx_timeout_symbols: 16,
     rx_timeout_auto: true,
     uplink_payload_len: 8,
-    downlink_payload_len: 8,
+    downlink_payload_len: 16,
 };
 
 /// Rocket MAC preset.
@@ -38,7 +38,7 @@ pub const ROCKET_MAC: MacConfig = MacConfig {
     rx_timeout_symbols: 16,
     rx_timeout_auto: true,
     uplink_payload_len: 8,
-    downlink_payload_len: 8,
+    downlink_payload_len: 16,
 };
 
 /// Test MAC preset (bench and bring-up).
@@ -52,5 +52,5 @@ pub const TEST_MAC: MacConfig = MacConfig {
     rx_timeout_symbols: 16,
     rx_timeout_auto: true,
     uplink_payload_len: 8,
-    downlink_payload_len: 8,
+    downlink_payload_len: 16,
 };

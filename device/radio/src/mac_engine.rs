@@ -223,11 +223,12 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         }
 
         let payload_len = self.profile.downlink_payload_len;
+        let now_us = Instant::now().as_micros();
         let packet = if payload_len == 0 {
             Packet::new(PacketType::KeepAlive)
         } else {
             self.transport
-                .next_downlink(payload_len)
+                .next_downlink(now_us, payload_len)
                 .unwrap_or_else(|| Packet::new(PacketType::KeepAlive))
         };
 

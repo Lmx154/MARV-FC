@@ -17,8 +17,14 @@ radio, and GS.
 
 - Control: `RcFrame`, low-latency RC control for drones/quadcopters.
   - Direction: GS -> radio (joysticks and buttons).
-- Telemetry: `TelemetryFrame`, system telemetry.
+- Telemetry: per-sensor packets with different rates (staggered).
   - Direction: FC (rp235x) -> radio via UART -> radio link -> GS.
+  - Target rates:
+    - IMU: 150 Hz
+    - Barometer: 100 Hz
+    - Compass: 50 Hz
+    - GPS: 10 Hz
+    - System: 1 Hz
 - Command: `CommandFrame`, reliable commands with a robust ACK system.
   - Direction: GS -> radio (ground control station commands).
 
@@ -32,53 +38,60 @@ radio, and GS.
 
 ### Packet families
 
-- `TelemetryFrame`
+- `TelemetryImu`
+- `TelemetryBaro`
+- `TelemetryMag`
+- `TelemetryGps`
+- `TelemetrySystem`
 - `RcFrame`
 - `CommandFrame`
 
-### TelemetryFrame fields
+### Telemetry packets
 
-- Dynamics
+- `TelemetryImu` (150 Hz)
   - `accel`: `[i16; 3]`, scaled m/s^2 * 100
   - `gyro`: `[i16; 3]`, scaled deg/s * 10
-- Location
+- `TelemetryBaro` (100 Hz)
+  - `pressure_pa`: `i32`
+  - `temp_c_x10`: `i16`
+- `TelemetryMag` (50 Hz)
+  - `mag`: `[i16; 3]`, scaled uT * 10 (or raw if preferred)
+- `TelemetryGps` (10 Hz)
   - `lat`: `i32`, deg * 1e7
   - `lon`: `i32`, deg * 1e7
-  - `alt`: `i16`, meters * 10
+  - `alt_mm`: `i32`, mm
   - `sats`: `u8`
-- Status
-  - `vbat`: `u16`, mV
-  - `temp`: `i8`, deg C
+  - `fix`: `u8`
+- `TelemetrySystem` (1 Hz)
+  - `vbat_mv`: `u16`
+  - `temp_c`: `i8`
   - `arm_status`: `u8`
   - `rssi_uplink`: `i8`
-- DebugValues
-  - `val1`: `f32`
-  - `val2`: `f32`
 
 ## Serialization
 
-- Frames are serialized with `serde` + `postcard`.
-- The serialized bytes are the protocol payload for both UART framing and LoRa
-  transport.
+- Packets are encoded as 1 byte `PacketType` + payload bytes (little-endian
+  fields as defined in the packet structs).
+- The packet bytes are the protocol payload for UART, LoRa, and USB-CDC.
 
 ## UART framing (wire link)
 
 - CRC is mandatory on UART and is always part of encoding and decoding.
-- Wrap: `Data` -> postcard serialize -> CRC -> COBS encode -> UART bytes.
-- Unwrap: UART bytes -> COBS decode -> CRC verify -> postcard deserialize.
+- Wrap: packet bytes -> CRC -> COBS encode -> UART bytes.
+- Unwrap: UART bytes -> COBS decode -> CRC verify -> packet bytes.
 - CRC failure: drop the frame.
 
 ## LoRa transport
 
-- The LoRa payload carries a single postcard frame (no UART CRC or COBS).
-- A radio only transmits frames that passed UART CRC validation.
+- The LoRa payload carries a single protocol packet (no UART CRC or COBS).
+- A radio only transmits packets that passed UART CRC validation.
 
 ## Directional flows
 
 ### Downlink (telemetry lane)
 
-- FC -> UART framed telemetry -> air radio -> LoRa -> GS radio -> GS translator
-  -> USB MAVLink.
+- FC -> UART framed telemetry packets -> air radio -> LoRa -> GS radio -> GS
+  translator -> USB MAVLink.
 
 ### Uplink (control + command lanes)
 

@@ -145,6 +145,11 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
 
                 match decode_packet(payload) {
                     Ok(packet) => {
+                        info!(
+                            "RX packet type={} len={}",
+                            packet.packet_type.name(),
+                            packet.payload.len()
+                        );
                         self.transport.on_downlink_rx(&packet, meta);
                     }
                     Err(err) => {
