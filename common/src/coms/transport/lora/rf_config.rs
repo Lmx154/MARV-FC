@@ -59,9 +59,9 @@ impl LoRaConfig {
             crc_on: true,
             invert_iq: false,
 
-            // Public LoRa sync word 0x3444 (exact legacy setting)
-            // You can later change to MAVLink private (0x1424) on BOTH ends.
-            sync_word: 0x3444,
+            // Custom private sync word (u8 = 0x47, SX126x encoded internally).
+            // Must match on both ends.
+            sync_word: 0x0047,
 
             // External RF switch wiring uses swapped TX/RX control lines.
             rf_switch_swap: true,
@@ -97,7 +97,7 @@ impl LoRaConfig {
             crc_on: true,
             invert_iq: false,
 
-            sync_word: 0x3444,
+            sync_word: 0x0047,
 
             rf_switch_swap: true,
         }
@@ -126,7 +126,7 @@ impl LoRaConfig {
             crc_on: true,
             invert_iq: false,
 
-            sync_word: 0x3444,
+            sync_word: 0x0047,
 
             rf_switch_swap: true,
         }
