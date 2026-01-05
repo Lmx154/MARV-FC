@@ -2,11 +2,11 @@
 use super::rf_config::{LoRaConfig, RfConfig};
 
 // ToA guide (timing constraint):
-// - total_len_bytes = HEADER_LEN (4) + payload_len
+// - total_len_bytes = HEADER_LEN (3) + payload_len
 // - toa_us = rf.toa_us(total_len_bytes)
 // - max_tick_hz ~= floor(1_000_000 / (toa_us + tx_guard_us))
 // Assumptions for the per-preset notes below:
-// - ELRS payload size = 8 bytes (total_len_bytes = 12)
+// - ELRS payload size = 8 bytes (total_len_bytes = 11)
 // - tx_guard_us = 1000
 // Update the notes if payload size or guard changes.
 

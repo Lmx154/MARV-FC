@@ -4,7 +4,7 @@ use heapless::Vec;
 use super::phy_service::MAX_PHY_PAYLOAD;
 
 // On-air header uses little-endian encoding for multi-byte fields.
-pub const HEADER_LEN: usize = 4;
+pub const HEADER_LEN: usize = 3;
 pub const MAX_PAYLOAD_LEN: usize = MAX_PHY_PAYLOAD - HEADER_LEN;
 
 pub type FrameBytes = Vec<u8, MAX_PHY_PAYLOAD>;
@@ -33,7 +33,6 @@ impl FrameType {
 pub struct FrameHeader {
     pub tick_seq: u16,
     pub frame_type: FrameType,
-    pub flags: u8,
 }
 
 impl FrameHeader {
@@ -41,7 +40,6 @@ impl FrameHeader {
         Self {
             tick_seq,
             frame_type,
-            flags: 0,
         }
     }
 }
@@ -60,7 +58,6 @@ pub fn encode_frame(header: &FrameHeader, payload: &[u8]) -> FrameBytes {
 
     let _ = out.extend_from_slice(&header.tick_seq.to_le_bytes());
     let _ = out.push(header.frame_type as u8);
-    let _ = out.push(header.flags);
     let _ = out.extend_from_slice(payload);
     out
 }
@@ -78,12 +75,9 @@ pub fn decode_frame(bytes: &[u8]) -> Result<(FrameHeader, &[u8]), DecodeError> {
         x if x == FrameType::ControlDown as u8 => FrameType::ControlDown,
         other => return Err(DecodeError::UnknownFrameType(other)),
     };
-    let flags = bytes[3];
-
     let header = FrameHeader {
         tick_seq,
         frame_type,
-        flags,
     };
 
     Ok((header, &bytes[HEADER_LEN..]))
