@@ -14,8 +14,8 @@ No. The link now uses two independent configs:
 - `RfConfig` (RF/PHY settings)
 - `MacConfig` (TDMA schedule, payload sizes, RX timeout policy)
 
-Both are still selected at build time via `link_config::ACTIVE` (which pairs
-`rf_presets::ACTIVE` and `mac_config::ACTIVE` today), but they can now be paired
+Both are still selected at build time via `link_config::ACTIVE` (which points to
+an explicit RF+MAC pair in `link_config.rs`), but they can now be paired
 independently.
 
 ## Config objects (lowest level first)
@@ -41,6 +41,7 @@ Purpose:
 - Provides derived calculations that combine RF + MAC:
   - `rx_timeout_symbols(rf, mac)`
   - `slot_rx_symbols(rf, mac)`
+- Preset MAC profiles live in `common/src/coms/transport/lora/mac_presets.rs`.
 
 ### 3) LinkConfig (RF + MAC pairing helper)
 
@@ -51,7 +52,7 @@ Purpose:
 - Provides helpers for derived values:
   - `rx_timeout_symbols()` and `slot_rx_symbols()`
   - `profile()` (builds a `LinkProfile`)
-- Exposes `DRONE` and `ROCKET` presets for per-vehicle overrides.
+- Exposes `DRONE_*` and `ROCKET_*` presets for per-vehicle rate selection.
 
 ### 4) PhyServiceConfig (default RX timeout)
 

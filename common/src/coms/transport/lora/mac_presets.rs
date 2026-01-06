@@ -1,21 +1,49 @@
-//! Vehicle and test MAC presets live here to avoid implicit sharing.
+//! Vehicle and rate-specific MAC presets live here.
 //!
 //! These presets encode packet sizes, lane priorities, and timing targets.
-//! Those inputs are vehicle- or use-case-specific, so the presets are kept
-//! separate even when numeric values happen to match.
-/// Non-shareable inputs baked into this preset:
-/// - uplink/downlink payload sizes 
-/// - tick rate and slot ratio (control latency vs telemetry budget)
-/// - guard/offset/ready timings (slot scheduling policy)
-/// - RX timeout policy (derived from the above schedule)
-/// These feed rx_timeout_symbols and slot_rx_symbols, so they stay per-vehicle.
-/// 
+//! Values are kept per-vehicle to allow divergence even when numbers match.
 
 use super::mac_config::MacConfig;
 
-/// Drone MAC preset.
-///
-pub const DRONE_MAC: MacConfig = MacConfig {
+// Drone presets (fast/tiny payloads).
+pub const DRONE_200: MacConfig = MacConfig {
+    tick_hz: 200,
+    slot_ratio_r: 5,
+    tx_guard_us: 500,
+    dl_tx_offset_us: 500,
+    rx_ready_guard_us: 300,
+    rx_timeout_symbols: 64,
+    rx_timeout_auto: true,
+    uplink_payload_len: 0,
+    downlink_payload_len: 0,
+};
+
+pub const DRONE_150: MacConfig = MacConfig {
+    tick_hz: 150,
+    slot_ratio_r: 5,
+    tx_guard_us: 500,
+    dl_tx_offset_us: 1_500,
+    rx_ready_guard_us: 400,
+    rx_timeout_symbols: 64,
+    rx_timeout_auto: true,
+    uplink_payload_len: 4,
+    downlink_payload_len: 4,
+};
+
+pub const DRONE_100: MacConfig = MacConfig {
+    tick_hz: 100,
+    slot_ratio_r: 5,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 64,
+    rx_timeout_auto: true,
+    uplink_payload_len: 4,
+    downlink_payload_len: 4,
+};
+
+// Drone presets (standard payloads).
+pub const DRONE_50: MacConfig = MacConfig {
     tick_hz: 50,
     slot_ratio_r: 10,
     tx_guard_us: 1_000,
@@ -27,9 +55,93 @@ pub const DRONE_MAC: MacConfig = MacConfig {
     downlink_payload_len: 16,
 };
 
-/// Rocket MAC preset.
-///
-pub const ROCKET_MAC: MacConfig = MacConfig {
+pub const DRONE_25: MacConfig = MacConfig {
+    tick_hz: 25,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+pub const DRONE_10: MacConfig = MacConfig {
+    tick_hz: 10,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+pub const DRONE_5: MacConfig = MacConfig {
+    tick_hz: 5,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+pub const DRONE_1: MacConfig = MacConfig {
+    tick_hz: 1,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+// Rocket presets (fast/tiny payloads).
+pub const ROCKET_200: MacConfig = MacConfig {
+    tick_hz: 200,
+    slot_ratio_r: 5,
+    tx_guard_us: 500,
+    dl_tx_offset_us: 500,
+    rx_ready_guard_us: 300,
+    rx_timeout_symbols: 64,
+    rx_timeout_auto: true,
+    uplink_payload_len: 0,
+    downlink_payload_len: 0,
+};
+
+pub const ROCKET_150: MacConfig = MacConfig {
+    tick_hz: 150,
+    slot_ratio_r: 5,
+    tx_guard_us: 500,
+    dl_tx_offset_us: 1_500,
+    rx_ready_guard_us: 400,
+    rx_timeout_symbols: 64,
+    rx_timeout_auto: true,
+    uplink_payload_len: 4,
+    downlink_payload_len: 4,
+};
+
+pub const ROCKET_100: MacConfig = MacConfig {
+    tick_hz: 100,
+    slot_ratio_r: 5,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 64,
+    rx_timeout_auto: true,
+    uplink_payload_len: 4,
+    downlink_payload_len: 4,
+};
+
+// Rocket presets (standard payloads).
+pub const ROCKET_50: MacConfig = MacConfig {
     tick_hz: 50,
     slot_ratio_r: 10,
     tx_guard_us: 1_000,
@@ -41,10 +153,44 @@ pub const ROCKET_MAC: MacConfig = MacConfig {
     downlink_payload_len: 16,
 };
 
-/// Test MAC preset (bench and bring-up).
-///
-pub const TEST_MAC: MacConfig = MacConfig {
-    tick_hz: 50,
+pub const ROCKET_25: MacConfig = MacConfig {
+    tick_hz: 25,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+pub const ROCKET_10: MacConfig = MacConfig {
+    tick_hz: 10,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+pub const ROCKET_5: MacConfig = MacConfig {
+    tick_hz: 5,
+    slot_ratio_r: 10,
+    tx_guard_us: 1_000,
+    dl_tx_offset_us: 2_500,
+    rx_ready_guard_us: 800,
+    rx_timeout_symbols: 16,
+    rx_timeout_auto: true,
+    uplink_payload_len: 8,
+    downlink_payload_len: 16,
+};
+
+pub const ROCKET_1: MacConfig = MacConfig {
+    tick_hz: 1,
     slot_ratio_r: 10,
     tx_guard_us: 1_000,
     dl_tx_offset_us: 2_500,

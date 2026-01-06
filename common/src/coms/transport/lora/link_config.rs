@@ -1,7 +1,9 @@
 //! Link-level pairing of RF + MAC configs with derived helpers.
 use super::link_profile::LinkProfile;
 use super::mac_config::{self, MacConfig};
+use super::mac_presets;
 use super::rf_config::RfConfig;
+use super::rf_presets;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LinkConfig {
@@ -27,16 +29,41 @@ impl LinkConfig {
     }
 }
 
-// Shared RF preset for both vehicles; adjust MAC per vehicle as needed.
-pub const SHARED_RF: RfConfig = super::rf_presets::ACTIVE;
+// Drone link configs.
+pub const DRONE_200: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_200);
+pub const DRONE_150: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_150);
+pub const DRONE_100: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_100);
+pub const DRONE_50: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_50);
+pub const DRONE_25: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_25);
+pub const DRONE_10: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_10);
+pub const DRONE_5: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_5);
+pub const DRONE_1: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_1);
 
-// Drone vs rocket differences live in MAC schedule/payload sizing for now.
-// These presets are derived from vehicle packetization, so keep them distinct.
-pub const DRONE_MAC: MacConfig = super::mac_config::DRONE_MAC;
-pub const ROCKET_MAC: MacConfig = super::mac_config::ROCKET_MAC;
-
-pub const DRONE: LinkConfig = LinkConfig::new(SHARED_RF, DRONE_MAC);
-pub const ROCKET: LinkConfig = LinkConfig::new(SHARED_RF, ROCKET_MAC);
+// Rocket link configs.
+pub const ROCKET_200: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_200);
+pub const ROCKET_150: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_150);
+pub const ROCKET_100: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_100);
+pub const ROCKET_50: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_50);
+pub const ROCKET_25: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_25);
+pub const ROCKET_10: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_10);
+pub const ROCKET_5: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_5);
+pub const ROCKET_1: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_1);
 
 // Toggle this to switch link configs at build time.
-pub const ACTIVE: LinkConfig = DRONE;
+pub const ACTIVE: LinkConfig = DRONE_100;

@@ -37,16 +37,15 @@ File: `common/src/coms/transport/lora/rf_config.rs`
 - Alias of `LoRaConfig` (`type RfConfig = LoRaConfig`).
 - Used directly by the SX1262 driver for modulation/packet params.
 - Affects symbol time and time on air.
-- Selected at build time via `link_config::ACTIVE` (which currently uses
-  `rf_presets::ACTIVE`).
+- Selected at build time via `link_config::ACTIVE` (explicit RF+MAC pair).
 
 ### MAC config (MacConfig)
 
 File: `common/src/coms/transport/lora/mac_config.rs`
 
 - Defines the TDMA schedule and payload sizing.
-- Selected at build time via `link_config::ACTIVE` (which currently uses
-  `mac_config::ACTIVE`).
+- Selected at build time via `link_config::ACTIVE` (explicit RF+MAC pair).
+- Preset MAC profiles live in `common/src/coms/transport/lora/mac_presets.rs`.
 
 Fields:
 - `tick_hz`
@@ -64,7 +63,7 @@ Fields:
 File: `common/src/coms/transport/lora/link_config.rs`
 
 - Pairs `RfConfig` and `MacConfig` into a single selection point.
-- Exposes `DRONE` and `ROCKET` presets for per-vehicle overrides.
+- Exposes `DRONE_*` and `ROCKET_*` presets for per-vehicle rate selection.
 - Provides helper methods:
   - `rx_timeout_symbols()` and `slot_rx_symbols()`
   - `profile()` for `LinkProfile::from_configs()`

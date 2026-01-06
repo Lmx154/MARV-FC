@@ -53,6 +53,3 @@ pub const LORA_SF10_BW125_CR46: RfConfig = LoRaConfig {
 // Long-range preset for maximum link margin.
 // ELRS(8B) ToA ~ 790.528 ms, max_tick_hz ~ 1 (guard 1000us).
 pub const LORA_SF11_BW125_CR48: RfConfig = LoRaConfig::preset_long_range();
-
-// Toggle this to switch RF profiles at runtime.
-pub const ACTIVE: RfConfig = LORA_SF6_BW500_CR45;
