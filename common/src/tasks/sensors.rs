@@ -6,12 +6,13 @@
 
 #![allow(async_fn_in_trait)]
 
-use defmt::warn;
+use defmt::{info, warn};
 
 use crate::drivers::adxl375::{Adxl375, Adxl375Raw};
 use crate::drivers::bmi088::{Bmi088, Bmi088Raw};
 use crate::drivers::bmm350::{Bmm350, RawMag};
 use crate::drivers::bmp390::Bmp390;
+use crate::drivers::bmp581::{Bmp581, Error as Bmp581Error};
 use crate::drivers::neom9n::{NeoM9n, GpsData};
 use crate::utils::delay::DelayMs;
 
@@ -66,6 +67,7 @@ pub async fn run_bmm350_task<I2C, D, S>(
     delay: &mut D,
     sink: &mut S,
     interval_ms: u32,
+    log_errors: bool,
 )
 where
     I2C: embedded_hal_async::i2c::I2c,
@@ -73,12 +75,18 @@ where
     S: DataSink<RawMag>,
 {
     if let Err(e) = mag.init(delay).await {
-        warn!("BMM350 init error: {:?}", e);
+        if log_errors {
+            warn!("BMM350 init error: {:?}", e);
+        }
     }
     loop {
         match mag.read_raw(delay).await {
             Ok(m) => sink.publish(m).await,
-            Err(e) => warn!("BMM350 read error: {:?}", e),
+            Err(e) => {
+                if log_errors {
+                    warn!("BMM350 read error: {:?}", e);
+                }
+            }
         }
         if interval_ms > 0 {
             delay.delay_ms(interval_ms).await;
@@ -112,12 +120,49 @@ where
     }
 }
 
+/// Run an async BMP581 read loop delivering (temp_c_x100, pressure_pa)
+pub async fn run_bmp581_task<I2C, D, P, S>(
+    baro: &mut Bmp581<I2C, D>,
+    delay: &mut P,
+    sink: &mut S,
+    interval_ms: u32,
+)
+where
+    I2C: embedded_hal_async::i2c::I2c,
+    D: embedded_hal_async::delay::DelayNs,
+    P: DelayMs,
+    S: DataSink<(i32, i32)>,
+{
+    match baro.init().await {
+        Ok(()) => info!("BMP581 init ok"),
+        Err(Bmp581Error::InvalidChipId(id)) => {
+            warn!("BMP581 invalid chip id 0x{:02X}", id);
+        }
+        Err(Bmp581Error::InvalidConfig) => warn!("BMP581 invalid config"),
+        Err(Bmp581Error::I2c(_)) => warn!("BMP581 init I2C error"),
+    }
+    loop {
+        match baro.read_compensated().await {
+            Ok(sample) => sink.publish(sample).await,
+            Err(Bmp581Error::I2c(_)) => warn!("BMP581 read I2C error"),
+            Err(Bmp581Error::InvalidConfig) => warn!("BMP581 read invalid config"),
+            Err(Bmp581Error::InvalidChipId(id)) => {
+                warn!("BMP581 read invalid chip id 0x{:02X}", id);
+            }
+        }
+        if interval_ms > 0 {
+            delay.delay_ms(interval_ms).await;
+        }
+    }
+}
+
 /// Run an async NEO-M9N read loop delivering parsed `GpsData` when available.
 pub async fn run_neom9n_task<I2C, D, S>(
     gps: &mut NeoM9n<I2C>,
     delay: &mut D,
     sink: &mut S,
     interval_ms: u32,
+    log_errors: bool,
 )
 where
     I2C: embedded_hal_async::i2c::I2c,
@@ -125,7 +170,9 @@ where
     S: DataSink<GpsData>,
 {
     if let Err(e) = gps.init(delay).await {
-        warn!("NEO-M9N init error: {:?}", e);
+        if log_errors {
+            warn!("NEO-M9N init error: {:?}", e);
+        }
     }
     // Nudge a NAV-PVT reply initially
     let _ = gps.poll_nav_pvt().await;
@@ -146,7 +193,11 @@ where
                     let _ = gps.poll_nav_pvt().await;
                 }
             }
-            Err(e) => warn!("NEO-M9N read error: {:?}", e),
+            Err(e) => {
+                if log_errors {
+                    warn!("NEO-M9N read error: {:?}", e);
+                }
+            }
         }
         loops = loops.wrapping_add(1);
         if interval_ms > 0 {

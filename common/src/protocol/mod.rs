@@ -4,4 +4,4 @@
 //! under `crate::coms::transport` or in small protocol/transport bridge modules.
 
 pub mod packet;
-//pub mod mavlink;
+pub mod mavlink;

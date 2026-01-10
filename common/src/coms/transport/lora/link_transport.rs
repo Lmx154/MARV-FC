@@ -281,7 +281,7 @@ impl LoraTransport {
     }
 
     fn select_telemetry_kind(&self, now_us: u64, max_len: usize) -> Option<TelemetryKind> {
-        let mut best: Option<(TelemetryKind, u64, u64)> = None;
+        let best: Option<(TelemetryKind, u64, u64)> = None;
 
         let best = pick_due(
             best,

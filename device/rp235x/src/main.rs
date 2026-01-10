@@ -10,7 +10,11 @@ use hardware::{load_config_and_params_from_sd, save_params_to_sd};
 use common::config::Config as AppConfig;
 use common::drivers::bmi088::{Bmi088, Bmi088Raw};
 use common::drivers::bmm350::{Bmm350, BMM350_ADDR};
-use common::drivers::bmp390::{Bmp390, BMP3X_ADDR_SDO_HIGH};
+use common::drivers::bmp581::{
+    Bmp581,
+    Bmp581Config,
+    BMP581_ADDR_PRIMARY,
+};
 use common::drivers::bmm350::RawMag;
 use common::drivers::neom9n::{NeoM9n, UBLOX_I2C_ADDR, GpsData};
 use common::tasks::coms::{
@@ -19,7 +23,7 @@ use common::tasks::coms::{
 use common::tasks::sensors::{
     run_bmi088_task,
     run_bmm350_task,
-    run_bmp390_task,
+    run_bmp581_task,
     run_neom9n_task,
     DataSink,
 };
@@ -30,24 +34,17 @@ use common::protocol::mavlink::encode::{
     build_statustext,
     build_statustext_frame,
     build_heartbeat_frame,
-    build_telemetry_frame,
     HeartbeatConfig,
     build_device_op_read_reply_frame,
     build_device_op_write_reply_frame,
     build_frame_from_msg,
 };
-use common::protocol::mavlink::link_authority::{
-    build_link_authority_frame, LAS_STATE_ARMED, LAS_STATE_DISARMED,
-};
 use common::protocol::mavlink::handlers::{dispatch_mavlink_message, MessageHandlerResult};
-use common::protocol::mavlink::link_mac_config::build_link_mac_config_command_frame;
-use common::coms::transport::lora::mac::LinkMacConfig;
 use common::protocol::mavlink::telemetry::{MavlinkTelemetryBundle, MavlinkTelemetrySource};
 use common::protocol::mavlink::prelude::{Frame, V2};
 use common::params::{ParamRegistry, ParamId};
 use common::policies::fc_state::{FcState, FcStatePolicy};
 use common::coms::scheduler::LinkScheduler;
-use common::utils::i2cscanner::scan_i2c_bus_default;
 
 use embassy_executor::Spawner;
 use embassy_rp::gpio::{Level, Output};
@@ -137,6 +134,11 @@ impl<'d> UsbCdc<'d> {
 struct EmbassyDelay;
 impl common::utils::delay::DelayMs for EmbassyDelay {
     async fn delay_ms(&mut self, ms: u32) { Timer::after_millis(ms.into()).await; }
+}
+impl embedded_hal_async::delay::DelayNs for EmbassyDelay {
+    async fn delay_ns(&mut self, ns: u32) {
+        Timer::after_nanos(ns as u64).await;
+    }
 }
 
 // ---- Shared state for unified logging ----
@@ -344,24 +346,25 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     info!("MARV-FC: Unified sensor output starting...");
 
-    // Configure SPI0 for BMI088
-    // Hardware pins from hardware.md:
-    // MOSI: GP3, MISO: GP0, SCK: GP2
-    // CS_ACCEL: GP1, CS_GYRO: GP4
-    let miso = p.PIN_0;
-    let mosi = p.PIN_3;
-    let sck = p.PIN_2;
-    let cs_accel = Output::new(p.PIN_1, Level::High);
-    let cs_gyro = Output::new(p.PIN_4, Level::High);
+    // Configure SPI1 for BMI088
+    // Hardware pins from pcbhardware.md:
+    // MOSI: GP11, MISO: GP12, SCK: GP10
+    // CS_ACCEL: GP13, CS_GYRO: GP14, CS_LSM: GP16
+    let miso = p.PIN_12;
+    let mosi = p.PIN_11;
+    let sck = p.PIN_10;
+    let cs_accel = Output::new(p.PIN_13, Level::High);
+    let cs_gyro = Output::new(p.PIN_14, Level::High);
+    let _cs_lsm = Output::new(p.PIN_16, Level::High);
 
-    // SK6812/WS2812-style addressable LED on GP16 using PIO0 SM0 + DMA CH4
+    // SK6812/WS2812-style addressable LED on GP6 using PIO0 SM0 + DMA CH4
     let mut pio0 = Pio::new(p.PIO0, PioIrqs);
     let ws2812_program = PioWs2812Program::new(&mut pio0.common);
     let ws2812 = PioWs2812::<_, 0, 1>::new(
         &mut pio0.common,
         pio0.sm0,
         p.DMA_CH4,
-        p.PIN_16,
+        p.PIN_6,
         &ws2812_program,
     );
 
@@ -370,7 +373,7 @@ async fn main(spawner: Spawner) {
     spi_config.frequency = 10_000_000; // 10 MHz - max for BMI088
 
     let spi = Spi::new(
-        p.SPI0,
+        p.SPI1,
         sck,
         mosi,
         miso,
@@ -379,17 +382,17 @@ async fn main(spawner: Spawner) {
         spi_config,
     );
 
-    // Configure SPI1 for microSD (blackbox logging)
-    // Hardware pins from hardware.md:
-    // MOSI: GP11, MISO: GP8, SCK: GP10, CS: GP9
-    let sd_miso = p.PIN_8;
-    let sd_mosi = p.PIN_11;
-    let sd_sck = p.PIN_10;
-    let sd_cs = Output::new(p.PIN_9, Level::High);
+    // Configure SPI0 for microSD (blackbox logging)
+    // Hardware pins from pcbhardware.md:
+    // MOSI: GP19, MISO: GP20, SCK: GP18, CS: GP21
+    let sd_miso = p.PIN_20;
+    let sd_mosi = p.PIN_19;
+    let sd_sck = p.PIN_18;
+    let sd_cs = Output::new(p.PIN_21, Level::High);
     let mut sd_spi_cfg = SpiConfig::default();
     sd_spi_cfg.frequency = 1_000_000; // conservative bring-up frequency
     let sd_bus = Spi::new_blocking(
-        p.SPI1,
+        p.SPI0,
         sd_sck,
         sd_mosi,
         sd_miso,
@@ -422,11 +425,11 @@ async fn main(spawner: Spawner) {
     // Create BMI088 instance; initialization happens inside the task
     let imu_bmi088 = Bmi088::new(spi, cs_accel, cs_gyro);
 
-    // ----- I2C0 (BMP390 barometer + ADXL375 high-g accel) -----
-    // Hardware pins from hardware.md:
-    // I2C0 SDA: GP12, SCL: GP13
-    let i2c0_sda = p.PIN_12;
-    let i2c0_scl = p.PIN_13;
+    // ----- I2C0 (BMP581 barometer + ADXL375 high-g accel) -----
+    // Hardware pins from pcbhardware.md:
+    // I2C0 SDA: GP8, SCL: GP9
+    let i2c0_sda = p.PIN_8;
+    let i2c0_scl = p.PIN_9;
     let mut i2c0_cfg = I2cConfig::default();
     i2c0_cfg.frequency = 100_000; // 100 kHz for robust bring-up
     let i2c0 = I2c::new_async(p.I2C0, i2c0_scl, i2c0_sda, Irqs, i2c0_cfg);
@@ -435,10 +438,10 @@ async fn main(spawner: Spawner) {
     // let i2c_for_adxl = SharedI2c0 { bus: i2c0_mutex };
 
     // ----- I2C1 (BMM350 magnetometer, GPS) -----
-    // Hardware pins from hardware.md:
-    // I2C1 SDA: GP6, SCL: GP7
-    let i2c1_scl = p.PIN_7;
-    let i2c1_sda = p.PIN_6;
+    // Hardware pins from pcbhardware.md:
+    // I2C1 SDA: GP2, SCL: GP3
+    let i2c1_scl = p.PIN_3;
+    let i2c1_sda = p.PIN_2;
     let mut i2c1_cfg = I2cConfig::default();
     i2c1_cfg.frequency = 100_000; // start at 100 kHz
     let i2c1 = I2c::new_async(p.I2C1, i2c1_scl, i2c1_sda, Irqs, i2c1_cfg);
@@ -447,13 +450,13 @@ async fn main(spawner: Spawner) {
     let i2c_for_gps = SharedI2c { bus: i2c1_mutex };
 
     // ----- UART0 (FC -> Radio) -----
-    // TX: GP14, RX: GP15
+    // TX: GP0, RX: GP1
     let mut uart_cfg = UartConfig::default();
     uart_cfg.baudrate = 115_200;
     let uart_fc_radio = RpUart(Uart::new(
         p.UART0,
-        p.PIN_14,
-        p.PIN_15,
+        p.PIN_0,
+        p.PIN_1,
         UartIrqs,
         p.DMA_CH2,
         p.DMA_CH3,
@@ -484,32 +487,7 @@ async fn main(spawner: Spawner) {
         max_packet,
     };
 
-    // ----- I2C bus scans at startup (for debug / bring-up / menus) -----
-    {
-        info!("I2C0 scan: starting (0x08-0x77)...");
-        let mut bus0 = SharedI2c0 { bus: i2c0_mutex };
-        let scan0 = scan_i2c_bus_default(&mut bus0).await;
-        if scan0.is_empty() {
-            warn!("I2C0 scan: no devices found in 0x08-0x77");
-        } else {
-            info!("I2C0 scan: found {} device(s)", scan0.count);
-            for addr in scan0.iter() {
-                debug!("  I2C0 device @ 0x{:02X}", addr);
-            }
-        }
-
-        info!("I2C1 scan: starting (0x08-0x77)...");
-        let mut bus1 = SharedI2c { bus: i2c1_mutex };
-        let scan1 = scan_i2c_bus_default(&mut bus1).await;
-        if scan1.is_empty() {
-            warn!("I2C1 scan: no devices found in 0x08-0x77");
-        } else {
-            info!("I2C1 scan: found {} device(s)", scan1.count);
-            for addr in scan1.iter() {
-                debug!("  I2C1 device @ 0x{:02X}", addr);
-            }
-        }
-    }
+    let bmp_addr = BMP581_ADDR_PRIMARY;
 
     // Initialize parameter registry with loaded values
     let params = PARAMS.init(Mutex::new(param_registry));
@@ -534,7 +512,9 @@ async fn main(spawner: Spawner) {
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088, imu_interval_ms)).unwrap();
     spawner.spawn(mag_task(i2c_for_bmm, mag_interval_ms)).unwrap();
-    spawner.spawn(baro_task(i2c_for_bmp, baro_interval_ms)).unwrap();
+    spawner
+        .spawn(baro_task(i2c_for_bmp, baro_interval_ms, bmp_addr))
+        .unwrap();
     spawner.spawn(gps_task(i2c_for_gps, gps_interval_ms)).unwrap();
     let led_color = RGB8 { r: led_r, g: led_g, b: led_b };
     spawner.spawn(logger_task(ws2812, led_color)).unwrap();
@@ -598,7 +578,7 @@ impl DataSink<GpsData> for GpsSink {
 #[embassy_executor::task]
 async fn imu_task(
     mut imu: Bmi088<
-        Spi<'static, embassy_rp::peripherals::SPI0, embassy_rp::spi::Async>,
+        Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Async>,
         Output<'static>,
         Output<'static>
     >,
@@ -616,17 +596,17 @@ async fn mag_task(i2c_dev: SharedI2c<'static>, interval_ms: u32) {
     let mut mag = Bmm350::new(i2c_dev, BMM350_ADDR);
     mag.set_debug(false);
     let mut sink = MagSink;
-    run_bmm350_task(&mut mag, &mut delay, &mut sink, interval_ms).await;
+    run_bmm350_task(&mut mag, &mut delay, &mut sink, interval_ms, false).await;
 }
 
 #[embassy_executor::task]
-async fn baro_task(i2c_dev: SharedI2c0<'static>, interval_ms: u32) {
-    let mut delay = EmbassyDelay;
-    info!("BMP390: starting task on I2C0 @0x{:02X}", BMP3X_ADDR_SDO_HIGH);
-    let mut bmp = Bmp390::new(i2c_dev, BMP3X_ADDR_SDO_HIGH);
-    bmp.set_debug(false);
+async fn baro_task(i2c_dev: SharedI2c0<'static>, interval_ms: u32, bmp_addr: u8) {
+    let mut pacing = EmbassyDelay;
+    info!("BMP581: starting task on I2C0 @0x{:02X}", bmp_addr);
+    let bmp_cfg = Bmp581Config::default();
+    let mut bmp = Bmp581::new(i2c_dev, EmbassyDelay, bmp_addr, bmp_cfg);
     let mut sink = BaroSink;
-    run_bmp390_task(&mut bmp, &mut delay, &mut sink, interval_ms).await;
+    run_bmp581_task(&mut bmp, &mut pacing, &mut sink, interval_ms).await;
 }
 
 // #[embassy_executor::task]
@@ -1156,73 +1136,26 @@ async fn uart_mavlink_task(
 
     let now_ms = Instant::now().as_millis() as u32;
     let mut sched = LinkScheduler::new(now_ms, 1, 10);
-    let mut last_las_tx_ms: u32 = now_ms.wrapping_sub(1_000);
-
-    // Last link MAC config we pushed to the Radio/GS side.
-    let mut last_link_cfg: Option<LinkMacConfig> = None;
-    let mut last_link_cfg_tx_ms: u32 = now_ms;
 
     loop {
         let now_ms = Instant::now().as_millis() as u32;
-        let (
-            fast_en,
-            fast_hz,
-            fast_max_bytes,
-            norm_en,
-            norm_hz,
-            norm_qmax,
-            tel_qos,
-            hb_en,
-            hb_hz,
-            las_max_age_ms,
-            link_cfg,
-        ) = {
+        let (telem_rate_hz, hb_en, hb_hz) = {
             let p = params.lock().await;
-            let fast_en = p.bool(ParamId::TelFastEn);
-            let fast_hz = p.u32(ParamId::TelFastHz).min(1000);
-            let fast_max_bytes = p
-                .u32(ParamId::TelFastMaxB)
-                .min(MAVLINK_MAX_FRAME as u32)
-                .min(common::coms::transport::lora::mac::INNER_MTU as u32) as usize;
-            let norm_en = p.bool(ParamId::TelNormEn);
-            let norm_hz = p.u32(ParamId::TelNormMaxHz).min(1000);
-            let norm_qmax = p.u32(ParamId::TelNormQmax).min(16) as usize;
-            let tel_qos = p.u32(ParamId::TelQos).min(255) as u8;
+            let telem_rate_hz = p.u32(ParamId::TelemRateHz).min(1000);
             let hb_en = p.bool(ParamId::HeartbeatEn);
             let hb_hz = fc_heartbeat_hz(&p);
-            let las_max_age_ms = p.u32(ParamId::LasMaxAgeMs).min(u16::MAX as u32);
-            let link_cfg = LinkMacConfig::from_params(&p);
-            (
-                fast_en,
-                fast_hz,
-                fast_max_bytes,
-                norm_en,
-                norm_hz,
-                norm_qmax,
-                tel_qos,
-                hb_en,
-                hb_hz,
-                las_max_age_ms,
-                link_cfg,
-            )
+            (telem_rate_hz, hb_en, hb_hz)
         };
 
         sched.set_heartbeat_enabled(hb_en);
         sched.set_heartbeat_hz(now_ms, hb_hz);
-        sched.set_fast_enabled(fast_en);
-        sched.set_fast_hz(now_ms, fast_hz);
-        sched.set_telemetry_hz(now_ms, if norm_en { norm_hz } else { 0 });
-        let las_interval_ms = (las_max_age_ms / 2).max(100);
+        sched.set_telemetry_hz(now_ms, telem_rate_hz);
 
         // Give RX priority. If we see no RX traffic for a short window,
         // we'll use the idle time to send telemetry.
-        let idle_timeout_ms = if fast_en && fast_hz != 0 {
-            hz_to_period_ms(fast_hz.min(u16::MAX as u32) as u16, 1, 30)
-        } else {
-            30
-        };
+        let idle_timeout_ms: u64 = 30;
         let rx_fut = mavlink::recv_frame_over_uart(&mut uart, &mut rx_scratch);
-        let idle_fut = Timer::after_millis(u64::from(idle_timeout_ms));
+        let idle_fut = Timer::after_millis(idle_timeout_ms);
         let mut rx_activity = false;
 
         match select::select(rx_fut, idle_fut).await {
@@ -1293,21 +1226,7 @@ async fn uart_mavlink_task(
         let now_ms = Instant::now().as_millis() as u32;
         let decision = sched.poll(now_ms);
 
-        let allow_fast_during_rx = tel_qos == 0;
-        if decision.send_fast && fast_en && (allow_fast_during_rx || !rx_activity) {
-            if fast_max_bytes != 0 {
-                let now_us = (now_ms as u64) * 1000;
-                let sample = source.latest().await;
-                if let Some(frame) = build_telemetry_frame(cfg, seq, now_us, &sample) {
-                    if frame.size() <= fast_max_bytes {
-                        seq = seq.wrapping_add(1);
-                        let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
-                    }
-                }
-            }
-        }
-
-        if decision.send_telemetry && norm_en && !rx_activity {
+        if decision.send_telemetry && !rx_activity {
             let now_us = (now_ms as u64) * 1000;
             let bundle = source.bundle(now_ms, now_us).await;
 
@@ -1319,8 +1238,7 @@ async fn uart_mavlink_task(
                 build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
             ];
 
-            let max_frames = norm_qmax.min(frames.len());
-            for frame in frames.iter().take(max_frames) {
+            for frame in frames.iter() {
                 seq = seq.wrapping_add(1);
                 // Send to radio via UART - best effort, ignore errors.
                 let _ = mavlink::send_frame_over_uart(&mut uart, frame, &mut tx_buf).await;
@@ -1336,42 +1254,6 @@ async fn uart_mavlink_task(
             seq = seq.wrapping_add(1);
             let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
         }
-
-        if now_ms.wrapping_sub(last_las_tx_ms) >= las_interval_ms {
-            let snapshot = {
-                let state = fc_state.lock().await;
-                state.snapshot()
-            };
-            let las_state = if snapshot.armed {
-                LAS_STATE_ARMED
-            } else {
-                LAS_STATE_DISARMED
-            };
-            let max_age_ms = las_max_age_ms.max(1) as u16;
-            let frame = build_link_authority_frame(cfg, seq, 0, 0, las_state, max_age_ms);
-            seq = seq.wrapping_add(1);
-            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
-            last_las_tx_ms = now_ms;
-        }
-
-        // Propagate link MAC config to the Radio/GS link without reflashing.
-        // We send on change (and also once at startup), at a low rate.
-        let now_ms = Instant::now().as_millis() as u32;
-        let should_send = match last_link_cfg {
-            None => true,
-            Some(prev) => prev.tick_hz != link_cfg.tick_hz
-                || prev.fast_max_bytes != link_cfg.fast_max_bytes
-                || prev.slot_mode != link_cfg.slot_mode,
-        };
-
-        if should_send && now_ms.wrapping_sub(last_link_cfg_tx_ms) >= 500 {
-            // Broadcast to any listener; Radio/GS will intercept and apply.
-            let frame = build_link_mac_config_command_frame(cfg, seq, 0, 0, link_cfg);
-            seq = seq.wrapping_add(1);
-            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
-            last_link_cfg = Some(link_cfg);
-            last_link_cfg_tx_ms = now_ms;
-        }
     }
 }
 
@@ -1382,5 +1264,5 @@ async fn gps_task(i2c_dev: SharedI2c<'static>, interval_ms: u32) {
     let mut gps = NeoM9n::new(i2c_dev, UBLOX_I2C_ADDR);
     gps.set_debug(false);
     let mut sink = GpsSink;
-    run_neom9n_task(&mut gps, &mut delay, &mut sink, interval_ms).await;
+    run_neom9n_task(&mut gps, &mut delay, &mut sink, interval_ms, false).await;
 }

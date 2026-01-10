@@ -10,7 +10,7 @@ This document outlines the hardware configurations and pin assignments for the M
 
 ## Flight Controller (FC)
 
-- **Microcontroller (MC)**: Waveshare RP2350B Core - RP2350B
+- **Microcontroller (MC)**: RP2354B
 
 - **Sensors and Interfaces**:
   - **IMU - BMI088 (dual CS) & LSM6DSV32X** : SPI1 Shared 
@@ -25,47 +25,54 @@ This document outlines the hardware configurations and pin assignments for the M
     - MISO: GP20
     - SCK: GP18
     - CS: GP21
+
   - **I2C0**: BMP581
     - SDA: GP8
     - SCL: GP9
-    - BMP390 Address: 0x77
+
   - **I2C1**: BMM350, Ublox NEO M9N GPS
     - SDA: GP2
     - SCL: GP3
     - BMM350 Address: 0x14
     - Ublox NEO M9N GPS Address: 0x42
+    
   - **RGB LED (SK6805-EC15 addressable LED)**:
     - GP6
-  - **Buzzer (Active buzzer PWM)**:
-    - GP5
+
+# External Pads 
   - **FC-RADIO Connection**: UART0
-    - TX: GP14 
-    - RX: GP15 
+    - TX: GP0 
+    - RX: GP1 
   - **FC-SBC Connection**: UART1
-    - TX: GP20
-    - RX: GP21
-  # PWM pins 
-    - **Rocket**
-      - **Servo Controller**
-        - AIR_BRK: GP
-        - ROLL_CTRL1: GP
-        - ROLL_CTRL2: GP
-        - ROLL_CTRL3: GP
-        - ROLL_CTRL4: GP
-        - THVCTR_CTRL1: GP
-        - THVCTR_CTRL2: GP
-    - **Drone**
-      - **Electronic Speed Controller**
-        - MOTOR1: GP
-        - MOTOR2: GP
-        - MOTOR3: GP
-        - MOTOR4: GP
+    - TX: GP4
+    - RX: GP5
+  - **External I2C0**: I2C0
+    - SDA: GP8
+    - SCL: GP9
+  - **External I2C1**: I2C1
+    - SDA: GP2
+    - SCL: GP3
+  - **External GPIO**: GPIO
+    - IO1: GP28
+    - IO2: GP29
+    - IO3: GP30
+    - IO4: GP31
+  - **ESC Pads**
+    - C/CURRENT_SENSE: 
+    - 1/PWM1: GP39
+    - 2/PWM2: GP38
+    - 3/PWM3: GP35
+    - 4/PWM4: GP36
+    - T/TELEMETRY: GP37
+  - **VTX Pads**
+    - TX/VTX_TX: GP32
+    - RX/VTX_RX: GP33
 
 
 
 ## Radio/GS
 
-- **Microcontroller (MC)**: Raspberry Pi Pico 2 - RP2350A
+- **Microcontroller (MC)**: RP2354A
 
 - **Sensors and Interfaces**:
   - **LoRa Radio - Waveshare SX1262 HF (915Mhz)**: SPI0

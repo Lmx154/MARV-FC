@@ -37,9 +37,9 @@ impl embedded_hal::delay::DelayNs for SdDelay {
     }
 }
 
-/// Load config and parameters from SD card (boot-time, SPI1 blocking mode)
+/// Load config and parameters from SD card (boot-time, SPI0 blocking mode)
 pub fn load_config_and_params_from_sd(
-    bus: Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
+    bus: Spi<'static, embassy_rp::peripherals::SPI0, embassy_rp::spi::Blocking>,
     cs: Output<'static>,
     params: &mut ParamRegistry,
 ) -> Result<(AppConfig, usize), embedded_sdmmc::Error<embedded_sdmmc::SdCardError>> {
@@ -86,7 +86,7 @@ fn load_params_from_sd(
     volume_mgr: &mut VolumeManager<
         embedded_sdmmc::sdcard::SdCard<
             ExclusiveDevice<
-                Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Blocking>,
+                Spi<'static, embassy_rp::peripherals::SPI0, embassy_rp::spi::Blocking>,
                 DummyCsPin,
                 SdDelay,
             >,
@@ -113,23 +113,23 @@ fn load_params_from_sd(
 }
 
 /// Save parameters to SD card PARAMS.TXT file
-/// This function recreates the SPI1 peripheral temporarily for the save operation
+/// This function recreates the SPI0 peripheral temporarily for the save operation
 pub fn save_params_to_sd(params: &ParamRegistry) -> Result<(), &'static str> {
-    // Safety: We're temporarily taking the SPI1 peripheral
-    // This only works because we know the SPI1 is not being used elsewhere
+    // Safety: We're temporarily taking the SPI0 peripheral
+    // This only works because we know the SPI0 is not being used elsewhere
     // The peripheral will be consumed and dropped after this function
     let p = unsafe { embassy_rp::Peripherals::steal() };
 
-    // Reconfigure SPI1 pins for SD card access
-    let sd_miso = p.PIN_8;
-    let sd_mosi = p.PIN_11;
-    let sd_sck = p.PIN_10;
-    let sd_cs = Output::new(p.PIN_9, Level::High);
+    // Reconfigure SPI0 pins for SD card access
+    let sd_miso = p.PIN_20;
+    let sd_mosi = p.PIN_19;
+    let sd_sck = p.PIN_18;
+    let sd_cs = Output::new(p.PIN_21, Level::High);
 
     let mut sd_spi_cfg = SpiConfig::default();
     sd_spi_cfg.frequency = 1_000_000;
 
-    let sd_bus = Spi::new_blocking(p.SPI1, sd_sck, sd_mosi, sd_miso, sd_spi_cfg);
+    let sd_bus = Spi::new_blocking(p.SPI0, sd_sck, sd_mosi, sd_miso, sd_spi_cfg);
 
     let spi_dev = ExclusiveDevice::new(sd_bus, DummyCsPin, SdDelay).unwrap();
     let sdcard = embedded_sdmmc::sdcard::SdCard::new(spi_dev, sd_cs, SdDelay);

@@ -35,4 +35,3 @@ embedded-hal-bus = "0.2"
 build = [
   { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/rp235x" }
 ]
-
