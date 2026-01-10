@@ -1,4 +1,4 @@
-# Hardware Pinouts for MARV Project
+# Hardware Pinouts for MARV Project prototype
 
 This document outlines the hardware configurations and pin assignments for the MARV project, including the Flight Controller (FC), Radio, and Ground Station (GS). All microcontrollers (MCs) are Raspberry Pi Pico 2 boards based on the RP2350A.
 

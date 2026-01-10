@@ -9,6 +9,7 @@ use hardware::{load_config_and_params_from_sd, save_params_to_sd};
 
 use common::config::Config as AppConfig;
 use common::drivers::bmi088::{Bmi088, Bmi088Raw};
+use common::drivers::lsm6dsv32x::{Lsm6dsv32x, Lsm6dsv32xRaw};
 use common::drivers::bmm350::{Bmm350, BMM350_ADDR};
 use common::drivers::bmp581::{
     Bmp581,
@@ -22,6 +23,7 @@ use common::tasks::coms::{
 };
 use common::tasks::sensors::{
     run_bmi088_task,
+    run_lsm6dsv32x_task,
     run_bmm350_task,
     run_bmp581_task,
     run_neom9n_task,
@@ -47,6 +49,7 @@ use common::policies::fc_state::{FcState, FcStatePolicy};
 use common::coms::scheduler::LinkScheduler;
 
 use embassy_executor::Spawner;
+use embassy_embedded_hal::shared_bus::asynch::spi::SpiDevice;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{Config as I2cConfig, I2c, Async as I2cAsync};
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
@@ -161,6 +164,7 @@ struct GpsState { fix: Option<GpsData>, seq: u32 }
 #[derive(Copy, Clone, Default)]
 struct SensorsState {
     imu: ImuData,
+    imu2: ImuData,
     highg: HighGData,
     mag: MagData,
     baro: BaroData,
@@ -169,6 +173,7 @@ struct SensorsState {
 
 static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
     imu: ImuData { accel: [0;3], gyro: [0;3], seq: 0 },
+    imu2: ImuData { accel: [0;3], gyro: [0;3], seq: 0 },
     highg: HighGData { accel: [0;3], seq: 0 },
     mag: MagData { xyz: [0;3], seq: 0 },
     baro: BaroData { t_c_x100: 0, p_pa: 0, seq: 0 },
@@ -251,6 +256,10 @@ type I2c1Type = I2c<'static, embassy_rp::peripherals::I2C1, I2cAsync>;
 // We'll implement a tiny shared I2C wrapper using a Mutex to allow multiple tasks to access the same bus concurrently.
 static I2C0_MUTEX: StaticCell<Mutex<RawMutex, I2c0Type>> = StaticCell::new();
 static I2C1_MUTEX: StaticCell<Mutex<RawMutex, I2c1Type>> = StaticCell::new();
+// Shared SPI1 bus for IMUs on the same bus.
+type Spi1Type = Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Async>;
+static SPI1_MUTEX: StaticCell<Mutex<RawMutex, Spi1Type>> = StaticCell::new();
+type Spi1Device = SpiDevice<'static, RawMutex, Spi1Type, Output<'static>>;
 
 #[derive(Clone, Copy)]
 struct SharedI2c0<'a> {
@@ -333,9 +342,9 @@ impl<'d> AsyncUartBus for RpUart<'d> {
 #[unsafe(link_section = ".bi_entries")]
 #[used]
 pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
-    embassy_rp::binary_info::rp_program_name!(c"MARV-FC BMI088 Test"),
+    embassy_rp::binary_info::rp_program_name!(c"MARV-FC Dual IMU Test"),
     embassy_rp::binary_info::rp_program_description!(
-        c"BMI088 IMU sensor test reading accelerometer and gyroscope data"
+        c"BMI088 + LSM6DSV32X IMU sensor test reading accelerometer and gyroscope data"
     ),
     embassy_rp::binary_info::rp_cargo_version!(),
     embassy_rp::binary_info::rp_program_build_attribute!(),
@@ -346,7 +355,7 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     info!("MARV-FC: Unified sensor output starting...");
 
-    // Configure SPI1 for BMI088
+    // Configure SPI1 for BMI088 + LSM6DSV32X
     // Hardware pins from pcbhardware.md:
     // MOSI: GP11, MISO: GP12, SCK: GP10
     // CS_ACCEL: GP13, CS_GYRO: GP14, CS_LSM: GP16
@@ -355,7 +364,7 @@ async fn main(spawner: Spawner) {
     let sck = p.PIN_10;
     let cs_accel = Output::new(p.PIN_13, Level::High);
     let cs_gyro = Output::new(p.PIN_14, Level::High);
-    let _cs_lsm = Output::new(p.PIN_16, Level::High);
+    let cs_lsm = Output::new(p.PIN_16, Level::High);
 
     // SK6812/WS2812-style addressable LED on GP6 using PIO0 SM0 + DMA CH4
     let mut pio0 = Pio::new(p.PIO0, PioIrqs);
@@ -368,9 +377,9 @@ async fn main(spawner: Spawner) {
         &ws2812_program,
     );
 
-    // Configure SPI with 10 MHz for maximum performance stress test
+    // Configure SPI with 10 MHz for high-rate IMU reads
     let mut spi_config = SpiConfig::default();
-    spi_config.frequency = 10_000_000; // 10 MHz - max for BMI088
+    spi_config.frequency = 10_000_000; // 10 MHz - safe for BMI088/LSM6DSV32X
 
     let spi = Spi::new(
         p.SPI1,
@@ -422,8 +431,14 @@ async fn main(spawner: Spawner) {
     let baro_interval_ms = hz_to_period_ms(config.baro_hz, 2, 1000);
     let gps_interval_ms = hz_to_period_ms(config.gps_hz, 20, 2000);
 
-    // Create BMI088 instance; initialization happens inside the task
-    let imu_bmi088 = Bmi088::new(spi, cs_accel, cs_gyro);
+    let spi_bus = SPI1_MUTEX.init(Mutex::new(spi));
+    let spi_accel = SpiDevice::new(spi_bus, cs_accel);
+    let spi_gyro = SpiDevice::new(spi_bus, cs_gyro);
+    let spi_lsm = SpiDevice::new(spi_bus, cs_lsm);
+
+    // Create IMU instances; initialization happens inside the tasks
+    let imu_bmi088 = Bmi088::new(spi_accel, spi_gyro);
+    let imu_lsm6dsv32x = Lsm6dsv32x::new(spi_lsm);
 
     // ----- I2C0 (BMP581 barometer + ADXL375 high-g accel) -----
     // Hardware pins from pcbhardware.md:
@@ -511,6 +526,7 @@ async fn main(spawner: Spawner) {
 
     // Spawn sensor tasks
     spawner.spawn(imu_task(imu_bmi088, imu_interval_ms)).unwrap();
+    spawner.spawn(imu2_task(imu_lsm6dsv32x, imu_interval_ms)).unwrap();
     spawner.spawn(mag_task(i2c_for_bmm, mag_interval_ms)).unwrap();
     spawner
         .spawn(baro_task(i2c_for_bmp, baro_interval_ms, bmp_addr))
@@ -542,6 +558,16 @@ impl DataSink<Bmi088Raw> for ImuSink {
         guard.imu.accel = data.accel;
         guard.imu.gyro = data.gyro;
         guard.imu.seq = guard.imu.seq.wrapping_add(1);
+    }
+}
+
+struct Imu2Sink;
+impl DataSink<Lsm6dsv32xRaw> for Imu2Sink {
+    async fn publish(&mut self, data: Lsm6dsv32xRaw) {
+        let mut guard = STATE.lock().await;
+        guard.imu2.accel = data.accel;
+        guard.imu2.gyro = data.gyro;
+        guard.imu2.seq = guard.imu2.seq.wrapping_add(1);
     }
 }
 
@@ -577,16 +603,19 @@ impl DataSink<GpsData> for GpsSink {
 
 #[embassy_executor::task]
 async fn imu_task(
-    mut imu: Bmi088<
-        Spi<'static, embassy_rp::peripherals::SPI1, embassy_rp::spi::Async>,
-        Output<'static>,
-        Output<'static>
-    >,
+    mut imu: Bmi088<Spi1Device, Spi1Device>,
     interval_ms: u32,
 ) {
     let mut delay = EmbassyDelay;
     let mut sink = ImuSink;
     run_bmi088_task(&mut imu, &mut delay, &mut sink, interval_ms).await;
+}
+
+#[embassy_executor::task]
+async fn imu2_task(mut imu: Lsm6dsv32x<Spi1Device>, interval_ms: u32) {
+    let mut delay = EmbassyDelay;
+    let mut sink = Imu2Sink;
+    run_lsm6dsv32x_task(&mut imu, &mut delay, &mut sink, interval_ms).await;
 }
 
 #[embassy_executor::task]
@@ -631,6 +660,7 @@ async fn logger_task(
     let mut led_on = false;
     // Track previous counters and time to compute real per-second rates
     let mut prev_imu_seq: u32 = 0;
+    let mut prev_imu2_seq: u32 = 0;
     let mut prev_highg_seq: u32 = 0;
     let mut prev_mag_seq: u32 = 0;
     let mut prev_baro_seq: u32 = 0;
@@ -642,9 +672,11 @@ async fn logger_task(
         // More detailed data at debug level every loop
         if let Some(fix) = s.gps.fix {
             debug!(
-                "IMU A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} hg:{} m:{} b:{} g:{}",
+                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} i2:{} hg:{} m:{} b:{} g:{}",
                 s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                 s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
+                s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
                 s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                 s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                 (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
@@ -652,17 +684,19 @@ async fn logger_task(
                 fix.latitude/10_000_000, (fix.latitude%10_000_000).abs(),
                 fix.longitude/10_000_000, (fix.longitude%10_000_000).abs(),
                 fix.altitude/1000, fix.satellites, fix.fix_type,
-                s.imu.seq, s.highg.seq, s.mag.seq, s.baro.seq, s.gps.seq
+                s.imu.seq, s.imu2.seq, s.highg.seq, s.mag.seq, s.baro.seq, s.gps.seq
             );
         } else {
             debug!(
-                "IMU A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} hg:{} m:{} b:{} g:{}",
+                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} i2:{} hg:{} m:{} b:{} g:{}",
                 s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                 s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
+                s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
                 s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                 s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                 (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
-                s.imu.seq, s.highg.seq, s.mag.seq, s.baro.seq, s.gps.seq
+                s.imu.seq, s.imu2.seq, s.highg.seq, s.mag.seq, s.baro.seq, s.gps.seq
             );
         }
 
@@ -670,16 +704,19 @@ async fn logger_task(
         let elapsed_ms = prev_t.elapsed().as_millis() as u32;
         if elapsed_ms >= 1000 {
             let imu_rate = (s.imu.seq.wrapping_sub(prev_imu_seq) * 1000) / elapsed_ms.max(1);
+            let imu2_rate = (s.imu2.seq.wrapping_sub(prev_imu2_seq) * 1000) / elapsed_ms.max(1);
             let highg_rate = (s.highg.seq.wrapping_sub(prev_highg_seq) * 1000) / elapsed_ms.max(1);
             let mag_rate = (s.mag.seq.wrapping_sub(prev_mag_seq) * 1000) / elapsed_ms.max(1);
             let baro_rate = (s.baro.seq.wrapping_sub(prev_baro_seq) * 1000) / elapsed_ms.max(1);
             let gps_rate = (s.gps.seq.wrapping_sub(prev_gps_seq) * 1000) / elapsed_ms.max(1);
             if let Some(fix) = s.gps.fix {
                 info!(
-                    "Rates IMU:{} Hz HG:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {}",
-                    imu_rate, highg_rate, mag_rate, baro_rate, gps_rate,
+                    "Rates IMU:{} Hz IMU2:{} Hz HG:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {}",
+                    imu_rate, imu2_rate, highg_rate, mag_rate, baro_rate, gps_rate,
                     s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                     s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                    s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
+                    s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
                     s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                     s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                     (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
@@ -690,16 +727,19 @@ async fn logger_task(
                 );
             } else {
                 info!(
-                    "Rates IMU:{} Hz HG:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix",
-                    imu_rate, highg_rate, mag_rate, baro_rate, gps_rate,
+                    "Rates IMU:{} Hz IMU2:{} Hz HG:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix",
+                    imu_rate, imu2_rate, highg_rate, mag_rate, baro_rate, gps_rate,
                     s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                     s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+                    s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
+                    s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
                     s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                     s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                     (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa
                 );
             }
             prev_imu_seq = s.imu.seq;
+            prev_imu2_seq = s.imu2.seq;
             prev_highg_seq = s.highg.seq;
             prev_mag_seq = s.mag.seq;
             prev_baro_seq = s.baro.seq;

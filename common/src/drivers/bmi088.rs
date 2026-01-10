@@ -1,15 +1,13 @@
 //! Generic BMI088 IMU Driver (Accelerometer + Gyroscope)
 //!
 //! Async, MCU-agnostic driver using embedded-hal 1.0 traits.
-//! - SPI: embedded_hal_async::spi::SpiBus<u8>
-//! - CS pins: embedded_hal::digital::OutputPin
+//! - SPI: embedded_hal_async::spi::SpiDevice<u8>
 //! - Delays: provided by a simple async trait defined in common::utils::delay
 
 #![allow(dead_code)]
 
 use defmt::{debug, info, warn, Format};
-use embedded_hal::digital::OutputPin;
-use embedded_hal_async::spi::SpiBus;
+use embedded_hal_async::spi::SpiDevice;
 
 use crate::utils::delay::DelayMs;
 
@@ -39,7 +37,6 @@ mod gyr {
 #[derive(Debug, Format)]
 pub enum Error {
     Spi,
-    Cs,
     ChipIdAccel(u8),
     ChipIdGyro(u8),
     AccelNotReady,
@@ -53,37 +50,29 @@ pub struct Bmi088Raw {
     pub gyro: [i16; 3],
 }
 
-/// Generic BMI088 driver using async SPI bus and two CS pins
-pub struct Bmi088<SPI, CSACC, CSGYR>
+/// Generic BMI088 driver using async SPI devices for accel + gyro
+pub struct Bmi088<ACC, GYR>
 where
-    SPI: SpiBus<u8>,
-    CSACC: OutputPin,
-    CSGYR: OutputPin,
+    ACC: SpiDevice<u8>,
+    GYR: SpiDevice<u8>,
 {
-    spi: SPI,
-    cs_accel: CSACC,
-    cs_gyro: CSGYR,
+    acc: ACC,
+    gyr: GYR,
 }
 
-impl<SPI, CSACC, CSGYR> Bmi088<SPI, CSACC, CSGYR>
+impl<ACC, GYR> Bmi088<ACC, GYR>
 where
-    SPI: SpiBus<u8>,
-    CSACC: OutputPin,
-    CSGYR: OutputPin,
+    ACC: SpiDevice<u8>,
+    GYR: SpiDevice<u8>,
 {
     /// Create a new BMI088 driver instance
-    pub fn new(spi: SPI, cs_accel: CSACC, cs_gyro: CSGYR) -> Self {
-        Self { spi, cs_accel, cs_gyro }
+    pub fn new(acc: ACC, gyr: GYR) -> Self {
+        Self { acc, gyr }
     }
 
     /// Initialize the BMI088 sensor with proper power-up sequence
     pub async fn init<D: DelayMs>(&mut self, delay: &mut D) -> Result<(), Error> {
         info!("BMI088: Starting initialization sequence");
-
-        // Ensure CS lines are high initially
-        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
-        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
-        delay.delay_ms(10).await;
 
         // Step 1: Reset gyroscope first (datasheet recommendation)
         info!("BMI088: Resetting gyroscope");
@@ -175,11 +164,10 @@ where
         let mut rx_buf = [0u8; 8];
         tx_buf[0] = acc::ACC_X_L | 0x80;
 
-        self.cs_accel.set_low().map_err(|_| Error::Cs)?;
-        let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
-
-        result.map_err(|_| Error::Spi)?;
+        self.acc
+            .transfer(&mut rx_buf, &tx_buf)
+            .await
+            .map_err(|_| Error::Spi)?;
 
         // Parse data starting from byte 2 (skip addr and dummy)
         let x = i16::from_le_bytes([rx_buf[2], rx_buf[3]]);
@@ -196,11 +184,10 @@ where
         let mut rx_buf = [0u8; 7];
         tx_buf[0] = gyr::RATE_X_L | 0x80;
 
-        self.cs_gyro.set_low().map_err(|_| Error::Cs)?;
-        let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
-
-        result.map_err(|_| Error::Spi)?;
+        self.gyr
+            .transfer(&mut rx_buf, &tx_buf)
+            .await
+            .map_err(|_| Error::Spi)?;
 
         // Parse data starting from byte 1
         let x = i16::from_le_bytes([rx_buf[1], rx_buf[2]]);
@@ -223,11 +210,10 @@ where
         let tx_buf = [reg | 0x80, 0x00, 0x00];
         let mut rx_buf = [0u8; 3];
 
-        self.cs_accel.set_low().map_err(|_| Error::Cs)?;
-        let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
-
-        result.map_err(|_| Error::Spi)?;
+        self.acc
+            .transfer(&mut rx_buf, &tx_buf)
+            .await
+            .map_err(|_| Error::Spi)?;
         Ok(rx_buf[2]) // Data is in the third byte
     }
 
@@ -235,11 +221,7 @@ where
     async fn write_acc(&mut self, reg: u8, val: u8) -> Result<(), Error> {
         let tx_buf = [reg & 0x7F, val];
 
-        self.cs_accel.set_low().map_err(|_| Error::Cs)?;
-        let result = self.spi.write(&tx_buf).await;
-        self.cs_accel.set_high().map_err(|_| Error::Cs)?;
-
-        result.map_err(|_| Error::Spi)
+        self.acc.write(&tx_buf).await.map_err(|_| Error::Spi)
     }
 
     /// Read a single register from the gyroscope
@@ -247,11 +229,10 @@ where
         let tx_buf = [reg | 0x80, 0x00];
         let mut rx_buf = [0u8; 2];
 
-        self.cs_gyro.set_low().map_err(|_| Error::Cs)?;
-        let result = self.spi.transfer(&mut rx_buf, &tx_buf).await;
-        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
-
-        result.map_err(|_| Error::Spi)?;
+        self.gyr
+            .transfer(&mut rx_buf, &tx_buf)
+            .await
+            .map_err(|_| Error::Spi)?;
         Ok(rx_buf[1])
     }
 
@@ -259,10 +240,6 @@ where
     async fn write_gyr(&mut self, reg: u8, val: u8) -> Result<(), Error> {
         let tx_buf = [reg & 0x7F, val];
 
-        self.cs_gyro.set_low().map_err(|_| Error::Cs)?;
-        let result = self.spi.write(&tx_buf).await;
-        self.cs_gyro.set_high().map_err(|_| Error::Cs)?;
-
-        result.map_err(|_| Error::Spi)
+        self.gyr.write(&tx_buf).await.map_err(|_| Error::Spi)
     }
 }

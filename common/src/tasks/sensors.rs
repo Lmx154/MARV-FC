@@ -10,6 +10,7 @@ use defmt::{info, warn};
 
 use crate::drivers::adxl375::{Adxl375, Adxl375Raw};
 use crate::drivers::bmi088::{Bmi088, Bmi088Raw};
+use crate::drivers::lsm6dsv32x::{Lsm6dsv32x, Lsm6dsv32xRaw};
 use crate::drivers::bmm350::{Bmm350, RawMag};
 use crate::drivers::bmp390::Bmp390;
 use crate::drivers::bmp581::{Bmp581, Error as Bmp581Error};
@@ -28,16 +29,15 @@ pub trait DataSink<T> {
 /// - `delay` is an async ms delay adapter
 /// - `sink` receives raw accel/gyro frames
 /// - `interval_ms` pacing; 0 to run as fast as possible
-pub async fn run_bmi088_task<SPI, CSACC, CSGYR, D, S>(
-    imu: &mut Bmi088<SPI, CSACC, CSGYR>,
+pub async fn run_bmi088_task<ACC, GYR, D, S>(
+    imu: &mut Bmi088<ACC, GYR>,
     delay: &mut D,
     sink: &mut S,
     interval_ms: u32,
 )
 where
-    SPI: embedded_hal_async::spi::SpiBus<u8>,
-    CSACC: embedded_hal::digital::OutputPin,
-    CSGYR: embedded_hal::digital::OutputPin,
+    ACC: embedded_hal_async::spi::SpiDevice<u8>,
+    GYR: embedded_hal_async::spi::SpiDevice<u8>,
     D: DelayMs,
     S: DataSink<Bmi088Raw>,
 {
@@ -53,6 +53,41 @@ where
             }
             Err(e) => {
                 warn!("BMI088 read error: {:?}", e);
+            }
+        }
+        if interval_ms > 0 {
+            delay.delay_ms(interval_ms).await;
+        }
+    }
+}
+
+/// Run an async LSM6DSV32X read loop.
+/// - `imu` is an initialized LSM6DSV32X driver (or it will be initialized here if not).
+/// - `delay` is an async ms delay adapter
+/// - `sink` receives raw accel/gyro frames
+/// - `interval_ms` pacing; 0 to run as fast as possible
+pub async fn run_lsm6dsv32x_task<SPI, D, S>(
+    imu: &mut Lsm6dsv32x<SPI>,
+    delay: &mut D,
+    sink: &mut S,
+    interval_ms: u32,
+)
+where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+    D: DelayMs,
+    S: DataSink<Lsm6dsv32xRaw>,
+{
+    if let Err(e) = imu.init(delay).await {
+        warn!("LSM6DSV32X init error: {:?}", e);
+    }
+
+    loop {
+        match imu.read_raw().await {
+            Ok(raw) => {
+                sink.publish(raw).await;
+            }
+            Err(e) => {
+                warn!("LSM6DSV32X read error: {:?}", e);
             }
         }
         if interval_ms > 0 {
