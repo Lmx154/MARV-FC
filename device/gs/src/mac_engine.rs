@@ -18,6 +18,9 @@ pub const LED_QUEUE_LEN: usize = 16;
 
 const DEFAULT_TICK_PULSE_US: u64 = 50;
 const DEFAULT_LQ_LOG_INTERVAL: u32 = 100;
+const DEFAULT_TX_LOG_INTERVAL: u32 = 50;
+const DEFAULT_RX_LATE_LOG_INTERVAL: u32 = 50;
+const DEFAULT_TX_REFUSE_LOG_INTERVAL: u32 = 50;
 
 #[derive(Clone, Copy)]
 pub enum LedEvent {
@@ -33,6 +36,9 @@ pub type LedSender = Sender<'static, RawMutex, LedEvent, LED_QUEUE_LEN>;
 pub struct MacEngineConfig {
     pub tick_pulse_us: u64,
     pub lq_log_interval: u32,
+    pub tx_log_interval: u32,
+    pub rx_late_log_interval: u32,
+    pub tx_refuse_log_interval: u32,
 }
 
 impl Default for MacEngineConfig {
@@ -40,6 +46,9 @@ impl Default for MacEngineConfig {
         Self {
             tick_pulse_us: DEFAULT_TICK_PULSE_US,
             lq_log_interval: DEFAULT_LQ_LOG_INTERVAL,
+            tx_log_interval: DEFAULT_TX_LOG_INTERVAL,
+            rx_late_log_interval: DEFAULT_RX_LATE_LOG_INTERVAL,
+            tx_refuse_log_interval: DEFAULT_TX_REFUSE_LOG_INTERVAL,
         }
     }
 }
@@ -54,6 +63,9 @@ pub struct MacEngine<const TXQ: usize, const RXQ: usize> {
     lq_expected: u32,
     lq_received: u32,
     lq_tick_count: u32,
+    tx_logs: u32,
+    rx_late_logs: u32,
+    tx_refuse_logs: u32,
     last_rx_seq: Option<u16>,
     led_tx: Option<LedSender>,
     tick_pin: Option<Output<'static>>,
@@ -83,6 +95,9 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
             lq_expected: 0,
             lq_received: 0,
             lq_tick_count: 0,
+            tx_logs: 0,
+            rx_late_logs: 0,
+            tx_refuse_logs: 0,
             last_rx_seq: None,
             led_tx,
             tick_pin,
@@ -182,12 +197,16 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
                 .saturating_sub(self.profile.rx_ready_guard_us);
             let now_us = Instant::now().as_micros();
             if now_us > rx_ready_deadline_us {
-                warn!(
-                    "RX arm late for DL slot tick={} now={}us deadline={}us",
-                    self.tick_seq,
-                    now_us,
-                    rx_ready_deadline_us
-                );
+                self.rx_late_logs = self.rx_late_logs.wrapping_add(1);
+                let interval = self.config.rx_late_log_interval.max(1);
+                if self.rx_late_logs == 1 || self.rx_late_logs % interval == 0 {
+                    warn!(
+                        "RX arm late for DL slot tick={} now={}us deadline={}us",
+                        self.tick_seq,
+                        now_us,
+                        rx_ready_deadline_us
+                    );
+                }
             }
             self.maybe_log_lq("DL");
             return;
@@ -230,12 +249,16 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         if !window.fits_tx(tx_start_us, duration_us) {
             self.constraint_violations = self.constraint_violations.wrapping_add(1);
             self.send_led(LedEvent::Error).await;
-            warn!(
-                "Refusing TX: ToA={}ms > SlotBudget={}ms (violations={})",
-                duration_us / 1000,
-                window.budget_us_from(tx_start_us) / 1000,
-                self.constraint_violations
-            );
+            self.tx_refuse_logs = self.tx_refuse_logs.wrapping_add(1);
+            let interval = self.config.tx_refuse_log_interval.max(1);
+            if self.tx_refuse_logs == 1 || self.tx_refuse_logs % interval == 0 {
+                warn!(
+                    "Refusing TX: ToA={}ms > SlotBudget={}ms (violations={})",
+                    duration_us / 1000,
+                    window.budget_us_from(tx_start_us) / 1000,
+                    self.constraint_violations
+                );
+            }
             return;
         }
 
@@ -247,18 +270,22 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
                 warn!("TX payload too large");
             }
         }
-        info!(
-            "TX CONTROL_UP tick={} type={}",
-            self.tick_seq,
-            packet.packet_type.name()
-        );
+        self.tx_logs = self.tx_logs.wrapping_add(1);
+        let interval = self.config.tx_log_interval.max(1);
+        if self.tx_logs == 1 || self.tx_logs % interval == 0 {
+            info!(
+                "TX CONTROL_UP tick={} type={}",
+                self.tick_seq,
+                packet.packet_type.name()
+            );
+        }
     }
 
     async fn send_led(&self, event: LedEvent) {
         let Some(led_tx) = self.led_tx.as_ref() else {
             return;
         };
-        led_tx.send(event).await;
+        let _ = led_tx.try_send(event);
     }
 
     async fn pulse_tick_pin(&mut self) {

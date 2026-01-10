@@ -125,13 +125,12 @@ impl TickClock {
             return None;
         }
 
-        let tick_start_us = self.next_tick_us;
-        loop {
-            self.next_tick_us = self.next_tick_us.wrapping_add(self.period_us);
-            if now_us < self.next_tick_us {
-                break;
-            }
-        }
+        let elapsed = now_us.wrapping_sub(self.next_tick_us);
+        let skipped = elapsed / self.period_us;
+        let tick_start_us = self
+            .next_tick_us
+            .wrapping_add(skipped.saturating_mul(self.period_us));
+        self.next_tick_us = tick_start_us.wrapping_add(self.period_us);
         Some(tick_start_us)
     }
 }

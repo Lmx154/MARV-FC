@@ -123,7 +123,7 @@ async fn main(spawner: Spawner) {
         &mut pio0.common,
         pio0.sm0,
         p.DMA_CH2,
-        p.PIN_15,
+        p.PIN_11,
         &ws2812_program,
     );
     let heartbeat = Output::new(p.PIN_25, Level::Low);
@@ -139,22 +139,22 @@ async fn main(spawner: Spawner) {
         p.SPI0,
         p.PIN_2,  // SCK
         p.PIN_3,  // MOSI
-        p.PIN_4,  // MISO
+        p.PIN_0,  // MISO
         p.DMA_CH0,
         p.DMA_CH1,
         spi_cfg,
     );
 
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
-    let nss = Output::new(p.PIN_5, Level::High);
+    let nss = Output::new(p.PIN_1, Level::High);
     let spi_dev = SpiDevice::new(spi_bus, nss);
 
-    let reset = Output::new(p.PIN_1, Level::High);
-    let busy = Input::new(p.PIN_0, Pull::None);
-    let dio1 = Input::new(p.PIN_6, Pull::None);
+    let reset = Output::new(p.PIN_5, Level::High);
+    let busy = Input::new(p.PIN_4, Pull::None);
+    let dio1 = Input::new(p.PIN_9, Pull::None);
 
-    let rf_tx = Output::new(p.PIN_8, Level::Low);
-    let rf_rx = Output::new(p.PIN_9, Level::Low);
+    let rf_tx = Output::new(p.PIN_7, Level::Low);
+    let rf_rx = Output::new(p.PIN_6, Level::Low);
     let tick_pin = Output::new(p.PIN_16, Level::Low);
 
     let link_cfg = LINK_CONFIG;

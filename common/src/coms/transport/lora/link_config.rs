@@ -35,7 +35,7 @@ pub const DRONE_200: LinkConfig =
 pub const DRONE_150: LinkConfig =
     LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_150);
 pub const DRONE_100: LinkConfig =
-    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_100);
+    LinkConfig::new(rf_presets::LORA_SF5_BW500_CR45, mac_presets::DRONE_100);
 pub const DRONE_50: LinkConfig =
     LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::DRONE_50);
 pub const DRONE_25: LinkConfig =
@@ -53,7 +53,7 @@ pub const ROCKET_200: LinkConfig =
 pub const ROCKET_150: LinkConfig =
     LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_150);
 pub const ROCKET_100: LinkConfig =
-    LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_100);
+    LinkConfig::new(rf_presets::LORA_SF5_BW500_CR45, mac_presets::ROCKET_100);
 pub const ROCKET_50: LinkConfig =
     LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_50);
 pub const ROCKET_25: LinkConfig =
@@ -66,4 +66,4 @@ pub const ROCKET_1: LinkConfig =
     LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_1);
 
 // Toggle this to switch link configs at build time.
-pub const ACTIVE: LinkConfig = DRONE_100;
+pub const ACTIVE: LinkConfig = DRONE_50;

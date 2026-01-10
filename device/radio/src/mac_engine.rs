@@ -290,6 +290,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         if self.tracker.poll(Instant::now().as_millis()) == LinkEvent::LockLost {
             info!("SYNC LOST: timeout -> SEARCH");
             self.reset_lq();
+            self.next_tick_seq = None;
         }
     }
 
@@ -297,7 +298,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         let Some(led_tx) = self.led_tx.as_ref() else {
             return;
         };
-        led_tx.send(event).await;
+        let _ = led_tx.try_send(event);
     }
 
     async fn pulse_tick_pin(&mut self) {
