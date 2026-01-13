@@ -8,7 +8,6 @@
 
 use defmt::{info, warn};
 
-use crate::drivers::adxl375::{Adxl375, Adxl375Raw};
 use crate::drivers::bmi088::{Bmi088, Bmi088Raw};
 use crate::drivers::lsm6dsv32x::{Lsm6dsv32x, Lsm6dsv32xRaw};
 use crate::drivers::bmm350::{Bmm350, RawMag};
@@ -235,46 +234,6 @@ where
             }
         }
         loops = loops.wrapping_add(1);
-        if interval_ms > 0 {
-            delay.delay_ms(interval_ms).await;
-        }
-    }
-}
-
-/// Run an async ADXL375 read loop delivering `Adxl375Raw`.
-///
-/// - `accel` is an ADXL375 driver
-/// - `delay` is an async ms delay adapter
-/// - `sink` receives raw accel frames
-/// - `interval_ms` pacing; 0 to run as fast as possible
-pub async fn run_adxl375_task<I2C, INT, D, S>(
-    accel: &mut Adxl375<I2C, INT>,
-    delay: &mut D,
-    sink: &mut S,
-    interval_ms: u32,
-)
-where
-    I2C: embedded_hal_async::i2c::I2c,
-    INT: embedded_hal::digital::InputPin,
-    D: DelayMs,
-    S: DataSink<Adxl375Raw>,
-{
-    if let Err(_e) = accel.init(delay).await {
-        // Can't format generic error type with defmt safely without extra bounds,
-        // so just log a static message (or match on variants higher up if needed).
-        warn!("ADXL375 init error");
-    }
-
-    loop {
-        match accel.read_accel_raw().await {
-            Ok(raw_vec) => {
-                let frame = Adxl375Raw { accel: raw_vec };
-                sink.publish(frame).await;
-            }
-            Err(_e) => {
-                warn!("ADXL375 read error");
-            }
-        }
         if interval_ms > 0 {
             delay.delay_ms(interval_ms).await;
         }

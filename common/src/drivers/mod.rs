@@ -6,4 +6,3 @@ pub mod bmp581;
 pub mod lsm6dsv32x;
 pub mod neom9n;
 pub mod sx1262;
-pub mod adxl375;

@@ -130,9 +130,6 @@ impl<'d> UsbCdc<'d> {
     }
 }
 
-// ADXL375 I2C address (adjust if ALT_ADDRESS wiring differs)
-// const ADXL375_ADDR: u8 = 0x53;
-
 // Provide an async delay adapter for generic drivers
 struct EmbassyDelay;
 impl common::utils::delay::DelayMs for EmbassyDelay {
@@ -150,9 +147,6 @@ impl embedded_hal_async::delay::DelayNs for EmbassyDelay {
 struct ImuData { accel: [i16; 3], gyro: [i16; 3], seq: u32 }
 
 #[derive(Copy, Clone, Default)]
-struct HighGData { accel: [i16; 3], seq: u32 }
-
-#[derive(Copy, Clone, Default)]
 struct MagData { xyz: [i32; 3], seq: u32 }
 
 #[derive(Copy, Clone, Default)]
@@ -165,7 +159,6 @@ struct GpsState { fix: Option<GpsData>, seq: u32 }
 struct SensorsState {
     imu: ImuData,
     imu2: ImuData,
-    highg: HighGData,
     mag: MagData,
     baro: BaroData,
     gps: GpsState,
@@ -174,7 +167,6 @@ struct SensorsState {
 static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
     imu: ImuData { accel: [0;3], gyro: [0;3], seq: 0 },
     imu2: ImuData { accel: [0;3], gyro: [0;3], seq: 0 },
-    highg: HighGData { accel: [0;3], seq: 0 },
     mag: MagData { xyz: [0;3], seq: 0 },
     baro: BaroData { t_c_x100: 0, p_pa: 0, seq: 0 },
     gps: GpsState { fix: None, seq: 0 },
@@ -638,18 +630,6 @@ async fn baro_task(i2c_dev: SharedI2c0<'static>, interval_ms: u32, bmp_addr: u8)
     run_bmp581_task(&mut bmp, &mut pacing, &mut sink, interval_ms).await;
 }
 
-// #[embassy_executor::task]
-// async fn adxl_task(i2c_dev: SharedI2c0<'static>) {
-//     let mut delay = EmbassyDelay;
-//     info!("ADXL375: starting task on I2C0 @0x{:02X}", ADXL375_ADDR);
-//     // INT pin not wired (or ignored) here, so we use a dummy type and None
-//     let mut accel: Adxl375<SharedI2c0<'static>, Input<'static>> =
-//         Adxl375::new(i2c_dev, ADXL375_ADDR, None);
-//     let mut sink = HighGSink;
-//     // e.g. 1 ms interval (~1 kHz logical pacing; actual ODR set in driver init)
-//     run_adxl375_task(&mut accel, &mut delay, &mut sink, 1).await;
-// }
-
 #[embassy_executor::task]
 async fn logger_task(
     mut led: PioWs2812<'static, embassy_rp::peripherals::PIO0, 0, 1>,
@@ -661,7 +641,6 @@ async fn logger_task(
     // Track previous counters and time to compute real per-second rates
     let mut prev_imu_seq: u32 = 0;
     let mut prev_imu2_seq: u32 = 0;
-    let mut prev_highg_seq: u32 = 0;
     let mut prev_mag_seq: u32 = 0;
     let mut prev_baro_seq: u32 = 0;
     let mut prev_gps_seq: u32 = 0;
@@ -672,31 +651,29 @@ async fn logger_task(
         // More detailed data at debug level every loop
         if let Some(fix) = s.gps.fix {
             debug!(
-                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} i2:{} hg:{} m:{} b:{} g:{}",
+                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} i2:{} m:{} b:{} g:{}",
                 s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                 s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
                 s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
                 s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
-                s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                 s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                 (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
                 fix.month, fix.day, fix.year, fix.hour, fix.minute, fix.second,
                 fix.latitude/10_000_000, (fix.latitude%10_000_000).abs(),
                 fix.longitude/10_000_000, (fix.longitude%10_000_000).abs(),
                 fix.altitude/1000, fix.satellites, fix.fix_type,
-                s.imu.seq, s.imu2.seq, s.highg.seq, s.mag.seq, s.baro.seq, s.gps.seq
+                s.imu.seq, s.imu2.seq, s.mag.seq, s.baro.seq, s.gps.seq
             );
         } else {
             debug!(
-                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} i2:{} hg:{} m:{} b:{} g:{}",
+                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} i2:{} m:{} b:{} g:{}",
                 s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                 s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
                 s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
                 s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
-                s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                 s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                 (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
-                s.imu.seq, s.imu2.seq, s.highg.seq, s.mag.seq, s.baro.seq, s.gps.seq
+                s.imu.seq, s.imu2.seq, s.mag.seq, s.baro.seq, s.gps.seq
             );
         }
 
@@ -705,19 +682,17 @@ async fn logger_task(
         if elapsed_ms >= 1000 {
             let imu_rate = (s.imu.seq.wrapping_sub(prev_imu_seq) * 1000) / elapsed_ms.max(1);
             let imu2_rate = (s.imu2.seq.wrapping_sub(prev_imu2_seq) * 1000) / elapsed_ms.max(1);
-            let highg_rate = (s.highg.seq.wrapping_sub(prev_highg_seq) * 1000) / elapsed_ms.max(1);
             let mag_rate = (s.mag.seq.wrapping_sub(prev_mag_seq) * 1000) / elapsed_ms.max(1);
             let baro_rate = (s.baro.seq.wrapping_sub(prev_baro_seq) * 1000) / elapsed_ms.max(1);
             let gps_rate = (s.gps.seq.wrapping_sub(prev_gps_seq) * 1000) / elapsed_ms.max(1);
             if let Some(fix) = s.gps.fix {
                 info!(
-                    "Rates IMU:{} Hz IMU2:{} Hz HG:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {}",
-                    imu_rate, imu2_rate, highg_rate, mag_rate, baro_rate, gps_rate,
+                    "Rates IMU:{} Hz IMU2:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {}",
+                    imu_rate, imu2_rate, mag_rate, baro_rate, gps_rate,
                     s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                     s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
                     s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
                     s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
-                    s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                     s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                     (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
                     fix.month, fix.day, fix.year, fix.hour, fix.minute, fix.second,
@@ -727,20 +702,18 @@ async fn logger_task(
                 );
             } else {
                 info!(
-                    "Rates IMU:{} Hz IMU2:{} Hz HG:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | HG [{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix",
-                    imu_rate, imu2_rate, highg_rate, mag_rate, baro_rate, gps_rate,
+                    "Rates IMU:{} Hz IMU2:{} Hz MAG:{} Hz BARO:{} Hz GPS:{} Hz | IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix",
+                    imu_rate, imu2_rate, mag_rate, baro_rate, gps_rate,
                     s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
                     s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
                     s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
                     s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
-                    s.highg.accel[0], s.highg.accel[1], s.highg.accel[2],
                     s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
                     (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa
                 );
             }
             prev_imu_seq = s.imu.seq;
             prev_imu2_seq = s.imu2.seq;
-            prev_highg_seq = s.highg.seq;
             prev_mag_seq = s.mag.seq;
             prev_baro_seq = s.baro.seq;
             prev_gps_seq = s.gps.seq;
