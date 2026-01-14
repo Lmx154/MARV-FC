@@ -29,8 +29,10 @@ use common::tasks::sensors::{
     run_neom9n_task,
     DataSink,
 };
-use common::coms::uart_coms::{AsyncUartBus, MAVLINK_MAX_FRAME};
-use common::protocol::mavlink as mavlink;
+use common::coms::transport::uart::{AsyncUartBus, MAVLINK_MAX_FRAME};
+use common::coms::transport::uart_packet::{
+    send_packet_over_uart, UART_PACKET_MAX_FRAME,
+};
 use common::protocol::mavlink::encode::{
     build_param_value_frame,
     build_statustext,
@@ -44,6 +46,9 @@ use common::protocol::mavlink::encode::{
 use common::protocol::mavlink::handlers::{dispatch_mavlink_message, MessageHandlerResult};
 use common::protocol::mavlink::telemetry::{MavlinkTelemetryBundle, MavlinkTelemetrySource};
 use common::protocol::mavlink::prelude::{Frame, V2};
+use common::protocol::packet::{
+    Packet, PacketType, TelemetryBaro, TelemetryGps, TelemetryImu, TelemetryMag,
+};
 use common::params::{ParamRegistry, ParamId};
 use common::policies::fc_state::{FcState, FcStatePolicy};
 use common::coms::scheduler::LinkScheduler;
@@ -67,8 +72,8 @@ use embassy_time::{Timer, Instant};
 use {defmt_rtt as _, panic_probe as _};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_futures::select;
 use static_cell::StaticCell;
+use heapless::Deque;
 use smart_leds::RGB8;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 // Bind I2C0/I2C1 interrupts for async I2C drivers
@@ -186,6 +191,14 @@ fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
     }
     let ms = 1000 / hz as u32;
     ms.clamp(min_ms, max_ms).max(1)
+}
+
+fn hz_to_interval_ms(hz: u32) -> u32 {
+    if hz == 0 {
+        return 1000;
+    }
+    let ms = 1000 / hz;
+    ms.max(1)
 }
 
 fn fc_policy_from_params(params: &ParamRegistry) -> FcStatePolicy {
@@ -537,7 +550,7 @@ async fn main(spawner: Spawner) {
         ))
         .unwrap();
     spawner
-        .spawn(uart_mavlink_task(uart_fc_radio, mav_cfg, params, fc_state))
+        .spawn(uart_link_task(uart_fc_radio, params))
         .unwrap();
 }
 
@@ -588,6 +601,75 @@ impl DataSink<GpsData> for GpsSink {
         let mut guard = STATE.lock().await;
         guard.gps.fix = Some(data);
         guard.gps.seq = guard.gps.seq.wrapping_add(1);
+    }
+}
+
+const LOG_FLUSH_INTERVAL_MS: u64 = 50;
+const LOG_BUFFER_CAP: usize = 128;
+
+struct LogBuffer<const N: usize> {
+    buf: Deque<SensorsState, N>,
+    drops: u32,
+}
+
+impl<const N: usize> LogBuffer<N> {
+    fn new() -> Self {
+        Self {
+            buf: Deque::new(),
+            drops: 0,
+        }
+    }
+
+    fn push(&mut self, sample: SensorsState) {
+        if self.buf.push_back(sample).is_err() {
+            let _ = self.buf.pop_front();
+            let _ = self.buf.push_back(sample);
+            self.drops = self.drops.wrapping_add(1);
+        }
+    }
+
+    fn pop(&mut self) -> Option<SensorsState> {
+        self.buf.pop_front()
+    }
+
+    fn len(&self) -> usize {
+        self.buf.len()
+    }
+
+    fn take_drops(&mut self) -> u32 {
+        let drops = self.drops;
+        self.drops = 0;
+        drops
+    }
+}
+
+fn log_debug_sample(s: &SensorsState) {
+    if let Some(fix) = s.gps.fix {
+        debug!(
+            "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} i2:{} m:{} b:{} g:{}",
+            s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
+            s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+            s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
+            s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
+            s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
+            (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
+            fix.month, fix.day, fix.year, fix.hour, fix.minute, fix.second,
+            fix.latitude / 10_000_000, (fix.latitude % 10_000_000).abs(),
+            fix.longitude / 10_000_000, (fix.longitude % 10_000_000).abs(),
+            fix.altitude / 1000, fix.satellites, fix.fix_type,
+            s.imu.seq, s.imu2.seq, s.mag.seq, s.baro.seq, s.gps.seq
+        );
+    } else {
+        debug!(
+            "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} i2:{} m:{} b:{} g:{}",
+            s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
+            s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
+            s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
+            s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
+            s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
+            (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
+            s.imu.seq, s.imu2.seq, s.mag.seq, s.baro.seq, s.gps.seq
+        );
     }
 }
 
@@ -645,36 +727,24 @@ async fn logger_task(
     let mut prev_baro_seq: u32 = 0;
     let mut prev_gps_seq: u32 = 0;
     let mut prev_t = Instant::now();
+    let mut log_buf: LogBuffer<LOG_BUFFER_CAP> = LogBuffer::new();
+    let mut last_flush = Instant::now();
     loop {
-        // Fetch a snapshot and emit unified line at fastest cadence (~1 kHz)
+        // Fetch a snapshot and enqueue it for batched debug logging.
         let s = STATE.lock().await.clone();
-        // More detailed data at debug level every loop
-        if let Some(fix) = s.gps.fix {
-            debug!(
-                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS {:02}/{:02}/{:04} {:02}:{:02}:{:02} lat {}.{:07} lon {}.{:07} alt {}m sats {} fix {} | seqs i:{} i2:{} m:{} b:{} g:{}",
-                s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
-                s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
-                s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
-                s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
-                s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
-                (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
-                fix.month, fix.day, fix.year, fix.hour, fix.minute, fix.second,
-                fix.latitude/10_000_000, (fix.latitude%10_000_000).abs(),
-                fix.longitude/10_000_000, (fix.longitude%10_000_000).abs(),
-                fix.altitude/1000, fix.satellites, fix.fix_type,
-                s.imu.seq, s.imu2.seq, s.mag.seq, s.baro.seq, s.gps.seq
-            );
-        } else {
-            debug!(
-                "IMU A[{},{},{}] G[{},{},{}] | IMU2 A[{},{},{}] G[{},{},{}] | MAG [{},{},{}] | BARO T={}c P={} Pa | GPS no-fix | seqs i:{} i2:{} m:{} b:{} g:{}",
-                s.imu.accel[0], s.imu.accel[1], s.imu.accel[2],
-                s.imu.gyro[0], s.imu.gyro[1], s.imu.gyro[2],
-                s.imu2.accel[0], s.imu2.accel[1], s.imu2.accel[2],
-                s.imu2.gyro[0], s.imu2.gyro[1], s.imu2.gyro[2],
-                s.mag.xyz[0], s.mag.xyz[1], s.mag.xyz[2],
-                (s.baro.t_c_x100 as f32) / 100.0, s.baro.p_pa,
-                s.imu.seq, s.imu2.seq, s.mag.seq, s.baro.seq, s.gps.seq
-            );
+        log_buf.push(s);
+
+        let flush_due = last_flush.elapsed().as_millis() >= LOG_FLUSH_INTERVAL_MS;
+        let backlog_high = log_buf.len() >= LOG_BUFFER_CAP.saturating_sub(1);
+        if flush_due || backlog_high {
+            let dropped = log_buf.take_drops();
+            if dropped != 0 {
+                warn!("Logger buffer dropped {} samples", dropped);
+            }
+            while let Some(sample) = log_buf.pop() {
+                log_debug_sample(&sample);
+            }
+            last_flush = Instant::now();
         }
 
         // Once per ~1s (or slightly more), compute true rates from deltas and print with current values
@@ -1130,143 +1200,97 @@ async fn usb_mavlink_task(
     }
 }
 
-// UART MAVLink task (FC <-> radio):
-// - RX/command handling has priority.
-// - Telemetry is sent only when link is idle.
+// UART custom link task (FC -> radio) using custom packet framing + CRC.
 #[embassy_executor::task]
-async fn uart_mavlink_task(
+async fn uart_link_task(
     mut uart: RpUart<'static>,
-    cfg: MavEndpointConfig,
     params: &'static Mutex<RawMutex, ParamRegistry>,
-    fc_state: &'static Mutex<RawMutex, FcState>,
 ) {
-    info!("UART: Starting bidirectional MAVLink task for radio");
-    let source = StateTelemetrySource;
-    let hb_cfg = HeartbeatConfig::default();
-    let mut seq: u8 = 0;
-    let mut tx_buf = [0u8; MAVLINK_MAX_FRAME];
-    let mut rx_scratch = [0u8; MAVLINK_MAX_FRAME];
-
-    let now_ms = Instant::now().as_millis() as u32;
-    let mut sched = LinkScheduler::new(now_ms, 1, 10);
+    info!("UART: Starting custom link task for radio");
+    let mut tx_buf = [0u8; UART_PACKET_MAX_FRAME];
+    let mut last_imu_seq: u32 = 0;
+    let mut last_mag_seq: u32 = 0;
+    let mut last_baro_seq: u32 = 0;
+    let mut last_gps_seq: u32 = 0;
+    let mut interval_ms: u32 = 10;
 
     loop {
-        let now_ms = Instant::now().as_millis() as u32;
-        let (telem_rate_hz, hb_en, hb_hz) = {
+        let rad_tel_hz = {
             let p = params.lock().await;
-            let telem_rate_hz = p.u32(ParamId::TelemRateHz).min(1000);
-            let hb_en = p.bool(ParamId::HeartbeatEn);
-            let hb_hz = fc_heartbeat_hz(&p);
-            (telem_rate_hz, hb_en, hb_hz)
+            p.u32(ParamId::RadioTelemRateHz).min(1000).max(1)
         };
-
-        sched.set_heartbeat_enabled(hb_en);
-        sched.set_heartbeat_hz(now_ms, hb_hz);
-        sched.set_telemetry_hz(now_ms, telem_rate_hz);
-
-        // Give RX priority. If we see no RX traffic for a short window,
-        // we'll use the idle time to send telemetry.
-        let idle_timeout_ms: u64 = 30;
-        let rx_fut = mavlink::recv_frame_over_uart(&mut uart, &mut rx_scratch);
-        let idle_fut = Timer::after_millis(idle_timeout_ms);
-        let mut rx_activity = false;
-
-        match select::select(rx_fut, idle_fut).await {
-            select::Either::First(res) => {
-                rx_activity = true;
-                let frame = match res {
-                    Ok(f) => f,
-                    Err(e) => {
-                        warn!("UART: RX error: {:?}", e);
-                        continue;
-                    }
-                };
-
-                // Handle command immediately.
-                let mut p = params.lock().await;
-                let policy = fc_policy_from_params(&p);
-                let statustext_en = p.bool(ParamId::StatustextEn);
-                let mut state = fc_state.lock().await;
-                let (result, params_changed) = dispatch_mavlink_message(
-                    frame,
-                    cfg,
-                    seq,
-                    &mut p,
-                    &mut state,
-                    policy,
-                    statustext_en,
-                );
-                drop(state);
-
-                match result {
-                    MessageHandlerResult::SendFrame(reply) => {
-                        seq = seq.wrapping_add(1);
-                        let _ = mavlink::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
-                    }
-                    MessageHandlerResult::SendFrames(frames) => {
-                        for frame in frames.into_iter() {
-                            seq = seq.wrapping_add(1);
-                            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
-                        }
-                    }
-                    MessageHandlerResult::SendAllParams => {
-                        info!("UART: PARAM_REQUEST_LIST - sending {} params", p.count());
-                        for idx in 0..p.count() {
-                            if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
-                                seq = seq.wrapping_add(1);
-                                let _ = mavlink::send_frame_over_uart(&mut uart, &reply, &mut tx_buf).await;
-                            }
-                        }
-                        info!("UART: PARAM_REQUEST_LIST complete");
-                    }
-                    MessageHandlerResult::NoResponse | MessageHandlerResult::Unhandled => {}
-                    MessageHandlerResult::DeviceOpRead(_) | MessageHandlerResult::DeviceOpWrite(_) => {
-                        // Device ops are currently served only over USB (Mission Planner).
-                    }
-                }
-                drop(p);
-
-                if params_changed {
-                    PARAMS_DIRTY.store(true, Ordering::Relaxed);
-                    PARAMS_LAST_MODIFIED.store(Instant::now().as_millis() as u32, Ordering::Relaxed);
-                }
-            }
-            select::Either::Second(_) => {
-                // Idle window elapsed: ok to send telemetry if due.
-            }
+        let next_interval_ms = hz_to_interval_ms(rad_tel_hz);
+        if next_interval_ms != interval_ms {
+            interval_ms = next_interval_ms;
         }
 
-        let now_ms = Instant::now().as_millis() as u32;
-        let decision = sched.poll(now_ms);
+        let s = STATE.lock().await.clone();
 
-        if decision.send_telemetry && !rx_activity {
-            let now_us = (now_ms as u64) * 1000;
-            let bundle = source.bundle(now_ms, now_us).await;
-
-            let frames = [
-                build_frame_from_msg(cfg, seq.wrapping_add(0), &bundle.sys_status),
-                build_frame_from_msg(cfg, seq.wrapping_add(1), &bundle.raw_imu),
-                build_frame_from_msg(cfg, seq.wrapping_add(2), &bundle.scaled_pressure),
-                build_frame_from_msg(cfg, seq.wrapping_add(3), &bundle.gps_raw_int),
-                build_frame_from_msg(cfg, seq.wrapping_add(4), &bundle.attitude),
-            ];
-
-            for frame in frames.iter() {
-                seq = seq.wrapping_add(1);
-                // Send to radio via UART - best effort, ignore errors.
-                let _ = mavlink::send_frame_over_uart(&mut uart, frame, &mut tx_buf).await;
-            }
-        }
-
-        if decision.send_heartbeat {
-            let snapshot = {
-                let state = fc_state.lock().await;
-                state.snapshot()
+        if s.imu.seq != last_imu_seq {
+            let imu = TelemetryImu {
+                accel: s.imu.accel,
+                gyro: s.imu.gyro,
             };
-            let frame = build_heartbeat_frame(cfg, seq, &snapshot, hb_cfg);
-            seq = seq.wrapping_add(1);
-            let _ = mavlink::send_frame_over_uart(&mut uart, &frame, &mut tx_buf).await;
+            let packet = Packet::with_payload(PacketType::TelemetryImu, imu.encode());
+            if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
+                .await
+                .is_ok()
+            {
+                last_imu_seq = s.imu.seq;
+            }
         }
+
+        if s.mag.seq != last_mag_seq {
+            let mag = TelemetryMag {
+                mag: [
+                    clamp_i16(s.mag.xyz[0]),
+                    clamp_i16(s.mag.xyz[1]),
+                    clamp_i16(s.mag.xyz[2]),
+                ],
+            };
+            let packet = Packet::with_payload(PacketType::TelemetryMag, mag.encode());
+            if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
+                .await
+                .is_ok()
+            {
+                last_mag_seq = s.mag.seq;
+            }
+        }
+
+        if s.baro.seq != last_baro_seq {
+            let baro = TelemetryBaro {
+                pressure_pa: s.baro.p_pa,
+                temp_c_x10: clamp_i16((s.baro.t_c_x100 / 10) as i32),
+            };
+            let packet = Packet::with_payload(PacketType::TelemetryBaro, baro.encode());
+            if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
+                .await
+                .is_ok()
+            {
+                last_baro_seq = s.baro.seq;
+            }
+        }
+
+        if s.gps.seq != last_gps_seq {
+            if let Some(fix) = s.gps.fix {
+                let gps = TelemetryGps {
+                    lat: fix.latitude,
+                    lon: fix.longitude,
+                    alt_mm: fix.altitude,
+                    sats: fix.satellites,
+                    fix: fix.fix_type,
+                };
+                let packet = Packet::with_payload(PacketType::TelemetryGps, gps.encode());
+                if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
+                    .await
+                    .is_ok()
+                {
+                    last_gps_seq = s.gps.seq;
+                }
+            }
+        }
+
+        Timer::after_millis(interval_ms as u64).await;
     }
 }
 

@@ -2,7 +2,7 @@ use defmt::{info, warn};
 use embassy_futures::select;
 use embassy_rp::gpio::Output;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
-use embassy_sync::channel::Sender;
+use embassy_sync::channel::{Receiver, Sender};
 use embassy_time::{Instant, Timer};
 
 use common::coms::transport::lora::link_profile::LinkProfile;
@@ -14,9 +14,13 @@ use common::coms::transport::lora::mac_scheduler::{
 };
 use common::coms::transport::lora::phy_service::{Phy, PhyError, RxIndication};
 use common::coms::transport::lora::link_transport::{LoraTransport, RxMeta};
-use common::protocol::packet::{decode_packet, encode_packet_fixed, Packet, PacketType};
+use common::protocol::packet::{
+    decode_packet, encode_packet_fixed, Packet, PacketType, TelemetryBaro, TelemetryGps,
+    TelemetryImu, TelemetryMag, TelemetrySystem,
+};
 
 pub const LED_QUEUE_LEN: usize = 16;
+pub const UART_PACKET_QUEUE_LEN: usize = 16;
 
 const DEFAULT_SYNC_POLL_MS: u64 = 100;
 const DEFAULT_TICK_PULSE_US: u64 = 50;
@@ -68,6 +72,7 @@ pub struct MacEngine<const TXQ: usize, const RXQ: usize> {
     lq_tick_count: u32,
     last_rx_seq: Option<u16>,
     led_tx: Option<LedSender>,
+    uart_rx: Option<Receiver<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>>,
     tick_pin: Option<Output<'static>>,
     config: MacEngineConfig,
 }
@@ -79,6 +84,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         profile: LinkProfile,
         tick_pin: Option<Output<'static>>,
         led_tx: Option<LedSender>,
+        uart_rx: Option<Receiver<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>>,
         config: MacEngineConfig,
     ) -> Self {
         let now_us = Instant::now().as_micros();
@@ -98,6 +104,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
             lq_tick_count: 0,
             last_rx_seq: None,
             led_tx,
+            uart_rx,
             tick_pin,
             config,
         }
@@ -105,6 +112,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
 
     pub async fn run(&mut self) -> ! {
         loop {
+            self.drain_uart();
             let now_us = Instant::now().as_micros();
             let wait_us = self
                 .tick_clock
@@ -205,6 +213,8 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         let Some(tick_start_us) = self.tick_clock.poll(now_us) else {
             return;
         };
+        self.drain_uart();
+        self.transport.poll_telemetry(now_us);
         self.send_led(LedEvent::Tick).await;
         self.pulse_tick_pin().await;
 
@@ -291,6 +301,56 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
             info!("SYNC LOST: timeout -> SEARCH");
             self.reset_lq();
             self.next_tick_seq = None;
+        }
+    }
+
+    fn drain_uart(&mut self) {
+        loop {
+            let packet = match self.uart_rx.as_mut() {
+                Some(uart_rx) => match uart_rx.try_receive() {
+                    Ok(packet) => packet,
+                    Err(_) => break,
+                },
+                None => break,
+            };
+            match packet.packet_type {
+                PacketType::TelemetryImu => {
+                    if let Ok(imu) = TelemetryImu::decode(packet.payload.as_slice()) {
+                        self.transport.enqueue_imu(imu);
+                    } else {
+                        warn!("UART RX decode error type=IMU");
+                    }
+                }
+                PacketType::TelemetryBaro => {
+                    if let Ok(baro) = TelemetryBaro::decode(packet.payload.as_slice()) {
+                        self.transport.enqueue_baro(baro);
+                    } else {
+                        warn!("UART RX decode error type=BARO");
+                    }
+                }
+                PacketType::TelemetryMag => {
+                    if let Ok(mag) = TelemetryMag::decode(packet.payload.as_slice()) {
+                        self.transport.enqueue_mag(mag);
+                    } else {
+                        warn!("UART RX decode error type=MAG");
+                    }
+                }
+                PacketType::TelemetryGps => {
+                    if let Ok(gps) = TelemetryGps::decode(packet.payload.as_slice()) {
+                        self.transport.enqueue_gps(gps);
+                    } else {
+                        warn!("UART RX decode error type=GPS");
+                    }
+                }
+                PacketType::TelemetrySystem => {
+                    if let Ok(system) = TelemetrySystem::decode(packet.payload.as_slice()) {
+                        self.transport.enqueue_system(system);
+                    } else {
+                        warn!("UART RX decode error type=SYSTEM");
+                    }
+                }
+                _ => {}
+            }
         }
     }
 

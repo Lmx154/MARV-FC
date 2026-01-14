@@ -18,6 +18,7 @@ pub enum PacketType {
     TelemetryMag = 0x14,
     TelemetryGps = 0x15,
     TelemetrySystem = 0x16,
+    TelemetryBurst = 0x17,
 }
 
 impl PacketType {
@@ -33,6 +34,7 @@ impl PacketType {
             0x14 => Some(PacketType::TelemetryMag),
             0x15 => Some(PacketType::TelemetryGps),
             0x16 => Some(PacketType::TelemetrySystem),
+            0x17 => Some(PacketType::TelemetryBurst),
             _ => None,
         }
     }
@@ -49,6 +51,7 @@ impl PacketType {
             PacketType::TelemetryMag => "TELEMETRY_MAG",
             PacketType::TelemetryGps => "TELEMETRY_GPS",
             PacketType::TelemetrySystem => "TELEMETRY_SYSTEM",
+            PacketType::TelemetryBurst => "TELEMETRY_BURST",
         }
     }
 }

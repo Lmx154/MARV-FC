@@ -6,13 +6,17 @@ edition = "2024"
 [lib]
 path = "src/lib.rs"
 
+[features]
+default = ["mavlink"]
+mavlink = ["dep:mavio"]
+
 [dependencies]
 embedded-hal = "1.0"
 micromath = "2.1"
 defmt = "1.0.1"
 embedded-hal-async = "1.0"
 bmp5 = { version = "0.2.2", features = ["defmt"] }
-mavio = { version = "0.5", default-features = false, features = ["dlct-common", "dlct-ardupilotmega"] }
+mavio = { version = "0.5", default-features = false, features = ["dlct-common", "dlct-ardupilotmega"], optional = true }
 heapless = { version = "0.8", features = ["defmt-03"] }
 lora-phy = { git = "https://github.com/Lmx154/lora-rs", features = ["defmt-03"] }
 embassy-sync = "0.7.2"

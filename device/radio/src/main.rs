@@ -14,21 +14,29 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::peripherals::SPI0;
 use embassy_rp::spi::{Async, Config as SpiConfig, Spi};
+use embassy_rp::uart::{
+    Async as UartAsync, Config as UartConfig, InterruptHandler as UartInterruptHandler, Uart,
+};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
-use embassy_sync::channel::{Channel, Receiver};
+use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Instant, Timer};
 use smart_leds::RGB8;
 use static_cell::StaticCell;
 
+use common::coms::transport::uart::AsyncUartBus;
+use common::coms::transport::uart_packet::{recv_packet_over_uart, UART_PACKET_MAX_FRAME};
 use common::coms::transport::lora::link_config::ACTIVE as LINK_CONFIG;
 use common::coms::transport::lora::phy_service::{
     PhyChannels, PhyService, PhyServiceConfig, TimeSource,
 };
 use common::coms::transport::lora::link_transport::LoraTransport;
 use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
+use common::protocol::packet::Packet;
 
-use crate::mac_engine::{LedEvent, MacEngine, MacEngineConfig, LED_QUEUE_LEN};
+use crate::mac_engine::{
+    LedEvent, MacEngine, MacEngineConfig, LED_QUEUE_LEN, UART_PACKET_QUEUE_LEN,
+};
 
 const TX_QUEUE_LEN: usize = 4;
 const RX_QUEUE_LEN: usize = 4;
@@ -43,6 +51,8 @@ type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
 static SPI_BUS: StaticCell<SpiBus> = StaticCell::new();
 static PHY_CHANNELS: StaticCell<PhyChannels<TX_QUEUE_LEN, RX_QUEUE_LEN>> = StaticCell::new();
 static LED_EVENTS: StaticCell<Channel<RawMutex, LedEvent, LED_QUEUE_LEN>> = StaticCell::new();
+static UART_PACKETS: StaticCell<Channel<RawMutex, Packet, UART_PACKET_QUEUE_LEN>> =
+    StaticCell::new();
 
 type SpiDev = SpiDevice<'static, RawMutex, Spi<'static, SPI0, Async>, Output<'static>>;
 type PhyServiceImpl =
@@ -64,6 +74,24 @@ fn irq_timestamp_us() -> u64 {
 embassy_rp::bind_interrupts!(struct PioIrqs {
     PIO0_IRQ_0 => PioInterruptHandler<embassy_rp::peripherals::PIO0>;
 });
+
+embassy_rp::bind_interrupts!(struct UartIrqs {
+    UART0_IRQ => UartInterruptHandler<embassy_rp::peripherals::UART0>;
+});
+
+struct RpUart<'d>(Uart<'d, UartAsync>);
+
+impl<'d> AsyncUartBus for RpUart<'d> {
+    type Error = embassy_rp::uart::Error;
+
+    async fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
+        Uart::write(&mut self.0, bytes).await
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
+        Uart::read(&mut self.0, buf).await
+    }
+}
 
 #[embassy_executor::task]
 async fn phy_service_task(mut service: PhyServiceImpl) -> ! {
@@ -110,6 +138,45 @@ async fn led_task(
     }
 }
 
+#[embassy_executor::task]
+async fn uart_rx_task(
+    mut uart: RpUart<'static>,
+    tx: Sender<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>,
+) -> ! {
+    let mut scratch = [0u8; UART_PACKET_MAX_FRAME];
+    let mut frames: u32 = 0;
+    let mut drops: u32 = 0;
+    let mut errors: u32 = 0;
+    loop {
+        match recv_packet_over_uart(&mut uart, &mut scratch).await {
+            Ok(packet) => {
+                let packet_type = packet.packet_type;
+                frames = frames.wrapping_add(1);
+                if tx.try_send(packet).is_err() {
+                    drops = drops.wrapping_add(1);
+                    if drops == 1 || drops % 50 == 0 {
+                        warn!("UART RX drop count={}", drops);
+                    }
+                    continue;
+                }
+                if frames == 1 || frames % 50 == 0 {
+                    info!(
+                        "UART RX packet type={} count={}",
+                        packet_type.name(),
+                        frames
+                    );
+                }
+            }
+            Err(err) => {
+                errors = errors.wrapping_add(1);
+                if errors == 1 || errors % 50 == 0 {
+                    warn!("UART RX error count={} last={}", errors, err);
+                }
+            }
+        }
+    }
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Radio L3 tick RX (SX1262)");
@@ -148,6 +215,20 @@ async fn main(spawner: Spawner) {
     let spi_bus = SPI_BUS.init(Mutex::new(spi));
     let nss = Output::new(p.PIN_1, Level::High);
     let spi_dev = SpiDevice::new(spi_bus, nss);
+
+    // ----- UART0 (FC -> Radio) -----
+    // TX: GP12, RX: GP13
+    let mut uart_cfg = UartConfig::default();
+    uart_cfg.baudrate = 115_200;
+    let uart_fc = RpUart(Uart::new(
+        p.UART0,
+        p.PIN_12,
+        p.PIN_13,
+        UartIrqs,
+        p.DMA_CH3,
+        p.DMA_CH4,
+        uart_cfg,
+    ));
 
     let reset = Output::new(p.PIN_5, Level::High);
     let busy = Input::new(p.PIN_4, Pull::None);
@@ -190,6 +271,10 @@ async fn main(spawner: Spawner) {
     );
 
     spawner.spawn(phy_service_task(service)).unwrap();
+    let uart_packets = UART_PACKETS.init(Channel::new());
+    let uart_tx = uart_packets.sender();
+    let uart_rx = uart_packets.receiver();
+    spawner.spawn(uart_rx_task(uart_fc, uart_tx)).unwrap();
 
     let profile = link_cfg.profile();
     let transport = LoraTransport::default();
@@ -199,6 +284,7 @@ async fn main(spawner: Spawner) {
         profile,
         Some(tick_pin),
         Some(led_tx),
+        Some(uart_rx),
         MacEngineConfig::default(),
     );
     engine.run().await;
