@@ -15,6 +15,7 @@ use common::coms::transport::lora::link_transport::{LoraTransport, RxMeta};
 use common::protocol::packet::{decode_packet, encode_packet_fixed, Packet, PacketType};
 
 pub const LED_QUEUE_LEN: usize = 16;
+pub const UART_PACKET_QUEUE_LEN: usize = 32;
 
 const DEFAULT_TICK_PULSE_US: u64 = 50;
 const DEFAULT_LQ_LOG_INTERVAL: u32 = 100;
@@ -68,6 +69,8 @@ pub struct MacEngine<const TXQ: usize, const RXQ: usize> {
     tx_refuse_logs: u32,
     last_rx_seq: Option<u16>,
     led_tx: Option<LedSender>,
+    uart_tx: Option<Sender<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>>,
+    uart_drops: u32,
     tick_pin: Option<Output<'static>>,
     slot_rx_symbols: u16,
     config: MacEngineConfig,
@@ -80,6 +83,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         profile: LinkProfile,
         tick_pin: Option<Output<'static>>,
         led_tx: Option<LedSender>,
+        uart_tx: Option<Sender<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>>,
         slot_rx_symbols: u16,
         config: MacEngineConfig,
     ) -> Self {
@@ -100,6 +104,8 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
             tx_refuse_logs: 0,
             last_rx_seq: None,
             led_tx,
+            uart_tx,
+            uart_drops: 0,
             tick_pin,
             slot_rx_symbols,
             config,
@@ -166,6 +172,14 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
                             packet.payload.len()
                         );
                         self.transport.on_downlink_rx(&packet, meta);
+                        if let Some(uart_tx) = self.uart_tx.as_ref() {
+                            if uart_tx.try_send(packet).is_err() {
+                                self.uart_drops = self.uart_drops.wrapping_add(1);
+                                if self.uart_drops == 1 || self.uart_drops % 50 == 0 {
+                                    warn!("UART TX drop count={}", self.uart_drops);
+                                }
+                            }
+                        }
                     }
                     Err(err) => {
                         warn!("RX packet decode error: {:?}", defmt::Debug2Format(&err));

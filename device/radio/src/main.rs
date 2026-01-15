@@ -46,6 +46,8 @@ const LED_TX_OK_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_ERROR_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 const LED_PULSE_US: u64 = 2000;
+const UART_RX_LOG_EVERY: u32 = 1;
+const UART_RX_LOG_PAYLOAD_MAX: usize = 32;
 
 type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
 static SPI_BUS: StaticCell<SpiBus> = StaticCell::new();
@@ -152,19 +154,39 @@ async fn uart_rx_task(
             Ok(packet) => {
                 let packet_type = packet.packet_type;
                 frames = frames.wrapping_add(1);
+                if UART_RX_LOG_EVERY > 0 && (frames == 1 || frames % UART_RX_LOG_EVERY == 0) {
+                    let payload = packet.payload.as_slice();
+                    let show_len = payload.len().min(UART_RX_LOG_PAYLOAD_MAX);
+                    if show_len < payload.len() {
+                        info!(
+                            "UART RX frame={} type={} frame_len={} payload_head={=[u8]} (trunc)",
+                            frames,
+                            packet_type.name(),
+                            1usize.saturating_add(payload.len()),
+                            &payload[..show_len]
+                        );
+                    } else {
+                        info!(
+                            "UART RX frame={} type={} frame_len={} payload={=[u8]}",
+                            frames,
+                            packet_type.name(),
+                            1usize.saturating_add(payload.len()),
+                            payload
+                        );
+                    }
+                } else if frames == 1 || frames % 50 == 0 {
+                    info!(
+                        "UART RX packet type={} count={}",
+                        packet_type.name(),
+                        frames
+                    );
+                }
                 if tx.try_send(packet).is_err() {
                     drops = drops.wrapping_add(1);
                     if drops == 1 || drops % 50 == 0 {
                         warn!("UART RX drop count={}", drops);
                     }
                     continue;
-                }
-                if frames == 1 || frames % 50 == 0 {
-                    info!(
-                        "UART RX packet type={} count={}",
-                        packet_type.name(),
-                        frames
-                    );
                 }
             }
             Err(err) => {

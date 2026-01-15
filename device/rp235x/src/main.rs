@@ -1200,6 +1200,37 @@ async fn usb_mavlink_task(
     }
 }
 
+const UART_TX_LOG_EVERY: u32 = 1;
+const UART_TX_LOG_PAYLOAD_MAX: usize = 32;
+
+fn log_uart_tx(packet: &Packet, count: u32) {
+    if UART_TX_LOG_EVERY == 0 {
+        return;
+    }
+    if count != 1 && count % UART_TX_LOG_EVERY != 0 {
+        return;
+    }
+    let payload = packet.payload.as_slice();
+    let show_len = payload.len().min(UART_TX_LOG_PAYLOAD_MAX);
+    if show_len < payload.len() {
+        info!(
+            "UART TX frame={} type={} payload_len={} payload_head={=[u8]} (trunc)",
+            count,
+            packet.packet_type.name(),
+            payload.len(),
+            &payload[..show_len]
+        );
+    } else {
+        info!(
+            "UART TX frame={} type={} payload_len={} payload={=[u8]}",
+            count,
+            packet.packet_type.name(),
+            payload.len(),
+            payload
+        );
+    }
+}
+
 // UART custom link task (FC -> radio) using custom packet framing + CRC.
 #[embassy_executor::task]
 async fn uart_link_task(
@@ -1208,6 +1239,7 @@ async fn uart_link_task(
 ) {
     info!("UART: Starting custom link task for radio");
     let mut tx_buf = [0u8; UART_PACKET_MAX_FRAME];
+    let mut tx_logs: u32 = 0;
     let mut last_imu_seq: u32 = 0;
     let mut last_mag_seq: u32 = 0;
     let mut last_baro_seq: u32 = 0;
@@ -1232,11 +1264,15 @@ async fn uart_link_task(
                 gyro: s.imu.gyro,
             };
             let packet = Packet::with_payload(PacketType::TelemetryImu, imu.encode());
-            if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
-                .await
-                .is_ok()
-            {
-                last_imu_seq = s.imu.seq;
+            match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
+                Ok(()) => {
+                    tx_logs = tx_logs.wrapping_add(1);
+                    log_uart_tx(&packet, tx_logs);
+                    last_imu_seq = s.imu.seq;
+                }
+                Err(err) => {
+                    warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
+                }
             }
         }
 
@@ -1249,11 +1285,15 @@ async fn uart_link_task(
                 ],
             };
             let packet = Packet::with_payload(PacketType::TelemetryMag, mag.encode());
-            if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
-                .await
-                .is_ok()
-            {
-                last_mag_seq = s.mag.seq;
+            match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
+                Ok(()) => {
+                    tx_logs = tx_logs.wrapping_add(1);
+                    log_uart_tx(&packet, tx_logs);
+                    last_mag_seq = s.mag.seq;
+                }
+                Err(err) => {
+                    warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
+                }
             }
         }
 
@@ -1263,11 +1303,15 @@ async fn uart_link_task(
                 temp_c_x10: clamp_i16((s.baro.t_c_x100 / 10) as i32),
             };
             let packet = Packet::with_payload(PacketType::TelemetryBaro, baro.encode());
-            if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
-                .await
-                .is_ok()
-            {
-                last_baro_seq = s.baro.seq;
+            match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
+                Ok(()) => {
+                    tx_logs = tx_logs.wrapping_add(1);
+                    log_uart_tx(&packet, tx_logs);
+                    last_baro_seq = s.baro.seq;
+                }
+                Err(err) => {
+                    warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
+                }
             }
         }
 
@@ -1281,11 +1325,15 @@ async fn uart_link_task(
                     fix: fix.fix_type,
                 };
                 let packet = Packet::with_payload(PacketType::TelemetryGps, gps.encode());
-                if send_packet_over_uart(&mut uart, &packet, &mut tx_buf)
-                    .await
-                    .is_ok()
-                {
-                    last_gps_seq = s.gps.seq;
+                match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
+                    Ok(()) => {
+                        tx_logs = tx_logs.wrapping_add(1);
+                        log_uart_tx(&packet, tx_logs);
+                        last_gps_seq = s.gps.seq;
+                    }
+                    Err(err) => {
+                        warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
+                    }
                 }
             }
         }
