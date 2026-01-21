@@ -857,9 +857,10 @@ async fn usb_mavlink_task(
 
         // Apply USB-connected policy and emit state + ready text if enabled.
         {
-            let p = params.lock().await;
-            let statustext_en = p.bool(ParamId::StatustextEn);
-            let policy = fc_policy_from_params(&p);
+            let (statustext_en, policy) = {
+                let p = params.lock().await;
+                (p.bool(ParamId::StatustextEn), fc_policy_from_params(&p))
+            };
             let mut link_failed = false;
 
             {
@@ -893,8 +894,6 @@ async fn usb_mavlink_task(
                 }
             }
 
-            drop(p);
-
             if link_failed {
                 let mut state = fc_state.lock().await;
                 let _ = state.set_usb_connected(false, policy);
@@ -914,20 +913,21 @@ async fn usb_mavlink_task(
             match recv_result {
                 embassy_futures::select::Either::First(Ok(n)) if n > 0 => {
                     if let Ok(frame) = unsafe { Frame::<V2>::deserialize(&rx_buf[..n]) } {
-                        let mut p = params.lock().await;
-                        let policy = fc_policy_from_params(&p);
-                        let statustext_en = p.bool(ParamId::StatustextEn);
-                        let mut state = fc_state.lock().await;
-                        let (result, params_changed) = dispatch_mavlink_message(
-                            frame,
-                            cfg,
-                            seq,
-                            &mut p,
-                            &mut state,
-                            policy,
-                            statustext_en,
-                        );
-                        drop(state);
+                        let (result, params_changed) = {
+                            let mut state = fc_state.lock().await;
+                            let mut p = params.lock().await;
+                            let policy = fc_policy_from_params(&p);
+                            let statustext_en = p.bool(ParamId::StatustextEn);
+                            dispatch_mavlink_message(
+                                frame,
+                                cfg,
+                                seq,
+                                &mut p,
+                                &mut state,
+                                policy,
+                                statustext_en,
+                            )
+                        };
 
                         match result {
                             MessageHandlerResult::SendFrame(reply) => {
@@ -954,9 +954,20 @@ async fn usb_mavlink_task(
                                 }
                             }
                             MessageHandlerResult::SendAllParams => {
-                                info!("MAVLink: PARAM_REQUEST_LIST - sending {} params", p.count());
-                                for idx in 0..p.count() {
-                                    if let Some(reply) = build_param_value_frame(cfg, seq, &p, idx) {
+                                let param_count = {
+                                    let p = params.lock().await;
+                                    p.count()
+                                };
+                                info!(
+                                    "MAVLink: PARAM_REQUEST_LIST - sending {} params",
+                                    param_count
+                                );
+                                for idx in 0..param_count {
+                                    let reply = {
+                                        let p = params.lock().await;
+                                        build_param_value_frame(cfg, seq, &p, idx)
+                                    };
+                                    if let Some(reply) = reply {
                                         seq = seq.wrapping_add(1);
                                         if let Ok(len) = reply.serialize(&mut tx_buf) {
                                             if let Err(e) = usb.write(&tx_buf[..len]).await {
@@ -1094,7 +1105,6 @@ async fn usb_mavlink_task(
                                 }
                             }
                         }
-                        drop(p);
 
                         if params_changed {
                             PARAMS_DIRTY.store(true, Ordering::Relaxed);
@@ -1210,8 +1220,10 @@ async fn usb_mavlink_task(
 
         // Mark USB disconnected so policy can drop back to IDLE.
         {
-            let p = params.lock().await;
-            let policy = fc_policy_from_params(&p);
+            let policy = {
+                let p = params.lock().await;
+                fc_policy_from_params(&p)
+            };
             let mut state = fc_state.lock().await;
             let _ = state.set_usb_connected(false, policy);
         }
