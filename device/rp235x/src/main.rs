@@ -19,7 +19,8 @@ use common::drivers::bmp581::{
 use common::drivers::bmm350::RawMag;
 use common::drivers::neom9n::{NeoM9n, UBLOX_I2C_ADDR, GpsData};
 use common::tasks::coms::{
-    MavEndpointConfig, TelemetrySample, TelemetrySource,
+    MavEndpointConfig, TelemetrySample, TelemetrySource, UartTelemetrySnapshot,
+    UartTelemetrySource, UartTelemetryRate, UartTxConfig,
 };
 use common::tasks::sensors::{
     run_bmi088_task,
@@ -30,9 +31,6 @@ use common::tasks::sensors::{
     DataSink,
 };
 use common::coms::transport::uart::{AsyncUartBus, MAVLINK_MAX_FRAME};
-use common::coms::transport::uart_packet::{
-    send_packet_over_uart, UART_PACKET_MAX_FRAME,
-};
 use common::protocol::mavlink::encode::{
     build_param_value_frame,
     build_statustext,
@@ -46,9 +44,6 @@ use common::protocol::mavlink::encode::{
 use common::protocol::mavlink::handlers::{dispatch_mavlink_message, MessageHandlerResult};
 use common::protocol::mavlink::telemetry::{MavlinkTelemetryBundle, MavlinkTelemetrySource};
 use common::protocol::mavlink::prelude::{Frame, V2};
-use common::protocol::packet::{
-    Packet, PacketType, TelemetryBaro, TelemetryGps, TelemetryImu, TelemetryMag,
-};
 use common::params::{ParamRegistry, ParamId};
 use common::policies::fc_state::{FcState, FcStatePolicy};
 use common::coms::scheduler::LinkScheduler;
@@ -193,14 +188,6 @@ fn hz_to_period_ms(hz: u16, min_ms: u32, max_ms: u32) -> u32 {
     ms.clamp(min_ms, max_ms).max(1)
 }
 
-fn hz_to_interval_ms(hz: u32) -> u32 {
-    if hz == 0 {
-        return 1000;
-    }
-    let ms = 1000 / hz;
-    ms.max(1)
-}
-
 fn fc_policy_from_params(params: &ParamRegistry) -> FcStatePolicy {
     FcStatePolicy {
         usb_forces_config: params.bool(ParamId::FcModeUsbForcesConfig),
@@ -252,6 +239,37 @@ impl MavlinkTelemetrySource for StateTelemetrySource {
             gps_raw_int: common::protocol::mavlink::encode::build_gps_raw_int(now_us, &sample),
             attitude: common::protocol::mavlink::encode::build_attitude(now_ms),
         }
+    }
+}
+
+struct StateUartTelemetrySource;
+
+impl UartTelemetrySource for StateUartTelemetrySource {
+    async fn snapshot(&self) -> UartTelemetrySnapshot {
+        let snap = STATE.lock().await.clone();
+        UartTelemetrySnapshot {
+            imu_seq: snap.imu.seq,
+            imu_accel: snap.imu.accel,
+            imu_gyro: snap.imu.gyro,
+            mag_seq: snap.mag.seq,
+            mag_xyz: snap.mag.xyz,
+            baro_seq: snap.baro.seq,
+            baro_t_c_x100: snap.baro.t_c_x100,
+            baro_p_pa: snap.baro.p_pa,
+            gps_seq: snap.gps.seq,
+            gps_fix: snap.gps.fix,
+        }
+    }
+}
+
+struct ParamUartTelemetryRate {
+    params: &'static Mutex<RawMutex, ParamRegistry>,
+}
+
+impl UartTelemetryRate for ParamUartTelemetryRate {
+    async fn rate_hz(&self) -> u32 {
+        let p = self.params.lock().await;
+        p.u32(ParamId::RadioTelemRateHz)
     }
 }
 
@@ -1200,146 +1218,23 @@ async fn usb_mavlink_task(
     }
 }
 
-const UART_TX_LOG_EVERY: u32 = 1;
+const UART_TX_LOG_EVERY: u32 = 0;
 const UART_TX_LOG_PAYLOAD_MAX: usize = 32;
-
-fn log_uart_tx(packet: &Packet, count: u32) {
-    if UART_TX_LOG_EVERY == 0 {
-        return;
-    }
-    if count != 1 && count % UART_TX_LOG_EVERY != 0 {
-        return;
-    }
-    let payload = packet.payload.as_slice();
-    let show_len = payload.len().min(UART_TX_LOG_PAYLOAD_MAX);
-    if show_len < payload.len() {
-        info!(
-            "UART TX frame={} type={} payload_len={} payload_head={=[u8]} (trunc)",
-            count,
-            packet.packet_type.name(),
-            payload.len(),
-            &payload[..show_len]
-        );
-    } else {
-        info!(
-            "UART TX frame={} type={} payload_len={} payload={=[u8]}",
-            count,
-            packet.packet_type.name(),
-            payload.len(),
-            payload
-        );
-    }
-}
 
 // UART custom link task (FC -> radio) using custom packet framing + CRC.
 #[embassy_executor::task]
 async fn uart_link_task(
-    mut uart: RpUart<'static>,
+    uart: RpUart<'static>,
     params: &'static Mutex<RawMutex, ParamRegistry>,
-) {
-    info!("UART: Starting custom link task for radio");
-    let mut tx_buf = [0u8; UART_PACKET_MAX_FRAME];
-    let mut tx_logs: u32 = 0;
-    let mut last_imu_seq: u32 = 0;
-    let mut last_mag_seq: u32 = 0;
-    let mut last_baro_seq: u32 = 0;
-    let mut last_gps_seq: u32 = 0;
-    let mut interval_ms: u32 = 10;
-
-    loop {
-        let rad_tel_hz = {
-            let p = params.lock().await;
-            p.u32(ParamId::RadioTelemRateHz).min(1000).max(1)
-        };
-        let next_interval_ms = hz_to_interval_ms(rad_tel_hz);
-        if next_interval_ms != interval_ms {
-            interval_ms = next_interval_ms;
-        }
-
-        let s = STATE.lock().await.clone();
-
-        if s.imu.seq != last_imu_seq {
-            let imu = TelemetryImu {
-                accel: s.imu.accel,
-                gyro: s.imu.gyro,
-            };
-            let packet = Packet::with_payload(PacketType::TelemetryImu, imu.encode());
-            match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
-                Ok(()) => {
-                    tx_logs = tx_logs.wrapping_add(1);
-                    log_uart_tx(&packet, tx_logs);
-                    last_imu_seq = s.imu.seq;
-                }
-                Err(err) => {
-                    warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
-                }
-            }
-        }
-
-        if s.mag.seq != last_mag_seq {
-            let mag = TelemetryMag {
-                mag: [
-                    clamp_i16(s.mag.xyz[0]),
-                    clamp_i16(s.mag.xyz[1]),
-                    clamp_i16(s.mag.xyz[2]),
-                ],
-            };
-            let packet = Packet::with_payload(PacketType::TelemetryMag, mag.encode());
-            match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
-                Ok(()) => {
-                    tx_logs = tx_logs.wrapping_add(1);
-                    log_uart_tx(&packet, tx_logs);
-                    last_mag_seq = s.mag.seq;
-                }
-                Err(err) => {
-                    warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
-                }
-            }
-        }
-
-        if s.baro.seq != last_baro_seq {
-            let baro = TelemetryBaro {
-                pressure_pa: s.baro.p_pa,
-                temp_c_x10: clamp_i16((s.baro.t_c_x100 / 10) as i32),
-            };
-            let packet = Packet::with_payload(PacketType::TelemetryBaro, baro.encode());
-            match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
-                Ok(()) => {
-                    tx_logs = tx_logs.wrapping_add(1);
-                    log_uart_tx(&packet, tx_logs);
-                    last_baro_seq = s.baro.seq;
-                }
-                Err(err) => {
-                    warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
-                }
-            }
-        }
-
-        if s.gps.seq != last_gps_seq {
-            if let Some(fix) = s.gps.fix {
-                let gps = TelemetryGps {
-                    lat: fix.latitude,
-                    lon: fix.longitude,
-                    alt_mm: fix.altitude,
-                    sats: fix.satellites,
-                    fix: fix.fix_type,
-                };
-                let packet = Packet::with_payload(PacketType::TelemetryGps, gps.encode());
-                match send_packet_over_uart(&mut uart, &packet, &mut tx_buf).await {
-                    Ok(()) => {
-                        tx_logs = tx_logs.wrapping_add(1);
-                        log_uart_tx(&packet, tx_logs);
-                        last_gps_seq = s.gps.seq;
-                    }
-                    Err(err) => {
-                        warn!("UART TX error type={} err={}", packet.packet_type.name(), err);
-                    }
-                }
-            }
-        }
-
-        Timer::after_millis(interval_ms as u64).await;
-    }
+) -> ! {
+    let cfg = UartTxConfig {
+        log_every: UART_TX_LOG_EVERY,
+        log_payload_max: UART_TX_LOG_PAYLOAD_MAX,
+        summary_every: 50,
+    };
+    let rate = ParamUartTelemetryRate { params };
+    let source = StateUartTelemetrySource;
+    common::tasks::coms::uart_telemetry_task(uart, source, rate, EmbassyDelay, cfg).await
 }
 
 #[embassy_executor::task]

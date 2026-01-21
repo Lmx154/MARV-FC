@@ -30,7 +30,7 @@ use common::coms::transport::lora::phy_service::{
 };
 use common::coms::transport::lora::link_transport::LoraTransport;
 use common::coms::transport::uart::AsyncUartBus;
-use common::coms::transport::uart_packet::{send_packet_over_uart, UART_PACKET_MAX_FRAME};
+use common::tasks::coms::UartTxConfig;
 use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 use common::protocol::packet::Packet;
 
@@ -46,7 +46,7 @@ const LED_TX_OK_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_ERROR_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 const LED_PULSE_US: u64 = 2000;
-const UART_TX_LOG_EVERY: u32 = 1;
+const UART_TX_LOG_EVERY: u32 = 0;
 const UART_TX_LOG_PAYLOAD_MAX: usize = 32;
 
 type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
@@ -145,50 +145,12 @@ async fn uart_tx_task(
     mut uart: RpUart<'static>,
     mut rx: Receiver<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>,
 ) -> ! {
-    let mut scratch = [0u8; UART_PACKET_MAX_FRAME];
-    let mut sent: u32 = 0;
-    let mut errors: u32 = 0;
-    loop {
-        let packet = rx.receive().await;
-        match send_packet_over_uart(&mut uart, &packet, &mut scratch).await {
-            Ok(()) => {
-                sent = sent.wrapping_add(1);
-                if UART_TX_LOG_EVERY > 0 && (sent == 1 || sent % UART_TX_LOG_EVERY == 0) {
-                    let payload = packet.payload.as_slice();
-                    let show_len = payload.len().min(UART_TX_LOG_PAYLOAD_MAX);
-                    if show_len < payload.len() {
-                        info!(
-                            "GS UART TX frame={} type={} payload_len={} payload_head={=[u8]} (trunc)",
-                            sent,
-                            packet.packet_type.name(),
-                            payload.len(),
-                            &payload[..show_len]
-                        );
-                    } else {
-                        info!(
-                            "GS UART TX frame={} type={} payload_len={} payload={=[u8]}",
-                            sent,
-                            packet.packet_type.name(),
-                            payload.len(),
-                            payload
-                        );
-                    }
-                } else if sent == 1 || sent % 50 == 0 {
-                    info!(
-                        "UART TX packet type={} count={}",
-                        packet.packet_type.name(),
-                        sent
-                    );
-                }
-            }
-            Err(err) => {
-                errors = errors.wrapping_add(1);
-                if errors == 1 || errors % 50 == 0 {
-                    warn!("UART TX error count={} last={}", errors, err);
-                }
-            }
-        }
-    }
+    let cfg = UartTxConfig {
+        log_every: UART_TX_LOG_EVERY,
+        log_payload_max: UART_TX_LOG_PAYLOAD_MAX,
+        summary_every: 50,
+    };
+    common::tasks::coms::uart_packet_tx_task(uart, rx, cfg).await
 }
 
 #[embassy_executor::main]
