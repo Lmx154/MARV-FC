@@ -19,6 +19,15 @@ pub const LORA_SF7_BW500_CR45: RfConfig = LoRaConfig {
     ..LoRaConfig::preset_fast()
 };
 
+// Mid profile: step down from SF7 while keeping BW500 for good range/latency balance.
+// ELRS(8B) ToA ~ 20.608 ms, max_tick_hz ~ 46 (guard 1000us).
+pub const LORA_SF8_BW500_CR45: RfConfig = LoRaConfig {
+    sf: 8,
+    bw: 0x06,
+    cr: 0x01,
+    ..LoRaConfig::preset_fast()
+};
+
 // Fast profile: default bench throughput preset (SF6/BW500/CR4/5).
 // ELRS(8B) ToA ~ 6.304 ms, max_tick_hz ~ 136 (guard 1000us).
 pub const LORA_SF6_BW500_CR45: RfConfig = LoRaConfig::preset_fast();

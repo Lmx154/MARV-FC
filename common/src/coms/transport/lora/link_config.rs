@@ -65,5 +65,19 @@ pub const ROCKET_5: LinkConfig =
 pub const ROCKET_1: LinkConfig =
     LinkConfig::new(rf_presets::LORA_SF6_BW500_CR45, mac_presets::ROCKET_1);
 
+// SX1262 LoRa telemetry-first presets.
+pub const LORA_TELEM_200: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF5_BW500_CR45, mac_presets::LORA_TELEM_200);
+pub const LORA_TELEM_100: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF5_BW500_CR45, mac_presets::LORA_TELEM_100);
+pub const LORA_TELEM_50: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF7_BW500_CR45, mac_presets::LORA_TELEM_50);
+pub const LORA_TELEM_20: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF8_BW500_CR45, mac_presets::LORA_TELEM_20);
+pub const LORA_TELEM_5: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF9_BW250_CR46, mac_presets::LORA_TELEM_5);
+pub const LORA_TELEM_1: LinkConfig =
+    LinkConfig::new(rf_presets::LORA_SF11_BW125_CR48, mac_presets::LORA_TELEM_1);
+
 // Toggle this to switch link configs at build time.
-pub const ACTIVE: LinkConfig = DRONE_50;
+pub const ACTIVE: LinkConfig = LORA_TELEM_50;
