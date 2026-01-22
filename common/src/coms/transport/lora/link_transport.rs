@@ -282,11 +282,11 @@ impl LoraTransport {
         true
     }
 
-    pub fn poll_telemetry(&mut self, now_us: u64) {
+    pub fn poll_telemetry(&mut self, _now_us: u64) {
         if self.telemetry.external_telemetry {
             return;
         }
-        self.enqueue_mock_telemetry(now_us);
+        // Mock telemetry is FC-owned; link transport does not synthesize samples.
     }
 
     pub fn enqueue_imu(&mut self, sample: TelemetryImu) {
