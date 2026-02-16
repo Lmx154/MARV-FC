@@ -1,3 +1,4 @@
+//! MAC layer tick scheduling, fit checks, and lock tracking.
 pub const DEFAULT_LOCK_TIMEOUT_MS: u64 = 1000;
 pub const DEFAULT_TICK_SLOP_TICKS: u16 = 2;
 
@@ -124,13 +125,12 @@ impl TickClock {
             return None;
         }
 
-        let tick_start_us = self.next_tick_us;
-        loop {
-            self.next_tick_us = self.next_tick_us.wrapping_add(self.period_us);
-            if now_us < self.next_tick_us {
-                break;
-            }
-        }
+        let elapsed = now_us.wrapping_sub(self.next_tick_us);
+        let skipped = elapsed / self.period_us;
+        let tick_start_us = self
+            .next_tick_us
+            .wrapping_add(skipped.saturating_mul(self.period_us));
+        self.next_tick_us = tick_start_us.wrapping_add(self.period_us);
         Some(tick_start_us)
     }
 }
@@ -188,39 +188,6 @@ impl TickTracker {
 
     pub const fn timeout_count(&self) -> u32 {
         self.timeout_count
-    }
-
-    pub fn on_uplink(&mut self, now_ms: u64, tick_seq: u16) -> TickUpdate {
-        let mut update = TickUpdate::default();
-
-        if let (Some(prev_seq), Some(last_ms)) = (self.last_tick_seq, self.last_rx_ms) {
-            let delta = tick_seq.wrapping_sub(prev_seq);
-            if delta == 0 {
-                self.dup_count = self.dup_count.wrapping_add(1);
-            } else {
-                let max_plausible = self.max_plausible_delta(now_ms, last_ms);
-                if delta > max_plausible {
-                    update.seq_anomaly = delta;
-                    self.seq_anomaly_count = self.seq_anomaly_count.wrapping_add(1);
-                } else if delta > 1 {
-                    let missed = delta - 1;
-                    update.missed = missed;
-                    self.missed_ticks = self.missed_ticks.wrapping_add(missed as u32);
-                }
-            }
-        }
-
-        self.last_tick_seq = Some(tick_seq);
-        self.last_rx_ms = Some(now_ms);
-        self.rx_count = self.rx_count.wrapping_add(1);
-
-        if self.state == LinkState::Search {
-            self.state = LinkState::Locked;
-            self.lock_count = self.lock_count.wrapping_add(1);
-            update.event = LinkEvent::LockAcquired;
-        }
-
-        update
     }
 
     pub fn on_uplink_tdma(

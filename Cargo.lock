@@ -158,6 +158,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bmp5"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e1962ab23c0b13e23f9bf37ba0a05d1d3cae8b2a95198d8c1226358ccd71946"
+dependencies = [
+ "byteorder",
+ "defmt 0.3.100",
+ "embedded-hal-async",
+]
+
+[[package]]
 name = "bytemuck"
 version = "1.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -230,6 +241,7 @@ dependencies = [
 name = "common"
 version = "0.1.0"
 dependencies = [
+ "bmp5",
  "defmt 1.0.1",
  "embassy-futures",
  "embassy-sync",
@@ -433,6 +445,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4b8a88685455ed29a21542a33abd9cb6510b6b129abadabdcef0f4c55bc8f61"
 dependencies = [
  "litrs",
+]
+
+[[package]]
+name = "drone-fc"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "cortex-m",
+ "cortex-m-rt",
+ "critical-section",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-sdmmc",
+ "heapless 0.8.0",
+ "panic-probe",
+ "portable-atomic",
+ "smart-leds",
+ "static_cell",
 ]
 
 [[package]]
@@ -1786,6 +1826,34 @@ name = "rgb"
 version = "0.8.52"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c6a884d2998352bb4daf0183589aec883f16a6da1f4dde84d8e2e9a5409a1ce"
+
+[[package]]
+name = "rocket-fc"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "cortex-m",
+ "cortex-m-rt",
+ "critical-section",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-sdmmc",
+ "heapless 0.8.0",
+ "panic-probe",
+ "portable-atomic",
+ "smart-leds",
+ "static_cell",
+]
 
 [[package]]
 name = "rp-binary-info"

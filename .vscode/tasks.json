@@ -67,6 +67,8 @@
 			"description": "Select firmware crate",
 			"options": [
 				"rp235x",
+				"rocket-fc",
+				"drone-fc",
 				"radio",
 				"gs",
 				"test"

@@ -6,5 +6,6 @@
 //! multiple links (USB, radio/LoRa) can share the same producer(s) but run at
 //! different rates.
 
+#[cfg(feature = "mavlink")]
 pub mod producer;
 pub mod scheduler;

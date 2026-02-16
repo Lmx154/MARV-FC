@@ -2,6 +2,8 @@
 members = [
     "common",
     "device/rp235x",
+    "device/rocket-fc",
+    "device/drone-fc",
     "device/radio",
     "device/gs",
     "device/test",

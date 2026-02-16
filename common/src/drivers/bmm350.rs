@@ -100,7 +100,9 @@ where
 			retries -= 1;
 		}
 		if chip_id != 0x33 {
-			error!("BMM350: Invalid chip ID 0x{:02X}", chip_id);
+			if self.verbose {
+				error!("BMM350: Invalid chip ID 0x{:02X}", chip_id);
+			}
 			return Err(Error::ChipId(chip_id));
 		}
 

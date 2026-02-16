@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+//! PHY service loop and radio I/O.
 
 use embassy_futures::select;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
@@ -6,42 +6,12 @@ use embassy_sync::channel::{Channel, Receiver, Sender};
 use heapless::Vec;
 use lora_phy::mod_params::RadioError;
 
-use super::lora_config::LoRaConfig;
 use crate::drivers::sx1262::{RawRx, Sx1262, Sx1262Error};
 
 pub const MAX_PHY_PAYLOAD: usize = 255;
 pub const DEFAULT_TX_QUEUE_LEN: usize = 4;
 pub const DEFAULT_RX_QUEUE_LEN: usize = 8;
 pub const DEFAULT_RX_CTRL_QUEUE_LEN: usize = 2;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProfileId {
-    Default,
-    Fast,
-    LongRange,
-}
-
-impl ProfileId {
-    pub fn config(self) -> LoRaConfig {
-        match self {
-            ProfileId::Default => LoRaConfig::preset_default(),
-            ProfileId::Fast => LoRaConfig::preset_fast(),
-            ProfileId::LongRange => LoRaConfig::preset_long_range(),
-        }
-    }
-
-    pub fn from_config(cfg: &LoRaConfig) -> Option<Self> {
-        if *cfg == LoRaConfig::preset_default() {
-            Some(ProfileId::Default)
-        } else if *cfg == LoRaConfig::preset_fast() {
-            Some(ProfileId::Fast)
-        } else if *cfg == LoRaConfig::preset_long_range() {
-            Some(ProfileId::LongRange)
-        } else {
-            None
-        }
-    }
-}
 
 #[derive(Clone, Debug)]
 pub struct TxRequest {
@@ -81,14 +51,9 @@ impl TimeSource for () {
     }
 }
 
-pub fn toa_us(profile: ProfileId, payload_len: usize) -> u64 {
-    profile.config().toa_us(payload_len)
-}
-
 pub struct PhyChannels<const TXQ: usize, const RXQ: usize> {
     pub tx: Channel<RawMutex, TxRequest, TXQ>,
     pub rx: Channel<RawMutex, RxIndication, RXQ>,
-    pub profile: Channel<RawMutex, ProfileId, 1>,
     pub rx_ctrl: Channel<RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
 }
 
@@ -97,7 +62,6 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
         Self {
             tx: Channel::new(),
             rx: Channel::new(),
-            profile: Channel::new(),
             rx_ctrl: Channel::new(),
         }
     }
@@ -106,7 +70,6 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
         Phy {
             tx: self.tx.sender(),
             rx: self.rx.receiver(),
-            profile: self.profile.sender(),
             rx_ctrl: self.rx_ctrl.sender(),
         }
     }
@@ -115,7 +78,6 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
         PhyServiceQueues {
             tx: self.tx.receiver(),
             rx: self.rx.sender(),
-            profile: self.profile.receiver(),
             rx_ctrl: self.rx_ctrl.receiver(),
         }
     }
@@ -125,7 +87,6 @@ impl<const TXQ: usize, const RXQ: usize> PhyChannels<TXQ, RXQ> {
 pub struct Phy<'a, const TXQ: usize, const RXQ: usize> {
     tx: Sender<'a, RawMutex, TxRequest, TXQ>,
     rx: Receiver<'a, RawMutex, RxIndication, RXQ>,
-    profile: Sender<'a, RawMutex, ProfileId, 1>,
     rx_ctrl: Sender<'a, RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
 }
 
@@ -142,10 +103,6 @@ impl<'a, const TXQ: usize, const RXQ: usize> Phy<'a, TXQ, RXQ> {
         self.rx.receive().await
     }
 
-    pub async fn apply_profile(&self, profile: ProfileId) {
-        self.profile.send(profile).await;
-    }
-
     pub fn arm_rx(&self, timeout_symbols: u16) {
         let _ = self
             .rx_ctrl
@@ -156,7 +113,6 @@ impl<'a, const TXQ: usize, const RXQ: usize> Phy<'a, TXQ, RXQ> {
 pub struct PhyServiceQueues<'a, const TXQ: usize, const RXQ: usize> {
     tx: Receiver<'a, RawMutex, TxRequest, TXQ>,
     rx: Sender<'a, RawMutex, RxIndication, RXQ>,
-    profile: Receiver<'a, RawMutex, ProfileId, 1>,
     rx_ctrl: Receiver<'a, RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
 }
 
@@ -184,11 +140,9 @@ where
     radio: Sx1262<SPI, CTRL, WAIT, DLY>,
     tx: Receiver<'a, RawMutex, TxRequest, TXQ>,
     rx: Sender<'a, RawMutex, RxIndication, RXQ>,
-    profile: Receiver<'a, RawMutex, ProfileId, 1>,
     rx_ctrl: Receiver<'a, RawMutex, RxControl, DEFAULT_RX_CTRL_QUEUE_LEN>,
     time: TS,
     cfg: PhyServiceConfig,
-    active_profile: ProfileId,
 }
 
 impl<'a, SPI, CTRL, WAIT, DLY, TS, const TXQ: usize, const RXQ: usize>
@@ -206,17 +160,13 @@ where
         queues: PhyServiceQueues<'a, TXQ, RXQ>,
         cfg: PhyServiceConfig,
     ) -> Self {
-        let active_profile =
-            ProfileId::from_config(radio.cfg()).unwrap_or(ProfileId::Default);
         Self {
             radio,
             tx: queues.tx,
             rx: queues.rx,
-            profile: queues.profile,
             rx_ctrl: queues.rx_ctrl,
             time,
             cfg,
-            active_profile,
         }
     }
 
@@ -224,11 +174,6 @@ where
         let mut rx_buf = [0u8; MAX_PHY_PAYLOAD];
 
         loop {
-            if let Ok(profile) = self.profile.try_receive() {
-                self.handle_profile(profile).await;
-                continue;
-            }
-
             if let Ok(req) = self.tx.try_receive() {
                 self.handle_tx(req).await;
                 continue;
@@ -267,17 +212,6 @@ where
                 }
             }
         }
-    }
-
-    async fn handle_profile(&mut self, profile: ProfileId) {
-        let cfg = profile.config();
-        if let Err(err) = self.radio.apply_lora_config(cfg).await {
-            defmt::warn!(
-                "phy profile apply error: {:?}",
-                defmt::Debug2Format(&err)
-            );
-        }
-        self.active_profile = profile;
     }
 
     async fn handle_tx(&mut self, req: TxRequest) {

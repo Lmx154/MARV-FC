@@ -300,7 +300,7 @@ pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
     ParamDef::new("LORA_SF",         ParamType::U32,  ParamValue::U32(7)),
     ParamDef::new("LORA_BW",         ParamType::U32,  ParamValue::U32(0)),
     ParamDef::new("LORA_CR",         ParamType::U32,  ParamValue::U32(0)),
-    ParamDef::new("LORA_SW",         ParamType::U32,  ParamValue::U32(0x3444)),
+    ParamDef::new("LORA_SW",         ParamType::U32,  ParamValue::U32(0x0047)),
 ];
 
 /// Runtime storage for parameter values.
@@ -511,4 +511,3 @@ impl<'a> core::fmt::Write for SliceWriter<'a> {
         Ok(())
     }
 }
-

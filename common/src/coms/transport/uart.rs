@@ -6,16 +6,24 @@
 
 #![allow(async_fn_in_trait)]
 
+#[cfg(feature = "mavlink")]
 use defmt::{debug, warn};
+#[cfg(feature = "mavlink")]
 use mavio::protocol::V2;
+#[cfg(feature = "mavlink")]
 use mavio::Frame;
 
 /// Maximum MAVLink2 frame size (payload 255 + 10-byte header + 2-byte CRC + 13-byte signature).
+#[cfg(feature = "mavlink")]
 pub const MAVLINK_MAX_FRAME: usize = 280;
 
+#[cfg(feature = "mavlink")]
 const MAVLINK2_MAGIC: u8 = 0xFD;
+#[cfg(feature = "mavlink")]
 const MAVLINK2_HEADER_LEN: usize = 10;
+#[cfg(feature = "mavlink")]
 const MAVLINK2_CRC_LEN: usize = 2;
+#[cfg(feature = "mavlink")]
 const MAVLINK2_SIGNATURE_LEN: usize = 13;
 
 /// Minimal async UART interface. Implement this in the device crate for your HAL type.
@@ -30,6 +38,7 @@ pub trait AsyncUartBus {
 }
 
 /// UART-specific errors when moving MAVLink frames.
+#[cfg(feature = "mavlink")]
 #[derive(Debug)]
 pub enum UartComError<E> {
     Transport(E),
@@ -38,6 +47,7 @@ pub enum UartComError<E> {
     Frame,
 }
 
+#[cfg(feature = "mavlink")]
 impl<E: defmt::Format> defmt::Format for UartComError<E> {
     fn format(&self, f: defmt::Formatter) {
         match self {
@@ -50,6 +60,7 @@ impl<E: defmt::Format> defmt::Format for UartComError<E> {
 }
 
 /// Serialize and send a MAVLink2 frame over UART.
+#[cfg(feature = "mavlink")]
 pub async fn send_frame_over_uart<U: AsyncUartBus>(
     uart: &mut U,
     frame: &Frame<V2>,
@@ -77,6 +88,7 @@ pub async fn send_frame_over_uart<U: AsyncUartBus>(
 /// This waits for the MAVLink2 magic byte (0xFD), reads the header to learn the
 /// payload length (and optional signature flag), then reads the remainder of
 /// the frame before handing it to `mavio` for deserialization.
+#[cfg(feature = "mavlink")]
 pub async fn recv_frame_over_uart<U: AsyncUartBus>(
     uart: &mut U,
     scratch: &mut [u8],

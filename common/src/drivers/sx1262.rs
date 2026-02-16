@@ -1,4 +1,4 @@
-// common/src/drivers/sx1262.rs
+ // common/src/drivers/sx1262.rs
 #![allow(dead_code)]
 #![allow(async_fn_in_trait)]
 
@@ -17,7 +17,7 @@ use lora_phy::sx126x::{
 };
 use lora_phy::LoRa;
 
-use crate::coms::transport::lora::lora_config::LoRaConfig;
+use crate::coms::transport::lora::rf_config::LoRaConfig;
 
 #[derive(Debug, Clone, Copy)]
 pub struct RawRx {
@@ -122,14 +122,9 @@ where
 
         let radio = Sx126x::new(spi, iv, sx_cfg);
 
-        let enable_public = match cfg.sync_word {
-            0x3444 => true,
-            0x1424 => false,
-            _ => return Err(Sx1262Error::InvalidParam),
-        };
-
+        let sync_word = sync_word_u8(cfg.sync_word)?;
         let mut delay_extra = delay.clone();
-        let mut lora = LoRa::new(radio, enable_public, delay).await?;
+        let mut lora = LoRa::with_syncword(radio, sync_word, delay).await?;
         if cfg.tcxo_enable {
             // lora-phy already waits 10ms for TCXO; top up to the configured delay.
             let extra_ms = cfg.tcxo_delay_ms.saturating_sub(10);
@@ -159,7 +154,7 @@ where
     }
 
     pub async fn apply_lora_config(&mut self, cfg: LoRaConfig) -> Result<()> {
-        if cfg.sync_word != self.cfg.sync_word {
+        if sync_word_u8(cfg.sync_word)? != sync_word_u8(self.cfg.sync_word)? {
             return Err(Sx1262Error::InvalidParam);
         }
 
@@ -309,6 +304,15 @@ fn map_tcxo_voltage(voltage: u8) -> Result<TcxoCtrlVoltage> {
         0x05 => Ok(TcxoCtrlVoltage::Ctrl2V7),
         0x06 => Ok(TcxoCtrlVoltage::Ctrl3V0),
         0x07 => Ok(TcxoCtrlVoltage::Ctrl3V3),
+        _ => Err(Sx1262Error::InvalidParam),
+    }
+}
+
+fn sync_word_u8(sync_word: u16) -> Result<u8> {
+    match sync_word {
+        0x3444 => Ok(0x34),
+        0x1424 => Ok(0x12),
+        0x0000..=0x00FF => Ok(sync_word as u8),
         _ => Err(Sx1262Error::InvalidParam),
     }
 }

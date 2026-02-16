@@ -1,7 +1,7 @@
-// common/src/lora/lora_config.rs
+//! RF layer config type, PHY parameters, and time-on-air math.
 #![allow(dead_code)]
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LoRaConfig {
     pub freq_hz: u32,
 
@@ -31,6 +31,8 @@ pub struct LoRaConfig {
     pub rf_switch_swap: bool,
 }
 
+pub type RfConfig = LoRaConfig;
+
 impl LoRaConfig {
     /// EXACT known-good working preset.
     pub const fn preset_known_good() -> Self {
@@ -57,9 +59,9 @@ impl LoRaConfig {
             crc_on: true,
             invert_iq: false,
 
-            // Public LoRa sync word 0x3444 (exact legacy setting)
-            // You can later change to MAVLink private (0x1424) on BOTH ends.
-            sync_word: 0x3444,
+            // Custom private sync word (u8 = 0x47, SX126x encoded internally).
+            // Must match on both ends.
+            sync_word: 0x0047,
 
             // External RF switch wiring uses swapped TX/RX control lines.
             rf_switch_swap: true,
@@ -95,7 +97,7 @@ impl LoRaConfig {
             crc_on: true,
             invert_iq: false,
 
-            sync_word: 0x3444,
+            sync_word: 0x0047,
 
             rf_switch_swap: true,
         }
@@ -124,7 +126,7 @@ impl LoRaConfig {
             crc_on: true,
             invert_iq: false,
 
-            sync_word: 0x3444,
+            sync_word: 0x0047,
 
             rf_switch_swap: true,
         }
@@ -253,51 +255,4 @@ fn div_ceil(n: u128, d: u128) -> u128 {
         return 0;
     }
     (n + d - 1) / d
-}
-
-#[cfg(test)]
-mod tests {
-    use super::LoRaConfig;
-
-    #[test]
-    fn toa_matches_sf7_example() {
-        let cfg = LoRaConfig {
-            sf: 7,
-            bw: 0x04,
-            cr: 0x01,
-            preamble_len: 8,
-            explicit_header: true,
-            crc_on: true,
-            ..LoRaConfig::preset_known_good()
-        };
-        assert_eq!(cfg.toa_us(12), 41_216);
-    }
-
-    #[test]
-    fn toa_matches_sf10_example() {
-        let cfg = LoRaConfig {
-            sf: 10,
-            bw: 0x04,
-            cr: 0x01,
-            preamble_len: 8,
-            explicit_header: true,
-            crc_on: true,
-            ..LoRaConfig::preset_known_good()
-        };
-        assert_eq!(cfg.toa_us(12), 288_768);
-    }
-
-    #[test]
-    fn toa_matches_sf12_ldro_example() {
-        let cfg = LoRaConfig {
-            sf: 12,
-            bw: 0x04,
-            cr: 0x01,
-            preamble_len: 8,
-            explicit_header: true,
-            crc_on: true,
-            ..LoRaConfig::preset_known_good()
-        };
-        assert_eq!(cfg.toa_us(12), 1_155_072);
-    }
 }

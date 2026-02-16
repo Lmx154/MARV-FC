@@ -54,15 +54,14 @@ mod defmt_test_logger {
 pub mod params;
 pub mod commands;
 pub mod drivers;
-pub mod filters;
-pub mod estimators;
 pub mod types;
 pub mod utils;
 pub mod config;
 pub mod coms;
+pub mod tasks;
 pub mod log_config;
 // Higher-level stack modules are disabled during L1 bring-up.
-// Re-enable once integration testing resumes.
-// pub mod protocol;
-// pub mod telemetry;
-// pub mod policies;
+// Protocol is enabled for control-link framing; others remain off.
+pub mod protocol;
+pub mod telemetry;
+pub mod policies;
