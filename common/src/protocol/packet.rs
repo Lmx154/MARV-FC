@@ -9,7 +9,6 @@ pub const MAX_PACKET_PAYLOAD: usize = MAX_PACKET_BYTES.saturating_sub(1);
 #[repr(u8)]
 pub enum PacketType {
     KeepAlive = 0x00,
-    RcData = 0x01,
     Command = 0x02,
     LinkStats = 0x10,
     Ack = 0x11,
@@ -25,7 +24,6 @@ impl PacketType {
     pub const fn from_u8(value: u8) -> Option<Self> {
         match value {
             0x00 => Some(PacketType::KeepAlive),
-            0x01 => Some(PacketType::RcData),
             0x02 => Some(PacketType::Command),
             0x10 => Some(PacketType::LinkStats),
             0x11 => Some(PacketType::Ack),
@@ -42,7 +40,6 @@ impl PacketType {
     pub const fn name(self) -> &'static str {
         match self {
             PacketType::KeepAlive => "KEEPALIVE",
-            PacketType::RcData => "RC_DATA",
             PacketType::Command => "COMMAND",
             PacketType::LinkStats => "LINK_STATS",
             PacketType::Ack => "ACK",

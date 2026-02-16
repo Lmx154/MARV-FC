@@ -32,6 +32,7 @@ pub enum LedEvent {
     Tick,
     RxOk,
     TxOk,
+    CmdAck,
     Error,
 }
 
@@ -194,6 +195,9 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
 
                 match decode_packet(payload) {
                     Ok(packet) => {
+                        if packet.packet_type == PacketType::Command {
+                            self.send_led(LedEvent::CmdAck).await;
+                        }
                         self.transport.on_uplink_rx(&packet, meta);
                     }
                     Err(err) => {
@@ -284,6 +288,11 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         match self.phy.tx(tx.as_slice()).await {
             Ok(()) => {
                 self.send_led(LedEvent::TxOk).await;
+                if packet.packet_type == PacketType::Command
+                    || packet.packet_type == PacketType::Ack
+                {
+                    self.send_led(LedEvent::CmdAck).await;
+                }
             }
             Err(PhyError::PayloadTooLarge) => {
                 warn!("TX payload too large");

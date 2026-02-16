@@ -7,7 +7,6 @@ use crate::protocol::packet::{
 };
 
 pub const DEFAULT_ARQ_TIMEOUT_MS: u64 = 250;
-pub const MAX_RC_BYTES: usize = 16;
 
 const IMU_PERIOD_US: u64 = 1_000_000 / 150;
 const BARO_PERIOD_US: u64 = 1_000_000 / 100;
@@ -172,12 +171,6 @@ struct TelemetryState {
     last_sent_mag_us: u64,
     last_sent_gps_us: u64,
     last_sent_system_us: u64,
-    last_mock_imu_us: u64,
-    last_mock_baro_us: u64,
-    last_mock_mag_us: u64,
-    last_mock_gps_us: u64,
-    last_mock_system_us: u64,
-    mock_seq: u32,
     last_imu: Option<TelemetryImu>,
     last_baro: Option<TelemetryBaro>,
     last_mag: Option<TelemetryMag>,
@@ -195,12 +188,6 @@ impl Default for TelemetryState {
             last_sent_mag_us: 0,
             last_sent_gps_us: 0,
             last_sent_system_us: 0,
-            last_mock_imu_us: 0,
-            last_mock_baro_us: 0,
-            last_mock_mag_us: 0,
-            last_mock_gps_us: 0,
-            last_mock_system_us: 0,
-            mock_seq: 0,
             last_imu: None,
             last_baro: None,
             last_mag: None,
@@ -218,7 +205,6 @@ pub struct LoraTransport {
     last_cmd_tx_ms: u64,
     next_cmd_seq: u8,
     arq_timeout_ms: u64,
-    rc_latest: Option<Vec<u8, MAX_RC_BYTES>>,
     pending_ack: Option<u8>,
     last_stats: LinkStats,
     telemetry: TelemetryState,
@@ -232,7 +218,6 @@ impl LoraTransport {
             last_cmd_tx_ms: 0,
             next_cmd_seq: 0,
             arq_timeout_ms,
-            rc_latest: None,
             pending_ack: None,
             last_stats: LinkStats {
                 rssi: 0,
@@ -270,15 +255,6 @@ impl LoraTransport {
         };
         self.next_cmd_seq = self.next_cmd_seq.wrapping_add(1);
         self.pending_cmd = Some(cmd);
-        true
-    }
-
-    pub fn update_rc(&mut self, data: &[u8]) -> bool {
-        let mut buf = Vec::new();
-        if buf.extend_from_slice(data).is_err() {
-            return false;
-        }
-        self.rc_latest = Some(buf);
         true
     }
 
@@ -329,16 +305,6 @@ impl LoraTransport {
                 if packet_fits(&packet, max_len) {
                     self.awaiting_ack = true;
                     self.last_cmd_tx_ms = now_ms;
-                    return Some(packet);
-                }
-            }
-        }
-
-        if let Some(rc) = self.rc_latest.take() {
-            let mut payload = Vec::<u8, MAX_PACKET_PAYLOAD>::new();
-            if payload.extend_from_slice(rc.as_slice()).is_ok() {
-                let packet = Packet::with_payload(PacketType::RcData, payload);
-                if packet_fits(&packet, max_len) {
                     return Some(packet);
                 }
             }
@@ -691,126 +657,6 @@ impl LoraTransport {
         }
     }
 
-    fn enqueue_mock_telemetry(&mut self, now_us: u64) {
-        let imu_period = IMU_PERIOD_US.max(1);
-        let mut last_imu = self.telemetry.last_mock_imu_us;
-        let mut produced = 0usize;
-        while now_us.saturating_sub(last_imu) >= imu_period
-            && produced < TELEMETRY_QUEUE_LEN
-        {
-            let sample = self.mock_imu();
-            self.telemetry.queues.push_imu(sample);
-            last_imu = last_imu.wrapping_add(imu_period);
-            produced += 1;
-        }
-        self.telemetry.last_mock_imu_us = last_imu;
-
-        let baro_period = BARO_PERIOD_US.max(1);
-        let mut last_baro = self.telemetry.last_mock_baro_us;
-        produced = 0;
-        while now_us.saturating_sub(last_baro) >= baro_period
-            && produced < TELEMETRY_QUEUE_LEN
-        {
-            let sample = self.mock_baro();
-            self.telemetry.queues.push_baro(sample);
-            last_baro = last_baro.wrapping_add(baro_period);
-            produced += 1;
-        }
-        self.telemetry.last_mock_baro_us = last_baro;
-
-        let mag_period = MAG_PERIOD_US.max(1);
-        let mut last_mag = self.telemetry.last_mock_mag_us;
-        produced = 0;
-        while now_us.saturating_sub(last_mag) >= mag_period
-            && produced < TELEMETRY_QUEUE_LEN
-        {
-            let sample = self.mock_mag();
-            self.telemetry.queues.push_mag(sample);
-            last_mag = last_mag.wrapping_add(mag_period);
-            produced += 1;
-        }
-        self.telemetry.last_mock_mag_us = last_mag;
-
-        let gps_period = GPS_PERIOD_US.max(1);
-        let mut last_gps = self.telemetry.last_mock_gps_us;
-        produced = 0;
-        while now_us.saturating_sub(last_gps) >= gps_period
-            && produced < TELEMETRY_QUEUE_LEN
-        {
-            let sample = self.mock_gps();
-            self.telemetry.queues.push_gps(sample);
-            last_gps = last_gps.wrapping_add(gps_period);
-            produced += 1;
-        }
-        self.telemetry.last_mock_gps_us = last_gps;
-
-        let system_period = SYSTEM_PERIOD_US.max(1);
-        let mut last_system = self.telemetry.last_mock_system_us;
-        produced = 0;
-        while now_us.saturating_sub(last_system) >= system_period
-            && produced < TELEMETRY_QUEUE_LEN
-        {
-            let sample = self.mock_system();
-            self.telemetry.queues.push_system(sample);
-            last_system = last_system.wrapping_add(system_period);
-            produced += 1;
-        }
-        self.telemetry.last_mock_system_us = last_system;
-    }
-
-    fn next_mock_seed(&mut self) -> u32 {
-        let next = self.telemetry.mock_seq.wrapping_add(1);
-        self.telemetry.mock_seq = next;
-        next
-    }
-
-    fn mock_imu(&mut self) -> TelemetryImu {
-        let seed = self.next_mock_seed() as i16;
-        TelemetryImu {
-            accel: [seed, seed.wrapping_add(100), seed.wrapping_sub(100)],
-            gyro: [
-                seed.wrapping_add(200),
-                seed.wrapping_add(300),
-                seed.wrapping_add(400),
-            ],
-        }
-    }
-
-    fn mock_baro(&mut self) -> TelemetryBaro {
-        let seed = self.next_mock_seed();
-        TelemetryBaro {
-            pressure_pa: 101_325 + (seed as i32 % 2000),
-            temp_c_x10: 250 + (seed as i16 % 50),
-        }
-    }
-
-    fn mock_mag(&mut self) -> TelemetryMag {
-        let seed = self.next_mock_seed() as i16;
-        TelemetryMag {
-            mag: [seed, seed.wrapping_add(50), seed.wrapping_sub(50)],
-        }
-    }
-
-    fn mock_gps(&mut self) -> TelemetryGps {
-        let seed = self.next_mock_seed() as i32;
-        TelemetryGps {
-            lat: 37_774_9000 + (seed % 1000),
-            lon: -122_419_4000 + (seed % 1000),
-            alt_mm: 15_000 + (seed % 500),
-            sats: 10,
-            fix: 3,
-        }
-    }
-
-    fn mock_system(&mut self) -> TelemetrySystem {
-        let seed = self.next_mock_seed();
-        TelemetrySystem {
-            vbat_mv: 12_000 + (seed as u16 % 500),
-            temp_c: (25 + (seed as i8 % 5)),
-            arm_status: (seed as u8) & 0x01,
-            rssi_uplink: clamp_i16_to_i8(self.last_stats.rssi),
-        }
-    }
 }
 
 fn pick_due(
@@ -874,16 +720,6 @@ fn payload_fits(max_len: usize, payload_len: usize) -> bool {
         return false;
     }
     1usize.saturating_add(payload_len) <= max_len
-}
-
-fn clamp_i16_to_i8(value: i16) -> i8 {
-    if value > i8::MAX as i16 {
-        i8::MAX
-    } else if value < i8::MIN as i16 {
-        i8::MIN
-    } else {
-        value as i8
-    }
 }
 
 fn packet_fits(packet: &Packet, max_len: usize) -> bool {

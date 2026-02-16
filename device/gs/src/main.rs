@@ -16,11 +16,13 @@ use embassy_rp::peripherals::SPI0;
 use embassy_rp::spi::{Async, Config as SpiConfig, Spi};
 use embassy_rp::uart::{
     Async as UartAsync, Config as UartConfig, InterruptHandler as UartInterruptHandler, Uart,
+    UartRx, UartTx,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
-use embassy_sync::channel::{Channel, Receiver};
+use embassy_sync::channel::{Channel, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Delay, Instant, Timer};
+use heapless::Vec;
 use smart_leds::RGB8;
 use static_cell::StaticCell;
 
@@ -35,7 +37,8 @@ use common::drivers::sx1262::{set_irq_timestamp_fn, Sx1262};
 use common::protocol::packet::Packet;
 
 use crate::mac_engine::{
-    LedEvent, MacEngine, MacEngineConfig, LED_QUEUE_LEN, UART_PACKET_QUEUE_LEN,
+    CommandRequest, LedEvent, MacEngine, MacEngineConfig, LED_QUEUE_LEN,
+    UART_COMMAND_QUEUE_LEN, UART_PACKET_QUEUE_LEN,
 };
 
 const TX_QUEUE_LEN: usize = 4;
@@ -43,17 +46,24 @@ const RX_QUEUE_LEN: usize = 4;
 const LED_BRIGHTNESS: u8 = 50;
 const LED_RX_OK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
 const LED_TX_OK_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
+const LED_CMD_ACK_COLOR: RGB8 = RGB8 { r: 0, g: 0, b: LED_BRIGHTNESS };
 const LED_ERROR_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 const LED_PULSE_US: u64 = 2000;
 const UART_TX_LOG_EVERY: u32 = 0;
 const UART_TX_LOG_PAYLOAD_MAX: usize = 32;
+const ARM_CMD_ID: u8 = 1;
+const DISARM_CMD_ID: u8 = 2;
+const RTL_CMD_ID: u8 = 3;
+const HOLD_CMD_ID: u8 = 4;
 
 type SpiBus = Mutex<RawMutex, Spi<'static, SPI0, Async>>;
 static SPI_BUS: StaticCell<SpiBus> = StaticCell::new();
 static PHY_CHANNELS: StaticCell<PhyChannels<TX_QUEUE_LEN, RX_QUEUE_LEN>> = StaticCell::new();
 static LED_EVENTS: StaticCell<Channel<RawMutex, LedEvent, LED_QUEUE_LEN>> = StaticCell::new();
 static UART_PACKETS: StaticCell<Channel<RawMutex, Packet, UART_PACKET_QUEUE_LEN>> =
+    StaticCell::new();
+static UART_COMMANDS: StaticCell<Channel<RawMutex, CommandRequest, UART_COMMAND_QUEUE_LEN>> =
     StaticCell::new();
 
 type SpiDev = SpiDevice<'static, RawMutex, Spi<'static, SPI0, Async>, Output<'static>>;
@@ -81,17 +91,17 @@ embassy_rp::bind_interrupts!(struct UartIrqs {
     UART0_IRQ => UartInterruptHandler<embassy_rp::peripherals::UART0>;
 });
 
-struct RpUart<'d>(Uart<'d, UartAsync>);
+struct RpUartTx<'d>(UartTx<'d, UartAsync>);
 
-impl<'d> AsyncUartBus for RpUart<'d> {
+impl<'d> AsyncUartBus for RpUartTx<'d> {
     type Error = embassy_rp::uart::Error;
 
     async fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
-        Uart::write(&mut self.0, bytes).await
+        self.0.write(bytes).await
     }
 
-    async fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-        Uart::read(&mut self.0, buf).await
+    async fn read_exact(&mut self, _buf: &mut [u8]) -> Result<(), Self::Error> {
+        Err(embassy_rp::uart::Error::Framing)
     }
 }
 
@@ -129,6 +139,13 @@ async fn led_task(
                 colors[0] = LED_OFF;
                 rgb.write(&colors).await;
             }
+            LedEvent::CmdAck => {
+                colors[0] = LED_CMD_ACK_COLOR;
+                rgb.write(&colors).await;
+                Timer::after_micros(LED_PULSE_US).await;
+                colors[0] = LED_OFF;
+                rgb.write(&colors).await;
+            }
             LedEvent::Error => {
                 colors[0] = LED_ERROR_COLOR;
                 rgb.write(&colors).await;
@@ -142,7 +159,7 @@ async fn led_task(
 
 #[embassy_executor::task]
 async fn uart_tx_task(
-    mut uart: RpUart<'static>,
+    mut uart: RpUartTx<'static>,
     mut rx: Receiver<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>,
 ) -> ! {
     let cfg = UartTxConfig {
@@ -151,6 +168,76 @@ async fn uart_tx_task(
         summary_every: 50,
     };
     common::tasks::coms::uart_packet_tx_task(uart, rx, cfg).await
+}
+
+#[embassy_executor::task]
+async fn uart_cmd_rx_task(
+    mut uart_rx: UartRx<'static, UartAsync>,
+    tx: Sender<'static, RawMutex, CommandRequest, UART_COMMAND_QUEUE_LEN>,
+) -> ! {
+    let mut line = Vec::<u8, 24>::new();
+    loop {
+        let mut byte = [0u8; 1];
+        if uart_rx.read(&mut byte).await.is_err() {
+            continue;
+        }
+        let b = byte[0];
+
+        if b == b'\n' || b == b'\r' {
+            if line.is_empty() {
+                continue;
+            }
+
+            let cmd_id = if equals_ignore_ascii_case(line.as_slice(), b"ARM") {
+                Some(ARM_CMD_ID)
+            } else if equals_ignore_ascii_case(line.as_slice(), b"DISARM") {
+                Some(DISARM_CMD_ID)
+            } else if equals_ignore_ascii_case(line.as_slice(), b"RTL") {
+                Some(RTL_CMD_ID)
+            } else if equals_ignore_ascii_case(line.as_slice(), b"HOLD") {
+                Some(HOLD_CMD_ID)
+            } else {
+                None
+            };
+
+            if let Some(cmd_id) = cmd_id {
+                let req = CommandRequest { cmd_id, payload: 0 };
+                if tx.try_send(req).is_ok() {
+                    info!("UART CMD {} queued", cmd_id);
+                } else {
+                    warn!("UART CMD queue full");
+                }
+            } else {
+                warn!("UART CMD unknown: {=[u8]}", line.as_slice());
+            }
+
+            line.clear();
+            continue;
+        }
+
+        if line.push(b).is_err() {
+            line.clear();
+        }
+    }
+}
+
+fn equals_ignore_ascii_case(input: &[u8], expected_upper: &[u8]) -> bool {
+    if input.len() != expected_upper.len() {
+        return false;
+    }
+
+    for (&lhs, &rhs_upper) in input.iter().zip(expected_upper.iter()) {
+        let lhs_upper = if lhs >= b'a' && lhs <= b'z' {
+            lhs - 32
+        } else {
+            lhs
+        };
+        if lhs_upper != rhs_upper {
+            return false;
+        }
+    }
+
+    true
 }
 
 #[embassy_executor::main]
@@ -196,7 +283,7 @@ async fn main(spawner: Spawner) {
     // TX: GP12, RX: GP13
     let mut uart_cfg = UartConfig::default();
     uart_cfg.baudrate = 115_200;
-    let uart = RpUart(Uart::new(
+    let uart = Uart::new(
         p.UART0,
         p.PIN_12,
         p.PIN_13,
@@ -204,7 +291,9 @@ async fn main(spawner: Spawner) {
         p.DMA_CH3,
         p.DMA_CH4,
         uart_cfg,
-    ));
+    );
+    let (uart_tx_half, uart_rx_half) = uart.split();
+    let uart_tx_bus = RpUartTx(uart_tx_half);
 
     let reset = Output::new(p.PIN_5, Level::High);
     let busy = Input::new(p.PIN_4, Pull::None);
@@ -251,7 +340,14 @@ async fn main(spawner: Spawner) {
     let uart_packets = UART_PACKETS.init(Channel::new());
     let uart_tx = uart_packets.sender();
     let uart_rx = uart_packets.receiver();
-    spawner.spawn(uart_tx_task(uart, uart_rx)).unwrap();
+    spawner.spawn(uart_tx_task(uart_tx_bus, uart_rx)).unwrap();
+
+    let uart_commands = UART_COMMANDS.init(Channel::new());
+    let uart_cmd_tx = uart_commands.sender();
+    let uart_cmd_rx = uart_commands.receiver();
+    spawner
+        .spawn(uart_cmd_rx_task(uart_rx_half, uart_cmd_tx))
+        .unwrap();
 
     let slot_rx_symbols = link_cfg.slot_rx_symbols();
     let profile = link_cfg.profile();
@@ -263,6 +359,7 @@ async fn main(spawner: Spawner) {
         Some(tick_pin),
         Some(led_tx),
         Some(uart_tx),
+        Some(uart_cmd_rx),
         slot_rx_symbols,
         MacEngineConfig::default(),
     );

@@ -190,39 +190,6 @@ impl TickTracker {
         self.timeout_count
     }
 
-    pub fn on_uplink(&mut self, now_ms: u64, tick_seq: u16) -> TickUpdate {
-        let mut update = TickUpdate::default();
-
-        if let (Some(prev_seq), Some(last_ms)) = (self.last_tick_seq, self.last_rx_ms) {
-            let delta = tick_seq.wrapping_sub(prev_seq);
-            if delta == 0 {
-                self.dup_count = self.dup_count.wrapping_add(1);
-            } else {
-                let max_plausible = self.max_plausible_delta(now_ms, last_ms);
-                if delta > max_plausible {
-                    update.seq_anomaly = delta;
-                    self.seq_anomaly_count = self.seq_anomaly_count.wrapping_add(1);
-                } else if delta > 1 {
-                    let missed = delta - 1;
-                    update.missed = missed;
-                    self.missed_ticks = self.missed_ticks.wrapping_add(missed as u32);
-                }
-            }
-        }
-
-        self.last_tick_seq = Some(tick_seq);
-        self.last_rx_ms = Some(now_ms);
-        self.rx_count = self.rx_count.wrapping_add(1);
-
-        if self.state == LinkState::Search {
-            self.state = LinkState::Locked;
-            self.lock_count = self.lock_count.wrapping_add(1);
-            update.event = LinkEvent::LockAcquired;
-        }
-
-        update
-    }
-
     pub fn on_uplink_tdma(
         &mut self,
         now_ms: u64,

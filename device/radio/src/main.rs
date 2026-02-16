@@ -43,6 +43,7 @@ const RX_QUEUE_LEN: usize = 4;
 const LED_BRIGHTNESS: u8 = 50;
 const LED_RX_OK_COLOR: RGB8 = RGB8 { r: 0, g: LED_BRIGHTNESS, b: 0 };
 const LED_TX_OK_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
+const LED_CMD_ACK_COLOR: RGB8 = RGB8 { r: 0, g: 0, b: LED_BRIGHTNESS };
 const LED_ERROR_COLOR: RGB8 = RGB8 { r: LED_BRIGHTNESS, g: 0, b: 0 };
 const LED_OFF: RGB8 = RGB8 { r: 0, g: 0, b: 0 };
 const LED_PULSE_US: u64 = 2000;
@@ -124,6 +125,13 @@ async fn led_task(
             }
             LedEvent::TxOk => {
                 colors[0] = LED_TX_OK_COLOR;
+                rgb.write(&colors).await;
+                Timer::after_micros(LED_PULSE_US).await;
+                colors[0] = LED_OFF;
+                rgb.write(&colors).await;
+            }
+            LedEvent::CmdAck => {
+                colors[0] = LED_CMD_ACK_COLOR;
                 rgb.write(&colors).await;
                 Timer::after_micros(LED_PULSE_US).await;
                 colors[0] = LED_OFF;

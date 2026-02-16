@@ -16,6 +16,7 @@ use common::protocol::packet::{decode_packet, encode_packet_fixed, Packet, Packe
 
 pub const LED_QUEUE_LEN: usize = 16;
 pub const UART_PACKET_QUEUE_LEN: usize = 32;
+pub const UART_COMMAND_QUEUE_LEN: usize = 16;
 
 const DEFAULT_TICK_PULSE_US: u64 = 50;
 const DEFAULT_LQ_LOG_INTERVAL: u32 = 100;
@@ -24,10 +25,17 @@ const DEFAULT_RX_LATE_LOG_INTERVAL: u32 = 50;
 const DEFAULT_TX_REFUSE_LOG_INTERVAL: u32 = 50;
 
 #[derive(Clone, Copy)]
+pub struct CommandRequest {
+    pub cmd_id: u8,
+    pub payload: u32,
+}
+
+#[derive(Clone, Copy)]
 pub enum LedEvent {
     Tick,
     RxOk,
     TxOk,
+    CmdAck,
     Error,
 }
 
@@ -70,6 +78,7 @@ pub struct MacEngine<const TXQ: usize, const RXQ: usize> {
     last_rx_seq: Option<u16>,
     led_tx: Option<LedSender>,
     uart_tx: Option<Sender<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>>,
+    uart_cmd_rx: Option<embassy_sync::channel::Receiver<'static, RawMutex, CommandRequest, UART_COMMAND_QUEUE_LEN>>,
     uart_drops: u32,
     tick_pin: Option<Output<'static>>,
     slot_rx_symbols: u16,
@@ -84,6 +93,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         tick_pin: Option<Output<'static>>,
         led_tx: Option<LedSender>,
         uart_tx: Option<Sender<'static, RawMutex, Packet, UART_PACKET_QUEUE_LEN>>,
+        uart_cmd_rx: Option<embassy_sync::channel::Receiver<'static, RawMutex, CommandRequest, UART_COMMAND_QUEUE_LEN>>,
         slot_rx_symbols: u16,
         config: MacEngineConfig,
     ) -> Self {
@@ -105,6 +115,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
             last_rx_seq: None,
             led_tx,
             uart_tx,
+            uart_cmd_rx,
             uart_drops: 0,
             tick_pin,
             slot_rx_symbols,
@@ -171,6 +182,12 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
                             packet.packet_type.name(),
                             packet.payload.len()
                         );
+                        if packet.packet_type == PacketType::Ack {
+                            if let Some(seq) = packet.payload.first().copied() {
+                                info!("RX ACK seq={}", seq);
+                                self.send_led(LedEvent::CmdAck).await;
+                            }
+                        }
                         self.transport.on_downlink_rx(&packet, meta);
                         if let Some(uart_tx) = self.uart_tx.as_ref() {
                             if uart_tx.try_send(packet).is_err() {
@@ -230,6 +247,7 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
 
         let payload_len = self.profile.uplink_payload_len;
         let now_ms = Instant::now().as_millis();
+        self.drain_uart_commands();
         let packet = if payload_len == 0 {
             Packet::new(PacketType::KeepAlive)
         } else {
@@ -279,6 +297,11 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         match self.phy.tx(tx.as_slice()).await {
             Ok(()) => {
                 self.send_led(LedEvent::TxOk).await;
+                if packet.packet_type == PacketType::Command
+                    || packet.packet_type == PacketType::Ack
+                {
+                    self.send_led(LedEvent::CmdAck).await;
+                }
             }
             Err(PhyError::PayloadTooLarge) => {
                 warn!("TX payload too large");
@@ -332,5 +355,19 @@ impl<const TXQ: usize, const RXQ: usize> MacEngine<TXQ, RXQ> {
         self.lq_expected = 0;
         self.lq_received = 0;
         self.lq_tick_count = 0;
+    }
+
+    fn drain_uart_commands(&mut self) {
+        let Some(rx) = self.uart_cmd_rx.as_mut() else {
+            return;
+        };
+
+        while let Ok(cmd) = rx.try_receive() {
+            if self.transport.enqueue_command(cmd.cmd_id, cmd.payload) {
+                info!("ENQ UART CMD id={} payload={}", cmd.cmd_id, cmd.payload);
+            } else {
+                warn!("DROP UART CMD id={} (pending busy)", cmd.cmd_id);
+            }
+        }
     }
 }

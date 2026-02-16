@@ -2,8 +2,8 @@
 use super::mac_codec::HEADER_LEN;
 use super::rf_config::RfConfig;
 
-// NOTE: These fields are selected from vehicle-specific packet sizes and lane
-// targets, so presets must remain per-vehicle even if values match.
+// NOTE: These fields are selected for the single long-range CMD + telemetry
+// link profile.
 #[derive(Clone, Copy, Debug)]
 pub struct MacConfig {
     pub tick_hz: u32,
@@ -30,8 +30,6 @@ impl MacConfig {
 }
 
 pub fn rx_timeout_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
-    // Not shareable: this helper absorbs per-vehicle packet sizes and schedule
-    // policy (payload lengths, tick rate, guards, offsets, readiness window).
     if !mac.rx_timeout_auto {
         return mac.rx_timeout_symbols;
     }
@@ -74,7 +72,6 @@ pub fn rx_timeout_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
 }
 
 pub fn slot_rx_symbols(rf: RfConfig, mac: MacConfig) -> u16 {
-    // Not shareable: the slot window depends on per-vehicle schedule settings.
     let symbol_us = lora_symbol_time_us(rf);
     if symbol_us == 0 {
         return mac.rx_timeout_symbols;
