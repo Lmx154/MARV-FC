@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MARV SITL Control</title>
+    <link rel="stylesheet" href="/ui/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>MARV SITL Control</h1>
+      <div class="conn-row">
+        <span id="conn-dot" class="dot offline"></span>
+        <span id="conn-label">Disconnected</span>
+        <button id="btn-connect" type="button">Connect WS</button>
+      </div>
+    </header>
+
+    <main class="grid">
+      <section class="card">
+        <h2>Simulation</h2>
+        <div class="kv">
+          <div>Tick</div><div id="sim-tick">-</div>
+          <div>Time (s)</div><div id="sim-time">-</div>
+          <div>Running</div><div id="sim-running">-</div>
+          <div>Rate (Hz)</div><div id="sim-rate">-</div>
+          <div>Selected File</div><div id="sim-file" class="truncate">-</div>
+        </div>
+        <div class="controls">
+          <button id="btn-pause" type="button">Pause</button>
+          <button id="btn-resume" type="button">Resume</button>
+          <label>
+            Rate Hz
+            <input id="input-rate" type="number" min="0.2" max="500" step="0.1" value="60" />
+          </label>
+          <button id="btn-rate" type="button">Set Rate</button>
+          <label>
+            Step ms
+            <input id="input-step" type="number" min="1" step="1" value="10" />
+          </label>
+          <button id="btn-step" type="button">Step</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Filesystem</h2>
+        <div class="fs-controls">
+          <label>
+            Root
+            <select id="root-select"></select>
+          </label>
+          <button id="btn-load-root" type="button">Load</button>
+          <button id="btn-up" type="button">Up</button>
+          <button id="btn-refresh" type="button">Refresh</button>
+          <label class="inline">
+            <input id="include-hidden" type="checkbox" />
+            Include hidden
+          </label>
+        </div>
+        <div class="path-row">
+          <strong>Path:</strong>
+          <span id="fs-path" class="truncate">-</span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Type</th>
+                <th>Size</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="fs-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>File Preview</h2>
+        <div class="path-row">
+          <strong>File:</strong>
+          <span id="preview-path" class="truncate">-</span>
+        </div>
+        <pre id="preview-content" class="preview"></pre>
+      </section>
+
+      <section class="card">
+        <h2>Event Log</h2>
+        <pre id="event-log" class="preview log"></pre>
+      </section>
+    </main>
+
+    <script src="/ui/app.js"></script>
+  </body>
+</html>
