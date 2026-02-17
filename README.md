@@ -8,6 +8,13 @@ MARV is an avionics system aimed at growing my understanding of avionics system 
 - tasks
 - simulation
 
+## Docs
+
+- Simulator: `docs/simulator.md`
+- Protocol: `docs/protocol.md`
+- Localization: `docs/localization.md`
+- PCB hardware: `docs/pcbhardware.md`
+
 ## SD card config (CONFIG.TXT)
 
 At boot the FC reads a simple key/value file `CONFIG.TXT` on the SD card (root). Current keys:

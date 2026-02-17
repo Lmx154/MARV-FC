@@ -144,7 +144,7 @@ where
 
 pub async fn uart_packet_tx_task<U, M, const N: usize>(
     mut uart: U,
-    mut rx: Receiver<'static, M, Packet, N>,
+    rx: Receiver<'static, M, Packet, N>,
     cfg: UartTxConfig,
 ) -> !
 where
