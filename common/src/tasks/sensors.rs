@@ -6,7 +6,7 @@
 
 #![allow(async_fn_in_trait)]
 
-use defmt::{info, warn};
+use defmt::warn;
 
 use crate::drivers::bmi088::{Bmi088, Bmi088Raw};
 use crate::drivers::lsm6dsv32x::{Lsm6dsv32x, Lsm6dsv32xRaw};
@@ -167,22 +167,13 @@ where
     P: DelayMs,
     S: DataSink<(i32, i32)>,
 {
-    match baro.init().await {
-        Ok(()) => info!("BMP581 init ok"),
-        Err(Bmp581Error::InvalidChipId(id)) => {
-            warn!("BMP581 invalid chip id 0x{:02X}", id);
-        }
-        Err(Bmp581Error::InvalidConfig) => warn!("BMP581 invalid config"),
-        Err(Bmp581Error::I2c(_)) => warn!("BMP581 init I2C error"),
-    }
+    let _ = baro.init().await;
     loop {
         match baro.read_compensated().await {
             Ok(sample) => sink.publish(sample).await,
-            Err(Bmp581Error::I2c(_)) => warn!("BMP581 read I2C error"),
-            Err(Bmp581Error::InvalidConfig) => warn!("BMP581 read invalid config"),
-            Err(Bmp581Error::InvalidChipId(id)) => {
-                warn!("BMP581 read invalid chip id 0x{:02X}", id);
-            }
+            Err(Bmp581Error::I2c(_)) => {}
+            Err(Bmp581Error::InvalidConfig) => {}
+            Err(Bmp581Error::InvalidChipId(_id)) => {}
         }
         if interval_ms > 0 {
             delay.delay_ms(interval_ms).await;

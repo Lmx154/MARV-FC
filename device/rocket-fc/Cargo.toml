@@ -33,5 +33,5 @@ embedded-hal-bus = "0.2"
 
 [package.metadata.embassy]
 build = [
-  { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/rocket-fc" }
+  { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/rp235x" }
 ]

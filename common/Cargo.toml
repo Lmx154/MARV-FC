@@ -21,6 +21,7 @@ heapless = { version = "0.8", features = ["defmt-03"] }
 lora-phy = { git = "https://github.com/Lmx154/lora-rs", features = ["defmt-03"] }
 embassy-sync = "0.7.2"
 embassy-futures = "0.1.2"
+embedded-sdmmc = { version = "0.7.0", default-features = false, features = ["defmt-log"] }
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
