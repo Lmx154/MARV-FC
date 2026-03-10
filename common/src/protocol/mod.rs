@@ -4,5 +4,4 @@
 //! under `crate::coms::transport` or in small protocol/transport bridge modules.
 
 pub mod packet;
-#[cfg(feature = "mavlink")]
-pub mod mavlink;
+

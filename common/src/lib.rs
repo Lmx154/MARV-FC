@@ -56,7 +56,6 @@ pub mod commands;
 pub mod drivers;
 pub mod types;
 pub mod utils;
-pub mod config;
 pub mod coms;
 pub mod tasks;
 pub mod log_config;

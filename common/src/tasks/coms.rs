@@ -3,12 +3,6 @@
 
 #![allow(async_fn_in_trait)]
 
-#[cfg(feature = "mavlink")]
-pub use crate::protocol::mavlink::encode::{
-    build_statustext, build_statustext_frame, build_telemetry_frame, statustext_to_str,
-    MavEndpointConfig, TelemetrySample, TelemetrySource, STATUSTEXT_CAP,
-};
-
 use defmt::{info, warn};
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Receiver, Sender};

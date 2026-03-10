@@ -12,17 +12,13 @@ mod telemetry_presets;
 
 use defmt::*;
 use hardware::pinout::fc;
-use hardware::{
-    RpUsbDevice, UsbCdc, build_usb_cdc, load_config_and_params_from_sd, save_params_to_sd,
-};
+use hardware::{load_config_and_params_from_sd, save_params_to_sd};
 
 use init::{
     I2C0_MUTEX, I2C1_MUTEX, I2c0Type, I2c1Type, RpUart, SPI1_MUTEX, SharedI2c, SharedI2c0,
     Spi1Device,
 };
 
-use common::coms::scheduler::LinkScheduler;
-use common::coms::transport::uart::MAVLINK_MAX_FRAME;
 use common::config::Config as AppConfig;
 use common::drivers::bmi088::{Bmi088, Bmi088Raw};
 use common::drivers::bmm350::RawMag;
@@ -31,18 +27,8 @@ use common::drivers::bmp581::{BMP581_ADDR_PRIMARY, Bmp581, Bmp581Config};
 use common::drivers::lsm6dsv32x::{Lsm6dsv32x, Lsm6dsv32xRaw};
 use common::drivers::neom9n::{GpsData, NeoM9n, UBLOX_I2C_ADDR};
 use common::params::{ParamId, ParamRegistry};
-use common::policies::fc_state::{FcState, FcStatePolicy};
-use common::protocol::mavlink::encode::{
-    HeartbeatConfig, build_device_op_read_reply_frame, build_device_op_write_reply_frame,
-    build_frame_from_msg, build_heartbeat_frame, build_param_value_frame, build_statustext,
-    build_statustext_frame,
-};
-use common::protocol::mavlink::handlers::{MessageHandlerResult, dispatch_mavlink_message};
-use common::protocol::mavlink::prelude::{Frame, V2};
-use common::protocol::mavlink::telemetry::{MavlinkTelemetryBundle, MavlinkTelemetrySource};
 use common::tasks::coms::{
-    MavEndpointConfig, TelemetrySample, TelemetrySource, UartTelemetryRate, UartTelemetrySnapshot,
-    UartTelemetrySource, UartTxConfig,
+    UartTelemetryRate, UartTelemetrySnapshot, UartTelemetrySource, UartTxConfig,
 };
 use common::tasks::sensors::{
     DataSink, run_bmi088_task, run_bmm350_task, run_bmp581_task, run_lsm6dsv32x_task,
@@ -59,11 +45,9 @@ use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::ws2812::{PioWs2812, PioWs2812Program};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_rp::uart::{Config as UartConfig, InterruptHandler as UartInterruptHandler, Uart};
-use embassy_rp::usb::{Driver as UsbDriver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex as RawMutex;
 use embassy_sync::mutex::Mutex;
 use embassy_time::{Instant, Timer};
-use embassy_usb::driver::EndpointError;
 use embedded_hal_async::i2c::I2c as _;
 use heapless::Deque;
 use smart_leds::RGB8;
@@ -82,10 +66,6 @@ embassy_rp::bind_interrupts!(struct UartIrqs {
 
 embassy_rp::bind_interrupts!(struct PioIrqs {
     PIO0_IRQ_0 => PioInterruptHandler<embassy_rp::peripherals::PIO0>;
-});
-
-embassy_rp::bind_interrupts!(struct UsbIrqs {
-    USBCTRL_IRQ => UsbInterruptHandler<embassy_rp::peripherals::USB>;
 });
 
 // Compile-time pinout contract for this binary.
@@ -196,7 +176,6 @@ static STATE: Mutex<RawMutex, SensorsState> = Mutex::new(SensorsState {
 
 // Parameter registry - shared between UART RX and TX tasks
 static PARAMS: StaticCell<Mutex<RawMutex, ParamRegistry>> = StaticCell::new();
-static FC_STATE: StaticCell<Mutex<RawMutex, FcState>> = StaticCell::new();
 
 fn clamp_i16(v: i32) -> i16 {
     v.clamp(i16::MIN as i32, i16::MAX as i32) as i16
@@ -239,67 +218,6 @@ where
     info!("{} scanner: found {} device(s)", bus_name, count);
     for addr in &found[..count] {
         info!("{} scanner: device @ 0x{:02X}", bus_name, *addr);
-    }
-}
-
-fn fc_policy_from_params(params: &ParamRegistry) -> FcStatePolicy {
-    FcStatePolicy {
-        usb_forces_config: params.bool(ParamId::FcModeUsbForcesConfig),
-        allow_arm_in_config: params.bool(ParamId::FcArmAllowedInConfig),
-    }
-}
-
-fn fc_heartbeat_hz(params: &ParamRegistry) -> u32 {
-    params.u32(ParamId::FcStateHeartbeatHz).max(1)
-}
-
-struct StateTelemetrySource;
-
-impl TelemetrySource for StateTelemetrySource {
-    async fn latest(&self) -> TelemetrySample {
-        let snap = STATE.lock().await.clone();
-        let (lat, lon, alt, sats, fix) = if let Some(f) = snap.gps.fix {
-            (
-                f.latitude,
-                f.longitude,
-                f.altitude,
-                f.satellites,
-                f.fix_type,
-            )
-        } else {
-            (0, 0, 0, 0, 0)
-        };
-        TelemetrySample {
-            accel: snap.imu.accel,
-            gyro: snap.imu.gyro,
-            mag: [
-                clamp_i16(snap.mag.xyz[0]),
-                clamp_i16(snap.mag.xyz[1]),
-                clamp_i16(snap.mag.xyz[2]),
-            ],
-            baro_p_pa: snap.baro.p_pa,
-            baro_t_cx10: clamp_i16((snap.baro.t_c_x100 / 10) as i32),
-            gps_lat_e7: lat,
-            gps_lon_e7: lon,
-            gps_alt_mm: alt,
-            gps_sat: sats,
-            gps_fix: fix,
-        }
-    }
-}
-
-impl MavlinkTelemetrySource for StateTelemetrySource {
-    async fn bundle(&self, now_ms: u32, now_us: u64) -> MavlinkTelemetryBundle {
-        let sample = self.latest().await;
-        MavlinkTelemetryBundle {
-            sys_status: common::protocol::mavlink::encode::build_sys_status(now_ms, &sample),
-            raw_imu: common::protocol::mavlink::encode::build_raw_imu(now_us, &sample),
-            scaled_pressure: common::protocol::mavlink::encode::build_scaled_pressure(
-                now_ms, &sample,
-            ),
-            gps_raw_int: common::protocol::mavlink::encode::build_gps_raw_int(now_us, &sample),
-            attitude: common::protocol::mavlink::encode::build_attitude(now_ms),
-        }
     }
 }
 
@@ -459,34 +377,17 @@ pub(crate) async fn spawn_all(spawner: Spawner) {
         p.UART0, p.PIN_0, p.PIN_1, UartIrqs, p.DMA_CH2, p.DMA_CH3, uart_cfg,
     ));
 
-    // ----- USB-CDC (primary configuration interface) -----
-    let usb_driver = UsbDriver::new(p.USB, UsbIrqs);
-    let (usb_dev, usb_cdc) = build_usb_cdc(usb_driver);
-
     let bmp_addr = BMP581_ADDR_PRIMARY;
 
     // Initialize parameter registry with loaded values
     let params = PARAMS.init(Mutex::new(param_registry));
-    let fc_state = FC_STATE.init(Mutex::new(FcState::new()));
-
-    // Create MAVLink endpoint config from params
     let params_guard = params.lock().await;
-    let sys_id = params_guard.u32(ParamId::SysId) as u8;
-    let comp_id = params_guard.u32(ParamId::CompId) as u8;
     // Get LED color from parameters
     let led_r = params_guard.u32(ParamId::LedColorR).min(255) as u8;
     let led_g = params_guard.u32(ParamId::LedColorG).min(255) as u8;
     let led_b = params_guard.u32(ParamId::LedColorB).min(255) as u8;
     drop(params_guard);
-    let mav_cfg = MavEndpointConfig { sys_id, comp_id };
-    info!(
-        "MAVLink endpoint: sys_id={} comp_id={}",
-        mav_cfg.sys_id, mav_cfg.comp_id
-    );
     info!("LED color: R={} G={} B={}", led_r, led_g, led_b);
-
-    // Start USB device task
-    spawner.spawn(core1::usb_device_task(usb_dev)).unwrap();
 
     // Spawn sensor tasks
     spawner
@@ -511,11 +412,6 @@ pub(crate) async fn spawn_all(spawner: Spawner) {
     };
     spawner
         .spawn(dma_tasks::logger_task(ws2812, led_color))
-        .unwrap();
-    spawner
-        .spawn(core1::usb_mavlink_task(
-            usb_cdc, mav_cfg, params, fc_state, i2c0_mutex, i2c1_mutex,
-        ))
         .unwrap();
     spawner
         .spawn(dma_tasks::uart_link_task(uart_fc_radio, params))

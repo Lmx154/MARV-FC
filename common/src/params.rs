@@ -1,21 +1,12 @@
 //! Single source of truth for firmware parameters.
 //!
 //! Goals:
-//! - One authoritative registry in firmware (GCS discovers via MAVLink).
-//! - Same registry backs both MAVLink PARAM_* and USB-CDC CLI.
+//! - One authoritative registry in firmware.
+//! - Same registry can back multiple configuration transports.
 //! - No metadata required for correctness (UI helpers can be added later).
 //!
 //! Constraints:
-//! - MAVLink PARAM_VALUE uses param_id[16]. Keep names <= 16 chars.
-//!
-//! ## MAVLink Integration
-//!
-//! The `protocol::mavlink::encode` module provides helpers for the parameter protocol:
-//! - `build_param_value_frame()` - Build PARAM_VALUE responses
-//! - `handle_param_request_read()` - Process PARAM_REQUEST_READ
-//! - `handle_param_set()` - Process PARAM_SET and update registry
-//!
-//! See `protocol::mavlink` for MAVLink parameter protocol helpers.
+//! - Keep names <= 16 chars (fixed-size ID used by some transports/tools).
 //!
 //! ## Quick Start
 //!
@@ -29,20 +20,14 @@
 //!     configure_sensor(rate);
 //! }
 //!
-//! // 3. Wire into MAVLink handler (see `protocol::mavlink`)
-//! match msg {
-//!     Common::ParamRequestList(_) => { /* send all params */ }
-//!     Common::ParamRequestRead(_) => { /* send one param */ }
-//!     Common::ParamSet(_) => { /* update param, send ACK */ }
-//!     _ => {}
-//! }
+//! // 3. Wire into your control-link handler (send/read/set)
 //! ```
 
 #![allow(dead_code)]
 
 use core::fmt;
 
-/// MAVLink param_id is 16 bytes (null-terminated / padded).
+/// Parameter name hard limit.
 pub const PARAM_NAME_MAX: usize = 16;
 
 /// Minimal param type set for bring-up.
@@ -72,18 +57,6 @@ impl ParamValue {
         }
     }
 
-    /// MAVLink PARAM_VALUE.param_value is f32, but for integer types we must
-    /// reinterpret the bits (transmute), not convert the value.
-    /// This ensures Mission Planner displays the correct values.
-    pub fn as_mavlink_f32(self) -> f32 {
-        match self {
-            ParamValue::Bool(v) => if v { 1.0 } else { 0.0 },
-            ParamValue::I32(v) => f32::from_bits(v as u32),
-            ParamValue::U32(v) => f32::from_bits(v),
-            ParamValue::F32(v) => v,
-        }
-    }
-
     /// Convenience: parse “CLI-ish” inputs without pulling in alloc.
     /// (You can ignore this if you already have parsing elsewhere.)
     pub fn parse_as(ty: ParamType, s: &str) -> Option<Self> {
@@ -105,7 +78,7 @@ impl ParamValue {
 
 #[derive(Copy, Clone, Debug)]
 pub struct ParamDef {
-    /// Must be <= 16 chars for MAVLink.
+    /// Must be <= 16 chars.
     pub name: &'static str,
     pub ty: ParamType,
     pub default: ParamValue,
@@ -118,9 +91,8 @@ impl ParamDef {
     }
 }
 
-/// Stable indices are the protocol.
-/// - MAVLink uses param_index 0..N-1
-/// - PARAM_REQUEST_READ by index expects stable ordering
+/// Stable indices are part of the on-wire protocol.
+/// If you support request-by-index, ordering must remain stable.
 #[repr(u16)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ParamId {
@@ -287,15 +259,13 @@ pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
     ParamDef::new("TEL_ADAPT_HOLD",   ParamType::U32,  ParamValue::U32(1000)),
     // --- LoRa tick MAC configuration ---
     // These values are stored durably on the FC (single source of truth).
-    // The GS pulls them via MAVLink PARAM_* and then applies them locally and
-    // distributes runtime config to the Radio via COMMAND_LONG (see protocol::mavlink::link_mac_config).
+    // The GS pulls them via the control-link config protocol and applies them locally.
     ParamDef::new("LINK_TICK_HZ",   ParamType::U32,  ParamValue::U32(50)),
     ParamDef::new("LINK_SLOT_MD",   ParamType::U32,  ParamValue::U32(1)),
     ParamDef::new("LINK_FAST_MB",   ParamType::U32,  ParamValue::U32(236)),
     ParamDef::new("LAS_MAX_AGE_MS", ParamType::U32,  ParamValue::U32(1000)),
 
     // --- LoRa RF (demodulation-affecting) configuration ---
-    // Encoding matches `protocol::mavlink::rf_reconfig::RfReconfigSettings`.
     ParamDef::new("LORA_F_KHZ",      ParamType::U32,  ParamValue::U32(915_000)),
     ParamDef::new("LORA_SF",         ParamType::U32,  ParamValue::U32(7)),
     ParamDef::new("LORA_BW",         ParamType::U32,  ParamValue::U32(0)),
@@ -306,8 +276,8 @@ pub const PARAM_DEFS: [ParamDef; PARAM_COUNT] = [
 /// Runtime storage for parameter values.
 ///
 /// This is the thing you actually mutate via:
-/// - MAVLink PARAM_SET
-/// - USB-CDC `param set ...`
+/// - a control-link parameter protocol
+/// - USB-CDC `param set ...` (if enabled)
 pub struct ParamRegistry {
     values: [ParamValue; PARAM_COUNT],
 }
@@ -337,7 +307,7 @@ impl ParamRegistry {
         for def in PARAM_DEFS.iter() {
             debug_assert!(
                 def.name.len() <= PARAM_NAME_MAX,
-                "Param name too long for MAVLink (max 16): {}",
+                "Param name too long (max 16): {}",
                 def.name
             );
             debug_assert_eq!(def.ty, def.default.ty(), "Default type mismatch for {}", def.name);
