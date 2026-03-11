@@ -1420,6 +1420,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "marv-fc-rl-rp2354b"
+version = "0.1.0"
+dependencies = [
+ "cortex-m-rt",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-time",
+ "panic-probe",
+]
+
+[[package]]
 name = "matrixmultiply"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"

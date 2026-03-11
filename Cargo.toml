@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "common",
+    "device/MARV-FC-RL-RP2354B",
     "device/rp235x",
     "device/rocket-fc",
     "device/drone-fc",

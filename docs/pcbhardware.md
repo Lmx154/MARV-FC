@@ -2,12 +2,6 @@
 
 This document outlines the hardware configurations and pin assignments for the MARV project, including the Flight Controller (FC), Radio, and Ground Station (GS). All microcontrollers (MCs) are Raspberry Pi Pico 2 boards based on the RP2350A.
 
-## LoRa sync word
-
-- This project uses a custom private LoRa sync word: `0x47`.
-- The value is configured in `common/src/coms/transport/lora/rf_config.rs` and
-  must match on both GS and radio.
-
 ## Flight Controller (FC)
 
 - **Microcontroller (MC)**: RP2354B
