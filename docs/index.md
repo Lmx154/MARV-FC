@@ -29,6 +29,7 @@ Primary goals:
 7. [`07-communication-bus-and-dataflow.md`](./07-communication-bus-and-dataflow.md)
 8. [`08-watchdog-architecture-and-liveness-supervision.md`](./08-watchdog-architecture-and-liveness-supervision.md)
 9. [`09-target-guidance-and-milestones.md`](./09-target-guidance-and-milestones.md)
+10. [`10-architecture-and-abstractions-visualization.md`](./10-architecture-and-abstractions-visualization.md)
 
 ## Reading Order
 
@@ -43,6 +44,7 @@ Recommended order:
 7. Communication, buses, and dataflow
 8. Watchdog architecture and liveness supervision
 9. Target-specific guidance and milestones
+10. Architecture and abstractions visualization
 
 ## Intended Use
 
