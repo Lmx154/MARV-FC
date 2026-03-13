@@ -1,6 +1,3 @@
-pub mod usb_cdc;
+//! Legacy compatibility surface for the old `coms` module spelling.
 
 pub mod transport;
-
-pub mod scheduler;
-

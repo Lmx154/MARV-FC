@@ -51,17 +51,19 @@ mod defmt_test_logger {
     static __DEFMT_MARKER_ERROR_END: u8 = 0;
 }
 
-pub mod params;
-pub mod commands;
+pub mod interfaces;
+pub mod messages;
 pub mod drivers;
-pub mod types;
-pub mod utils;
-pub mod coms;
-pub mod tasks;
-pub mod log_config;
-// Higher-level stack modules are disabled during L1 bring-up.
-// Protocol is enabled for control-link framing; others remain off.
 pub mod protocol;
-pub mod telemetry;
+pub mod comms;
 pub mod policies;
-pub mod sd;
+pub mod localization;
+pub mod control;
+pub mod services;
+pub mod tasks;
+pub mod utilities;
+pub mod prelude;
+
+// Temporary compatibility shims kept while the documented architecture settles.
+pub mod coms;
+pub mod utils;
