@@ -7,11 +7,22 @@ use crate::config::{DeviceConfig, STATUS_HEARTBEAT_PERIOD_MS};
 use crate::core1;
 use crate::pinmap;
 use crate::resources::DeviceResources;
+use crate::storage;
 use crate::watchdog;
 
 pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
-    let _resources = resources;
+    let DeviceResources {
+        pins,
+        buses,
+        watchdog: _watchdog,
+        system: _system,
+    } = resources;
     let config = DeviceConfig::default();
+
+    match storage::run_startup_smoke_test(pins.storage, buses.storage) {
+        Ok(path) => info!("sd smoke test complete: {}", path.as_str()),
+        Err(error) => info!("sd smoke test failed: {:?}", error),
+    }
 
     info!("MARV-FC-RL-RP2354B resource graph initialized");
     info!("core0 owns SPI1 sensors, I2C domains, actuator outputs, and watchdog feed");

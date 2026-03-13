@@ -10,6 +10,7 @@ mod core1;
 mod interrupts;
 mod pinmap;
 mod resources;
+mod storage;
 mod watchdog;
 
 use embassy_executor::Spawner;
