@@ -15,9 +15,9 @@ pub struct LoRaConfig {
     pub tx_power: i8,
 
     // Modulation
-    pub sf: u8,   // 5..12
-    pub bw: u8,   // Semtech encoding (0x04 = 125 kHz)
-    pub cr: u8,   // 0x01 = 4/5, 0x02 = 4/6, ...
+    pub sf: u8, // 5..12
+    pub bw: u8, // Semtech encoding (0x04 = 125 kHz)
+    pub cr: u8, // 0x01 = 4/5, 0x02 = 4/6, ...
     pub ldro: bool,
 
     // Packet
@@ -45,12 +45,12 @@ impl LoRaConfig {
             tcxo_delay_ms: 20,
 
             use_dcdc: true,
-            tx_power: 0,        // conservative for lab testing
+            tx_power: 0, // conservative for lab testing
 
             // Modulation: SF7 / BW125 / CR4/5 / LDRO off
             sf: 7,
-            bw: 0x04,  // BW125 (Semtech encoding)
-            cr: 0x01,  // CR 4/5
+            bw: 0x04, // BW125 (Semtech encoding)
+            cr: 0x01, // CR 4/5
             ldro: false,
 
             // Packet: same as legacy driver

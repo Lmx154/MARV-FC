@@ -63,7 +63,7 @@ Examples:
 
 - GPS parsing
 - telemetry framing and transmission
-- SD card logging
+- log sink flushing to SD or host filesystem
 - radio bridge work
 - SBC bridge work
 - indicators and diagnostics
@@ -84,8 +84,12 @@ That means the preferred pattern is:
 - sensor task publishes typed samples
 - estimator consumes typed samples
 - control consumes estimates
-- logging and telemetry subscribe to results
+- time-sensitive logging subscribes on the publisher core
+- telemetry subscribes to results
 - slow I/O stays away from the deterministic loop
+
+When logging is part of the measurement-observability requirement, keeping it on Core 0 is preferable to cross-core mirroring.
+For the FC targets, log capture rates up to roughly 200 Hz should be treated as a time-sensitive subscriber workload, while SD or host sink latency remains buffered background behavior.
 
 ---
 
@@ -102,6 +106,7 @@ Examples:
 - estimator updates
 - control updates
 - actuator outputs
+- time-sensitive logging capture for Core 0 publishers
 - critical liveness tracking
 - watchdog supervisor
 - final watchdog feed authority
@@ -112,7 +117,6 @@ Owns variable-latency and less critical work.
 Examples:
 
 - telemetry
-- logging
 - GPS
 - bridge services
 - diagnostics
@@ -120,6 +124,24 @@ Examples:
 - optional non-critical processing
 
 This split is not absolute law, but it is a strong architectural guard rail.
+
+---
+
+## Cross-core exchange rule
+
+On dual-core targets, pub-sub fan-out should be treated as a same-core mechanism by default.
+
+That means:
+
+- feed-critical streams such as raw IMU, estimator state, and watchdog evidence stay local to Core 0
+- time-sensitive logging subscribers for those streams stay local to Core 0 as well
+- Core 1 does not directly subscribe to Core 0 fast-path streams unless the target declares an explicit bridge in `device/.../channels.rs`
+- if a target forbids cross-core data exchange entirely, the bridge set stays empty and each core operates only on its own local channels
+
+If Core 1 needs observability, the allowed pattern is an intentional non-critical mirror, snapshot, or bridge owned by the target assembly.
+That rule should not be used as the default placement for time-sensitive logging.
+
+DMA does not change this rule. DMA helps move peripheral data efficiently, but it does not define ownership, fan-out semantics, or make cross-core exchange free.
 
 ---
 
@@ -192,6 +214,35 @@ This is especially important for:
 
 ---
 
+## Measurement time source for portable flight logic
+
+Portable estimator and controller logic should treat sample timestamps as the source of truth for time progression.
+
+Preferred pattern:
+
+- producer acquires sample
+- producer stamps sample with measurement time
+- consumer computes `dt` from consecutive sample timestamps
+
+Avoid in portable estimator/controller logic:
+
+- deriving `dt` directly from local embedded wall-clock reads
+- assuming runtime scheduling cadence equals physical measurement cadence
+
+Why this matters:
+
+- SITL can pause, step, or run slower/faster than real time
+- replay can inject recorded timestamps directly
+- offline analysis can preserve original measurement timing
+- deterministic tests are easier when data carries time explicitly
+
+Practical implication:
+
+- wall-clock timers remain valid for platform-owned delays, retries, and polling
+- measurement-time progression for estimation/control should come from typed sample messages
+
+---
+
 ## Guidance for fast-path decomposition
 
 The fast path should be split only when there is strong justification.
@@ -209,6 +260,11 @@ Bad reasons to split include:
 * convenience
 * “everything should be a task”
 * generic async enthusiasm
+
+Data-driven execution reminder for estimator-style loops:
+
+- prefer sample-arrival-driven updates where feasible
+- treat fixed periodic wakeups as scheduling tools, not the physics clock
 
 ---
 

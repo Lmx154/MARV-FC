@@ -1,9 +1,9 @@
 //! Architecture seams for hardware-agnostic capabilities.
 
-pub mod sensors;
-pub mod comms;
-pub mod storage;
 pub mod actuators;
-pub mod timing;
+pub mod comms;
 pub mod health;
+pub mod sensors;
+pub mod storage;
 pub mod system;
+pub mod timing;

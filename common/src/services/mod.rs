@@ -1,9 +1,9 @@
 //! Reusable stateful workflows and orchestration logic.
 
 pub mod acquisition;
-pub mod estimation;
 pub mod control;
-pub mod telemetry;
-pub mod logging;
+pub mod estimation;
 pub mod health;
+pub mod logging;
 pub mod status;
+pub mod telemetry;

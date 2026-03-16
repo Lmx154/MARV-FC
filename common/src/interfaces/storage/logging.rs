@@ -4,7 +4,7 @@ use heapless::{String, Vec};
 
 pub const MAX_LOG_PREFIX_LEN: usize = 4;
 pub const MAX_LOG_PATH_LEN: usize = 64;
-pub const MAX_LOG_LINE_LEN: usize = 256;
+pub const MAX_LOG_LINE_LEN: usize = 1024;
 pub const MAX_LOG_ENTRIES: usize = 64;
 pub const MAX_LOG_LINES: usize = 32;
 

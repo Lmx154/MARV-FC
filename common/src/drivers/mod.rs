@@ -1,9 +1,9 @@
 //! Portable drivers and adapters.
 
+pub mod leds;
+pub mod radio;
 pub mod sensors;
 pub mod storage;
-pub mod radio;
-pub mod leds;
 
 // Flat re-exports keep legacy call sites usable while modules migrate.
 pub use radio::sx1262;

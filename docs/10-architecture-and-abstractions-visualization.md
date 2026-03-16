@@ -39,7 +39,7 @@ flowchart TB
         d_test["test"]
     end
 
-    subgraph simulator["simulator/ (SITL host runtime)"]
+    subgraph simulator["sim/ (SITL host runtime)"]
         s_loop["sim_loop + state"]
         s_api["api + ws + fs_access"]
         s_ui["ui (index.html, app.js, styles.css)"]
@@ -61,31 +61,34 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    subgraph model["FC runtime model"]
+        subgraph model["FC runtime model"]
         subgraph core0["Core 0 deterministic island (feed-critical)"]
             isr["ISR class<br/>latch, timestamp, notify"]
             tier0["Tier 0 edge I/O<br/>SPI/I2C/UART/PWM + watchdog HW access"]
+            fastpub["Core 0 local pub-sub<br/>fast samples fan out without backpressure"]
             tier1["Tier 1 pure transforms<br/>conversion, calibration, parsing, freshness math"]
             tier2["Tier 2 stateful services<br/>estimation -> control -> actuator intent"]
+            tap0["Core 0 local subscribers<br/>estimator + local diagnostics + time-sensitive logging"]
             wds["Watchdog supervisor<br/>liveness contract evaluation"]
             wdhw["Hardware feed owner<br/>device/.../watchdog.rs"]
 
-            isr --> tier0 --> tier1 --> tier2 --> wds --> wdhw
+            isr --> tier0 --> fastpub --> tier1 --> tier2 --> wds --> wdhw
+            fastpub --> tap0
         end
 
         subgraph core1["Core 1 variable-latency island"]
-            bg["telemetry, logging, GPS, bridge services, diagnostics, indicators"]
+            bg["telemetry, GPS, bridge services, diagnostics, indicators<br/>from Core 1 local inputs or explicit mirrors only"]
         end
 
         subgraph channels["Typed channel topology (example from FC target)"]
-            feedc["FastSensorSample + EnvironmentalSample + AuxiliaryNavigationSample + WatchdogStatus"]
-            noncrit["FcRadioTraffic + CompanionTraffic"]
+            core0ch["core0_local<br/>FastSensorSample + EnvironmentalSample + AuxiliaryNavigationSample + WatchdogStatus"]
+            core1ch["core1_local<br/>FcRadioTraffic + CompanionTraffic"]
+            xcore["cross_core_bridges<br/>explicit only, empty by default"]
         end
 
-        tier2 --> feedc
-        feedc --> bg
-        bg --> noncrit
-        noncrit --> wds
+        fastpub --> core0ch
+        bg --> core1ch
+        xcore -.optional and target-owned.-> bg
     end
 
     wds -.deny feed on invalid progress.-> reset["Watchdog reset + reset-cause reporting"]
@@ -141,5 +144,7 @@ flowchart TB
 ## 10.4 Notes
 
 - Tasks are scheduling boundaries, not architecture layers.
-- `common/` owns reusable logic; `device/` owns concrete HAL assembly; `simulator/` preserves parity on host.
+- `common/` owns reusable logic; `device/` owns concrete HAL assembly; `sim/` preserves parity on host.
 - Watchdog feed authority should stay centralized under Core 0 supervisory logic.
+- Pub-sub fan-out is core-local by default; cross-core visibility requires an explicit target-owned bridge.
+- Time-sensitive logging capture belongs with the publishers on Core 0; slow sinks still require buffering and must not stall the fast path.

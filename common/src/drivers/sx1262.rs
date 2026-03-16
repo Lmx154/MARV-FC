@@ -1,4 +1,4 @@
- // common/src/drivers/sx1262.rs
+// common/src/drivers/sx1262.rs
 #![allow(dead_code)]
 #![allow(async_fn_in_trait)]
 
@@ -6,16 +6,13 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::digital::Wait;
 use embedded_hal_async::spi::SpiDevice;
+use lora_phy::LoRa;
 use lora_phy::iv::GenericSx126xInterfaceVariant;
 use lora_phy::mod_params::{
-    Bandwidth, CodingRate, ModulationParams, PacketParams, RadioError, RxMode,
-    SpreadingFactor,
+    Bandwidth, CodingRate, ModulationParams, PacketParams, RadioError, RxMode, SpreadingFactor,
 };
 use lora_phy::mod_traits::RadioKind;
-use lora_phy::sx126x::{
-    Config as Sx126xConfig, DeviceSel, Sx126x, Sx126xVariant, TcxoCtrlVoltage,
-};
-use lora_phy::LoRa;
+use lora_phy::sx126x::{Config as Sx126xConfig, DeviceSel, Sx126x, Sx126xVariant, TcxoCtrlVoltage};
 
 use crate::coms::transport::lora::rf_config::LoRaConfig;
 
@@ -111,14 +108,8 @@ where
             (rf_switch_rx, rf_switch_tx)
         };
 
-        let iv = GenericSx126xInterfaceVariant::new(
-            reset,
-            dio1,
-            busy,
-            Some(rf_rx),
-            Some(rf_tx),
-        )
-        .map_err(Sx1262Error::Radio)?;
+        let iv = GenericSx126xInterfaceVariant::new(reset, dio1, busy, Some(rf_rx), Some(rf_tx))
+            .map_err(Sx1262Error::Radio)?;
 
         let radio = Sx126x::new(spi, iv, sx_cfg);
 
@@ -133,8 +124,7 @@ where
             }
         }
 
-        let (mod_params, rx_pkt_params, tx_pkt_params) =
-            build_params(&mut lora, &cfg)?;
+        let (mod_params, rx_pkt_params, tx_pkt_params) = build_params(&mut lora, &cfg)?;
 
         Ok(Self {
             lora,
@@ -159,8 +149,7 @@ where
         }
 
         self.cfg = cfg;
-        let (mod_params, rx_pkt_params, tx_pkt_params) =
-            build_params(&mut self.lora, &self.cfg)?;
+        let (mod_params, rx_pkt_params, tx_pkt_params) = build_params(&mut self.lora, &self.cfg)?;
         self.mod_params = mod_params;
         self.rx_pkt_params = rx_pkt_params;
         self.tx_pkt_params = tx_pkt_params;
@@ -176,12 +165,7 @@ where
 
         let power = self.cfg.tx_power as i32;
         self.lora
-            .prepare_for_tx(
-                &self.mod_params,
-                &mut self.tx_pkt_params,
-                power,
-                payload,
-            )
+            .prepare_for_tx(&self.mod_params, &mut self.tx_pkt_params, power, payload)
             .await?;
         self.lora.tx().await?;
         self.start_rx_continuous().await?;

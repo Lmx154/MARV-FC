@@ -10,6 +10,7 @@ mod core1;
 mod interrupts;
 mod pinmap;
 mod resources;
+mod sensor_spi;
 mod storage;
 mod watchdog;
 

@@ -48,6 +48,50 @@
 				}
 			},
 			"problemMatcher": []
+		},
+		{
+			"label": "Build RP2354B-CROSSCORE-TESTS",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP2354B-CROSSCORE-TESTS"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash RP2354B-CROSSCORE-TESTS",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP2354B-CROSSCORE-TESTS",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach RP2354B-CROSSCORE-TESTS",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/rp2354b-crosscore-tests"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP2354B-CROSSCORE-TESTS",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
 		}
 	]
 }

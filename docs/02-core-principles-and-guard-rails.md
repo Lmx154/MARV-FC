@@ -110,6 +110,7 @@ Fast-loop logic should consume typed messages or stable snapshots, not reach acr
 
 ### Rule 10
 Slow or variable-latency I/O must not sit directly in the flight-critical path unless intentionally justified.
+Time-sensitive logging capture may live on Core 0 beside the publishers, but any slow logging sink behavior must remain buffered and non-blocking.
 
 ### Rule 11
 Only one architectural owner may feed the hardware watchdog.
@@ -153,7 +154,8 @@ If something has a real role, it deserves a real home.
 Byte format and link behavior are not the same thing.
 
 ### Do not allow non-critical work to share timing fate with critical work by default
-Telemetry, logging, debug, and indicators must not casually introduce jitter into control and estimation paths.
+Telemetry, debug, and indicators must not casually introduce jitter into control and estimation paths.
+Time-sensitive logging is allowed to remain on Core 0 when it is part of the same measurement-observability boundary, but buffered sinks must still be prevented from stalling the fast path.
 
 ### Do not let SITL become a side project with a different mental model
 It should mirror production architecture as closely as practical.

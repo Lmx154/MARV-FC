@@ -3,7 +3,7 @@
 // Minimal host-side defmt logger to satisfy unit test linking.
 #[cfg(test)]
 mod defmt_test_logger {
-    use defmt::{global_logger, Logger};
+    use defmt::{Logger, global_logger};
 
     #[global_logger]
     struct HostLogger;
@@ -51,18 +51,18 @@ mod defmt_test_logger {
     static __DEFMT_MARKER_ERROR_END: u8 = 0;
 }
 
-pub mod interfaces;
-pub mod messages;
-pub mod drivers;
-pub mod protocol;
 pub mod comms;
-pub mod policies;
-pub mod localization;
 pub mod control;
+pub mod drivers;
+pub mod interfaces;
+pub mod localization;
+pub mod messages;
+pub mod policies;
+pub mod prelude;
+pub mod protocol;
 pub mod services;
 pub mod tasks;
 pub mod utilities;
-pub mod prelude;
 
 // Temporary compatibility shims kept while the documented architecture settles.
 pub mod coms;

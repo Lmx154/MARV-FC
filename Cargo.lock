@@ -1307,8 +1307,10 @@ dependencies = [
  "defmt-rtt",
  "embassy-executor",
  "embassy-rp",
+ "embassy-sync",
  "embassy-time",
  "embedded-hal 1.0.0",
+ "embedded-hal-async",
  "embedded-hal-bus",
  "embedded-sdmmc",
  "panic-probe",
@@ -1862,6 +1864,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c92f344f63f950ee36cf4080050e4dce850839b9175da38f9d2ffb69b4dbb21"
 dependencies = [
  "crc-any",
+]
+
+[[package]]
+name = "rp2354b-crosscore-tests"
+version = "0.1.0"
+dependencies = [
+ "cortex-m-rt",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-time",
+ "panic-probe",
 ]
 
 [[package]]

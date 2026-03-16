@@ -2,6 +2,7 @@
 members = [
     "common",
     "device/MARV-FC-RL-RP2354B",
+    "device/RP2354B-CROSSCORE-TESTS",
     "simulator",
 ]
 resolver = "3"

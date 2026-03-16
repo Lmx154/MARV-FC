@@ -10,10 +10,14 @@ pub enum LogCommand {
 impl LogCommand {
     pub fn append_line(path: &str, line: &str) -> Result<Self, LogError> {
         let mut owned_path = LogPath::new();
-        owned_path.push_str(path).map_err(|_| LogError::PathTooLong)?;
+        owned_path
+            .push_str(path)
+            .map_err(|_| LogError::PathTooLong)?;
 
         let mut owned_line = LogLine::new();
-        owned_line.push_str(line).map_err(|_| LogError::LineTooLong)?;
+        owned_line
+            .push_str(line)
+            .map_err(|_| LogError::LineTooLong)?;
 
         Ok(Self::AppendLine {
             path: owned_path,

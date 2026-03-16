@@ -54,11 +54,11 @@ impl Packet {
         }
     }
 
-    pub fn with_payload(
-        packet_type: PacketType,
-        payload: Vec<u8, MAX_PACKET_PAYLOAD>,
-    ) -> Self {
-        Self { packet_type, payload }
+    pub fn with_payload(packet_type: PacketType, payload: Vec<u8, MAX_PACKET_PAYLOAD>) -> Self {
+        Self {
+            packet_type,
+            payload,
+        }
     }
 }
 

@@ -6,7 +6,7 @@
 
 #![allow(dead_code)]
 
-use defmt::{debug, info, warn, Format};
+use defmt::{Format, debug, info, warn};
 use embedded_hal_async::spi::SpiDevice;
 
 use crate::utils::delay::DelayMs;

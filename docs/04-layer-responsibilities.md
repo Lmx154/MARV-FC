@@ -113,6 +113,37 @@ Portable drivers may perform:
 - typed sample construction
 - validation and device-state management
 
+Producer direction for sensor drivers:
+
+- acquire from SPI/I2C/UART or equivalent backend
+- emit typed sensor samples outward
+- attach acquisition metadata at the message boundary (including measurement timestamp)
+
+Sensor driver capability contract:
+
+- each driver should provide an explicit init and reset path
+- each driver should provide runtime configuration controls for measurement cadence and range (for example ODR, filter bandwidth, full-scale range)
+- drivers on addressable buses should expose address selection as constructor/configuration input; non-addressable buses (for example SPI with dedicated chip-select lines) should explicitly state address selection is not applicable
+- each driver should support calibration state management (set, clear, and read active calibration state)
+- any in-driver calibration helper should be bounded and explicit about assumptions (for example static bias capture requiring a stationary platform)
+- hardware transaction failures should surface as typed errors; critical sample-path functions should not silently zero or discard failed channels
+- register-level configuration should remain in the driver boundary and should not leak into policy, estimator, or control layers
+
+Execution boundary guidance for producer wiring:
+
+- driver calls that touch the bus are Tier 0 edge behavior
+- calibration transforms and unit conversion logic are Tier 1 transforms
+- acquisition orchestration, publish cadence, and fan-out belong to Tier 2 services/tasks
+- producers should stamp measurement time at acquisition boundary before publish
+
+Portable drivers should not own:
+
+- estimator update logic
+- controller update logic
+- high-level policy or mode decisions
+
+This keeps backends swappable so embedded, SITL, and replay producers can feed the same portable estimator and control layers.
+
 ---
 
 ## 4.4 `common/protocol/`
@@ -196,6 +227,13 @@ Examples:
 - propagation/update logic
 
 It consumes time-stamped measurements and produces estimates.
+
+Estimator timing source rule:
+
+- `dt` should come from measurement timestamps carried by samples
+- `dt` should not be inferred from local wall-clock reads inside portable estimator logic
+
+This is required for deterministic SITL stepping, replay, and offline analysis parity.
 
 This layer should remain portable so it can run in:
 

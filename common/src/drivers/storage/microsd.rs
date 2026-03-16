@@ -125,7 +125,11 @@ where
             .open_root_dir(self.volume)
             .map_err(map_sd_error)?;
 
-        for component in normalized.as_str().split('/').filter(|part| !part.is_empty()) {
+        for component in normalized
+            .as_str()
+            .split('/')
+            .filter(|part| !part.is_empty())
+        {
             let next = match self.volume_mgr.open_dir(current, component) {
                 Ok(dir) => dir,
                 Err(SdError::NotFound) if create => {
@@ -168,15 +172,16 @@ where
             .map_err(map_sd_error)?;
         self.volume_mgr.close_dir(dir).map_err(map_sd_error)?;
 
-        self.active_file = Some(ActiveLogFile {
-            path,
-            handle: file,
-        });
+        self.active_file = Some(ActiveLogFile { path, handle: file });
 
         Ok(file)
     }
 
-    fn create_empty_file(&mut self, directory: RawDirectory, name: &ShortFileName) -> Result<(), LogError> {
+    fn create_empty_file(
+        &mut self,
+        directory: RawDirectory,
+        name: &ShortFileName,
+    ) -> Result<(), LogError> {
         let file = self
             .volume_mgr
             .open_file_in_dir(directory, name, Mode::ReadWriteCreate)
@@ -196,7 +201,10 @@ where
 
         self.volume_mgr
             .iterate_dir(directory, |entry| {
-                if closure_error.is_some() || is_special_directory(&entry.name) || entry.attributes.is_lfn() {
+                if closure_error.is_some()
+                    || is_special_directory(&entry.name)
+                    || entry.attributes.is_lfn()
+                {
                     return;
                 }
 
@@ -217,7 +225,9 @@ where
                 };
 
                 if entry.attributes.is_directory() {
-                    if matches!(kind, EntryKind::Directories) && out.push(full_path.clone()).is_err() {
+                    if matches!(kind, EntryKind::Directories)
+                        && out.push(full_path.clone()).is_err()
+                    {
                         closure_error = Some(LogError::TooManyEntries);
                         return;
                     }
@@ -291,9 +301,7 @@ where
                 }
 
                 if byte != b'\r' && current_line >= start_line && output.len() < count {
-                    line_bytes
-                        .push(byte)
-                        .map_err(|_| LogError::LineTooLong)?;
+                    line_bytes.push(byte).map_err(|_| LogError::LineTooLong)?;
                 }
             }
         }
@@ -522,7 +530,10 @@ fn parse_csv_sequence(name: &ShortFileName, prefix: &str) -> Option<u16> {
     }
 
     for byte in prefix.bytes() {
-        if prefix_upper.push(byte.to_ascii_uppercase() as char).is_err() {
+        if prefix_upper
+            .push(byte.to_ascii_uppercase() as char)
+            .is_err()
+        {
             return None;
         }
     }
@@ -564,7 +575,9 @@ fn push_line(lines: &mut LogLineList, bytes: &[u8]) -> Result<(), LogError> {
     let text = str::from_utf8(bytes).map_err(|_| LogError::Utf8)?;
     let mut line = LogLine::new();
     line.push_str(text).map_err(|_| LogError::LineTooLong)?;
-    lines.push(line).map_err(|_| LogError::TooManyLinesRequested)
+    lines
+        .push(line)
+        .map_err(|_| LogError::TooManyLinesRequested)
 }
 
 fn map_filename_error(error: FilenameError) -> LogError {

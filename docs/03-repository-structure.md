@@ -334,6 +334,7 @@ The channel topology of a target is not an implementation detail. It encodes:
 * latency boundaries
 * scheduling boundaries
 * failure propagation paths
+* core locality and any explicit cross-core bridges
 
 That is important enough to deserve an explicit home.
 

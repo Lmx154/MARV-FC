@@ -20,11 +20,31 @@ Dataflow should be explicit and typed.
 
 Recommended primitives conceptually include:
 
-- bounded channels for streams
+- bounded queues for point-to-point streams
+- pub-sub channels for same-core fan-out
 - signals or watch-style latest-value mechanisms for snapshots
 - request/response only where truly needed
 
 The architecture should avoid hidden shared mutable state as the default design pattern.
+
+---
+
+## Pub-sub locality rule
+
+Pub-sub is the preferred transport when one producer must fan out typed data to multiple consumers without making those consumers owners of the fast path.
+
+For dual-core targets, that fan-out should remain core-local by default.
+
+That means:
+
+- estimator and any raw-sample diagnostic consumers on Core 0 may subscribe to the same IMU stream
+- time-sensitive logging consumers should stay on the same core as the publisher
+- telemetry/logging consumers must not backpressure the fast producer
+- any Core 1 visibility into Core 0 data requires an explicit bridge or mirror owned in `device/.../channels.rs`
+
+If a subscriber is non-critical and falls behind, the architecture should prefer dropped copies or lag reporting over stalling the fast producer.
+
+DMA is orthogonal here: it can accelerate bus transfers, but it is not the architectural mechanism for cross-core message exchange.
 
 ---
 
@@ -203,12 +223,19 @@ Telemetry and logging should generally be subscribers, not owners of the critica
 Good pattern:
 
 * fast path produces estimates/control/fault outputs
-* telemetry consumes copies or snapshots
-* logger consumes copies or snapshots
+* same-core logger subscribers consume copies or snapshots without backpressuring the producer
+* time-sensitive log capture stays on the publisher core rather than crossing cores by default
+* telemetry subscribers consume copies or snapshots without backpressuring the producer
+* any cross-core copy is an explicit bridge, not an incidental subscription
 
 Bad pattern:
 
 * fast path waits for telemetry/logging serialization or sink behavior
+
+Practical implication:
+
+* for publisher-adjacent logs up to roughly 200 Hz, keep the logger on Core 0 with the publishers
+* buffering, file I/O, and other variable-latency sink behavior must still be isolated from the producer timeline
 
 ---
 

@@ -88,6 +88,21 @@ Characteristics:
 - narrow in scope
 - platform edge oriented
 
+For sensor acquisition, Tier 0 edge behavior should follow a producer model:
+
+- read raw or minimally processed measurements
+- attach acquisition metadata (including timestamp)
+- publish typed samples to downstream consumers
+
+Tier 0 sensor code should not embed estimator/control/policy decision logic.
+
+Driver capability execution split:
+
+- reset and register configuration operations (ODR/range/filter/address selection where applicable) are Tier 0 edge operations
+- raw sample decoding and optional bounded in-driver offset application remain close to Tier 0/Tier 1 boundary and should stay deterministic
+- calibration solve routines that require aggregation over many samples should be explicit Tier 2 orchestration steps that call Tier 0 reads and Tier 1 math helpers
+- producer tasks should publish typed stamped samples, while estimator/control/policy consume those samples without direct register access
+
 Examples of conceptual functions:
 
 - `read_bmi088_accel_raw()`
@@ -173,6 +188,11 @@ Examples of conceptual functions:
 - `watchdog_supervisor_step(statuses, now)`
 
 Tier 2 logic should usually consume typed data rather than directly reaching into hardware.
+
+For estimator/control timing in Tier 2 portable logic:
+
+- compute `dt` from stamped measurement data
+- avoid using local wall-clock reads as the primary physics timeline
 
 ---
 
@@ -266,11 +286,12 @@ Examples:
 - GPS parsing at a low rate
 - barometer at medium rate
 - telemetry output at slower or bursty rate
+- time-sensitive log capture at publisher cadence
 
 ### 2. Different latency behavior
 Examples:
 
-- SD card logging
+- log sink flushing or archival
 - radio bridging
 - UART parsing
 - telemetry transmission
@@ -387,10 +408,22 @@ Examples:
 
 * GPS parsing
 * telemetry framing
-* SD logging
+* log sink flushing to SD or host filesystem
 * radio or SBC bridge
 * diagnostics
 * LED patterns
+
+### Core-0-resident logging guidance
+
+If logging is part of the time-sensitive observability contract for a publisher, it should remain on the same core as that publisher rather than being mirrored across cores by default.
+
+Examples:
+
+* IMU or estimator logs captured at up to a few hundred hertz
+* fault or watchdog evidence that must be observed with minimal transport delay
+
+The logging subscriber, record assembly, and enqueue decision may therefore live on Core 0.
+The slow sink side of logging must still be buffered so storage or host I/O latency does not stall the deterministic island.
 
 ---
 

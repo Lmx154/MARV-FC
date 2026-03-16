@@ -2,4 +2,4 @@
 
 pub mod microsd;
 
-pub use microsd::{MicrosdLogger, MicrosdLoggerConfig, DEFAULT_FLUSH_EVERY_LINES};
+pub use microsd::{DEFAULT_FLUSH_EVERY_LINES, MicrosdLogger, MicrosdLoggerConfig};

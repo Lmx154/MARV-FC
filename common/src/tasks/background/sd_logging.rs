@@ -1,9 +1,9 @@
-//! Dedicated Core-1-style SD logging task body.
+//! Portable log-sink task body for a buffered logging channel.
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
 use crate::interfaces::storage::{LogError, LoggerEngine};
-use crate::services::logging::{handle_log_command, LogChannel};
+use crate::services::logging::{LogChannel, handle_log_command};
 
 pub async fn run_sd_logging_task<M, E, F, const DEPTH: usize>(
     channel: &'static LogChannel<M, DEPTH>,

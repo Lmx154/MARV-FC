@@ -36,9 +36,7 @@ pub async fn enqueue_line<M, const DEPTH: usize>(
 where
     M: RawMutex,
 {
-    channel
-        .send(LogCommand::append_line(path, line)?)
-        .await;
+    channel.send(LogCommand::append_line(path, line)?).await;
     Ok(())
 }
 
