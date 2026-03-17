@@ -37,20 +37,20 @@ async fn usb_device_task(mut usb: RpUsbDevice) -> ! {
 }
 
 #[embassy_executor::task]
-async fn usb_hil_ingest_task(mut class: RpUsbClass) -> ! {
+async fn usb_cdc_ingest_task(mut class: RpUsbClass) -> ! {
     let mut packet = [0u8; USB_PACKET_SIZE as usize];
     let mut stream = MavlinkStreamPump::<MAVLINK_STREAM_CAPACITY>::new();
     let mut bridge = MavlinkHilSensorBridge::default();
 
     loop {
         class.wait_connection().await;
-        info!("usb cdc HIL host connected");
+        info!("usb cdc host connected");
 
         loop {
             let len = match class.read_packet(&mut packet).await {
                 Ok(len) => len,
                 Err(_) => {
-                    warn!("usb cdc HIL host disconnected");
+                    warn!("usb cdc host disconnected");
                     break;
                 }
             };
@@ -62,7 +62,7 @@ async fn usb_hil_ingest_task(mut class: RpUsbClass) -> ! {
                     Ok(frame) => frame,
                     Err(DecodeError::UnsupportedMessage { .. }) => continue,
                     Err(_) => {
-                        warn!("usb cdc HIL decode error");
+                        warn!("usb cdc decode error");
                         continue;
                     }
                 };
@@ -84,7 +84,7 @@ pub fn spawn(spawner: &Spawner, usb: embassy_rp::Peri<'static, USB>) {
 
     let mut config = Config::new(0x1209, 0x0001);
     config.manufacturer = Some("MARV");
-    config.product = Some("MARV HIL");
+    config.product = Some("MARV FC");
     config.serial_number = Some("MARV-FC-RP2354B");
     config.max_packet_size_0 = 64;
 
@@ -101,5 +101,5 @@ pub fn spawn(spawner: &Spawner, usb: embassy_rp::Peri<'static, USB>) {
     let usb = builder.build();
 
     spawner.spawn(usb_device_task(usb)).unwrap();
-    spawner.spawn(usb_hil_ingest_task(class)).unwrap();
+    spawner.spawn(usb_cdc_ingest_task(class)).unwrap();
 }

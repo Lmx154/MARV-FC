@@ -36,7 +36,7 @@ use crate::pinmap;
 use crate::resources::{DeviceResources, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
 use crate::storage;
-use crate::usb_hil;
+use crate::usb_cdc;
 use crate::watchdog;
 
 const CORE0_TIME_SENSITIVE_EXECUTOR_PRIORITY: interrupt::Priority = interrupt::Priority::P2;
@@ -239,7 +239,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     let sensor_bus = buses.sensors;
     let storage_bus = buses.storage;
 
-    usb_hil::spawn(&spawner, usb);
+    usb_cdc::spawn(&spawner, usb);
 
     let imu_period_ms = imu_period_ms(config.fast_loop_hz);
     let imu_config = Spi1ImuServiceConfig {
