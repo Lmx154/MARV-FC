@@ -7,7 +7,7 @@ use embassy_sync::channel::Receiver;
 use embassy_sync::pubsub::{Subscriber, WaitResult};
 use heapless::String;
 
-use crate::interfaces::storage::{LogError, LogLine, LogPath};
+use crate::interfaces::storage::{LogError, LogLine, LogPath, LoggerEngine};
 use crate::messages::logging::{
     LogSinkState, LoggedSensor, SensorLogField, SensorLogSnapshot, SensorLogState,
 };
@@ -402,6 +402,37 @@ impl SensorSnapshotLogger {
             self.update_sink_state_from_queue_error(error);
             SensorSnapshotLoggerError::Queue(error)
         })?;
+        self.mark_snapshot_emitted();
+        Ok(())
+    }
+
+    pub fn append_snapshot<E>(
+        &mut self,
+        engine: &mut E,
+        timestamp: MeasurementTimestamp,
+    ) -> Result<(), SensorSnapshotLoggerError>
+    where
+        E: LoggerEngine,
+    {
+        if self.config.emit_header && !self.header_emitted {
+            let header = self.format_header_line()?;
+            engine
+                .append_line(self.path.as_str(), header.as_str())
+                .map_err(|error| {
+                    self.note_sink_error(error);
+                    SensorSnapshotLoggerError::Path(error)
+                })?;
+            self.header_emitted = true;
+        }
+
+        let snapshot = self.snapshot(timestamp);
+        let line = self.format_snapshot_line(&snapshot)?;
+        engine
+            .append_line(self.path.as_str(), line.as_str())
+            .map_err(|error| {
+                self.note_sink_error(error);
+                SensorSnapshotLoggerError::Path(error)
+            })?;
         self.mark_snapshot_emitted();
         Ok(())
     }

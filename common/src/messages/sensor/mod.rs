@@ -69,3 +69,10 @@ pub struct GpsFixSampleStamped {
     pub timestamp: MeasurementTimestamp,
     pub sample: GpsFixSample,
 }
+
+/// Simulation/replay control tick anchored by simulator boot time.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TimeSample {
+    pub timestamp: MeasurementTimestamp,
+    pub time_boot_ms: u32,
+}

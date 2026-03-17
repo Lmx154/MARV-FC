@@ -4,6 +4,7 @@ use embassy_sync::pubsub::{ImmediatePublisher, PubSubChannel, Subscriber, WaitRe
 
 use crate::messages::sensor::{
     BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
+    TimeSample,
 };
 
 pub type SampleChannel<M, T, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
@@ -60,3 +61,11 @@ pub type GpsFixSamplePublisher<'a, M, const DEPTH: usize, const SUBS: usize, con
 pub type GpsFixSampleSubscriber<'a, M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
     SampleSubscriber<'a, M, GpsFixSampleStamped, DEPTH, SUBS, PUBS>;
 pub type GpsFixSampleWaitResult = SampleWaitResult<GpsFixSampleStamped>;
+
+pub type TimeSampleChannel<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
+    SampleChannel<M, TimeSample, DEPTH, SUBS, PUBS>;
+pub type TimeSamplePublisher<'a, M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
+    SamplePublisher<'a, M, TimeSample, DEPTH, SUBS, PUBS>;
+pub type TimeSampleSubscriber<'a, M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
+    SampleSubscriber<'a, M, TimeSample, DEPTH, SUBS, PUBS>;
+pub type TimeSampleWaitResult = SampleWaitResult<TimeSample>;

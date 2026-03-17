@@ -1,14 +1,15 @@
-# Simulator (SITL) Backend + UI
+# Simulator (FC SITL Runtime)
 
-This document explains how to run and use the `simulator` crate backend and the built-in web UI.
+The `simulator` crate is currently the host-side FC SITL runtime.
 
-## What it provides
+Its job is narrow:
 
-- HTTP API for simulation state and filesystem browsing
-- WebSocket endpoint for simulation control + live events
-- Built-in static UI served directly by the backend
+- receive simulator truth over UDP using MAVLink 2 `common`
+- decode frames with the shared MAVLink parser in `common`
+- publish accepted samples into shared acquisition channels in `common`
+- write shared sensor snapshot CSV logs for replay auditability
 
-No `npm` or frontend build step is required.
+The runtime is step-driven. It does not synthesize control, estimation, or other firmware behavior from host wall-clock timers.
 
 ## Run
 
@@ -18,87 +19,103 @@ From repo root:
 cargo run -p simulator
 ```
 
-Default bind address is `127.0.0.1:9000`.
+Default endpoints:
 
-Open:
-
-```text
-http://127.0.0.1:9000/
-```
+- RX bind: `127.0.0.1:14560`
+- TX actuator target: `127.0.0.1:14561`
 
 ## Environment variables
 
-- `SIM_BIND`
-  - HTTP/WebSocket bind address
-  - Example: `SIM_BIND=0.0.0.0:8080`
-- `SIM_ALLOWED_ROOTS`
-  - Allowed filesystem roots exposed by `/api/fs/*`
-  - If unset, defaults to current working directory
-  - Uses OS path list separator (`:` on Linux/macOS, `;` on Windows)
+- `FC_SITL_BIND`
+  - UDP socket the FC SITL listens on for simulator MAVLink traffic
+  - Default: `127.0.0.1:14560`
+- `FC_SITL_ACTUATOR_ADDR`
+  - UDP target for outbound actuator MAVLink traffic
+  - Currently reserved for the standalone TX helper; the main runtime does not transmit actuator commands yet
+  - Default: `127.0.0.1:14561`
+- `FC_SITL_TICK_TIMEOUT_MS`
+  - Host-side liveness timeout for `SYSTEM_TIME`
+  - Default: `500`
+- `FC_SITL_LOG_DIR`
+  - Directory for CSV replay logs
+  - Default: `simulator/out`
+- `FC_SITL_SYSTEM_ID`
+  - Outbound MAVLink system id
+  - Default: `42`
+- `FC_SITL_COMPONENT_ID`
+  - Outbound MAVLink component id
+  - Default: `1`
 
 Example:
 
 ```bash
-SIM_BIND=0.0.0.0:8080 \
-SIM_ALLOWED_ROOTS="/home/luis/data:/tmp" \
+FC_SITL_BIND=127.0.0.1:14560 \
+FC_SITL_ACTUATOR_ADDR=127.0.0.1:14561 \
 cargo run -p simulator
 ```
 
-## UI overview
+## Runtime path
 
-The UI is served at `/` and uses the same backend origin.
+Current active path:
 
-- Connect/disconnect WebSocket
-- View live sim snapshot (`tick`, `sim_time_s`, `running`, `rate_hz`, selected data file)
-- Pause/resume, set sim rate, and single-step
-- Browse allowed roots, preview files, and select a data file for simulation
+1. bind UDP RX
+2. decode MAVLink 2 `common` frames via `common::protocol::mavlink`
+3. bridge `SYSTEM_TIME`, `HIL_SENSOR`, and `HIL_GPS` into shared sample channels
+4. drain those shared channels into `common::services::logging::SensorSnapshotLogger`
+5. append one portable sensor snapshot row on each accepted sim tick
 
-## HTTP API
+No estimator, controller, mixer, or actuator solve is executed by the runtime today.
 
-Base URL: `http://<host>:<port>`
+## Input contract
 
-- `GET /health`
-- `GET /api/sim/state`
-- `POST /api/sim/select_data_file`
-- `GET /api/fs/roots`
-- `GET /api/fs/list?path=<path>&include_hidden=<bool>`
-- `GET /api/fs/stat?path=<path>`
-- `GET /api/fs/read?path=<path>&max_bytes=<n>`
+Inbound messages currently consumed:
 
-### Example: select data file
+- `SYSTEM_TIME`
+- `HIL_SENSOR`
+- `HIL_GPS`
 
-```bash
-curl -X POST http://127.0.0.1:9000/api/sim/select_data_file \
-  -H "content-type: application/json" \
-  -d '{"path":"/home/luis/data/flight1.csv"}'
-```
+Accepted `SYSTEM_TIME.time_boot_ms` values define the replay tick.
 
-## WebSocket API
+- missing `HIL_SENSOR` is allowed on a tick
+- missing `HIL_GPS` is allowed on a tick
+- stale or duplicate `SYSTEM_TIME` ticks are ignored
+- GPS fixes with `fix_type < 2` are ignored
 
-Endpoint:
+Published shared sample types:
 
-```text
-ws://<host>:<port>/ws
-```
+- `TimeSample`
+- `ImuSampleStamped`
+- `BarometerSampleStamped`
+- `GpsFixSampleStamped`
 
-Client sends JSON text messages:
+## Output contract
 
-- `{"type":"pause"}`
-- `{"type":"resume"}`
-- `{"type":"set_rate_hz","hz":120.0}`
-- `{"type":"step","dt_ms":20}`
-- `{"type":"select_data_file","path":"/abs/path/file.csv"}`
-- `{"type":"ping","id":"abc"}`
+Outbound support present in the crate but not wired into the runtime:
 
-Server sends JSON events with `type`:
+- MAVLink `ACTUATOR_CONTROL_TARGET`
+- encoder lives in `common::protocol::mavlink`
+- UDP send helper lives in `simulator/src/tx_actuator.rs`
+- the main runtime does not emit actuator traffic yet
 
-- `hello`
-- `snapshot`
-- `ack`
-- `error`
+## Logging
 
-## Notes
+The host logger uses the shared `LoggerEngine` + `SensorSnapshotLogger` path.
 
-- File access is constrained to `SIM_ALLOWED_ROOTS`.
-- Relative paths are resolved from the first configured root.
-- `cargo check -p simulator --offline` works if dependencies are already cached.
+Files are created with the shared flight-log naming convention:
+
+- `simulator/out/FLGT0001.CSV`
+- `simulator/out/FLGT0002.CSV`
+
+The CSV schema is the portable sensor snapshot schema from `common`, including:
+
+- `log_us`
+- sink state
+- per-sensor freshness/state markers
+- sample timestamps
+- IMU/barometer/GPS sample fields
+
+## ICD
+
+The frozen FC SITL interface contract lives in:
+
+- [`docs/FC_SITL_ICD.md`](./FC_SITL_ICD.md)
