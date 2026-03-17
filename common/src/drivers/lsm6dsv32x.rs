@@ -12,6 +12,7 @@ use embedded_hal_async::spi::SpiDevice;
 use crate::utils::delay::DelayMs;
 
 mod reg {
+    pub const IF_CFG: u8 = 0x03;
     pub const WHO_AM_I: u8 = 0x0F;
     pub const WHO_AM_I_VAL: u8 = 0x70;
 
@@ -30,6 +31,8 @@ mod reg {
     pub const CTRL3_IF_INC: u8 = 0x04;
     pub const CTRL3_BDU: u8 = 0x40;
     pub const CTRL8_REQUIRED_ONE: u8 = 0x04;
+    pub const IF_CFG_I2C_I3C_DISABLE: u8 = 0x01;
+    pub const IF_CFG_SIM_3WIRE: u8 = 0x04;
 
     pub const ODR_1920: u8 = 0x0A;
     pub const OP_MODE_XL_HIGH_PERF: u8 = 0x00;
@@ -38,6 +41,11 @@ mod reg {
     pub const FS_G_2000DPS: u8 = 0x04;
     pub const FS_XL_16G: u8 = 0x02;
 }
+
+const INIT_SETTLE_DELAY_MS: u32 = 20;
+const INIT_RETRY_DELAY_MS: u32 = 10;
+const INIT_ATTEMPTS: u8 = 3;
+const INTERFACE_RECOVERY_DELAY_MS: u32 = 1;
 
 #[derive(Debug, Format)]
 pub enum Error {
@@ -221,14 +229,50 @@ where
         config: Lsm6dsv32xConfig,
     ) -> Result<(), Error> {
         info!("LSM6DSV32X: Starting initialization sequence");
+        delay.delay_ms(INIT_SETTLE_DELAY_MS).await;
+
+        let mut last_error = Error::ResetTimeout;
+        for attempt in 0..INIT_ATTEMPTS {
+            match self.init_once(delay, config).await {
+                Ok(()) => {
+                    info!(
+                        "LSM6DSV32X: Initialization complete on attempt {}",
+                        attempt + 1
+                    );
+                    return Ok(());
+                }
+                Err(error) => {
+                    warn!(
+                        "LSM6DSV32X: Initialization attempt {} failed: {:?}",
+                        attempt + 1,
+                        error
+                    );
+                    last_error = error;
+                    if attempt + 1 < INIT_ATTEMPTS {
+                        delay.delay_ms(INIT_RETRY_DELAY_MS).await;
+                    }
+                }
+            }
+        }
+
+        Err(last_error)
+    }
+
+    async fn init_once<D: DelayMs>(
+        &mut self,
+        delay: &mut D,
+        config: Lsm6dsv32xConfig,
+    ) -> Result<(), Error> {
+        self.force_primary_spi_interface().await?;
+        delay.delay_ms(INTERFACE_RECOVERY_DELAY_MS).await;
 
         self.soft_reset(delay).await?;
+        self.force_primary_spi_interface().await?;
+        delay.delay_ms(INTERFACE_RECOVERY_DELAY_MS).await;
         self.verify_chip_id(delay).await?;
+        self.configure_primary_spi_interface().await?;
         self.enable_bdu_and_auto_increment().await?;
-        self.apply_config(config).await?;
-
-        info!("LSM6DSV32X: Initialization complete");
-        Ok(())
+        self.apply_config(config).await
     }
 
     /// Soft-reset the device and wait for the reset bit to clear.
@@ -267,6 +311,29 @@ where
             reg::WHO_AM_I_VAL
         );
         Err(Error::ChipId(who))
+    }
+
+    async fn configure_primary_spi_interface(&mut self) -> Result<(), Error> {
+        // IF_CFG is not reset by CTRL3.SW_RESET, so force known-good 4-wire SPI
+        // settings once communication is established.
+        let if_cfg = reg::IF_CFG_I2C_I3C_DISABLE;
+        self.write_reg(reg::IF_CFG, if_cfg).await?;
+
+        let readback = self.read_reg(reg::IF_CFG).await?;
+        debug!("LSM6DSV32X: IF_CFG=0x{:02X}", readback);
+        if (readback & reg::IF_CFG_SIM_3WIRE) != 0 {
+            warn!("LSM6DSV32X: IF_CFG still indicates 3-wire SPI");
+        }
+
+        Ok(())
+    }
+
+    async fn force_primary_spi_interface(&mut self) -> Result<(), Error> {
+        // Blindly force 4-wire SPI before any readback. This can recover from a
+        // warm-boot state where IF_CFG.SIM left the device in 3-wire mode, which
+        // is not cleared by CTRL3.SW_RESET.
+        self.write_reg(reg::IF_CFG, reg::IF_CFG_I2C_I3C_DISABLE)
+            .await
     }
 
     /// Apply measurement range and ODR/performance configuration.
