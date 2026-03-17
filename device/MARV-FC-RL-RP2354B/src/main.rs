@@ -12,6 +12,7 @@ mod pinmap;
 mod resources;
 mod sensor_spi;
 mod storage;
+mod usb_hil;
 mod watchdog;
 
 use embassy_executor::Spawner;

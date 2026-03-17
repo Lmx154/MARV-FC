@@ -13,11 +13,10 @@ use common::services::acquisition::{
     BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, MavlinkHilSensorBridge,
     TimeSampleChannel,
 };
+use common::services::telemetry::MavlinkStreamPump;
 use config::Config;
 use fs_logger::FsLogger;
-use mavlink::{
-    DecodeError, MAVLINK_V1_STX, MAVLINK_V2_STX, MIN_MAVLINK_FRAME_LEN, try_consume_frame,
-};
+use mavlink::DecodeError;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -62,9 +61,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &GPS_CHANNEL,
     )?;
     let mut bridge = MavlinkHilSensorBridge::default();
+    let mut stream = MavlinkStreamPump::<RX_BUFFER_LIMIT>::new();
     let tick_timeout = Duration::from_millis(config.tick_timeout_ms);
     let mut receive_buffer = [0u8; 512];
-    let mut frame_buffer = Vec::<u8>::with_capacity(RX_BUFFER_LIMIT);
     let mut last_tick_at = Instant::now();
     let mut timeout_reported = false;
 
@@ -73,9 +72,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         match timeout(tick_timeout, rx_socket.recv_from(&mut receive_buffer)).await {
             Ok(Ok((len, _peer))) => {
-                extend_frame_buffer(&mut frame_buffer, &receive_buffer[..len]);
+                stream.ingest_bytes(&receive_buffer[..len]);
 
-                while let Some(frame) = try_next_frame(&mut frame_buffer) {
+                while let Some(frame) = stream.try_next_frame() {
                     let frame = match frame {
                         Ok(frame) => frame,
                         Err(DecodeError::UnsupportedMessage { .. }) => continue,
@@ -123,52 +122,4 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     #[allow(unreachable_code)]
     Ok(())
-}
-
-fn extend_frame_buffer(frame_buffer: &mut Vec<u8>, bytes: &[u8]) {
-    if bytes.len() >= RX_BUFFER_LIMIT {
-        frame_buffer.clear();
-        frame_buffer.extend_from_slice(&bytes[bytes.len() - RX_BUFFER_LIMIT..]);
-        return;
-    }
-
-    let required = frame_buffer.len().saturating_add(bytes.len());
-    if required > RX_BUFFER_LIMIT {
-        let overflow = required - RX_BUFFER_LIMIT;
-        frame_buffer.drain(..overflow.min(frame_buffer.len()));
-    }
-
-    frame_buffer.extend_from_slice(bytes);
-}
-
-fn try_next_frame(
-    frame_buffer: &mut Vec<u8>,
-) -> Option<Result<common::protocol::mavlink::MavlinkFrame, DecodeError>> {
-    loop {
-        let sync_offset = frame_buffer
-            .iter()
-            .position(|byte| *byte == MAVLINK_V2_STX || *byte == MAVLINK_V1_STX)?;
-        if sync_offset > 0 {
-            frame_buffer.drain(..sync_offset);
-        }
-
-        if frame_buffer.len() < MIN_MAVLINK_FRAME_LEN {
-            return None;
-        }
-
-        match try_consume_frame(frame_buffer.as_slice()) {
-            Ok(Some((frame, consumed))) => {
-                frame_buffer.drain(..consumed);
-                return Some(Ok(frame));
-            }
-            Ok(None) => return None,
-            Err(DecodeError::BadMagic(_)) => {
-                frame_buffer.drain(..1);
-            }
-            Err(error) => {
-                frame_buffer.drain(..1);
-                return Some(Err(error));
-            }
-        }
-    }
 }

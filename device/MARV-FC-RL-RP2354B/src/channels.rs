@@ -1,7 +1,7 @@
 use common::messages::logging::{LogSinkState, LoggedSensor};
 use common::services::acquisition::{
-    BarometerSampleSubscriber, GpsFixSampleSubscriber, ImuSampleChannel, ImuSampleSubscriber,
-    MagnetometerSampleSubscriber,
+    BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleChannel, GpsFixSampleSubscriber,
+    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleSubscriber, TimeSampleChannel,
 };
 use common::services::logging::{LogChannel, LogSinkStateChannel};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -35,6 +35,9 @@ pub struct ImuInitReport {
 pub const IMU_CHANNEL_DEPTH: usize = 16;
 pub const IMU_CHANNEL_SUBS: usize = 2;
 pub const IMU_CHANNEL_PUBS: usize = 1;
+pub const HIL_CHANNEL_DEPTH: usize = 16;
+pub const HIL_CHANNEL_SUBS: usize = 2;
+pub const HIL_CHANNEL_PUBS: usize = 1;
 pub const LOG_CHANNEL_DEPTH: usize = 32;
 pub const LOG_SINK_STATE_DEPTH: usize = 4;
 pub const SENSOR_FAULT_DEPTH: usize = 8;
@@ -56,6 +59,30 @@ pub type FcLogSinkStateReceiver =
     Receiver<'static, CriticalSectionRawMutex, LogSinkState, LOG_SINK_STATE_DEPTH>;
 pub type FcSensorFaultReceiver =
     Receiver<'static, CriticalSectionRawMutex, LoggedSensor, SENSOR_FAULT_DEPTH>;
+pub type FcHilTimeChannel = TimeSampleChannel<
+    CriticalSectionRawMutex,
+    HIL_CHANNEL_DEPTH,
+    HIL_CHANNEL_SUBS,
+    HIL_CHANNEL_PUBS,
+>;
+pub type FcHilImuChannel = ImuSampleChannel<
+    CriticalSectionRawMutex,
+    HIL_CHANNEL_DEPTH,
+    HIL_CHANNEL_SUBS,
+    HIL_CHANNEL_PUBS,
+>;
+pub type FcHilBarometerChannel = BarometerSampleChannel<
+    CriticalSectionRawMutex,
+    HIL_CHANNEL_DEPTH,
+    HIL_CHANNEL_SUBS,
+    HIL_CHANNEL_PUBS,
+>;
+pub type FcHilGpsChannel = GpsFixSampleChannel<
+    CriticalSectionRawMutex,
+    HIL_CHANNEL_DEPTH,
+    HIL_CHANNEL_SUBS,
+    HIL_CHANNEL_PUBS,
+>;
 pub type DisabledBarometerSubscriber =
     BarometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledMagnetometerSubscriber =
@@ -64,6 +91,10 @@ pub type DisabledGpsSubscriber = GpsFixSampleSubscriber<'static, CriticalSection
 
 pub static IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
 pub static AUX_IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
+pub static HIL_TIME_CHANNEL: FcHilTimeChannel = FcHilTimeChannel::new();
+pub static HIL_IMU_CHANNEL: FcHilImuChannel = FcHilImuChannel::new();
+pub static HIL_BAROMETER_CHANNEL: FcHilBarometerChannel = FcHilBarometerChannel::new();
+pub static HIL_GPS_CHANNEL: FcHilGpsChannel = FcHilGpsChannel::new();
 pub static LOG_CHANNEL: LogChannel<CriticalSectionRawMutex, LOG_CHANNEL_DEPTH> = LogChannel::new();
 pub static LOG_SINK_STATE_CHANNEL: LogSinkStateChannel<
     CriticalSectionRawMutex,

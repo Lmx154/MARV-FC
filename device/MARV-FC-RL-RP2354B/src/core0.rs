@@ -36,6 +36,7 @@ use crate::pinmap;
 use crate::resources::{DeviceResources, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
 use crate::storage;
+use crate::usb_hil;
 use crate::watchdog;
 
 const CORE0_TIME_SENSITIVE_EXECUTOR_PRIORITY: interrupt::Priority = interrupt::Priority::P2;
@@ -219,12 +220,17 @@ fn start_core0_time_sensitive_executor() -> SendSpawner {
     CORE0_TIME_SENSITIVE_EXECUTOR.start(interrupt::SWI_IRQ_0)
 }
 
-pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
+pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     let DeviceResources {
         pins,
         buses,
         watchdog: _watchdog,
-        system: _system,
+        system:
+            crate::resources::SystemResources {
+                usb,
+                flash: _flash,
+                core1: _core1,
+            },
     } = resources;
     let config = DeviceConfig::default();
     let time_sensitive_spawner = start_core0_time_sensitive_executor();
@@ -232,6 +238,8 @@ pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
     let storage_pins = pins.storage;
     let sensor_bus = buses.sensors;
     let storage_bus = buses.storage;
+
+    usb_hil::spawn(&spawner, usb);
 
     let imu_period_ms = imu_period_ms(config.fast_loop_hz);
     let imu_config = Spi1ImuServiceConfig {
@@ -272,7 +280,7 @@ pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
                         let sink_state_receiver = Some(LOG_SINK_STATE_CHANNEL.receiver());
                         let sensor_fault_receiver = Some(SENSOR_FAULT_CHANNEL.receiver());
 
-                        _spawner.spawn(sd_logging_task(engine)).unwrap();
+                        spawner.spawn(sd_logging_task(engine)).unwrap();
                         time_sensitive_spawner
                             .spawn(sensor_logging_task(
                                 logger,
