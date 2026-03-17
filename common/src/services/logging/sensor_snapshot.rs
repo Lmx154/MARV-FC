@@ -3,12 +3,13 @@
 use core::fmt::Write;
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::channel::Receiver;
 use embassy_sync::pubsub::{Subscriber, WaitResult};
 use heapless::String;
 
 use crate::interfaces::storage::{LogError, LogLine, LogPath};
 use crate::messages::logging::{
-    LoggedSensor, LogSinkState, SensorLogField, SensorLogSnapshot, SensorLogState,
+    LogSinkState, LoggedSensor, SensorLogField, SensorLogSnapshot, SensorLogState,
 };
 use crate::messages::sensor::{
     BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
@@ -41,6 +42,7 @@ impl Default for SensorSnapshotLogFlags {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SensorSnapshotSensorConfig {
     pub imu: bool,
+    pub aux_imu: bool,
     pub barometer: bool,
     pub magnetometer: bool,
     pub gps: bool,
@@ -50,6 +52,7 @@ impl Default for SensorSnapshotSensorConfig {
     fn default() -> Self {
         Self {
             imu: true,
+            aux_imu: false,
             barometer: true,
             magnetometer: true,
             gps: true,
@@ -108,6 +111,7 @@ pub struct SensorSnapshotLogger {
     header_emitted: bool,
     sink_state: LogSinkState,
     imu: SensorSlot<ImuSampleStamped>,
+    aux_imu: SensorSlot<ImuSampleStamped>,
     barometer: SensorSlot<BarometerSampleStamped>,
     magnetometer: SensorSlot<MagnetometerSampleStamped>,
     gps: SensorSlot<GpsFixSampleStamped>,
@@ -116,7 +120,9 @@ pub struct SensorSnapshotLogger {
 impl SensorSnapshotLogger {
     pub fn new(path: &str, config: SensorSnapshotLoggerConfig) -> Result<Self, LogError> {
         let mut owned_path = LogPath::new();
-        owned_path.push_str(path).map_err(|_| LogError::PathTooLong)?;
+        owned_path
+            .push_str(path)
+            .map_err(|_| LogError::PathTooLong)?;
 
         Ok(Self {
             path: owned_path,
@@ -127,6 +133,7 @@ impl SensorSnapshotLogger {
             header_emitted: false,
             sink_state: LogSinkState::Healthy,
             imu: SensorSlot::default(),
+            aux_imu: SensorSlot::default(),
             barometer: SensorSlot::default(),
             magnetometer: SensorSlot::default(),
             gps: SensorSlot::default(),
@@ -148,6 +155,7 @@ impl SensorSnapshotLogger {
     pub fn sensor_enabled(&self, sensor: LoggedSensor) -> bool {
         match sensor {
             LoggedSensor::Imu => self.config.sensors.imu,
+            LoggedSensor::AuxImu => self.config.sensors.aux_imu,
             LoggedSensor::Barometer => self.config.sensors.barometer,
             LoggedSensor::Magnetometer => self.config.sensors.magnetometer,
             LoggedSensor::Gps => self.config.sensors.gps,
@@ -156,6 +164,10 @@ impl SensorSnapshotLogger {
 
     pub fn sink_state(&self) -> LogSinkState {
         self.sink_state
+    }
+
+    pub fn note_sink_state(&mut self, state: LogSinkState) {
+        self.sink_state = state;
     }
 
     pub fn note_sensor_fault(&mut self, sensor: LoggedSensor) {
@@ -167,15 +179,26 @@ impl SensorSnapshotLogger {
     }
 
     pub fn note_sink_error(&mut self, error: LogError) {
-        self.sink_state = error.into();
+        self.note_sink_state(error.into());
     }
 
     pub fn note_sink_backpressured(&mut self) {
-        self.sink_state = LogSinkState::Backpressured;
+        self.note_sink_state(LogSinkState::Backpressured);
     }
 
     pub fn note_sink_recovered(&mut self) {
-        self.sink_state = LogSinkState::Healthy;
+        self.note_sink_state(LogSinkState::Healthy);
+    }
+
+    pub fn drain_sink_states<M, const DEPTH: usize>(
+        &mut self,
+        receiver: &Receiver<'_, M, LogSinkState, DEPTH>,
+    ) where
+        M: RawMutex,
+    {
+        while let Ok(state) = receiver.try_receive() {
+            self.note_sink_state(state);
+        }
     }
 
     pub fn drain_imu<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
@@ -186,6 +209,17 @@ impl SensorSnapshotLogger {
     {
         if self.config.sensors.imu {
             drain_subscriber(subscriber, &mut self.imu);
+        }
+    }
+
+    pub fn drain_aux_imu<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
+        &mut self,
+        subscriber: &mut Subscriber<'_, M, ImuSampleStamped, DEPTH, SUBS, PUBS>,
+    ) where
+        M: RawMutex,
+    {
+        if self.config.sensors.aux_imu {
+            drain_subscriber(subscriber, &mut self.aux_imu);
         }
     }
 
@@ -229,14 +263,19 @@ impl SensorSnapshotLogger {
             imu: build_field(&self.imu, self.config.flags.mark_stale_data, |sample| {
                 (sample.timestamp, sample.sample)
             }),
+            aux_imu: build_field(&self.aux_imu, self.config.flags.mark_stale_data, |sample| {
+                (sample.timestamp, sample.sample)
+            }),
             barometer: build_field(
                 &self.barometer,
                 self.config.flags.mark_stale_data,
                 |sample| (sample.timestamp, sample.sample),
             ),
-            magnetometer: build_field(&self.magnetometer, self.config.flags.mark_stale_data, |sample| {
-                (sample.timestamp, sample.sample)
-            }),
+            magnetometer: build_field(
+                &self.magnetometer,
+                self.config.flags.mark_stale_data,
+                |sample| (sample.timestamp, sample.sample),
+            ),
             gps: build_field(&self.gps, self.config.flags.mark_stale_data, |sample| {
                 (sample.timestamp, sample.sample)
             }),
@@ -245,6 +284,7 @@ impl SensorSnapshotLogger {
 
     pub fn mark_snapshot_emitted(&mut self) {
         reset_slot_for_next_emit(&mut self.imu);
+        reset_slot_for_next_emit(&mut self.aux_imu);
         reset_slot_for_next_emit(&mut self.barometer);
         reset_slot_for_next_emit(&mut self.magnetometer);
         reset_slot_for_next_emit(&mut self.gps);
@@ -263,6 +303,14 @@ impl SensorSnapshotLogger {
             write!(
                 &mut line,
                 ",imu_ax_mps2,imu_ay_mps2,imu_az_mps2,imu_gx_rad_s,imu_gy_rad_s,imu_gz_rad_s"
+            )
+            .map_err(|_| SensorSnapshotLoggerError::Format)?;
+        }
+        if self.config.sensors.aux_imu {
+            write_sensor_header(&mut line, "aux_imu", &self.config.flags)?;
+            write!(
+                &mut line,
+                ",aux_imu_ax_mps2,aux_imu_ay_mps2,aux_imu_az_mps2,aux_imu_gx_rad_s,aux_imu_gy_rad_s,aux_imu_gz_rad_s"
             )
             .map_err(|_| SensorSnapshotLoggerError::Format)?;
         }
@@ -304,6 +352,9 @@ impl SensorSnapshotLogger {
         if self.config.sensors.imu {
             write_imu_field(&mut line, &snapshot.imu, &self.config.flags)?;
         }
+        if self.config.sensors.aux_imu {
+            write_imu_field(&mut line, &snapshot.aux_imu, &self.config.flags)?;
+        }
         if self.config.sensors.barometer {
             write_barometer_field(&mut line, &snapshot.barometer, &self.config.flags)?;
         }
@@ -327,11 +378,10 @@ impl SensorSnapshotLogger {
     {
         if self.config.emit_header && !self.header_emitted {
             let header = self.format_header_line()?;
-            try_enqueue_line(channel, self.path.as_str(), header.as_str())
-                .map_err(|error| {
-                    self.update_sink_state_from_queue_error(error);
-                    SensorSnapshotLoggerError::Queue(error)
-                })?;
+            try_enqueue_line(channel, self.path.as_str(), header.as_str()).map_err(|error| {
+                self.update_sink_state_from_queue_error(error);
+                SensorSnapshotLoggerError::Queue(error)
+            })?;
             self.header_emitted = true;
         }
 
@@ -355,6 +405,7 @@ impl SensorSnapshotLogger {
     fn slot_mut(&mut self, sensor: LoggedSensor) -> &mut dyn SensorSlotControl {
         match sensor {
             LoggedSensor::Imu => &mut self.imu,
+            LoggedSensor::AuxImu => &mut self.aux_imu,
             LoggedSensor::Barometer => &mut self.barometer,
             LoggedSensor::Magnetometer => &mut self.magnetometer,
             LoggedSensor::Gps => &mut self.gps,
@@ -525,9 +576,7 @@ fn write_magnetometer_field(
         Some(sample) => write!(
             line,
             ",{},{},{}",
-            sample.field_ut[0],
-            sample.field_ut[1],
-            sample.field_ut[2]
+            sample.field_ut[0], sample.field_ut[1], sample.field_ut[2]
         )
         .map_err(|_| SensorSnapshotLoggerError::Format),
         None => write!(line, ",,,").map_err(|_| SensorSnapshotLoggerError::Format),
@@ -567,7 +616,7 @@ mod tests {
         SensorSnapshotSensorConfig,
     };
     use crate::interfaces::storage::LogError;
-    use crate::messages::logging::{LoggedSensor, LogSinkState, SensorLogState};
+    use crate::messages::logging::{LogSinkState, LoggedSensor, SensorLogState};
     use crate::messages::sensor::{
         BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
         ImuSampleStamped,
@@ -591,23 +640,27 @@ mod tests {
         )
         .unwrap();
 
-        imu_channel.immediate_publisher().publish_immediate(ImuSampleStamped::new(
-            MeasurementTimestamp::from_micros(10_000),
-            ImuSample {
-                accel_mps2: [1.0, 2.0, 3.0],
-                gyro_rad_s: [4.0, 5.0, 6.0],
-            },
-        ));
-        gps_channel.immediate_publisher().publish_immediate(GpsFixSampleStamped {
-            timestamp: MeasurementTimestamp::from_micros(10_000),
-            sample: GpsFixSample {
-                lat_deg: 30.0,
-                lon_deg: -97.0,
-                alt_m: 100.0,
-                vel_ned_mps: [1.0, 2.0, 3.0],
-                sats: 10,
-            },
-        });
+        imu_channel
+            .immediate_publisher()
+            .publish_immediate(ImuSampleStamped::new(
+                MeasurementTimestamp::from_micros(10_000),
+                ImuSample {
+                    accel_mps2: [1.0, 2.0, 3.0],
+                    gyro_rad_s: [4.0, 5.0, 6.0],
+                },
+            ));
+        gps_channel
+            .immediate_publisher()
+            .publish_immediate(GpsFixSampleStamped {
+                timestamp: MeasurementTimestamp::from_micros(10_000),
+                sample: GpsFixSample {
+                    lat_deg: 30.0,
+                    lon_deg: -97.0,
+                    alt_m: 100.0,
+                    vel_ned_mps: [1.0, 2.0, 3.0],
+                    sats: 10,
+                },
+            });
 
         logger.drain_imu(&mut imu_subscriber);
         logger.drain_gps(&mut gps_subscriber);
@@ -616,13 +669,15 @@ mod tests {
         assert_eq!(first.gps.state, SensorLogState::Fresh);
         logger.mark_snapshot_emitted();
 
-        imu_channel.immediate_publisher().publish_immediate(ImuSampleStamped::new(
-            MeasurementTimestamp::from_micros(20_000),
-            ImuSample {
-                accel_mps2: [7.0, 8.0, 9.0],
-                gyro_rad_s: [10.0, 11.0, 12.0],
-            },
-        ));
+        imu_channel
+            .immediate_publisher()
+            .publish_immediate(ImuSampleStamped::new(
+                MeasurementTimestamp::from_micros(20_000),
+                ImuSample {
+                    accel_mps2: [7.0, 8.0, 9.0],
+                    gyro_rad_s: [10.0, 11.0, 12.0],
+                },
+            ));
 
         logger.drain_imu(&mut imu_subscriber);
         logger.drain_gps(&mut gps_subscriber);
@@ -642,13 +697,15 @@ mod tests {
         let faulted = logger.snapshot(MeasurementTimestamp::from_micros(1));
         assert_eq!(faulted.imu.state, SensorLogState::Fault);
 
-        imu_channel.immediate_publisher().publish_immediate(ImuSampleStamped::new(
-            MeasurementTimestamp::from_micros(2),
-            ImuSample {
-                accel_mps2: [1.0, 0.0, 0.0],
-                gyro_rad_s: [0.0, 1.0, 0.0],
-            },
-        ));
+        imu_channel
+            .immediate_publisher()
+            .publish_immediate(ImuSampleStamped::new(
+                MeasurementTimestamp::from_micros(2),
+                ImuSample {
+                    accel_mps2: [1.0, 0.0, 0.0],
+                    gyro_rad_s: [0.0, 1.0, 0.0],
+                },
+            ));
         logger.drain_imu(&mut imu_subscriber);
         let recovered = logger.snapshot(MeasurementTimestamp::from_micros(2));
         assert_eq!(recovered.imu.state, SensorLogState::Fresh);
@@ -744,6 +801,7 @@ mod tests {
         let header = logger.format_header_line().unwrap();
         assert!(!header.contains("sink_state"));
         assert!(!header.contains("imu_state"));
+        assert!(!header.contains("aux_imu_state"));
         assert!(header.contains("imu_ax_mps2"));
     }
 
@@ -755,6 +813,7 @@ mod tests {
                 emit_header: false,
                 sensors: SensorSnapshotSensorConfig {
                     imu: true,
+                    aux_imu: false,
                     barometer: false,
                     magnetometer: false,
                     gps: false,
@@ -786,13 +845,15 @@ mod tests {
         )
         .unwrap();
 
-        imu_channel.immediate_publisher().publish_immediate(ImuSampleStamped::new(
-            MeasurementTimestamp::from_micros(10_000),
-            ImuSample {
-                accel_mps2: [1.0, 2.0, 3.0],
-                gyro_rad_s: [4.0, 5.0, 6.0],
-            },
-        ));
+        imu_channel
+            .immediate_publisher()
+            .publish_immediate(ImuSampleStamped::new(
+                MeasurementTimestamp::from_micros(10_000),
+                ImuSample {
+                    accel_mps2: [1.0, 2.0, 3.0],
+                    gyro_rad_s: [4.0, 5.0, 6.0],
+                },
+            ));
         logger.drain_imu(&mut imu_subscriber);
         logger.mark_snapshot_emitted();
 

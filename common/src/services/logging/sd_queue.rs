@@ -4,9 +4,10 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::{Channel, TrySendError};
 
 use crate::interfaces::storage::{LogError, LoggerEngine};
-use crate::messages::logging::LogCommand;
+use crate::messages::logging::{LogCommand, LogSinkState};
 
 pub type LogChannel<M, const DEPTH: usize> = Channel<M, LogCommand, DEPTH>;
+pub type LogSinkStateChannel<M, const DEPTH: usize> = Channel<M, LogSinkState, DEPTH>;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
 pub enum TryEnqueueLogError {

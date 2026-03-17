@@ -18,8 +18,13 @@ pub type BarometerSampleChannel<M, const DEPTH: usize, const SUBS: usize, const 
     SampleChannel<M, BarometerSampleStamped, DEPTH, SUBS, PUBS>;
 pub type BarometerSamplePublisher<'a, M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
     SamplePublisher<'a, M, BarometerSampleStamped, DEPTH, SUBS, PUBS>;
-pub type BarometerSampleSubscriber<'a, M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
-    SampleSubscriber<'a, M, BarometerSampleStamped, DEPTH, SUBS, PUBS>;
+pub type BarometerSampleSubscriber<
+    'a,
+    M,
+    const DEPTH: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> = SampleSubscriber<'a, M, BarometerSampleStamped, DEPTH, SUBS, PUBS>;
 pub type BarometerSampleWaitResult = SampleWaitResult<BarometerSampleStamped>;
 
 pub type MagnetometerSampleChannel<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =

@@ -3,7 +3,5 @@
 pub mod runtime;
 pub mod sdcard;
 
-pub use runtime::{
-    LoggedSensor, LogSinkState, SensorLogField, SensorLogSnapshot, SensorLogState,
-};
+pub use runtime::{LogSinkState, LoggedSensor, SensorLogField, SensorLogSnapshot, SensorLogState};
 pub use sdcard::LogCommand;

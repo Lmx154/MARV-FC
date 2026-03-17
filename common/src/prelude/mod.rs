@@ -4,7 +4,7 @@ pub use crate::drivers::storage::{MicrosdLogger, MicrosdLoggerConfig};
 pub use crate::interfaces::storage::{LogError, LogPath, LoggerEngine};
 pub use crate::messages::fault::{HealthReport, ResetReason, WatchdogStatus};
 pub use crate::messages::logging::{
-    LogCommand, LoggedSensor, LogSinkState, SensorLogField, SensorLogSnapshot, SensorLogState,
+    LogCommand, LogSinkState, LoggedSensor, SensorLogField, SensorLogSnapshot, SensorLogState,
 };
 pub use crate::messages::sensor::{
     BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
@@ -13,7 +13,7 @@ pub use crate::messages::sensor::{
 pub use crate::protocol::packet::{Packet, PacketType};
 pub use crate::services::acquisition::{
     Bmi088ImuSource, ImuProducerConfig, ImuProducerError, ImuSampleChannel, ImuSamplePublisher,
-    ImuSampleSubscriber, ImuSampleWaitResult,
+    ImuSampleSubscriber, ImuSampleWaitResult, Lsm6dsv32xImuSource,
 };
 pub use crate::services::health::{
     DeadlineWindow, FaultAggregation, FeedDecision, LivenessClass, LivenessEvidence,

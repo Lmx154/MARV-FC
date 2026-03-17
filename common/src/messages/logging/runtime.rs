@@ -7,6 +7,7 @@ use crate::utilities::time::MeasurementTimestamp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
 pub enum LoggedSensor {
     Imu,
+    AuxImu,
     Barometer,
     Magnetometer,
     Gps,
@@ -106,6 +107,7 @@ pub struct SensorLogSnapshot {
     pub timestamp: MeasurementTimestamp,
     pub sink_state: LogSinkState,
     pub imu: SensorLogField<ImuSample>,
+    pub aux_imu: SensorLogField<ImuSample>,
     pub barometer: SensorLogField<BarometerSample>,
     pub magnetometer: SensorLogField<MagnetometerSample>,
     pub gps: SensorLogField<GpsFixSample>,
