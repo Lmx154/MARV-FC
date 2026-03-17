@@ -2,6 +2,7 @@
 
 pub mod attitude;
 pub mod calibration;
+pub mod estimation;
 pub mod navigation;
 pub mod sensor_fusion;
 pub mod state;
