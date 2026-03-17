@@ -1,16 +1,20 @@
+use core::cell::RefCell;
+
 use common::drivers::bmi088::{
     AccelRange as Bmi088AccelRange, Bmi088, GyroRange as Bmi088GyroRange,
 };
+use common::drivers::lsm6dsv32x::{
+    AccelRange as Lsm6dsv32xAccelRange, GyroRange as Lsm6dsv32xGyroRange, Lsm6dsv32x,
+};
 use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
-use common::messages::logging::{LogSinkState, LoggedSensor};
+use common::messages::logging::LoggedSensor;
 use common::services::acquisition::{
-    BarometerSampleSubscriber, Bmi088ImuSource, GpsFixSampleSubscriber, ImuProducerConfig,
-    ImuSampleChannel, ImuSampleSubscriber, Lsm6dsv32xImuSource, MagnetometerSampleSubscriber,
+    Bmi088ImuSource, DualImuServiceError, ImuProducerConfig, Lsm6dsv32xImuSource,
+    run_dual_imu_service,
 };
-use common::services::logging::{LogChannel, LogSinkStateChannel, SensorSnapshotLogger};
+use common::services::logging::SensorSnapshotLogger;
 use common::tasks::background::sd_logging::run_sd_logging_task;
-use common::tasks::fast_loop::imu_acquisition::run_fast_imu_acquisition_task;
 use common::tasks::medium_loop::run_core0_sensor_logging_task;
 use common::utilities::time::MeasurementTimestamp;
 use defmt::{info, warn};
@@ -18,13 +22,14 @@ use embassy_executor::{InterruptExecutor, SendSpawner, Spawner};
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::interrupt::{self, InterruptExt};
 use embassy_rp::spi::{Config as SpiConfig, Spi};
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Receiver;
-use embassy_sync::mutex::Mutex;
 use embassy_time::{Duration, Timer};
 
 use crate::buses::SensorSpiBus;
-use crate::channels;
+use crate::channels::{
+    self, AUX_IMU_CHANNEL, DisabledBarometerSubscriber, DisabledGpsSubscriber,
+    DisabledMagnetometerSubscriber, FcImuSubscriber, FcLogSinkStateReceiver, FcSensorFaultReceiver,
+    IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL, SENSOR_FAULT_CHANNEL,
+};
 use crate::config::{DeviceConfig, STATUS_HEARTBEAT_PERIOD_MS};
 use crate::core1;
 use crate::pinmap;
@@ -32,47 +37,10 @@ use crate::resources::{DeviceResources, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
 use crate::storage;
 use crate::watchdog;
-use common::drivers::lsm6dsv32x::{
-    AccelRange as Lsm6dsv32xAccelRange, GyroRange as Lsm6dsv32xGyroRange, Lsm6dsv32x,
-};
 
-// Cover at least one 10 ms logging interval at a 1 kHz publish rate, with jitter margin.
-const IMU_CHANNEL_DEPTH: usize = 16;
-const IMU_CHANNEL_SUBS: usize = 2;
-const IMU_CHANNEL_PUBS: usize = 1;
-const LOG_CHANNEL_DEPTH: usize = 32;
-const LOG_SINK_STATE_DEPTH: usize = 4;
 const CORE0_TIME_SENSITIVE_EXECUTOR_PRIORITY: interrupt::Priority = interrupt::Priority::P2;
+const SENSOR_SPI_FREQUENCY_HZ: u32 = 1_000_000;
 
-type FcImuChannel = ImuSampleChannel<
-    CriticalSectionRawMutex,
-    IMU_CHANNEL_DEPTH,
-    IMU_CHANNEL_SUBS,
-    IMU_CHANNEL_PUBS,
->;
-type FcImuSubscriber = ImuSampleSubscriber<
-    'static,
-    CriticalSectionRawMutex,
-    IMU_CHANNEL_DEPTH,
-    IMU_CHANNEL_SUBS,
-    IMU_CHANNEL_PUBS,
->;
-type FcLogSinkStateReceiver =
-    Receiver<'static, CriticalSectionRawMutex, LogSinkState, LOG_SINK_STATE_DEPTH>;
-type DisabledBarometerSubscriber =
-    BarometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
-type DisabledMagnetometerSubscriber =
-    MagnetometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
-type DisabledGpsSubscriber = GpsFixSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
-type Bmi088Source = Bmi088ImuSource<SharedSpiDevice, SharedSpiDevice>;
-type Lsm6dsv32xSource = Lsm6dsv32xImuSource<SharedSpiDevice>;
-
-static IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
-static AUX_IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
-static LOG_CHANNEL: LogChannel<CriticalSectionRawMutex, LOG_CHANNEL_DEPTH> = LogChannel::new();
-static LOG_SINK_STATE_CHANNEL: LogSinkStateChannel<CriticalSectionRawMutex, LOG_SINK_STATE_DEPTH> =
-    LogSinkStateChannel::new();
-static SENSOR_SPI_BUS: SharedSensorSpiBus = Mutex::new(None);
 static CORE0_TIME_SENSITIVE_EXECUTOR: InterruptExecutor = InterruptExecutor::new();
 
 #[allow(non_snake_case)]
@@ -108,72 +76,101 @@ fn measurement_now() -> MeasurementTimestamp {
     MeasurementTimestamp::from_micros(embassy_time::Instant::now().as_micros())
 }
 
-fn build_sensor_sources(pins: SensorPins, bus: SensorSpiBus) -> (Bmi088Source, Lsm6dsv32xSource) {
+fn try_report_sensor_fault(sensor: LoggedSensor) {
+    let _ = SENSOR_FAULT_CHANNEL.try_send(sensor);
+}
+
+#[embassy_executor::task]
+async fn spi1_imu_service_task(
+    pins: SensorPins,
+    bus: SensorSpiBus,
+    config: ImuProducerConfig,
+) -> ! {
     let mut spi_config = SpiConfig::default();
-    spi_config.frequency = 1_000_000;
+    spi_config.frequency = SENSOR_SPI_FREQUENCY_HZ;
 
     let spi = Spi::new(
         bus.spi, pins.sck, pins.mosi, pins.miso, bus.tx_dma, bus.rx_dma, spi_config,
     );
-    let shared_bus: &'static SharedSensorSpiBus = &SENSOR_SPI_BUS;
-    if let Ok(mut bus_guard) = shared_bus.try_lock() {
-        *bus_guard = Some(spi);
-    } else {
-        panic!("sensor SPI bus already initialized");
-    }
+    let shared_bus: SharedSensorSpiBus = RefCell::new(spi);
     let accel_cs = Output::new(pins.bmi088_accel_cs, Level::High);
     let gyro_cs = Output::new(pins.bmi088_gyro_cs, Level::High);
     let lsm6dsv32x_cs = Output::new(pins.lsm6dsv32x_cs, Level::High);
 
     let bmi088_driver = Bmi088::new(
-        SharedSpiDevice::new(shared_bus, accel_cs).unwrap(),
-        SharedSpiDevice::new(shared_bus, gyro_cs).unwrap(),
+        SharedSpiDevice::new(&shared_bus, accel_cs).unwrap(),
+        SharedSpiDevice::new(&shared_bus, gyro_cs).unwrap(),
     );
     let lsm6dsv32x_driver =
-        Lsm6dsv32x::new(SharedSpiDevice::new(shared_bus, lsm6dsv32x_cs).unwrap());
+        Lsm6dsv32x::new(SharedSpiDevice::new(&shared_bus, lsm6dsv32x_cs).unwrap());
 
-    (
-        Bmi088ImuSource::new(
-            bmi088_driver,
-            Bmi088AccelRange::G6,
-            Bmi088GyroRange::Dps2000,
-        ),
-        Lsm6dsv32xImuSource::new(
-            lsm6dsv32x_driver,
-            Lsm6dsv32xAccelRange::G16,
-            Lsm6dsv32xGyroRange::Dps2000,
-        ),
-    )
-}
+    let mut bmi088_source = Bmi088ImuSource::new(
+        bmi088_driver,
+        Bmi088AccelRange::G6,
+        Bmi088GyroRange::Dps2000,
+    );
+    let mut lsm6dsv32x_source = Lsm6dsv32xImuSource::new(
+        lsm6dsv32x_driver,
+        Lsm6dsv32xAccelRange::G16,
+        Lsm6dsv32xGyroRange::Dps2000,
+    );
 
-#[embassy_executor::task]
-async fn bmi088_acquisition_task(mut source: Bmi088Source, config: ImuProducerConfig) -> ! {
     let clock = EmbassyClock;
     let mut delay = EmbassyDelay;
 
-    run_fast_imu_acquisition_task(
+    let bmi088_ready = match bmi088_source.driver_mut().init(&mut delay).await {
+        Ok(()) => {
+            info!("BMI088 acquisition source initialized");
+            true
+        }
+        Err(error) => {
+            warn!("BMI088 initialization failed: {:?}", error);
+            false
+        }
+    };
+    let lsm6dsv32x_ready = match lsm6dsv32x_source.driver_mut().init(&mut delay).await {
+        Ok(()) => {
+            info!("LSM6DSV32X acquisition source initialized");
+            true
+        }
+        Err(error) => {
+            warn!("LSM6DSV32X initialization failed: {:?}", error);
+            false
+        }
+    };
+
+    IMU_INIT_SIGNAL.signal(channels::ImuInitReport {
+        imu_ready: bmi088_ready,
+        aux_imu_ready: lsm6dsv32x_ready,
+    });
+
+    if !bmi088_ready {
+        warn!("BMI088 will remain unpublished until SPI1 service retry logic is added");
+    }
+    if !lsm6dsv32x_ready {
+        warn!("LSM6DSV32X will remain unpublished until SPI1 service retry logic is added");
+    }
+
+    run_dual_imu_service(
         &IMU_CHANNEL,
-        &mut source,
-        &clock,
-        &mut delay,
-        config,
-        |error| warn!("BMI088 acquisition error: {:?}", error),
-    )
-    .await
-}
-
-#[embassy_executor::task]
-async fn lsm6dsv32x_acquisition_task(mut source: Lsm6dsv32xSource, config: ImuProducerConfig) -> ! {
-    let clock = EmbassyClock;
-    let mut delay = EmbassyDelay;
-
-    run_fast_imu_acquisition_task(
+        &mut bmi088_source,
+        bmi088_ready,
         &AUX_IMU_CHANNEL,
-        &mut source,
+        &mut lsm6dsv32x_source,
+        lsm6dsv32x_ready,
         &clock,
         &mut delay,
         config,
-        |error| warn!("LSM6DSV32X acquisition error: {:?}", error),
+        |error| match error {
+            DualImuServiceError::Primary(error) => {
+                warn!("BMI088 acquisition error: {:?}", error);
+                try_report_sensor_fault(LoggedSensor::Imu);
+            }
+            DualImuServiceError::Auxiliary(error) => {
+                warn!("LSM6DSV32X acquisition error: {:?}", error);
+                try_report_sensor_fault(LoggedSensor::AuxImu);
+            }
+        },
     )
     .await
 }
@@ -184,6 +181,7 @@ async fn sensor_logging_task(
     mut imu_subscriber: Option<FcImuSubscriber>,
     mut aux_imu_subscriber: Option<FcImuSubscriber>,
     sink_state_receiver: Option<FcLogSinkStateReceiver>,
+    sensor_fault_receiver: Option<FcSensorFaultReceiver>,
 ) -> ! {
     let mut delay = EmbassyDelay;
 
@@ -196,6 +194,7 @@ async fn sensor_logging_task(
         None::<&mut DisabledMagnetometerSubscriber>,
         None::<&mut DisabledGpsSubscriber>,
         sink_state_receiver.as_ref(),
+        sensor_fault_receiver.as_ref(),
         &mut delay,
         measurement_now,
         |error| warn!("sensor logging error: {:?}", error),
@@ -228,66 +227,18 @@ pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
     } = resources;
     let config = DeviceConfig::default();
     let time_sensitive_spawner = start_core0_time_sensitive_executor();
-    let SensorPins {
-        sck,
-        mosi,
-        miso,
-        bmi088_accel_cs,
-        bmi088_gyro_cs,
-        lsm6dsv32x_cs,
-    } = pins.sensors;
-    let sensor_pins = SensorPins {
-        sck,
-        mosi,
-        miso,
-        bmi088_accel_cs,
-        bmi088_gyro_cs,
-        lsm6dsv32x_cs,
-    };
+    let sensor_pins = pins.sensors;
     let storage_pins = pins.storage;
     let sensor_bus = buses.sensors;
     let storage_bus = buses.storage;
 
-    let (mut bmi088_source, mut lsm6dsv32x_source) = build_sensor_sources(sensor_pins, sensor_bus);
-    let mut init_delay = EmbassyDelay;
-    let bmi088_ready = match bmi088_source.driver_mut().init(&mut init_delay).await {
-        Ok(()) => {
-            info!("BMI088 acquisition source initialized");
-            true
-        }
-        Err(error) => {
-            warn!("BMI088 initialization failed: {:?}", error);
-            false
-        }
-    };
-    let lsm6dsv32x_ready = match lsm6dsv32x_source.driver_mut().init(&mut init_delay).await {
-        Ok(()) => {
-            info!("LSM6DSV32X acquisition source initialized");
-            true
-        }
-        Err(error) => {
-            warn!("LSM6DSV32X initialization failed: {:?}", error);
-            false
-        }
-    };
-
     let imu_config = ImuProducerConfig {
         period_ms: imu_period_ms(config.fast_loop_hz),
     };
-    if bmi088_ready {
-        time_sensitive_spawner
-            .spawn(bmi088_acquisition_task(bmi088_source, imu_config))
-            .unwrap();
-    } else {
-        warn!("BMI088 acquisition task not started because initialization did not complete");
-    }
-    if lsm6dsv32x_ready {
-        time_sensitive_spawner
-            .spawn(lsm6dsv32x_acquisition_task(lsm6dsv32x_source, imu_config))
-            .unwrap();
-    } else {
-        warn!("LSM6DSV32X acquisition task not started because initialization did not complete");
-    }
+    time_sensitive_spawner
+        .spawn(spi1_imu_service_task(sensor_pins, sensor_bus, imu_config))
+        .unwrap();
+    let imu_init = IMU_INIT_SIGNAL.wait().await;
 
     if config.logging.enabled {
         match storage::build_logger_engine(storage_pins, storage_bus, config.logging) {
@@ -297,25 +248,26 @@ pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
                     config.logging.sensor_snapshot,
                 ) {
                     Ok(mut logger) => {
-                        if !bmi088_ready {
+                        if !imu_init.imu_ready {
                             logger.note_sensor_fault(LoggedSensor::Imu);
                         }
-                        if !lsm6dsv32x_ready {
+                        if !imu_init.aux_imu_ready {
                             logger.note_sensor_fault(LoggedSensor::AuxImu);
                         }
 
-                        let imu_subscriber = if logger.config().sensors.imu && bmi088_ready {
+                        let imu_subscriber = if logger.config().sensors.imu && imu_init.imu_ready {
                             Some(IMU_CHANNEL.subscriber().unwrap())
                         } else {
                             None
                         };
                         let aux_imu_subscriber =
-                            if logger.config().sensors.aux_imu && lsm6dsv32x_ready {
+                            if logger.config().sensors.aux_imu && imu_init.aux_imu_ready {
                                 Some(AUX_IMU_CHANNEL.subscriber().unwrap())
                             } else {
                                 None
                             };
                         let sink_state_receiver = Some(LOG_SINK_STATE_CHANNEL.receiver());
+                        let sensor_fault_receiver = Some(SENSOR_FAULT_CHANNEL.receiver());
 
                         _spawner.spawn(sd_logging_task(engine)).unwrap();
                         time_sensitive_spawner
@@ -324,6 +276,7 @@ pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
                                 imu_subscriber,
                                 aux_imu_subscriber,
                                 sink_state_receiver,
+                                sensor_fault_receiver,
                             ))
                             .unwrap();
                         info!(

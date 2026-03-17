@@ -4,7 +4,7 @@ use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Receiver;
 use embassy_sync::pubsub::Subscriber;
 
-use crate::messages::logging::LogSinkState;
+use crate::messages::logging::{LogSinkState, LoggedSensor};
 use crate::messages::sensor::{
     BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
 };
@@ -32,6 +32,7 @@ pub async fn run_core0_sensor_logging_task<
     const GPS_SUBS: usize,
     const GPS_PUBS: usize,
     const STATUS_DEPTH: usize,
+    const SENSOR_FAULT_DEPTH: usize,
 >(
     logger: &mut SensorSnapshotLogger,
     log_channel: &'static LogChannel<M, LOG_DEPTH>,
@@ -45,6 +46,7 @@ pub async fn run_core0_sensor_logging_task<
     >,
     gps: Option<&mut Subscriber<'_, M, GpsFixSampleStamped, GPS_DEPTH, GPS_SUBS, GPS_PUBS>>,
     sink_states: Option<&Receiver<'_, M, LogSinkState, STATUS_DEPTH>>,
+    sensor_faults: Option<&Receiver<'_, M, LoggedSensor, SENSOR_FAULT_DEPTH>>,
     delay: &mut D,
     mut time_source: impl FnMut() -> MeasurementTimestamp,
     mut on_error: F,
@@ -78,6 +80,9 @@ where
         }
         if let Some(receiver) = sink_states {
             logger.drain_sink_states(receiver);
+        }
+        if let Some(receiver) = sensor_faults {
+            logger.drain_sensor_faults(receiver);
         }
 
         if let Err(error) = logger.emit_snapshot(log_channel, time_source()) {

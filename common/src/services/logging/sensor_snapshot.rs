@@ -201,6 +201,17 @@ impl SensorSnapshotLogger {
         }
     }
 
+    pub fn drain_sensor_faults<M, const DEPTH: usize>(
+        &mut self,
+        receiver: &Receiver<'_, M, LoggedSensor, DEPTH>,
+    ) where
+        M: RawMutex,
+    {
+        while let Ok(sensor) = receiver.try_receive() {
+            self.note_sensor_fault(sensor);
+        }
+    }
+
     pub fn drain_imu<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
         &mut self,
         subscriber: &mut Subscriber<'_, M, ImuSampleStamped, DEPTH, SUBS, PUBS>,
