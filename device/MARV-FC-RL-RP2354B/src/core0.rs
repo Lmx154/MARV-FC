@@ -10,8 +10,8 @@ use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
 use common::messages::logging::LoggedSensor;
 use common::services::acquisition::{
-    Bmi088ImuSource, DualImuServiceError, ImuProducerConfig, Lsm6dsv32xImuSource,
-    run_dual_imu_service,
+    Bmi088ImuSource, Lsm6dsv32xImuSource, Spi1ImuServiceConfig, Spi1ImuServiceError,
+    Spi1ImuSourceSchedule, run_spi1_imu_service,
 };
 use common::services::logging::SensorSnapshotLogger;
 use common::tasks::background::sd_logging::run_sd_logging_task;
@@ -84,7 +84,7 @@ fn try_report_sensor_fault(sensor: LoggedSensor) {
 async fn spi1_imu_service_task(
     pins: SensorPins,
     bus: SensorSpiBus,
-    config: ImuProducerConfig,
+    config: Spi1ImuServiceConfig,
 ) -> ! {
     let mut spi_config = SpiConfig::default();
     spi_config.frequency = SENSOR_SPI_FREQUENCY_HZ;
@@ -151,22 +151,23 @@ async fn spi1_imu_service_task(
         warn!("LSM6DSV32X will remain unpublished until SPI1 service retry logic is added");
     }
 
-    run_dual_imu_service(
+    run_spi1_imu_service(
         &IMU_CHANNEL,
         &mut bmi088_source,
-        bmi088_ready,
         &AUX_IMU_CHANNEL,
         &mut lsm6dsv32x_source,
-        lsm6dsv32x_ready,
         &clock,
         &mut delay,
-        config,
+        Spi1ImuServiceConfig {
+            primary: Spi1ImuSourceSchedule::new(bmi088_ready, config.primary.period_ms),
+            auxiliary: Spi1ImuSourceSchedule::new(lsm6dsv32x_ready, config.auxiliary.period_ms),
+        },
         |error| match error {
-            DualImuServiceError::Primary(error) => {
+            Spi1ImuServiceError::Primary(error) => {
                 warn!("BMI088 acquisition error: {:?}", error);
                 try_report_sensor_fault(LoggedSensor::Imu);
             }
-            DualImuServiceError::Auxiliary(error) => {
+            Spi1ImuServiceError::Auxiliary(error) => {
                 warn!("LSM6DSV32X acquisition error: {:?}", error);
                 try_report_sensor_fault(LoggedSensor::AuxImu);
             }
@@ -232,8 +233,10 @@ pub async fn run(_spawner: Spawner, resources: DeviceResources) -> ! {
     let sensor_bus = buses.sensors;
     let storage_bus = buses.storage;
 
-    let imu_config = ImuProducerConfig {
-        period_ms: imu_period_ms(config.fast_loop_hz),
+    let imu_period_ms = imu_period_ms(config.fast_loop_hz);
+    let imu_config = Spi1ImuServiceConfig {
+        primary: Spi1ImuSourceSchedule::new(true, imu_period_ms),
+        auxiliary: Spi1ImuSourceSchedule::new(true, imu_period_ms),
     };
     time_sensitive_spawner
         .spawn(spi1_imu_service_task(sensor_pins, sensor_bus, imu_config))

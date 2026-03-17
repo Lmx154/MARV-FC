@@ -12,8 +12,9 @@ pub use crate::messages::sensor::{
 };
 pub use crate::protocol::packet::{Packet, PacketType};
 pub use crate::services::acquisition::{
-    Bmi088ImuSource, ImuProducerConfig, ImuProducerError, ImuSampleChannel, ImuSamplePublisher,
-    ImuSampleSubscriber, ImuSampleWaitResult, Lsm6dsv32xImuSource,
+    Bmi088ImuSource, ImuSampleChannel, ImuSamplePublisher, ImuSampleSubscriber,
+    ImuSampleWaitResult, Lsm6dsv32xImuSource, Spi1ImuServiceConfig, Spi1ImuServiceError,
+    Spi1ImuSourceSchedule,
 };
 pub use crate::services::health::{
     DeadlineWindow, FaultAggregation, FeedDecision, LivenessClass, LivenessEvidence,
