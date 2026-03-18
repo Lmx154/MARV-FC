@@ -40,6 +40,29 @@ pub struct BarometerSampleStamped {
     pub sample: BarometerSample,
 }
 
+/// Analog pressure transducer sample in PSI.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PressureTransducerSample {
+    pub pressure_psi: f32,
+}
+
+impl PressureTransducerSample {
+    pub fn pressure_kpa(self) -> f32 {
+        crate::drivers::pressure_transducer::psi_to_kpa(self.pressure_psi)
+    }
+
+    pub fn pressure_pa(self) -> f32 {
+        crate::drivers::pressure_transducer::psi_to_pa(self.pressure_psi)
+    }
+}
+
+/// Pressure transducer sample plus acquisition timestamp.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PressureTransducerSampleStamped {
+    pub timestamp: MeasurementTimestamp,
+    pub sample: PressureTransducerSample,
+}
+
 /// Magnetometer sample in microtesla.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MagnetometerSample {

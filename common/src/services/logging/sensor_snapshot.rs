@@ -13,7 +13,8 @@ use crate::messages::logging::{
 };
 use crate::messages::sensor::{
     BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
-    ImuSampleStamped, MagnetometerSample, MagnetometerSampleStamped,
+    ImuSampleStamped, MagnetometerSample, MagnetometerSampleStamped, PressureTransducerSample,
+    PressureTransducerSampleStamped,
 };
 use crate::services::logging::{LogChannel, TryEnqueueLogError, try_enqueue_line};
 use crate::utilities::time::MeasurementTimestamp;
@@ -44,6 +45,7 @@ pub struct SensorSnapshotSensorConfig {
     pub imu: bool,
     pub aux_imu: bool,
     pub barometer: bool,
+    pub pressure_transducer: bool,
     pub magnetometer: bool,
     pub gps: bool,
 }
@@ -54,6 +56,7 @@ impl Default for SensorSnapshotSensorConfig {
             imu: true,
             aux_imu: false,
             barometer: true,
+            pressure_transducer: false,
             magnetometer: true,
             gps: true,
         }
@@ -113,6 +116,7 @@ pub struct SensorSnapshotLogger {
     imu: SensorSlot<ImuSampleStamped>,
     aux_imu: SensorSlot<ImuSampleStamped>,
     barometer: SensorSlot<BarometerSampleStamped>,
+    pressure_transducer: SensorSlot<PressureTransducerSampleStamped>,
     magnetometer: SensorSlot<MagnetometerSampleStamped>,
     gps: SensorSlot<GpsFixSampleStamped>,
 }
@@ -135,6 +139,7 @@ impl SensorSnapshotLogger {
             imu: SensorSlot::default(),
             aux_imu: SensorSlot::default(),
             barometer: SensorSlot::default(),
+            pressure_transducer: SensorSlot::default(),
             magnetometer: SensorSlot::default(),
             gps: SensorSlot::default(),
         })
@@ -157,6 +162,7 @@ impl SensorSnapshotLogger {
             LoggedSensor::Imu => self.config.sensors.imu,
             LoggedSensor::AuxImu => self.config.sensors.aux_imu,
             LoggedSensor::Barometer => self.config.sensors.barometer,
+            LoggedSensor::PressureTransducer => self.config.sensors.pressure_transducer,
             LoggedSensor::Magnetometer => self.config.sensors.magnetometer,
             LoggedSensor::Gps => self.config.sensors.gps,
         }
@@ -245,6 +251,17 @@ impl SensorSnapshotLogger {
         }
     }
 
+    pub fn drain_pressure_transducer<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
+        &mut self,
+        subscriber: &mut Subscriber<'_, M, PressureTransducerSampleStamped, DEPTH, SUBS, PUBS>,
+    ) where
+        M: RawMutex,
+    {
+        if self.config.sensors.pressure_transducer {
+            drain_subscriber(subscriber, &mut self.pressure_transducer);
+        }
+    }
+
     pub fn drain_magnetometer<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
         &mut self,
         subscriber: &mut Subscriber<'_, M, MagnetometerSampleStamped, DEPTH, SUBS, PUBS>,
@@ -282,6 +299,11 @@ impl SensorSnapshotLogger {
                 self.config.flags.mark_stale_data,
                 |sample| (sample.timestamp, sample.sample),
             ),
+            pressure_transducer: build_field(
+                &self.pressure_transducer,
+                self.config.flags.mark_stale_data,
+                |sample| (sample.timestamp, sample.sample),
+            ),
             magnetometer: build_field(
                 &self.magnetometer,
                 self.config.flags.mark_stale_data,
@@ -297,6 +319,7 @@ impl SensorSnapshotLogger {
         reset_slot_for_next_emit(&mut self.imu);
         reset_slot_for_next_emit(&mut self.aux_imu);
         reset_slot_for_next_emit(&mut self.barometer);
+        reset_slot_for_next_emit(&mut self.pressure_transducer);
         reset_slot_for_next_emit(&mut self.magnetometer);
         reset_slot_for_next_emit(&mut self.gps);
     }
@@ -329,6 +352,14 @@ impl SensorSnapshotLogger {
             write_sensor_header(&mut line, "baro", &self.config.flags)?;
             write!(&mut line, ",baro_pressure_pa,baro_temp_c")
                 .map_err(|_| SensorSnapshotLoggerError::Format)?;
+        }
+        if self.config.sensors.pressure_transducer {
+            write_sensor_header(&mut line, "pressure_transducer", &self.config.flags)?;
+            write!(
+                &mut line,
+                ",pressure_transducer_psi,pressure_transducer_kpa"
+            )
+            .map_err(|_| SensorSnapshotLoggerError::Format)?;
         }
         if self.config.sensors.magnetometer {
             write_sensor_header(&mut line, "mag", &self.config.flags)?;
@@ -368,6 +399,13 @@ impl SensorSnapshotLogger {
         }
         if self.config.sensors.barometer {
             write_barometer_field(&mut line, &snapshot.barometer, &self.config.flags)?;
+        }
+        if self.config.sensors.pressure_transducer {
+            write_pressure_transducer_field(
+                &mut line,
+                &snapshot.pressure_transducer,
+                &self.config.flags,
+            )?;
         }
         if self.config.sensors.magnetometer {
             write_magnetometer_field(&mut line, &snapshot.magnetometer, &self.config.flags)?;
@@ -449,6 +487,7 @@ impl SensorSnapshotLogger {
             LoggedSensor::Imu => &mut self.imu,
             LoggedSensor::AuxImu => &mut self.aux_imu,
             LoggedSensor::Barometer => &mut self.barometer,
+            LoggedSensor::PressureTransducer => &mut self.pressure_transducer,
             LoggedSensor::Magnetometer => &mut self.magnetometer,
             LoggedSensor::Gps => &mut self.gps,
         }
@@ -608,6 +647,19 @@ fn write_barometer_field(
     }
 }
 
+fn write_pressure_transducer_field(
+    line: &mut String<{ crate::interfaces::storage::MAX_LOG_LINE_LEN }>,
+    field: &SensorLogField<PressureTransducerSample>,
+    flags: &SensorSnapshotLogFlags,
+) -> Result<(), SensorSnapshotLoggerError> {
+    write_sensor_preamble(line, field, flags)?;
+    match field.sample {
+        Some(sample) => write!(line, ",{},{}", sample.pressure_psi, sample.pressure_kpa())
+            .map_err(|_| SensorSnapshotLoggerError::Format),
+        None => write!(line, ",,").map_err(|_| SensorSnapshotLoggerError::Format),
+    }
+}
+
 fn write_magnetometer_field(
     line: &mut String<{ crate::interfaces::storage::MAX_LOG_LINE_LEN }>,
     field: &SensorLogField<MagnetometerSample>,
@@ -661,7 +713,7 @@ mod tests {
     use crate::messages::logging::{LogSinkState, LoggedSensor, SensorLogState};
     use crate::messages::sensor::{
         BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
-        ImuSampleStamped,
+        ImuSampleStamped, PressureTransducerSample, PressureTransducerSampleStamped,
     };
     use crate::services::logging::LogChannel;
     use crate::utilities::time::MeasurementTimestamp;
@@ -857,6 +909,7 @@ mod tests {
                     imu: true,
                     aux_imu: false,
                     barometer: false,
+                    pressure_transducer: false,
                     magnetometer: false,
                     gps: false,
                 },
@@ -868,7 +921,48 @@ mod tests {
         let header = logger.format_header_line().unwrap();
         assert!(header.contains("imu_ax_mps2"));
         assert!(!header.contains("baro_pressure_pa"));
+        assert!(!header.contains("pressure_transducer_psi"));
         assert!(!header.contains("gps_lat_deg"));
+    }
+
+    #[test]
+    fn pressure_transducer_section_formats_expected_values() {
+        let pressure_channel =
+            PubSubChannel::<NoopRawMutex, PressureTransducerSampleStamped, 4, 1, 1>::new();
+        let mut pressure_subscriber = pressure_channel.subscriber().unwrap();
+        let mut logger = SensorSnapshotLogger::new(
+            "flight.csv",
+            SensorSnapshotLoggerConfig {
+                emit_header: true,
+                sensors: SensorSnapshotSensorConfig {
+                    imu: false,
+                    aux_imu: false,
+                    barometer: false,
+                    pressure_transducer: true,
+                    magnetometer: false,
+                    gps: false,
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        pressure_channel
+            .immediate_publisher()
+            .publish_immediate(PressureTransducerSampleStamped {
+                timestamp: MeasurementTimestamp::from_micros(42),
+                sample: PressureTransducerSample { pressure_psi: 73.5 },
+            });
+        logger.drain_pressure_transducer(&mut pressure_subscriber);
+
+        let header = logger.format_header_line().unwrap();
+        let line = logger
+            .format_snapshot_line(&logger.snapshot(MeasurementTimestamp::from_micros(100)))
+            .unwrap();
+
+        assert!(header.contains("pressure_transducer_psi"));
+        assert!(header.contains("pressure_transducer_kpa"));
+        assert!(line.contains(",73.5,"));
     }
 
     #[test]

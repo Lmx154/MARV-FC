@@ -1,7 +1,9 @@
 //! Typed runtime logging snapshots and status flags.
 
 use crate::interfaces::storage::LogError;
-use crate::messages::sensor::{BarometerSample, GpsFixSample, ImuSample, MagnetometerSample};
+use crate::messages::sensor::{
+    BarometerSample, GpsFixSample, ImuSample, MagnetometerSample, PressureTransducerSample,
+};
 use crate::utilities::time::MeasurementTimestamp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
@@ -9,6 +11,7 @@ pub enum LoggedSensor {
     Imu,
     AuxImu,
     Barometer,
+    PressureTransducer,
     Magnetometer,
     Gps,
 }
@@ -109,6 +112,7 @@ pub struct SensorLogSnapshot {
     pub imu: SensorLogField<ImuSample>,
     pub aux_imu: SensorLogField<ImuSample>,
     pub barometer: SensorLogField<BarometerSample>,
+    pub pressure_transducer: SensorLogField<PressureTransducerSample>,
     pub magnetometer: SensorLogField<MagnetometerSample>,
     pub gps: SensorLogField<GpsFixSample>,
 }

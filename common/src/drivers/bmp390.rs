@@ -81,6 +81,7 @@ pub enum Error {
     I2c,
     InvalidChipId(u8),
     Timeout,
+    DataNotReady(u8),
 }
 
 /// Async BMP3x driver owning the I2C bus
@@ -333,6 +334,23 @@ where
             }
         }
 
+        self.read_compensated_ready().await
+    }
+
+    /// Read compensated values only when a fresh conversion is already ready.
+    ///
+    /// Callers that schedule the device periodically can use this to avoid
+    /// embedding delay logic inside higher-level source adapters.
+    pub async fn try_read_compensated(&mut self) -> Result<(i32, i32), Error> {
+        let status = self.read_reg(REG_STATUS).await?;
+        if (status & 0x60) != 0x60 {
+            return Err(Error::DataNotReady(status));
+        }
+
+        self.read_compensated_ready().await
+    }
+
+    async fn read_compensated_ready(&mut self) -> Result<(i32, i32), Error> {
         // Burst read 6 bytes: 0x04..0x09 => P[23:0], T[23:0]
         let mut buf = [0u8; DATA_LEN];
         self.read_many(REG_PRESS_DATA, &mut buf).await?;

@@ -2,7 +2,7 @@
 
 use core::future::Future;
 
-use crate::messages::sensor::ImuSample;
+use crate::messages::sensor::{BarometerSample, ImuSample, PressureTransducerSample};
 
 /// Portable IMU source abstraction used by acquisition producers.
 ///
@@ -12,4 +12,22 @@ pub trait ImuSource {
     type Error;
 
     fn read_imu_sample(&mut self) -> impl Future<Output = Result<ImuSample, Self::Error>> + '_;
+}
+
+/// Portable barometer source abstraction used by acquisition producers.
+pub trait BarometerSource {
+    type Error;
+
+    fn read_barometer_sample(
+        &mut self,
+    ) -> impl Future<Output = Result<BarometerSample, Self::Error>> + '_;
+}
+
+/// Portable analog pressure transducer abstraction used by acquisition producers.
+pub trait PressureTransducerSource {
+    type Error;
+
+    fn read_pressure_transducer_sample(
+        &mut self,
+    ) -> impl Future<Output = Result<PressureTransducerSample, Self::Error>> + '_;
 }

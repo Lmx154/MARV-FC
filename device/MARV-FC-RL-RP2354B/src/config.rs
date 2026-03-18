@@ -36,6 +36,7 @@ impl Default for LoggingConfig {
                     imu: true,
                     aux_imu: true,
                     barometer: true,
+                    pressure_transducer: false,
                     magnetometer: true,
                     gps: true,
                 },

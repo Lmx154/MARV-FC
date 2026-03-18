@@ -8,12 +8,17 @@ pub use crate::messages::logging::{
 };
 pub use crate::messages::sensor::{
     BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
-    ImuSampleStamped, MagnetometerSample, MagnetometerSampleStamped,
+    ImuSampleStamped, MagnetometerSample, MagnetometerSampleStamped, PressureTransducerSample,
+    PressureTransducerSampleStamped,
 };
 pub use crate::protocol::packet::{Packet, PacketType};
 pub use crate::services::acquisition::{
-    Bmi088ImuSource, ImuSampleChannel, ImuSamplePublisher, ImuSampleSubscriber,
-    ImuSampleWaitResult, Lsm6dsv32xImuSource, Spi1ImuServiceConfig, Spi1ImuServiceError,
+    BarometerSampleChannel, BarometerSamplePublisher, BarometerSampleSubscriber,
+    BarometerSampleWaitResult, BarometerServiceConfig, Bmi088ImuSource, Bmp388BarometerSource,
+    ImuSampleChannel, ImuSamplePublisher, ImuSampleSubscriber, ImuSampleWaitResult,
+    Lsm6dsv32xImuSource, PressureTransducerSampleChannel, PressureTransducerSamplePublisher,
+    PressureTransducerSampleSubscriber, PressureTransducerSampleWaitResult,
+    PressureTransducerServiceConfig, Spi1ImuServiceConfig, Spi1ImuServiceError,
     Spi1ImuSourceSchedule,
 };
 pub use crate::services::health::{

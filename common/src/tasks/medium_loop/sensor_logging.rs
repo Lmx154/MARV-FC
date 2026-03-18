@@ -7,6 +7,7 @@ use embassy_sync::pubsub::Subscriber;
 use crate::messages::logging::{LogSinkState, LoggedSensor};
 use crate::messages::sensor::{
     BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
+    PressureTransducerSampleStamped,
 };
 use crate::services::logging::{
     LogChannel, SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
@@ -25,6 +26,9 @@ pub async fn run_core0_sensor_logging_task<
     const BARO_DEPTH: usize,
     const BARO_SUBS: usize,
     const BARO_PUBS: usize,
+    const PRESSURE_DEPTH: usize,
+    const PRESSURE_SUBS: usize,
+    const PRESSURE_PUBS: usize,
     const MAG_DEPTH: usize,
     const MAG_SUBS: usize,
     const MAG_PUBS: usize,
@@ -40,6 +44,16 @@ pub async fn run_core0_sensor_logging_task<
     aux_imu: Option<&mut Subscriber<'_, M, ImuSampleStamped, IMU_DEPTH, IMU_SUBS, IMU_PUBS>>,
     barometer: Option<
         &mut Subscriber<'_, M, BarometerSampleStamped, BARO_DEPTH, BARO_SUBS, BARO_PUBS>,
+    >,
+    pressure_transducer: Option<
+        &mut Subscriber<
+            '_,
+            M,
+            PressureTransducerSampleStamped,
+            PRESSURE_DEPTH,
+            PRESSURE_SUBS,
+            PRESSURE_PUBS,
+        >,
     >,
     magnetometer: Option<
         &mut Subscriber<'_, M, MagnetometerSampleStamped, MAG_DEPTH, MAG_SUBS, MAG_PUBS>,
@@ -59,6 +73,7 @@ where
     let mut imu = imu;
     let mut aux_imu = aux_imu;
     let mut barometer = barometer;
+    let mut pressure_transducer = pressure_transducer;
     let mut magnetometer = magnetometer;
     let mut gps = gps;
 
@@ -71,6 +86,9 @@ where
         }
         if let Some(subscriber) = barometer.as_deref_mut() {
             logger.drain_barometer(subscriber);
+        }
+        if let Some(subscriber) = pressure_transducer.as_deref_mut() {
+            logger.drain_pressure_transducer(subscriber);
         }
         if let Some(subscriber) = magnetometer.as_deref_mut() {
             logger.drain_magnetometer(subscriber);

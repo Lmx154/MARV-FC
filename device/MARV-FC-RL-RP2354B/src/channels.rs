@@ -1,7 +1,8 @@
 use common::messages::logging::{LogSinkState, LoggedSensor};
 use common::services::acquisition::{
     BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleChannel, GpsFixSampleSubscriber,
-    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleSubscriber, TimeSampleChannel,
+    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleSubscriber,
+    PressureTransducerSampleSubscriber, TimeSampleChannel,
 };
 use common::services::logging::{LogChannel, LogSinkStateChannel};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -85,6 +86,8 @@ pub type FcHilGpsChannel = GpsFixSampleChannel<
 >;
 pub type DisabledBarometerSubscriber =
     BarometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
+pub type DisabledPressureTransducerSubscriber =
+    PressureTransducerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledMagnetometerSubscriber =
     MagnetometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledGpsSubscriber = GpsFixSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;

@@ -4,6 +4,8 @@
 pub mod bmi088;
 #[path = "../bmm350.rs"]
 pub mod bmm350;
+#[path = "../bmp388.rs"]
+pub mod bmp388;
 #[path = "../bmp390.rs"]
 pub mod bmp390;
 #[path = "../bmp581.rs"]
@@ -12,3 +14,5 @@ pub mod bmp581;
 pub mod lsm6dsv32x;
 #[path = "../neom9n.rs"]
 pub mod neom9n;
+#[path = "../pressure_transducer.rs"]
+pub mod pressure_transducer;

@@ -1,8 +1,5 @@
-use common::protocol::mavlink::DecodeError;
-use common::services::acquisition::MavlinkHilSensorBridge;
-use common::services::telemetry::MavlinkStreamPump;
 use defmt::{info, warn};
-use embassy_executor::Spawner;
+use embassy_executor::{Spawner, task};
 use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::USB;
 use embassy_rp::usb::{Driver, InterruptHandler};
@@ -10,10 +7,8 @@ use embassy_usb::class::cdc_acm::{CdcAcmClass, State};
 use embassy_usb::{Builder, Config, UsbDevice};
 use static_cell::StaticCell;
 
-use crate::channels::{HIL_BAROMETER_CHANNEL, HIL_GPS_CHANNEL, HIL_IMU_CHANNEL, HIL_TIME_CHANNEL};
-
 const USB_PACKET_SIZE: u16 = 64;
-const MAVLINK_STREAM_CAPACITY: usize = 4096;
+const USB_BANNER: &[u8] = b"payload-controller-rp2350\r\n";
 
 type RpUsbDriver = Driver<'static, USB>;
 type RpUsbDevice = UsbDevice<'static, RpUsbDriver>;
@@ -29,20 +24,19 @@ static MSOS_DESCRIPTOR: StaticCell<[u8; 0]> = StaticCell::new();
 static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
 static CDC_ACM_STATE: StaticCell<State<'static>> = StaticCell::new();
 
-#[embassy_executor::task]
+#[task]
 async fn usb_device_task(mut usb: RpUsbDevice) -> ! {
     usb.run().await
 }
 
-#[embassy_executor::task]
-async fn usb_cdc_ingest_task(mut class: RpUsbClass) -> ! {
+#[task]
+async fn usb_cdc_session_task(mut class: RpUsbClass) -> ! {
     let mut packet = [0u8; USB_PACKET_SIZE as usize];
-    let mut stream = MavlinkStreamPump::<MAVLINK_STREAM_CAPACITY>::new();
-    let mut bridge = MavlinkHilSensorBridge::default();
 
     loop {
         class.wait_connection().await;
         info!("usb cdc host connected");
+        let _ = class.write_packet(USB_BANNER).await;
 
         loop {
             let len = match class.read_packet(&mut packet).await {
@@ -53,25 +47,13 @@ async fn usb_cdc_ingest_task(mut class: RpUsbClass) -> ! {
                 }
             };
 
-            stream.ingest_bytes(&packet[..len]);
+            if len == 0 {
+                continue;
+            }
 
-            while let Some(frame) = stream.try_next_frame() {
-                let frame = match frame {
-                    Ok(frame) => frame,
-                    Err(DecodeError::UnsupportedMessage { .. }) => continue,
-                    Err(_) => {
-                        warn!("usb cdc decode error");
-                        continue;
-                    }
-                };
-
-                let _ = bridge.handle_frame(
-                    frame,
-                    &HIL_TIME_CHANNEL,
-                    &HIL_IMU_CHANNEL,
-                    &HIL_BAROMETER_CHANNEL,
-                    &HIL_GPS_CHANNEL,
-                );
+            if class.write_packet(&packet[..len]).await.is_err() {
+                warn!("usb cdc echo failed");
+                break;
             }
         }
     }
@@ -82,8 +64,8 @@ pub fn spawn(spawner: &Spawner, usb: embassy_rp::Peri<'static, USB>) {
 
     let mut config = Config::new(0x1209, 0x0001);
     config.manufacturer = Some("MARV");
-    config.product = Some("MARV FC");
-    config.serial_number = Some("MARV-FC-RP2354B");
+    config.product = Some("Payload Controller");
+    config.serial_number = Some("PAYLOAD-CONTROLLER-RP2350");
     config.max_packet_size_0 = 64;
 
     let mut builder = Builder::new(
@@ -99,5 +81,5 @@ pub fn spawn(spawner: &Spawner, usb: embassy_rp::Peri<'static, USB>) {
     let usb = builder.build();
 
     spawner.spawn(usb_device_task(usb)).unwrap();
-    spawner.spawn(usb_cdc_ingest_task(class)).unwrap();
+    spawner.spawn(usb_cdc_session_task(class)).unwrap();
 }

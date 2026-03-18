@@ -4,7 +4,7 @@ use embassy_sync::pubsub::{ImmediatePublisher, PubSubChannel, Subscriber, WaitRe
 
 use crate::messages::sensor::{
     BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
-    TimeSample,
+    PressureTransducerSampleStamped, TimeSample,
 };
 
 pub type SampleChannel<M, T, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
@@ -35,6 +35,28 @@ pub type BarometerSampleSubscriber<
     const PUBS: usize,
 > = SampleSubscriber<'a, M, BarometerSampleStamped, DEPTH, SUBS, PUBS>;
 pub type BarometerSampleWaitResult = SampleWaitResult<BarometerSampleStamped>;
+
+pub type PressureTransducerSampleChannel<
+    M,
+    const DEPTH: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> = SampleChannel<M, PressureTransducerSampleStamped, DEPTH, SUBS, PUBS>;
+pub type PressureTransducerSamplePublisher<
+    'a,
+    M,
+    const DEPTH: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> = SamplePublisher<'a, M, PressureTransducerSampleStamped, DEPTH, SUBS, PUBS>;
+pub type PressureTransducerSampleSubscriber<
+    'a,
+    M,
+    const DEPTH: usize,
+    const SUBS: usize,
+    const PUBS: usize,
+> = SampleSubscriber<'a, M, PressureTransducerSampleStamped, DEPTH, SUBS, PUBS>;
+pub type PressureTransducerSampleWaitResult = SampleWaitResult<PressureTransducerSampleStamped>;
 
 pub type MagnetometerSampleChannel<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> =
     SampleChannel<M, MagnetometerSampleStamped, DEPTH, SUBS, PUBS>;

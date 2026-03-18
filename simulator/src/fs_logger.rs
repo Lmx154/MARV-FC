@@ -53,6 +53,7 @@ where
                     imu: true,
                     aux_imu: false,
                     barometer: true,
+                    pressure_transducer: false,
                     magnetometer: false,
                     gps: true,
                 },

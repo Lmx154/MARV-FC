@@ -27,8 +27,9 @@ use embassy_time::{Duration, Timer};
 use crate::buses::SensorSpiBus;
 use crate::channels::{
     self, AUX_IMU_CHANNEL, DisabledBarometerSubscriber, DisabledGpsSubscriber,
-    DisabledMagnetometerSubscriber, FcImuSubscriber, FcLogSinkStateReceiver, FcSensorFaultReceiver,
-    IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL, SENSOR_FAULT_CHANNEL,
+    DisabledMagnetometerSubscriber, DisabledPressureTransducerSubscriber, FcImuSubscriber,
+    FcLogSinkStateReceiver, FcSensorFaultReceiver, IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL,
+    LOG_SINK_STATE_CHANNEL, SENSOR_FAULT_CHANNEL,
 };
 use crate::config::{DeviceConfig, STATUS_HEARTBEAT_PERIOD_MS};
 use crate::core1;
@@ -193,6 +194,7 @@ async fn sensor_logging_task(
         imu_subscriber.as_mut(),
         aux_imu_subscriber.as_mut(),
         None::<&mut DisabledBarometerSubscriber>,
+        None::<&mut DisabledPressureTransducerSubscriber>,
         None::<&mut DisabledMagnetometerSubscriber>,
         None::<&mut DisabledGpsSubscriber>,
         sink_state_receiver.as_ref(),
