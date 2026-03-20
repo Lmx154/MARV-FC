@@ -14,6 +14,8 @@ use crate::utils::delay::DelayMs;
 // I2C addresses
 pub const BMP388_ADDR_SDO_LOW: u8 = 0x76;
 pub const BMP388_ADDR_SDO_HIGH: u8 = 0x77;
+pub const BMP390_ADDR_SDO_LOW: u8 = BMP388_ADDR_SDO_LOW;
+pub const BMP390_ADDR_SDO_HIGH: u8 = BMP388_ADDR_SDO_HIGH;
 pub const BMP3X_ADDR_SDO_LOW: u8 = BMP388_ADDR_SDO_LOW;
 pub const BMP3X_ADDR_SDO_HIGH: u8 = BMP388_ADDR_SDO_HIGH;
 
@@ -50,6 +52,9 @@ const IIR_FILTER_OFF: u8 = 0x00;
 
 const CALIB_DATA_LEN: usize = 21;
 const DATA_LEN: usize = 6;
+
+pub const BMP390_REG_CHIP_ID: u8 = REG_CHIP_ID;
+pub const BMP390_CHIP_ID: u8 = CHIP_ID_390;
 
 macro_rules! bmp_dbg {
 	($s:expr, $($arg:tt)*) => {
@@ -414,3 +419,13 @@ where
 
 // BMP3x alias type for external naming if preferred
 pub type Bmp3x<I2C> = Bmp390<I2C>;
+
+pub async fn read_bmp390_chip_id<I2C>(i2c: &mut I2C, address: u8) -> Result<u8, I2C::Error>
+where
+    I2C: I2c,
+{
+    let mut buf = [0u8; 1];
+    i2c.write_read(address, &[BMP390_REG_CHIP_ID], &mut buf)
+        .await?;
+    Ok(buf[0])
+}

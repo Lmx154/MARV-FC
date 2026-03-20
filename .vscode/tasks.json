@@ -94,6 +94,50 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Build RECOVERY-ALTIMETER-RP2350",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RECOVERY-ALTIMETER-RP2350"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash RECOVERY-ALTIMETER-RP2350",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RECOVERY-ALTIMETER-RP2350",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach RECOVERY-ALTIMETER-RP2350",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/recovery-altimeter-rp2350"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RECOVERY-ALTIMETER-RP2350",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Build RP2354B-CROSSCORE-TESTS",
 			"type": "shell",
 			"command": "cargo",

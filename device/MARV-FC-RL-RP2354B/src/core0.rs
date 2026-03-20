@@ -9,10 +9,7 @@ use common::drivers::lsm6dsv32x::{
 use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
 use common::messages::logging::LoggedSensor;
-use common::services::acquisition::{
-    Bmi088ImuSource, Lsm6dsv32xImuSource, Spi1ImuServiceConfig, Spi1ImuServiceError,
-    Spi1ImuSourceSchedule, run_spi1_imu_service,
-};
+use common::services::acquisition::{Bmi088ImuSource, Lsm6dsv32xImuSource};
 use common::services::logging::SensorSnapshotLogger;
 use common::tasks::background::sd_logging::run_sd_logging_task;
 use common::tasks::medium_loop::run_core0_sensor_logging_task;
@@ -36,6 +33,9 @@ use crate::core1;
 use crate::pinmap;
 use crate::resources::{DeviceResources, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
+use crate::spi1_sensor_cluster::{
+    ImuSchedule, SensorSpiClusterConfig, SensorSpiClusterError, run_spi1_sensor_cluster,
+};
 use crate::storage;
 use crate::usb_cdc;
 use crate::watchdog;
@@ -83,10 +83,10 @@ fn try_report_sensor_fault(sensor: LoggedSensor) {
 }
 
 #[embassy_executor::task]
-async fn spi1_imu_service_task(
+async fn spi1_sensor_cluster_task(
     pins: SensorPins,
     bus: SensorSpiBus,
-    config: Spi1ImuServiceConfig,
+    config: SensorSpiClusterConfig,
 ) -> ! {
     let mut spi_config = SpiConfig::default();
     spi_config.frequency = SENSOR_SPI_FREQUENCY_HZ;
@@ -147,29 +147,29 @@ async fn spi1_imu_service_task(
     });
 
     if !bmi088_ready {
-        warn!("BMI088 will remain unpublished until SPI1 service retry logic is added");
+        warn!("BMI088 will remain unpublished until SPI1 sensor-cluster retry logic is added");
     }
     if !lsm6dsv32x_ready {
-        warn!("LSM6DSV32X will remain unpublished until SPI1 service retry logic is added");
+        warn!("LSM6DSV32X will remain unpublished until SPI1 sensor-cluster retry logic is added");
     }
 
-    run_spi1_imu_service(
+    run_spi1_sensor_cluster(
         &IMU_CHANNEL,
         &mut bmi088_source,
         &AUX_IMU_CHANNEL,
         &mut lsm6dsv32x_source,
         &clock,
         &mut delay,
-        Spi1ImuServiceConfig {
-            primary: Spi1ImuSourceSchedule::new(bmi088_ready, config.primary.period_ms),
-            auxiliary: Spi1ImuSourceSchedule::new(lsm6dsv32x_ready, config.auxiliary.period_ms),
+        SensorSpiClusterConfig {
+            primary_imu: ImuSchedule::new(bmi088_ready, config.primary_imu.period_ms),
+            auxiliary_imu: ImuSchedule::new(lsm6dsv32x_ready, config.auxiliary_imu.period_ms),
         },
         |error| match error {
-            Spi1ImuServiceError::Primary(error) => {
+            SensorSpiClusterError::PrimaryImu(error) => {
                 warn!("BMI088 acquisition error: {:?}", error);
                 try_report_sensor_fault(LoggedSensor::Imu);
             }
-            Spi1ImuServiceError::Auxiliary(error) => {
+            SensorSpiClusterError::AuxiliaryImu(error) => {
                 warn!("LSM6DSV32X acquisition error: {:?}", error);
                 try_report_sensor_fault(LoggedSensor::AuxImu);
             }
@@ -244,12 +244,16 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     usb_cdc::spawn(&spawner, usb);
 
     let imu_period_ms = imu_period_ms(config.fast_loop_hz);
-    let imu_config = Spi1ImuServiceConfig {
-        primary: Spi1ImuSourceSchedule::new(true, imu_period_ms),
-        auxiliary: Spi1ImuSourceSchedule::new(true, imu_period_ms),
+    let imu_config = SensorSpiClusterConfig {
+        primary_imu: ImuSchedule::new(true, imu_period_ms),
+        auxiliary_imu: ImuSchedule::new(true, imu_period_ms),
     };
     time_sensitive_spawner
-        .spawn(spi1_imu_service_task(sensor_pins, sensor_bus, imu_config))
+        .spawn(spi1_sensor_cluster_task(
+            sensor_pins,
+            sensor_bus,
+            imu_config,
+        ))
         .unwrap();
     let imu_init = IMU_INIT_SIGNAL.wait().await;
 

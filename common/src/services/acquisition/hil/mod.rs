@@ -11,7 +11,7 @@ use crate::protocol::mavlink::{
 };
 use crate::utilities::time::MeasurementTimestamp;
 
-use super::sample_channels::{
+use super::channels::{
     BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, TimeSampleChannel,
 };
 

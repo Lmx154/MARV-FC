@@ -7,7 +7,7 @@ use crate::interfaces::timing::MonotonicClock;
 use crate::messages::sensor::PressureTransducerSampleStamped;
 use crate::utils::delay::DelayMs;
 
-use super::sample_channels::PressureTransducerSampleChannel;
+use super::channels::PressureTransducerSampleChannel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PressureTransducerServiceConfig {

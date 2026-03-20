@@ -1,5 +1,5 @@
 [package]
-name = "marv-fc-rl-rp2354b"
+name = "recovery-altimeter-rp2350"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -9,24 +9,23 @@ build = "build.rs"
 common = { path = "../../common" }
 cortex-m-rt = "0.7.0"
 embassy-sync = "0.7.2"
-embassy-executor = { version = "0.9.0", features = ["arch-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
-embassy-rp = { version = "0.8.0", features = ["defmt", "time-driver", "critical-section-impl", "rp235xb", "binary-info", "imagedef-none"] }
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
+embassy-executor = { version = "0.9.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+embassy-rp = { version = "0.8.0", features = ["defmt", "time-driver", "critical-section-impl", "rp235xa", "binary-info", "imagedef-none"] }
 embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-usb = "0.5.1"
 embedded-hal = "1.0"
 embedded-hal-async = "1.0"
 embedded-hal-bus = "0.2"
 embedded-sdmmc = { version = "0.7.0", default-features = false, features = ["defmt-log"] }
+heapless = { version = "0.8", features = ["defmt-03"] }
 static_cell = "2.1.1"
 
 defmt = "1.0.1"
 defmt-rtt = "1.0.0"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 
-[dev-dependencies]
-futures = { version = "0.3", default-features = false, features = ["std", "executor"] }
-
 [package.metadata.embassy]
 build = [
-  { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/marv-fc-rl-rp2354b" }
+  { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/recovery-altimeter-rp2350" }
 ]

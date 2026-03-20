@@ -15,11 +15,10 @@ pub use crate::protocol::packet::{Packet, PacketType};
 pub use crate::services::acquisition::{
     BarometerSampleChannel, BarometerSamplePublisher, BarometerSampleSubscriber,
     BarometerSampleWaitResult, BarometerServiceConfig, Bmi088ImuSource, Bmp388BarometerSource,
-    ImuSampleChannel, ImuSamplePublisher, ImuSampleSubscriber, ImuSampleWaitResult,
-    Lsm6dsv32xImuSource, PressureTransducerSampleChannel, PressureTransducerSamplePublisher,
-    PressureTransducerSampleSubscriber, PressureTransducerSampleWaitResult,
-    PressureTransducerServiceConfig, Spi1ImuServiceConfig, Spi1ImuServiceError,
-    Spi1ImuSourceSchedule,
+    Bmp390BarometerSource, ImuSampleChannel, ImuSamplePublisher, ImuSampleSubscriber,
+    ImuSampleWaitResult, Lsm6dsv32xImuSource, Mpu6050ImuSource, PressureTransducerSampleChannel,
+    PressureTransducerSamplePublisher, PressureTransducerSampleSubscriber,
+    PressureTransducerSampleWaitResult, PressureTransducerServiceConfig,
 };
 pub use crate::services::health::{
     DeadlineWindow, FaultAggregation, FeedDecision, LivenessClass, LivenessEvidence,

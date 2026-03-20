@@ -12,6 +12,8 @@ pub mod bmp390;
 pub mod bmp581;
 #[path = "../lsm6dsv32x.rs"]
 pub mod lsm6dsv32x;
+#[path = "../mpu6050.rs"]
+pub mod mpu6050;
 #[path = "../neom9n.rs"]
 pub mod neom9n;
 #[path = "../pressure_transducer.rs"]

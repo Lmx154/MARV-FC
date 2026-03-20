@@ -421,6 +421,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "554e3e840696f54b4c9afcf28a0f24da431c927f4151040020416e7393d6d0d8"
 dependencies = [
+ "defmt 1.0.1",
  "embassy-futures",
  "embassy-hal-internal",
  "embassy-sync",
@@ -1101,6 +1102,7 @@ dependencies = [
  "embedded-hal-async",
  "embedded-hal-bus",
  "embedded-sdmmc",
+ "futures",
  "panic-probe",
  "static_cell",
 ]
@@ -1440,6 +1442,29 @@ name = "rand_core"
 version = "0.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
+
+[[package]]
+name = "recovery-altimeter-rp2350"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "cortex-m-rt",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-embedded-hal",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-sdmmc",
+ "heapless 0.8.0",
+ "panic-probe",
+ "static_cell",
+]
 
 [[package]]
 name = "redox_syscall"

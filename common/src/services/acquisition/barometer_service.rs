@@ -7,7 +7,7 @@ use crate::interfaces::timing::MonotonicClock;
 use crate::messages::sensor::BarometerSampleStamped;
 use crate::utils::delay::DelayMs;
 
-use super::sample_channels::BarometerSampleChannel;
+use super::channels::BarometerSampleChannel;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BarometerServiceConfig {

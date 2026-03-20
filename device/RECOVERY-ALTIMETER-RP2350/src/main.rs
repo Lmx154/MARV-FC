@@ -7,14 +7,10 @@ mod clocks;
 mod config;
 mod core0;
 mod core1;
-mod interrupts;
 mod pinmap;
 mod resources;
-mod sensor_spi;
-mod spi1_sensor_cluster;
 mod storage;
 mod usb_cdc;
-mod watchdog;
 
 use embassy_executor::Spawner;
 use embassy_rp::block::ImageDef;
