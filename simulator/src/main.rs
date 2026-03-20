@@ -5,18 +5,18 @@ mod tx_actuator;
 
 use std::error::Error;
 use std::time::Duration;
-use std::time::Instant;
 
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 
+use common::protocol::mavlink::{DecodeError, MavlinkHilMessagePump};
 use common::services::acquisition::{
-    BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, MavlinkHilSensorBridge,
-    TimeSampleChannel,
+    BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, TimeSampleChannel,
 };
-use common::services::telemetry::MavlinkStreamPump;
+use common::services::hil::{
+    HilByteReader, HilIngressLoopError, HilIngressRoutes, HilRuntime, run_hil_ingress_loop,
+};
 use config::Config;
 use fs_logger::FsLogger;
-use mavlink::DecodeError;
 use tokio::net::UdpSocket;
 use tokio::time::timeout;
 
@@ -50,73 +50,91 @@ static GPS_CHANNEL: GpsFixSampleChannel<
     CHANNEL_PUBLISHERS,
 > = GpsFixSampleChannel::new();
 
+enum UdpReadError {
+    Io(std::io::Error),
+    Timeout,
+}
+
+struct UdpHilReader {
+    socket: UdpSocket,
+    timeout: Duration,
+}
+
+impl HilByteReader for UdpHilReader {
+    type Error = UdpReadError;
+
+    async fn read(&mut self, buffer: &mut [u8]) -> Result<usize, Self::Error> {
+        match timeout(self.timeout, self.socket.recv_from(buffer)).await {
+            Ok(Ok((len, _peer))) => Ok(len),
+            Ok(Err(error)) => Err(UdpReadError::Io(error)),
+            Err(_) => Err(UdpReadError::Timeout),
+        }
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn Error>> {
     let config = Config::from_env().map_err(std::io::Error::other)?;
-    let rx_socket = UdpSocket::bind(config.bind_addr).await?;
+    let reader_timeout = Duration::from_millis(config.tick_timeout_ms);
+    let mut reader = UdpHilReader {
+        socket: UdpSocket::bind(config.bind_addr).await?,
+        timeout: reader_timeout,
+    };
     let mut logger = FsLogger::new(
         &config.log_dir,
         &IMU_CHANNEL,
         &BAROMETER_CHANNEL,
         &GPS_CHANNEL,
     )?;
-    let mut bridge = MavlinkHilSensorBridge::default();
-    let mut stream = MavlinkStreamPump::<RX_BUFFER_LIMIT>::new();
-    let tick_timeout = Duration::from_millis(config.tick_timeout_ms);
+    let routes = HilIngressRoutes::new(
+        &TIME_CHANNEL,
+        &IMU_CHANNEL,
+        &BAROMETER_CHANNEL,
+        &GPS_CHANNEL,
+        &(),
+    );
+    let mut protocol = MavlinkHilMessagePump::<RX_BUFFER_LIMIT>::new();
+    let mut runtime = HilRuntime::new();
     let mut receive_buffer = [0u8; 512];
-    let mut last_tick_at = Instant::now();
     let mut timeout_reported = false;
 
     println!("FC SITL RX listening on {}", config.bind_addr);
 
     loop {
-        match timeout(tick_timeout, rx_socket.recv_from(&mut receive_buffer)).await {
-            Ok(Ok((len, _peer))) => {
-                stream.ingest_bytes(&receive_buffer[..len]);
-
-                while let Some(frame) = stream.try_next_frame() {
-                    let frame = match frame {
-                        Ok(frame) => frame,
-                        Err(DecodeError::UnsupportedMessage { .. }) => continue,
-                        Err(error) => {
-                            eprintln!("rx decode error: {error}");
-                            continue;
-                        }
-                    };
-
-                    let dispatch = bridge.handle_frame(
-                        frame,
-                        &TIME_CHANNEL,
-                        &IMU_CHANNEL,
-                        &BAROMETER_CHANNEL,
-                        &GPS_CHANNEL,
-                    );
-
-                    if let Some(tick) = dispatch.tick {
-                        logger.log_tick(tick)?;
-                        println!("tick={}", tick.time_boot_ms);
-                        last_tick_at = Instant::now();
-                        timeout_reported = false;
-                    }
+        match run_hil_ingress_loop(
+            &mut reader,
+            &mut protocol,
+            &mut runtime,
+            &routes,
+            &mut receive_buffer,
+            |dispatch| {
+                if let Some(tick) = dispatch.tick {
+                    logger.log_tick(tick)?;
+                    println!("tick={}", tick.time_boot_ms);
+                    timeout_reported = false;
                 }
-
-                if !timeout_reported && last_tick_at.elapsed() >= tick_timeout {
-                    eprintln!(
-                        "rx timeout: no SYSTEM_TIME within {} ms",
-                        config.tick_timeout_ms
-                    );
-                    timeout_reported = true;
-                }
+                Ok::<(), fs_logger::FsLoggerError>(())
+            },
+            |error| match error {
+                DecodeError::UnsupportedMessage { .. } => {}
+                error => eprintln!("rx decode error: {error}"),
+            },
+        )
+        .await
+        {
+            Err(HilIngressLoopError::Transport(UdpReadError::Io(error))) => {
+                return Err(Box::new(error) as Box<dyn Error>);
             }
-            Ok(Err(error)) => return Err(Box::new(error) as Box<dyn Error>),
-            Err(_) if !timeout_reported => {
+            Err(HilIngressLoopError::Transport(UdpReadError::Timeout)) if !timeout_reported => {
                 eprintln!(
                     "rx timeout: no SYSTEM_TIME within {} ms",
                     config.tick_timeout_ms
                 );
                 timeout_reported = true;
             }
-            Err(_) => {}
+            Err(HilIngressLoopError::Transport(UdpReadError::Timeout)) => {}
+            Err(HilIngressLoopError::Dispatch(error)) => return Err(Box::new(error)),
+            Ok(()) => unreachable!(),
         }
     }
 

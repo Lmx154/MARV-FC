@@ -2,8 +2,7 @@ use common::drivers::bmp390::{
     BMP390_ADDR_SDO_HIGH, BMP390_ADDR_SDO_LOW, BMP390_CHIP_ID, Bmp390, read_bmp390_chip_id,
 };
 use common::drivers::mpu6050::{
-    MPU6050_ADDR_AD0_HIGH, MPU6050_ADDR_AD0_LOW, MPU6050_CHIP_ID, Mpu6050,
-    read_mpu6050_chip_id,
+    MPU6050_ADDR_AD0_HIGH, MPU6050_ADDR_AD0_LOW, MPU6050_CHIP_ID, Mpu6050, read_mpu6050_chip_id,
 };
 use common::interfaces::sensors::{BarometerSource, ImuSource};
 use common::interfaces::storage::LoggerEngine;
@@ -153,10 +152,8 @@ async fn try_init_bmp390_source<'a>(
         probe_bmp390_address(&mut probe_bus, config.address).await
     }?;
 
-    let mut source = Bmp390BarometerSource::new(Bmp390::new(
-        I2cDevice::new(shared_bus),
-        detected_address,
-    ));
+    let mut source =
+        Bmp390BarometerSource::new(Bmp390::new(I2cDevice::new(shared_bus), detected_address));
     let mut delay = EmbassyDelay;
 
     match source.driver_mut().init(&mut delay).await {
@@ -278,7 +275,8 @@ async fn recovery_i2c_sensor_task(
                     Err(error) => warn!("BMP390 acquisition error: {:?}", error),
                 }
 
-                next_barometer_action = deadline_after_ms(measurement_now(), bmp390_config.period_ms);
+                next_barometer_action =
+                    deadline_after_ms(measurement_now(), bmp390_config.period_ms);
             } else {
                 barometer_source = try_init_bmp390_source(shared_bus, bmp390_config).await;
 
@@ -319,9 +317,7 @@ async fn recovery_i2c_sensor_task(
                 imu_source = try_init_mpu6050_source(shared_bus, mpu6050_config).await;
 
                 if imu_source.is_none() {
-                    warn!(
-                        "MPU6050 not detected on 0x68/0x69; verify AD0 strap and device power"
-                    );
+                    warn!("MPU6050 not detected on 0x68/0x69; verify AD0 strap and device power");
                 }
 
                 next_imu_action = deadline_after_ms(

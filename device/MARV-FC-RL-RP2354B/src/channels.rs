@@ -1,12 +1,13 @@
+use common::messages::control::RgbLedCommand;
 use common::messages::logging::{LogSinkState, LoggedSensor};
 use common::services::acquisition::{
     BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleChannel, GpsFixSampleSubscriber,
     ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleSubscriber,
-    PressureTransducerSampleSubscriber, TimeSampleChannel,
+    PressureTransducerSampleSubscriber, TimeSampleChannel, TimeSampleSubscriber,
 };
 use common::services::logging::{LogChannel, LogSinkStateChannel};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Receiver;
+use embassy_sync::channel::{Receiver, Sender};
 use embassy_sync::signal::Signal;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -15,6 +16,7 @@ pub enum ChannelId {
     EnvironmentalSample,
     AuxiliaryNavigationSample,
     LoggingRecord,
+    MissionCommand,
     SensorFault,
     FcRadioTraffic,
     CompanionTraffic,
@@ -36,12 +38,13 @@ pub struct ImuInitReport {
 pub const IMU_CHANNEL_DEPTH: usize = 16;
 pub const IMU_CHANNEL_SUBS: usize = 2;
 pub const IMU_CHANNEL_PUBS: usize = 1;
-pub const HIL_CHANNEL_DEPTH: usize = 16;
-pub const HIL_CHANNEL_SUBS: usize = 2;
-pub const HIL_CHANNEL_PUBS: usize = 1;
+pub const SENSOR_CHANNEL_DEPTH: usize = 16;
+pub const SENSOR_CHANNEL_SUBS: usize = 2;
+pub const SENSOR_CHANNEL_PUBS: usize = 1;
 pub const LOG_CHANNEL_DEPTH: usize = 32;
 pub const LOG_SINK_STATE_DEPTH: usize = 4;
 pub const SENSOR_FAULT_DEPTH: usize = 8;
+pub const RGB_LED_COMMAND_DEPTH: usize = 4;
 
 pub type FcImuChannel = ImuSampleChannel<
     CriticalSectionRawMutex,
@@ -60,49 +63,69 @@ pub type FcLogSinkStateReceiver =
     Receiver<'static, CriticalSectionRawMutex, LogSinkState, LOG_SINK_STATE_DEPTH>;
 pub type FcSensorFaultReceiver =
     Receiver<'static, CriticalSectionRawMutex, LoggedSensor, SENSOR_FAULT_DEPTH>;
-pub type FcHilTimeChannel = TimeSampleChannel<
+pub type FcRgbLedCommandReceiver =
+    Receiver<'static, CriticalSectionRawMutex, RgbLedCommand, RGB_LED_COMMAND_DEPTH>;
+pub type FcRgbLedCommandSender =
+    Sender<'static, CriticalSectionRawMutex, RgbLedCommand, RGB_LED_COMMAND_DEPTH>;
+pub type FcTimeChannel = TimeSampleChannel<
     CriticalSectionRawMutex,
-    HIL_CHANNEL_DEPTH,
-    HIL_CHANNEL_SUBS,
-    HIL_CHANNEL_PUBS,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
 >;
-pub type FcHilImuChannel = ImuSampleChannel<
+pub type FcTimeSubscriber = TimeSampleSubscriber<
+    'static,
     CriticalSectionRawMutex,
-    HIL_CHANNEL_DEPTH,
-    HIL_CHANNEL_SUBS,
-    HIL_CHANNEL_PUBS,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
 >;
-pub type FcHilBarometerChannel = BarometerSampleChannel<
+pub type FcBarometerChannel = BarometerSampleChannel<
     CriticalSectionRawMutex,
-    HIL_CHANNEL_DEPTH,
-    HIL_CHANNEL_SUBS,
-    HIL_CHANNEL_PUBS,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
 >;
-pub type FcHilGpsChannel = GpsFixSampleChannel<
+pub type FcBarometerSubscriber = BarometerSampleSubscriber<
+    'static,
     CriticalSectionRawMutex,
-    HIL_CHANNEL_DEPTH,
-    HIL_CHANNEL_SUBS,
-    HIL_CHANNEL_PUBS,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
 >;
-pub type DisabledBarometerSubscriber =
-    BarometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
+pub type FcGpsChannel = GpsFixSampleChannel<
+    CriticalSectionRawMutex,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
+>;
+pub type FcGpsSubscriber = GpsFixSampleSubscriber<
+    'static,
+    CriticalSectionRawMutex,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
+>;
 pub type DisabledPressureTransducerSubscriber =
     PressureTransducerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledMagnetometerSubscriber =
     MagnetometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
-pub type DisabledGpsSubscriber = GpsFixSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 
 pub static IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
 pub static AUX_IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
-pub static HIL_TIME_CHANNEL: FcHilTimeChannel = FcHilTimeChannel::new();
-pub static HIL_IMU_CHANNEL: FcHilImuChannel = FcHilImuChannel::new();
-pub static HIL_BAROMETER_CHANNEL: FcHilBarometerChannel = FcHilBarometerChannel::new();
-pub static HIL_GPS_CHANNEL: FcHilGpsChannel = FcHilGpsChannel::new();
+pub static TIME_CHANNEL: FcTimeChannel = FcTimeChannel::new();
+pub static BAROMETER_CHANNEL: FcBarometerChannel = FcBarometerChannel::new();
+pub static GPS_CHANNEL: FcGpsChannel = FcGpsChannel::new();
 pub static LOG_CHANNEL: LogChannel<CriticalSectionRawMutex, LOG_CHANNEL_DEPTH> = LogChannel::new();
 pub static LOG_SINK_STATE_CHANNEL: LogSinkStateChannel<
     CriticalSectionRawMutex,
     LOG_SINK_STATE_DEPTH,
 > = LogSinkStateChannel::new();
+pub static RGB_LED_COMMAND_CHANNEL: embassy_sync::channel::Channel<
+    CriticalSectionRawMutex,
+    RgbLedCommand,
+    RGB_LED_COMMAND_DEPTH,
+> = embassy_sync::channel::Channel::new();
 pub static SENSOR_FAULT_CHANNEL: embassy_sync::channel::Channel<
     CriticalSectionRawMutex,
     LoggedSensor,
@@ -115,6 +138,7 @@ const CORE0_LOCAL: &[ChannelId] = &[
     ChannelId::EnvironmentalSample,
     ChannelId::AuxiliaryNavigationSample,
     ChannelId::LoggingRecord,
+    ChannelId::MissionCommand,
     ChannelId::SensorFault,
     ChannelId::WatchdogStatus,
 ];

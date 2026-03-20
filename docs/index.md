@@ -142,6 +142,7 @@ Current migration note:
 8. [`08-watchdog-architecture-and-liveness-supervision.md`](./08-watchdog-architecture-and-liveness-supervision.md)
 9. [`09-target-guidance-and-milestones.md`](./09-target-guidance-and-milestones.md)
 10. [`10-architecture-and-abstractions-visualization.md`](./10-architecture-and-abstractions-visualization.md)
+11. [`11-hil-framework-plan.md`](./11-hil-framework-plan.md)
 
 ## Reading Order
 
@@ -157,6 +158,7 @@ Recommended order:
 8. Watchdog architecture and liveness supervision
 9. Target-specific guidance and milestones
 10. Architecture and abstractions visualization
+11. HIL framework plan
 
 ## Intended Use
 

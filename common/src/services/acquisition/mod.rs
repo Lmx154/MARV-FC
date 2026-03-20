@@ -23,6 +23,6 @@ pub use pressure_transducer_service::{
     PressureTransducerServiceConfig, run_pressure_transducer_service,
 };
 pub use sources::{
-    Bmi088ImuSource, Bmp388BarometerSource, Bmp390BarometerSource, Lsm6dsv32xImuSource,
-    Mpu6050ImuSource,
+    Bmi088ImuSource, Bmp388BarometerSource, Bmp390BarometerSource, Bmp581BarometerSource,
+    Lsm6dsv32xImuSource, Mpu6050ImuSource,
 };

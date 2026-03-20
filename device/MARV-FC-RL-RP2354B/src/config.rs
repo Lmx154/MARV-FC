@@ -1,5 +1,9 @@
 #![allow(dead_code)]
 
+use common::drivers::bmp581::{BMP581_ADDR_PRIMARY, Bmp581Config};
+use common::messages::control::RgbLedCommand;
+use common::policies::mission::BarometerRgbLedMissionConfig;
+use common::services::hil::SensorBackend;
 use common::services::logging::{
     SensorSnapshotLogFlags, SensorSnapshotLoggerConfig, SensorSnapshotSensorConfig,
 };
@@ -12,6 +16,9 @@ pub const LOG_FILE_PREFIX: &str = "FLGT";
 pub const LOG_RECORD_PERIOD_MS: u32 = 10;
 pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 12_000_000;
 pub const LOG_SD_FLUSH_EVERY_LINES: usize = 64;
+pub const SENSOR_BACKEND: SensorBackend = SensorBackend::Hil;
+pub const BMP581_I2C_FREQUENCY_HZ: u32 = 400_000;
+pub const BMP581_PERIOD_MS: u32 = 20;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LoggingConfig {
@@ -54,15 +61,74 @@ impl Default for LoggingConfig {
 
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceConfig {
+    pub bmp581: Bmp581RuntimeConfig,
+    pub mission: MissionConfig,
+    pub sensor_backend: SensorBackend,
     pub fast_loop_hz: u32,
     pub watchdog_timeout_ms: u32,
     pub status_heartbeat_period_ms: u64,
     pub logging: LoggingConfig,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Bmp581RuntimeConfig {
+    pub enabled: bool,
+    pub address: u8,
+    pub i2c_frequency_hz: u32,
+    pub period_ms: u32,
+    pub driver_config: Bmp581Config,
+}
+
+impl Default for Bmp581RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            address: BMP581_ADDR_PRIMARY,
+            i2c_frequency_hz: BMP581_I2C_FREQUENCY_HZ,
+            period_ms: BMP581_PERIOD_MS,
+            driver_config: Bmp581Config::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MissionConfig {
+    pub altitude_led_latch: AltitudeLedLatchMissionConfig,
+}
+
+impl Default for MissionConfig {
+    fn default() -> Self {
+        Self {
+            altitude_led_latch: AltitudeLedLatchMissionConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct AltitudeLedLatchMissionConfig {
+    pub enabled: bool,
+    pub mission: BarometerRgbLedMissionConfig,
+}
+
+impl Default for AltitudeLedLatchMissionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mission: BarometerRgbLedMissionConfig::new(
+                5_000.0,
+                common::utilities::units::STANDARD_SEA_LEVEL_PRESSURE_PA,
+                RgbLedCommand::new(24, 24, 24),
+            ),
+        }
+    }
+}
+
 impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
+            bmp581: Bmp581RuntimeConfig::default(),
+            mission: MissionConfig::default(),
+            sensor_backend: SENSOR_BACKEND,
             fast_loop_hz: FAST_LOOP_HZ,
             watchdog_timeout_ms: WATCHDOG_TIMEOUT_MS,
             status_heartbeat_period_ms: STATUS_HEARTBEAT_PERIOD_MS,

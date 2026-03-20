@@ -1,34 +1,19 @@
-//! Portable bridge from MAVLink HIL messages into shared sample channels.
+//! Compatibility shim while HIL migrates from acquisition into the shared HIL framework.
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use heapless::Vec;
 
-use crate::messages::sensor::{
-    BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
-    ImuSampleStamped, TimeSample,
-};
-use crate::protocol::mavlink::{
-    DecodedMessage, HilGpsMessage, HilSensorMessage, MavlinkFrame, SystemTimeMessage,
-};
-use crate::utilities::time::MeasurementTimestamp;
-
-use super::channels::{
+use crate::protocol::mavlink::{MavlinkFrame, frame_to_hil_messages};
+use crate::services::acquisition::{
     BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, TimeSampleChannel,
 };
+use crate::services::hil::{HilIngressRoutes, HilRuntime};
 
-const IMU_UPDATED_MASK: u32 = 0x003F;
-const BARO_UPDATED_MASK: u32 = 0x1A00;
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct HilMavlinkDispatch {
-    pub tick: Option<TimeSample>,
-    pub imu_published: bool,
-    pub barometer_published: bool,
-    pub gps_published: bool,
-}
+pub type HilMavlinkDispatch = crate::services::hil::HilDispatch;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MavlinkHilSensorBridge {
-    last_time_boot_ms: Option<u32>,
+    runtime: HilRuntime,
 }
 
 impl MavlinkHilSensorBridge {
@@ -57,124 +42,21 @@ impl MavlinkHilSensorBridge {
     where
         M: RawMutex,
     {
-        match frame.message {
-            DecodedMessage::SystemTime(message) => self.handle_system_time(message, time_channel),
-            DecodedMessage::HilSensor(message) => {
-                self.handle_hil_sensor(message, imu_channel, barometer_channel)
-            }
-            DecodedMessage::HilGps(message) => self.handle_hil_gps(message, gps_channel),
-        }
-    }
+        let routes = HilIngressRoutes::new(
+            time_channel,
+            imu_channel,
+            barometer_channel,
+            gps_channel,
+            &(),
+        );
+        let mut messages = Vec::<_, 4>::new();
+        frame_to_hil_messages(frame, &mut messages);
 
-    fn handle_system_time<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
-        &mut self,
-        message: SystemTimeMessage,
-        channel: &TimeSampleChannel<M, DEPTH, SUBS, PUBS>,
-    ) -> HilMavlinkDispatch
-    where
-        M: RawMutex,
-    {
-        if self
-            .last_time_boot_ms
-            .is_some_and(|previous| message.time_boot_ms <= previous)
-        {
-            return HilMavlinkDispatch::default();
-        }
-
-        self.last_time_boot_ms = Some(message.time_boot_ms);
-        let tick = TimeSample {
-            timestamp: MeasurementTimestamp::from_micros(u64::from(message.time_boot_ms) * 1_000),
-            time_boot_ms: message.time_boot_ms,
-        };
-        channel.immediate_publisher().publish_immediate(tick);
-        HilMavlinkDispatch {
-            tick: Some(tick),
-            ..Default::default()
-        }
-    }
-
-    fn handle_hil_sensor<
-        M,
-        const IMU_DEPTH: usize,
-        const IMU_SUBS: usize,
-        const IMU_PUBS: usize,
-        const BARO_DEPTH: usize,
-        const BARO_SUBS: usize,
-        const BARO_PUBS: usize,
-    >(
-        &mut self,
-        message: HilSensorMessage,
-        imu_channel: &ImuSampleChannel<M, IMU_DEPTH, IMU_SUBS, IMU_PUBS>,
-        barometer_channel: &BarometerSampleChannel<M, BARO_DEPTH, BARO_SUBS, BARO_PUBS>,
-    ) -> HilMavlinkDispatch
-    where
-        M: RawMutex,
-    {
-        let timestamp = MeasurementTimestamp::from_micros(message.time_usec);
         let mut dispatch = HilMavlinkDispatch::default();
-
-        if message.fields_updated & IMU_UPDATED_MASK != 0 {
-            imu_channel
-                .immediate_publisher()
-                .publish_immediate(ImuSampleStamped::new(
-                    timestamp,
-                    ImuSample {
-                        accel_mps2: message.accel_mps2,
-                        gyro_rad_s: message.gyro_rad_s,
-                    },
-                ));
-            dispatch.imu_published = true;
+        for message in messages {
+            dispatch.merge(self.runtime.accept(message, &routes));
         }
-
-        if message.fields_updated & BARO_UPDATED_MASK != 0 {
-            barometer_channel
-                .immediate_publisher()
-                .publish_immediate(BarometerSampleStamped {
-                    timestamp,
-                    sample: BarometerSample {
-                        pressure_pa: message.abs_pressure_hpa * 100.0,
-                        temperature_c: message.temperature_c,
-                    },
-                });
-            dispatch.barometer_published = true;
-        }
-
         dispatch
-    }
-
-    fn handle_hil_gps<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize>(
-        &mut self,
-        message: HilGpsMessage,
-        channel: &GpsFixSampleChannel<M, DEPTH, SUBS, PUBS>,
-    ) -> HilMavlinkDispatch
-    where
-        M: RawMutex,
-    {
-        if message.fix_type < 2 {
-            return HilMavlinkDispatch::default();
-        }
-
-        channel
-            .immediate_publisher()
-            .publish_immediate(GpsFixSampleStamped {
-                timestamp: MeasurementTimestamp::from_micros(message.time_usec),
-                sample: GpsFixSample {
-                    lat_deg: f64::from(message.lat_deg_e7) / 1.0e7,
-                    lon_deg: f64::from(message.lon_deg_e7) / 1.0e7,
-                    alt_m: (message.alt_mm as f32) / 1_000.0,
-                    vel_ned_mps: [
-                        (message.vn_cm_s as f32) / 100.0,
-                        (message.ve_cm_s as f32) / 100.0,
-                        (message.vd_cm_s as f32) / 100.0,
-                    ],
-                    sats: message.satellites_visible,
-                },
-            });
-
-        HilMavlinkDispatch {
-            gps_published: true,
-            ..Default::default()
-        }
     }
 }
 
@@ -239,7 +121,7 @@ mod tests {
                     ve_cm_s: 0,
                     vd_cm_s: -50,
                     cog_cdeg: 0,
-                    satellites_visible: 12,
+                    satellites_visible: 9,
                 }),
             },
             &time_channel,
@@ -252,19 +134,26 @@ mod tests {
 
         let first_tick = bridge.handle_frame(
             MavlinkFrame {
-                message: DecodedMessage::SystemTime(SystemTimeMessage { time_boot_ms: 10 }),
+                message: DecodedMessage::SystemTime(SystemTimeMessage { time_boot_ms: 123 }),
             },
             &time_channel,
             &imu_channel,
             &baro_channel,
             &gps_channel,
         );
-        assert!(first_tick.tick.is_some());
-        assert!(time_subscriber.try_next_message().is_some());
+        assert_eq!(first_tick.tick.unwrap().time_boot_ms, 123);
+        match time_subscriber.try_next_message().unwrap() {
+            embassy_sync::pubsub::WaitResult::Message(sample) => {
+                assert_eq!(sample.time_boot_ms, 123);
+            }
+            embassy_sync::pubsub::WaitResult::Lagged(skipped) => {
+                panic!("unexpected lagged tick sample: {skipped}");
+            }
+        }
 
         let duplicate_tick = bridge.handle_frame(
             MavlinkFrame {
-                message: DecodedMessage::SystemTime(SystemTimeMessage { time_boot_ms: 10 }),
+                message: DecodedMessage::SystemTime(SystemTimeMessage { time_boot_ms: 123 }),
             },
             &time_channel,
             &imu_channel,
@@ -272,5 +161,6 @@ mod tests {
             &gps_channel,
         );
         assert!(duplicate_tick.tick.is_none());
+        assert!(time_subscriber.try_next_message().is_none());
     }
 }

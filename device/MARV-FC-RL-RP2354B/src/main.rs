@@ -12,6 +12,7 @@ mod pinmap;
 mod resources;
 mod sensor_spi;
 mod spi1_sensor_cluster;
+mod status_led;
 mod storage;
 mod usb_cdc;
 mod watchdog;

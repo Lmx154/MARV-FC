@@ -4,6 +4,14 @@ use core::fmt;
 
 use heapless::Vec;
 
+use crate::services::hil::egress::HilEgressProtocol;
+use crate::services::hil::ingress::HilIngressProtocol;
+use crate::services::hil::model::{
+    HilActuatorCommand, HilBarometerSample, HilEgressMessage, HilGpsSample, HilImuSample,
+    HilIngressMessage, HilTick,
+};
+use crate::utilities::time::MeasurementTimestamp;
+
 pub const MAVLINK_V2_STX: u8 = 0xFD;
 pub const MAVLINK_V1_STX: u8 = 0xFE;
 const MAVLINK_V1_HEADER_LEN: usize = 5;
@@ -18,15 +26,20 @@ pub const SYSTEM_TIME_ID: u32 = 2;
 pub const HIL_SENSOR_ID: u32 = 107;
 pub const HIL_GPS_ID: u32 = 113;
 pub const ACTUATOR_CONTROL_TARGET_ID: u32 = 140;
+pub const COMMAND_LONG_ID: u32 = 76;
 
 const CRC_EXTRA_SYSTEM_TIME: u8 = 137;
 const CRC_EXTRA_HIL_SENSOR: u8 = 108;
 const CRC_EXTRA_HIL_GPS: u8 = 124;
 const CRC_EXTRA_ACTUATOR_CONTROL_TARGET: u8 = 181;
+const CRC_EXTRA_COMMAND_LONG: u8 = 152;
 
 const HIL_SENSOR_LEN: usize = 64;
 const HIL_GPS_BASE_LEN: usize = 36;
 const SYSTEM_TIME_LEN: usize = 12;
+const COMMAND_LONG_LEN: usize = 33;
+const IMU_UPDATED_MASK: u32 = 0x003F;
+const BARO_UPDATED_MASK: u32 = 0x1A00;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SystemTimeMessage {
@@ -71,6 +84,15 @@ pub struct ActuatorControlTargetMessage {
 }
 
 #[derive(Clone, Copy, Debug)]
+pub struct CommandLongMessage {
+    pub params: [f32; 7],
+    pub command: u16,
+    pub target_system: u8,
+    pub target_component: u8,
+    pub confirmation: u8,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub enum DecodedMessage {
     SystemTime(SystemTimeMessage),
     HilSensor(HilSensorMessage),
@@ -82,6 +104,176 @@ pub struct MavlinkFrame {
     pub message: DecodedMessage,
 }
 
+pub struct MavlinkHilMessagePump<const CAPACITY: usize, const PENDING: usize = 4> {
+    buffer: Vec<u8, CAPACITY>,
+    pending: Vec<HilIngressMessage, PENDING>,
+}
+
+impl<const CAPACITY: usize, const PENDING: usize> Default
+    for MavlinkHilMessagePump<CAPACITY, PENDING>
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const CAPACITY: usize, const PENDING: usize> MavlinkHilMessagePump<CAPACITY, PENDING> {
+    pub const fn new() -> Self {
+        Self {
+            buffer: Vec::new(),
+            pending: Vec::new(),
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.buffer.clear();
+        self.pending.clear();
+    }
+
+    pub fn ingest_bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.buffer.is_full() {
+                self.buffer.remove(0);
+            }
+            let _ = self.buffer.push(byte);
+        }
+    }
+
+    pub fn try_next_message(&mut self) -> Option<Result<HilIngressMessage, DecodeError>> {
+        if !self.pending.is_empty() {
+            return Some(Ok(self.pending.remove(0)));
+        }
+
+        loop {
+            let sync_offset = self
+                .buffer
+                .iter()
+                .position(|byte| *byte == MAVLINK_V2_STX || *byte == MAVLINK_V1_STX)?;
+            if sync_offset > 0 {
+                self.drop_front(sync_offset);
+            }
+
+            if self.buffer.len() < MIN_MAVLINK_FRAME_LEN {
+                return None;
+            }
+
+            match try_consume_frame(self.buffer.as_slice()) {
+                Ok(Some((frame, consumed))) => {
+                    self.drop_front(consumed);
+                    frame_to_hil_messages(frame, &mut self.pending);
+                    if self.pending.is_empty() {
+                        continue;
+                    }
+                    return Some(Ok(self.pending.remove(0)));
+                }
+                Ok(None) => return None,
+                Err(DecodeError::BadMagic(_)) => {
+                    self.drop_front(1);
+                }
+                Err(error) => {
+                    self.drop_front(1);
+                    return Some(Err(error));
+                }
+            }
+        }
+    }
+
+    fn drop_front(&mut self, count: usize) {
+        for _ in 0..count.min(self.buffer.len()) {
+            self.buffer.remove(0);
+        }
+    }
+}
+
+impl<const CAPACITY: usize, const PENDING: usize> HilIngressProtocol
+    for MavlinkHilMessagePump<CAPACITY, PENDING>
+{
+    type Error = DecodeError;
+
+    fn reset(&mut self) {
+        self.reset();
+    }
+
+    fn ingest_bytes(&mut self, bytes: &[u8]) {
+        self.ingest_bytes(bytes);
+    }
+
+    fn try_next_message(&mut self) -> Option<Result<HilIngressMessage, Self::Error>> {
+        self.try_next_message()
+    }
+}
+
+pub struct MavlinkHilEgressEncoder {
+    sequence: u8,
+    system_id: u8,
+    component_id: u8,
+}
+
+impl MavlinkHilEgressEncoder {
+    pub const fn new(system_id: u8, component_id: u8) -> Self {
+        Self {
+            sequence: 0,
+            system_id,
+            component_id,
+        }
+    }
+
+    fn encode_actuator_command(
+        &mut self,
+        command: HilActuatorCommand,
+    ) -> Vec<u8, MAX_MAVLINK_FRAME_LEN> {
+        let frame = encode_actuator_control_target(
+            &ActuatorControlTargetMessage {
+                time_usec: command.timestamp.as_micros(),
+                group_mlx: command.group,
+                controls: command.controls,
+            },
+            self.sequence,
+            self.system_id,
+            self.component_id,
+        );
+        self.sequence = self.sequence.wrapping_add(1);
+        frame
+    }
+
+    fn encode_mission_event(
+        &mut self,
+        event: crate::services::hil::model::HilMissionEvent,
+    ) -> Vec<u8, MAX_MAVLINK_FRAME_LEN> {
+        let frame = encode_command_long(
+            &CommandLongMessage {
+                params: event.params,
+                command: event.command_id,
+                target_system: 0,
+                target_component: 0,
+                confirmation: 0,
+            },
+            self.sequence,
+            self.system_id,
+            self.component_id,
+        );
+        self.sequence = self.sequence.wrapping_add(1);
+        frame
+    }
+}
+
+impl HilEgressProtocol for MavlinkHilEgressEncoder {
+    type EncodedFrame = Vec<u8, MAX_MAVLINK_FRAME_LEN>;
+    type Error = ();
+
+    fn encode_message(
+        &mut self,
+        message: HilEgressMessage,
+    ) -> Result<Option<Self::EncodedFrame>, Self::Error> {
+        match message {
+            HilEgressMessage::ActuatorCommand(command) => {
+                Ok(Some(self.encode_actuator_command(command)))
+            }
+            HilEgressMessage::MissionEvent(event) => Ok(Some(self.encode_mission_event(event))),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum DecodeError {
     BadMagic(u8),
@@ -89,6 +281,57 @@ pub enum DecodeError {
     UnsupportedVersionFlags(u8),
     ChecksumMismatch { expected: u16, actual: u16 },
     UnsupportedMessage { id: u32, payload_len: usize },
+}
+
+pub fn frame_to_hil_messages<const N: usize>(
+    frame: MavlinkFrame,
+    out: &mut Vec<HilIngressMessage, N>,
+) {
+    match frame.message {
+        DecodedMessage::SystemTime(message) => {
+            let _ = out.push(HilIngressMessage::Tick(HilTick {
+                timestamp: MeasurementTimestamp::from_micros(
+                    u64::from(message.time_boot_ms) * 1_000,
+                ),
+                time_boot_ms: message.time_boot_ms,
+            }));
+        }
+        DecodedMessage::HilSensor(message) => {
+            let timestamp = MeasurementTimestamp::from_micros(message.time_usec);
+
+            if message.fields_updated & IMU_UPDATED_MASK != 0 {
+                let _ = out.push(HilIngressMessage::ImuSample(HilImuSample {
+                    timestamp,
+                    accel_mps2: message.accel_mps2,
+                    gyro_rad_s: message.gyro_rad_s,
+                }));
+            }
+
+            if message.fields_updated & BARO_UPDATED_MASK != 0 {
+                let _ = out.push(HilIngressMessage::BarometerSample(HilBarometerSample {
+                    timestamp,
+                    pressure_pa: message.abs_pressure_hpa * 100.0,
+                    temperature_c: message.temperature_c,
+                }));
+            }
+        }
+        DecodedMessage::HilGps(message) => {
+            if message.fix_type >= 2 {
+                let _ = out.push(HilIngressMessage::GpsSample(HilGpsSample {
+                    timestamp: MeasurementTimestamp::from_micros(message.time_usec),
+                    lat_deg: f64::from(message.lat_deg_e7) / 1.0e7,
+                    lon_deg: f64::from(message.lon_deg_e7) / 1.0e7,
+                    alt_m: (message.alt_mm as f32) / 1_000.0,
+                    vel_ned_mps: [
+                        (message.vn_cm_s as f32) / 100.0,
+                        (message.ve_cm_s as f32) / 100.0,
+                        (message.vd_cm_s as f32) / 100.0,
+                    ],
+                    sats: message.satellites_visible,
+                }));
+            }
+        }
+    }
 }
 
 impl fmt::Display for DecodeError {
@@ -337,6 +580,40 @@ pub fn encode_actuator_control_target(
     frame
 }
 
+pub fn encode_command_long(
+    message: &CommandLongMessage,
+    sequence: u8,
+    system_id: u8,
+    component_id: u8,
+) -> Vec<u8, MAX_MAVLINK_FRAME_LEN> {
+    let mut frame = Vec::<u8, MAX_MAVLINK_FRAME_LEN>::new();
+
+    let _ = frame.push(MAVLINK_V2_STX);
+    let _ = frame.push(COMMAND_LONG_LEN as u8);
+    let _ = frame.push(0);
+    let _ = frame.push(0);
+    let _ = frame.push(sequence);
+    let _ = frame.push(system_id);
+    let _ = frame.push(component_id);
+    let _ = frame.push((COMMAND_LONG_ID & 0xFF) as u8);
+    let _ = frame.push(((COMMAND_LONG_ID >> 8) & 0xFF) as u8);
+    let _ = frame.push(((COMMAND_LONG_ID >> 16) & 0xFF) as u8);
+    for param in message.params {
+        extend_slice(&mut frame, &param.to_le_bytes());
+    }
+    extend_slice(&mut frame, &message.command.to_le_bytes());
+    let _ = frame.push(message.target_system);
+    let _ = frame.push(message.target_component);
+    let _ = frame.push(message.confirmation);
+    let checksum = checksum_v2(
+        &frame[1..10],
+        &frame[10..10 + COMMAND_LONG_LEN],
+        CRC_EXTRA_COMMAND_LONG,
+    );
+    extend_slice(&mut frame, &checksum.to_le_bytes());
+    frame
+}
+
 fn extend_slice<const N: usize>(frame: &mut Vec<u8, N>, bytes: &[u8]) {
     for byte in bytes {
         let _ = frame.push(*byte);
@@ -349,6 +626,7 @@ fn crc_extra_for(message_id: u32) -> Option<u8> {
         HIL_SENSOR_ID => Some(CRC_EXTRA_HIL_SENSOR),
         HIL_GPS_ID => Some(CRC_EXTRA_HIL_GPS),
         ACTUATOR_CONTROL_TARGET_ID => Some(CRC_EXTRA_ACTUATOR_CONTROL_TARGET),
+        COMMAND_LONG_ID => Some(CRC_EXTRA_COMMAND_LONG),
         _ => None,
     }
 }
@@ -443,9 +721,10 @@ mod tests {
     use heapless::Vec;
 
     use super::{
-        ACTUATOR_CONTROL_TARGET_ID, ActuatorControlTargetMessage, CRC_EXTRA_SYSTEM_TIME,
-        DecodeError, DecodedMessage, MAVLINK_V1_STX, MAVLINK_V2_STX, SYSTEM_TIME_ID, checksum_v1,
-        checksum_v2, decode_frame, encode_actuator_control_target, extend_slice, try_consume_frame,
+        ACTUATOR_CONTROL_TARGET_ID, ActuatorControlTargetMessage, COMMAND_LONG_ID,
+        CRC_EXTRA_SYSTEM_TIME, CommandLongMessage, DecodeError, DecodedMessage, MAVLINK_V1_STX,
+        MAVLINK_V2_STX, SYSTEM_TIME_ID, checksum_v1, checksum_v2, decode_frame,
+        encode_actuator_control_target, encode_command_long, extend_slice, try_consume_frame,
     };
 
     #[test]
@@ -468,6 +747,30 @@ mod tests {
             ACTUATOR_CONTROL_TARGET_ID
         );
         assert_eq!(frame[50], 1);
+    }
+
+    #[test]
+    fn command_long_encoding_places_command_after_params() {
+        let frame = encode_command_long(
+            &CommandLongMessage {
+                params: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
+                command: 31_000,
+                target_system: 0,
+                target_component: 0,
+                confirmation: 0,
+            },
+            9,
+            42,
+            7,
+        );
+
+        assert_eq!(frame[0], MAVLINK_V2_STX);
+        assert_eq!(frame[1], 33);
+        assert_eq!(
+            u32::from(frame[7]) | (u32::from(frame[8]) << 8) | (u32::from(frame[9]) << 16),
+            COMMAND_LONG_ID
+        );
+        assert_eq!(u16::from_le_bytes([frame[38], frame[39]]), 31_000);
     }
 
     #[test]

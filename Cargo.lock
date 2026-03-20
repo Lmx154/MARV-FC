@@ -1104,6 +1104,7 @@ dependencies = [
  "embedded-sdmmc",
  "futures",
  "panic-probe",
+ "smart-leds",
  "static_cell",
 ]
 

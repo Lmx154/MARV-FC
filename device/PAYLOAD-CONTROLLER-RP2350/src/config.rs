@@ -2,6 +2,7 @@
 
 use common::drivers::bmp388::BMP388_ADDR_SDO_LOW;
 use common::drivers::pressure_transducer::PressureTransducerConfig;
+use common::services::hil::SensorBackend;
 use common::services::logging::{
     SensorSnapshotLogFlags, SensorSnapshotLoggerConfig, SensorSnapshotSensorConfig,
 };
@@ -21,6 +22,10 @@ pub const LOG_FILE_PREFIX: &str = "PAYL";
 pub const LOG_RECORD_PERIOD_MS: u32 = 100;
 pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 12_000_000;
 pub const LOG_SD_FLUSH_EVERY_LINES: usize = 32;
+pub const PAYLOAD_SERVO_TEST_COMMAND_ID: u16 = 31_000;
+pub const HIL_SYSTEM_ID: u8 = 42;
+pub const HIL_COMPONENT_ID: u8 = 1;
+pub const SENSOR_BACKEND: SensorBackend = SensorBackend::Hil;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Bmp388RuntimeConfig {
@@ -124,9 +129,28 @@ impl Default for LoggingConfig {
 pub struct DeviceConfig {
     pub status_heartbeat_period_ms: u64,
     pub bmp388: Bmp388RuntimeConfig,
+    pub hil: HilConfig,
+    pub sensor_backend: SensorBackend,
     pub pressure_transducer: PressureTransducerRuntimeConfig,
     pub servo: ServoRuntimeConfig,
     pub logging: LoggingConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HilConfig {
+    pub system_id: u8,
+    pub component_id: u8,
+    pub payload_servo_test_command_id: u16,
+}
+
+impl Default for HilConfig {
+    fn default() -> Self {
+        Self {
+            system_id: HIL_SYSTEM_ID,
+            component_id: HIL_COMPONENT_ID,
+            payload_servo_test_command_id: PAYLOAD_SERVO_TEST_COMMAND_ID,
+        }
+    }
 }
 
 impl Default for DeviceConfig {
@@ -134,6 +158,8 @@ impl Default for DeviceConfig {
         Self {
             status_heartbeat_period_ms: STATUS_HEARTBEAT_PERIOD_MS,
             bmp388: Bmp388RuntimeConfig::default(),
+            hil: HilConfig::default(),
+            sensor_backend: SENSOR_BACKEND,
             pressure_transducer: PressureTransducerRuntimeConfig::default(),
             servo: ServoRuntimeConfig::default(),
             logging: LoggingConfig::default(),

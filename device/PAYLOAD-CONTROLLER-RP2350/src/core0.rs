@@ -5,14 +5,19 @@ use common::drivers::pressure_transducer::PressureTransducer;
 use common::drivers::servo::{RcServo, ServoError};
 use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
+use common::messages::control::StaticLedCommand;
+use common::messages::logging::LoggedSensor;
 use common::services::acquisition::{
     BarometerServiceConfig, Bmp388BarometerSource, PressureTransducerServiceConfig,
     run_barometer_service, run_pressure_transducer_service,
 };
+use common::services::hil::HilMissionEvent;
+use common::services::hil::SensorBackend;
 use common::services::logging::{
     SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
 };
 use common::tasks::background::sd_logging::run_sd_logging_task;
+use common::tasks::medium_loop::run_core0_sensor_logging_task;
 use common::utilities::time::MeasurementTimestamp;
 use common::utilities::units::pressure_altitude_ft;
 use common::utils::delay::DelayMs;
@@ -27,8 +32,12 @@ use embassy_rp::pwm::{Config as PwmConfig, Pwm, SetDutyCycle};
 use embassy_time::{Duration, Timer};
 
 use crate::channels::{
-    BAROMETER_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL, PRESSURE_TRANSDUCER_CHANNEL,
-    PayloadBarometerSubscriber, PayloadLogSinkStateReceiver, PayloadPressureTransducerSubscriber,
+    BAROMETER_CHANNEL, DisabledGpsSubscriber, DisabledImuSubscriber,
+    DisabledMagnetometerSubscriber, HIL_MISSION_EVENT_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
+    PRESSURE_TRANSDUCER_CHANNEL, PayloadBarometerSubscriber, PayloadHilMissionEventSender,
+    PayloadLogSinkStateReceiver, PayloadPressureTransducerSubscriber,
+    PayloadStatusLedCommandReceiver, PayloadStatusLedCommandSender, PayloadTimeSubscriber,
+    STATUS_LED_COMMAND_CHANNEL, TIME_CHANNEL,
 };
 use crate::config::DeviceConfig;
 use crate::core1;
@@ -133,30 +142,42 @@ async fn sensor_logging_task(
     mut logger: SensorSnapshotLogger,
     mut barometer_subscriber: Option<PayloadBarometerSubscriber>,
     mut pressure_transducer_subscriber: Option<PayloadPressureTransducerSubscriber>,
+    mut time_subscriber: Option<PayloadTimeSubscriber>,
     sink_state_receiver: PayloadLogSinkStateReceiver,
 ) -> ! {
     let mut delay = EmbassyDelay;
 
-    loop {
-        if let Some(subscriber) = barometer_subscriber.as_mut() {
-            logger.drain_barometer(subscriber);
-        }
-        if let Some(subscriber) = pressure_transducer_subscriber.as_mut() {
-            logger.drain_pressure_transducer(subscriber);
-        }
-        logger.drain_sink_states(&sink_state_receiver);
-
-        if let Err(error) = logger.emit_snapshot(&LOG_CHANNEL, measurement_now()) {
+    run_core0_sensor_logging_task(
+        &mut logger,
+        &LOG_CHANNEL,
+        None::<&mut DisabledImuSubscriber>,
+        None::<&mut DisabledImuSubscriber>,
+        barometer_subscriber.as_mut(),
+        pressure_transducer_subscriber.as_mut(),
+        None::<&mut DisabledMagnetometerSubscriber>,
+        None::<&mut DisabledGpsSubscriber>,
+        time_subscriber.as_mut(),
+        Some(&sink_state_receiver),
+        None::<
+            &embassy_sync::channel::Receiver<
+                '_,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                LoggedSensor,
+                1,
+            >,
+        >,
+        &mut delay,
+        measurement_now,
+        |error| {
             if !matches!(
                 error,
                 SensorSnapshotLoggerError::Queue(TryEnqueueLogError::ChannelFull)
             ) {
                 warn!("sensor logging error: {:?}", error);
             }
-        }
-
-        delay.delay_ms(logger.period_ms()).await;
-    }
+        },
+    )
+    .await
 }
 
 #[task]
@@ -246,12 +267,18 @@ async fn pressure_transducer_task(
 #[task]
 async fn status_led_task(
     status_led: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_25>,
+    receiver: PayloadStatusLedCommandReceiver,
 ) -> ! {
     let mut led = Output::new(status_led, Level::Low);
+    led.set_low();
 
     loop {
-        Timer::after(Duration::from_millis(500)).await;
-        led.toggle();
+        let command = receiver.receive().await;
+        if command.on {
+            led.set_high();
+        } else {
+            led.set_low();
+        }
     }
 }
 
@@ -261,6 +288,9 @@ async fn servo_deploy_task(
     bus: crate::buses::ServoPwm,
     mut barometer_subscriber: PayloadBarometerSubscriber,
     config: crate::config::ServoRuntimeConfig,
+    led_sender: PayloadStatusLedCommandSender,
+    mission_event_sender: Option<PayloadHilMissionEventSender>,
+    mission_event_command_id: u16,
 ) -> ! {
     if !config.enabled {
         info!("servo deployment disabled by device config");
@@ -338,6 +368,22 @@ async fn servo_deploy_task(
         match set_servo_angle(&mut pwm, &servo, config.open_angle_deg, pwm_top) {
             Ok(duty) => {
                 deployed = true;
+                let _ = led_sender.try_send(StaticLedCommand::ON);
+                if let Some(sender) = mission_event_sender {
+                    let _ = sender.try_send(HilMissionEvent {
+                        timestamp: sample.timestamp,
+                        command_id: mission_event_command_id,
+                        params: [
+                            config.trigger_altitude_ft as f32,
+                            altitude_ft,
+                            config.open_angle_deg as f32,
+                            duty as f32,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                    });
+                }
                 info!(
                     "servo deployed: altitude_ft={=u32} threshold_ft={=u32} angle_deg={=u16} duty={=u16}",
                     altitude_ft as u32, config.trigger_altitude_ft, config.open_angle_deg, duty,
@@ -381,18 +427,38 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     } = resources;
     let config = DeviceConfig::default();
 
-    usb_cdc::spawn(&spawner, usb);
-    spawner.spawn(status_led_task(status.led)).unwrap();
     spawner
-        .spawn(bmp388_barometer_task(sda, scl, payload_i2c, config.bmp388))
-        .unwrap();
-    spawner
-        .spawn(pressure_transducer_task(
-            pressure_adc,
-            pressure_adc_bus,
-            config.pressure_transducer,
+        .spawn(status_led_task(
+            status.led,
+            STATUS_LED_COMMAND_CHANNEL.receiver(),
         ))
         .unwrap();
+    let _ = STATUS_LED_COMMAND_CHANNEL
+        .sender()
+        .try_send(StaticLedCommand::OFF);
+    match config.sensor_backend {
+        SensorBackend::Real => {
+            spawner
+                .spawn(bmp388_barometer_task(sda, scl, payload_i2c, config.bmp388))
+                .unwrap();
+            spawner
+                .spawn(pressure_transducer_task(
+                    pressure_adc,
+                    pressure_adc_bus,
+                    config.pressure_transducer,
+                ))
+                .unwrap();
+        }
+        SensorBackend::Hil => {
+            usb_cdc::spawn(
+                &spawner,
+                usb,
+                config.hil,
+                HIL_MISSION_EVENT_CHANNEL.receiver(),
+            );
+        }
+        SensorBackend::Replay => {}
+    }
     if config.servo.enabled {
         let barometer_subscriber = BAROMETER_CHANNEL.subscriber().unwrap();
         spawner
@@ -401,6 +467,10 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                 servo_pwm,
                 barometer_subscriber,
                 config.servo,
+                STATUS_LED_COMMAND_CHANNEL.sender(),
+                matches!(config.sensor_backend, SensorBackend::Hil)
+                    .then_some(HIL_MISSION_EVENT_CHANNEL.sender()),
+                config.hil.payload_servo_test_command_id,
             ))
             .unwrap();
     } else {
@@ -415,15 +485,39 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                         log_path.as_str(),
                         config.logging.sensor_snapshot,
                     ) {
-                        Ok(logger) => {
+                        Ok(mut logger) => {
+                            if !matches!(config.sensor_backend, SensorBackend::Real)
+                                && logger.config().sensors.pressure_transducer
+                            {
+                                logger.note_sensor_fault(LoggedSensor::PressureTransducer);
+                            }
+                            if matches!(config.sensor_backend, SensorBackend::Replay)
+                                && logger.config().sensors.barometer
+                            {
+                                logger.note_sensor_fault(LoggedSensor::Barometer);
+                            }
+
                             let barometer_subscriber = if logger.config().sensors.barometer {
-                                Some(BAROMETER_CHANNEL.subscriber().unwrap())
+                                match config.sensor_backend {
+                                    SensorBackend::Real | SensorBackend::Hil => {
+                                        Some(BAROMETER_CHANNEL.subscriber().unwrap())
+                                    }
+                                    SensorBackend::Replay => None,
+                                }
                             } else {
                                 None
                             };
                             let pressure_transducer_subscriber =
-                                if logger.config().sensors.pressure_transducer {
+                                if logger.config().sensors.pressure_transducer
+                                    && matches!(config.sensor_backend, SensorBackend::Real)
+                                {
                                     Some(PRESSURE_TRANSDUCER_CHANNEL.subscriber().unwrap())
+                                } else {
+                                    None
+                                };
+                            let time_subscriber =
+                                if matches!(config.sensor_backend, SensorBackend::Hil) {
+                                    Some(TIME_CHANNEL.subscriber().unwrap())
                                 } else {
                                     None
                                 };
@@ -435,6 +529,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                                     logger,
                                     barometer_subscriber,
                                     pressure_transducer_subscriber,
+                                    time_subscriber,
                                     sink_state_receiver,
                                 ))
                                 .unwrap();
@@ -479,6 +574,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         pinmap::SERVO_PWM,
         core1::ROLE_SUMMARY,
     );
+    info!("sensor_backend={:?}", config.sensor_backend);
     info!(
         "servo runtime: closed={=u16}deg open={=u16}deg trigger_altitude_ft={=u32}",
         config.servo.closed_angle_deg,

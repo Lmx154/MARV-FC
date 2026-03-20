@@ -2,12 +2,12 @@
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::channel::Receiver;
-use embassy_sync::pubsub::Subscriber;
+use embassy_sync::pubsub::{Subscriber, WaitResult};
 
 use crate::messages::logging::{LogSinkState, LoggedSensor};
 use crate::messages::sensor::{
     BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
-    PressureTransducerSampleStamped,
+    PressureTransducerSampleStamped, TimeSample,
 };
 use crate::services::logging::{
     LogChannel, SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
@@ -35,6 +35,9 @@ pub async fn run_core0_sensor_logging_task<
     const GPS_DEPTH: usize,
     const GPS_SUBS: usize,
     const GPS_PUBS: usize,
+    const TIME_DEPTH: usize,
+    const TIME_SUBS: usize,
+    const TIME_PUBS: usize,
     const STATUS_DEPTH: usize,
     const SENSOR_FAULT_DEPTH: usize,
 >(
@@ -59,6 +62,7 @@ pub async fn run_core0_sensor_logging_task<
         &mut Subscriber<'_, M, MagnetometerSampleStamped, MAG_DEPTH, MAG_SUBS, MAG_PUBS>,
     >,
     gps: Option<&mut Subscriber<'_, M, GpsFixSampleStamped, GPS_DEPTH, GPS_SUBS, GPS_PUBS>>,
+    time: Option<&mut Subscriber<'_, M, TimeSample, TIME_DEPTH, TIME_SUBS, TIME_PUBS>>,
     sink_states: Option<&Receiver<'_, M, LogSinkState, STATUS_DEPTH>>,
     sensor_faults: Option<&Receiver<'_, M, LoggedSensor, SENSOR_FAULT_DEPTH>>,
     delay: &mut D,
@@ -76,6 +80,9 @@ where
     let mut pressure_transducer = pressure_transducer;
     let mut magnetometer = magnetometer;
     let mut gps = gps;
+    let mut time = time;
+    let mut latest_authoritative_time = None;
+    let mut last_emitted_timestamp = None;
 
     loop {
         if let Some(subscriber) = imu.as_deref_mut() {
@@ -96,6 +103,16 @@ where
         if let Some(subscriber) = gps.as_deref_mut() {
             logger.drain_gps(subscriber);
         }
+        if let Some(subscriber) = time.as_deref_mut() {
+            while let Some(message) = subscriber.try_next_message() {
+                match message {
+                    WaitResult::Lagged(_) => {}
+                    WaitResult::Message(sample) => {
+                        latest_authoritative_time = Some(sample.timestamp);
+                    }
+                }
+            }
+        }
         if let Some(receiver) = sink_states {
             logger.drain_sink_states(receiver);
         }
@@ -103,13 +120,21 @@ where
             logger.drain_sensor_faults(receiver);
         }
 
-        if let Err(error) = logger.emit_snapshot(log_channel, time_source()) {
+        let snapshot_time = latest_authoritative_time.unwrap_or_else(|| time_source());
+        if latest_authoritative_time.is_some() && Some(snapshot_time) == last_emitted_timestamp {
+            delay.delay_ms(logger.period_ms()).await;
+            continue;
+        }
+
+        if let Err(error) = logger.emit_snapshot(log_channel, snapshot_time) {
             if !matches!(
                 error,
                 SensorSnapshotLoggerError::Queue(TryEnqueueLogError::ChannelFull)
             ) {
                 on_error(error);
             }
+        } else {
+            last_emitted_timestamp = Some(snapshot_time);
         }
 
         delay.delay_ms(logger.period_ms()).await;
