@@ -4,8 +4,8 @@ use crate::services::hil::egress::{HilByteWriter, HilEgressProtocol};
 use crate::services::hil::ingress::{HilByteReader, HilIngressProtocol};
 use crate::services::hil::model::HilEgressMessage;
 use crate::services::hil::routing::{
-    HilBarometerRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes, HilMagnetometerRoute,
-    HilTimeRoute,
+    HilBarometerRoute, HilControlCommandRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes,
+    HilMagnetometerRoute, HilTimeRoute,
 };
 use crate::services::hil::runtime::{HilDispatch, HilRuntime};
 
@@ -23,6 +23,7 @@ pub async fn run_hil_ingress_loop<
     Barometer,
     Gps,
     Magnetometer,
+    Control,
     OnDispatch,
     DispatchError,
     OnProtocolError,
@@ -31,7 +32,7 @@ pub async fn run_hil_ingress_loop<
     reader: &mut Reader,
     protocol: &mut Protocol,
     runtime: &mut HilRuntime,
-    routes: &HilIngressRoutes<'_, Time, Imu, Barometer, Gps, Magnetometer>,
+    routes: &HilIngressRoutes<'_, Time, Imu, Barometer, Gps, Magnetometer, Control>,
     read_buffer: &mut [u8; BUFFER],
     mut on_dispatch: OnDispatch,
     mut on_protocol_error: OnProtocolError,
@@ -44,6 +45,7 @@ where
     Barometer: HilBarometerRoute,
     Gps: HilGpsRoute,
     Magnetometer: HilMagnetometerRoute,
+    Control: HilControlCommandRoute,
     OnDispatch: FnMut(HilDispatch) -> Result<(), DispatchError>,
     OnProtocolError: FnMut(Protocol::Error),
 {

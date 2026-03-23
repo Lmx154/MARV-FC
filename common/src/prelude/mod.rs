@@ -7,6 +7,7 @@ pub use crate::messages::fault::{HealthReport, ResetReason, WatchdogStatus};
 pub use crate::messages::logging::{
     LogCommand, LogSinkState, LoggedSensor, SensorLogField, SensorLogSnapshot, SensorLogState,
 };
+pub use crate::messages::runtime::FlightPhase;
 pub use crate::messages::sensor::{
     BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
     ImuSampleStamped, MagnetometerSample, MagnetometerSampleStamped, PressureTransducerSample,
@@ -26,7 +27,7 @@ pub use crate::services::acquisition::{
 };
 pub use crate::services::health::{
     DeadlineWindow, FaultAggregation, FeedDecision, LivenessClass, LivenessEvidence,
-    WatchdogSupervisor,
+    LivenessUpdate, WatchdogContract, WatchdogEvaluation, WatchdogSource, WatchdogSupervisor,
 };
 pub use crate::services::logging::{LogChannel, TryEnqueueLogError, try_enqueue_line};
 pub use crate::services::logging::{

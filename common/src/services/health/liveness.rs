@@ -19,3 +19,15 @@ impl LivenessEvidence {
         now_ms.saturating_sub(self.last_progress_ms) > self.max_age_ms as u64
     }
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LivenessUpdate {
+    pub mask: u32,
+    pub now_ms: u64,
+}
+
+impl LivenessUpdate {
+    pub const fn new(mask: u32, now_ms: u64) -> Self {
+        Self { mask, now_ms }
+    }
+}

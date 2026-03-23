@@ -3,6 +3,8 @@
 use embassy_rp::{Peri, Peripherals, peripherals};
 
 use crate::buses::{BusResources, PayloadI2cBus, PressureAdcBus, ServoPwm, StorageSpiBus};
+use crate::config;
+use crate::watchdog::WatchdogResources;
 
 pub struct PayloadSensorPins {
     pub sda: Peri<'static, peripherals::PIN_0>,
@@ -41,6 +43,7 @@ pub struct SystemResources {
 pub struct DeviceResources {
     pub pins: PinResources,
     pub buses: BusResources,
+    pub watchdog: WatchdogResources,
     pub system: SystemResources,
 }
 
@@ -64,6 +67,7 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
         USB: usb,
         FLASH: flash,
         CORE1: core1,
+        WATCHDOG: watchdog,
         ..
     } = peripherals;
 
@@ -92,6 +96,10 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
                 rx_dma: spi0_rx_dma,
             },
             servo_pwm: ServoPwm { pwm: pwm6 },
+        },
+        watchdog: WatchdogResources {
+            peripheral: watchdog,
+            timeout_ms: config::WATCHDOG_TIMEOUT_MS,
         },
         system: SystemResources { usb, flash, core1 },
     }

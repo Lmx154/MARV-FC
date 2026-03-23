@@ -7,12 +7,18 @@ use common::drivers::mpu6050::{
 use common::interfaces::sensors::{BarometerSource, ImuSource};
 use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
+use common::messages::logging::LoggedSensor;
+use common::messages::runtime::FlightPhase;
 use common::messages::sensor::{BarometerSampleStamped, ImuSampleStamped};
+use common::policies::modes::phase_after_init;
 use common::services::acquisition::{Bmp390BarometerSource, Mpu6050ImuSource};
+use common::services::health::{FeedDecision, LivenessUpdate, WatchdogSupervisor};
+use common::services::hil::{HilControlRuntime, HilEgressMessage, SensorBackend};
 use common::services::logging::{
     SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
 };
 use common::tasks::background::sd_logging::run_sd_logging_task;
+use common::tasks::medium_loop::sensor_logging::run_core0_sensor_logging_task;
 use common::utilities::time::MeasurementTimestamp;
 use common::utils::delay::DelayMs;
 use defmt::{info, warn};
@@ -22,13 +28,17 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::i2c::{self, I2c};
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
 use embassy_sync::mutex::Mutex;
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_hal_async::i2c::I2c as AsyncI2c;
 use static_cell::StaticCell;
 
 use crate::channels::{
-    BAROMETER_CHANNEL, IMU_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
-    RecoveryBarometerSubscriber, RecoveryImuSubscriber, RecoveryLogSinkStateReceiver,
+    BAROMETER_CHANNEL, FLIGHT_PHASE_CHANNEL, HIL_BOOT_SIGNAL, HIL_CONTROL_COMMAND_CHANNEL,
+    HIL_EGRESS_CHANNEL, IMU_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
+    RecoveryBarometerSubscriber, RecoveryFlightPhaseSubscriber, RecoveryHilControlCommandReceiver,
+    RecoveryHilEgressSender, RecoveryImuSubscriber, RecoveryLogSinkStateReceiver,
+    RecoveryTimeSubscriber, RecoveryWatchdogLivenessReceiver, TIME_CHANNEL,
+    WATCHDOG_LIVENESS_CHANNEL,
 };
 use crate::config::{Bmp390RuntimeConfig, DeviceConfig, Mpu6050RuntimeConfig};
 use crate::core1;
@@ -36,18 +46,19 @@ use crate::pinmap;
 use crate::resources::{DeviceResources, RecoverySensorPins, SystemResources};
 use crate::storage;
 use crate::usb_cdc;
-
-const SENSOR_RETRY_PERIOD_MS: u32 = 1_000;
-
-bind_interrupts!(struct Irqs {
-    I2C0_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
-});
+use crate::watchdog;
 
 type RecoveryI2c = I2c<'static, embassy_rp::peripherals::I2C0, i2c::Async>;
 type SharedRecoveryI2cBus = Mutex<NoopRawMutex, RecoveryI2c>;
 type SharedRecoveryI2cDevice = I2cDevice<'static, NoopRawMutex, RecoveryI2c>;
+type RecoveryBmp390Source = Bmp390BarometerSource<SharedRecoveryI2cDevice>;
+type RecoveryMpu6050Source = Mpu6050ImuSource<SharedRecoveryI2cDevice>;
 
 static I2C_BUS: StaticCell<SharedRecoveryI2cBus> = StaticCell::new();
+
+bind_interrupts!(struct Irqs {
+    I2C0_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
+});
 
 struct EmbassyClock;
 
@@ -67,6 +78,14 @@ impl DelayMs for EmbassyDelay {
 
 fn measurement_now() -> MeasurementTimestamp {
     MeasurementTimestamp::from_micros(embassy_time::Instant::now().as_micros())
+}
+
+fn watchdog_now_ms() -> u64 {
+    Instant::now().as_millis()
+}
+
+fn report_watchdog_progress(mask: u32) {
+    let _ = WATCHDOG_LIVENESS_CHANNEL.try_send(LivenessUpdate::new(mask, watchdog_now_ms()));
 }
 
 fn deadline_after_ms(now: MeasurementTimestamp, delay_ms: u32) -> MeasurementTimestamp {
@@ -143,10 +162,10 @@ where
     None
 }
 
-async fn try_init_bmp390_source<'a>(
+async fn try_init_bmp390_source(
     shared_bus: &'static SharedRecoveryI2cBus,
     config: Bmp390RuntimeConfig,
-) -> Option<Bmp390BarometerSource<SharedRecoveryI2cDevice>> {
+) -> Option<RecoveryBmp390Source> {
     let detected_address = {
         let mut probe_bus = I2cDevice::new(shared_bus);
         probe_bmp390_address(&mut probe_bus, config.address).await
@@ -168,10 +187,10 @@ async fn try_init_bmp390_source<'a>(
     }
 }
 
-async fn try_init_mpu6050_source<'a>(
+async fn try_init_mpu6050_source(
     shared_bus: &'static SharedRecoveryI2cBus,
     config: Mpu6050RuntimeConfig,
-) -> Option<Mpu6050ImuSource<SharedRecoveryI2cDevice>> {
+) -> Option<RecoveryMpu6050Source> {
     let detected_address = {
         let mut probe_bus = I2cDevice::new(shared_bus);
         probe_mpu6050_address(&mut probe_bus, config.address).await
@@ -209,53 +228,173 @@ async fn sensor_logging_task(
     mut logger: SensorSnapshotLogger,
     mut imu_subscriber: Option<RecoveryImuSubscriber>,
     mut barometer_subscriber: Option<RecoveryBarometerSubscriber>,
+    mut time_subscriber: Option<RecoveryTimeSubscriber>,
     sink_state_receiver: RecoveryLogSinkStateReceiver,
 ) -> ! {
     let mut delay = EmbassyDelay;
 
-    loop {
-        if let Some(subscriber) = imu_subscriber.as_mut() {
-            logger.drain_imu(subscriber);
-        }
-        if let Some(subscriber) = barometer_subscriber.as_mut() {
-            logger.drain_barometer(subscriber);
-        }
-        logger.drain_sink_states(&sink_state_receiver);
-
-        if let Err(error) = logger.emit_snapshot(&LOG_CHANNEL, measurement_now()) {
+    run_core0_sensor_logging_task(
+        &mut logger,
+        &LOG_CHANNEL,
+        imu_subscriber.as_mut(),
+        None::<&mut RecoveryImuSubscriber>,
+        barometer_subscriber.as_mut(),
+        None::<
+            &mut embassy_sync::pubsub::Subscriber<
+                '_,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                common::messages::sensor::PressureTransducerSampleStamped,
+                1,
+                1,
+                1,
+            >,
+        >,
+        None::<
+            &mut embassy_sync::pubsub::Subscriber<
+                '_,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                common::messages::sensor::MagnetometerSampleStamped,
+                1,
+                1,
+                1,
+            >,
+        >,
+        None::<
+            &mut embassy_sync::pubsub::Subscriber<
+                '_,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                common::messages::sensor::GpsFixSampleStamped,
+                1,
+                1,
+                1,
+            >,
+        >,
+        time_subscriber.as_mut(),
+        Some(&sink_state_receiver),
+        None::<
+            &embassy_sync::channel::Receiver<
+                '_,
+                embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
+                LoggedSensor,
+                1,
+            >,
+        >,
+        &mut delay,
+        measurement_now,
+        |error| {
             if !matches!(
                 error,
                 SensorSnapshotLoggerError::Queue(TryEnqueueLogError::ChannelFull)
             ) {
                 warn!("sensor logging error: {:?}", error);
             }
+        },
+    )
+    .await
+}
+
+#[task]
+async fn watchdog_task(
+    mut hardware: watchdog::HardwareWatchdog,
+    receiver: RecoveryWatchdogLivenessReceiver,
+    mut phase_subscriber: RecoveryFlightPhaseSubscriber,
+    watchdog_enabled_in_hil: bool,
+) -> ! {
+    let receiver = receiver;
+    let mut phase = FlightPhase::Init;
+    let mut supervisor = WatchdogSupervisor::<{ watchdog::SOURCE_COUNT }>::new(
+        watchdog::SOURCES,
+        watchdog::INIT_CONTRACT,
+        watchdog_now_ms(),
+    );
+    let mut ticker = Ticker::every(Duration::from_millis(50));
+    let mut last_decision = None;
+
+    hardware.start();
+
+    loop {
+        ticker.next().await;
+
+        while let Some(next_phase) = phase_subscriber.try_next_message_pure() {
+            phase = next_phase;
+            supervisor.set_contract(watchdog::contract_for_phase(phase), watchdog_now_ms());
+            info!("watchdog phase -> {:?}", phase);
+            if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
+                info!("watchdog HIL liveness disabled by config");
+            }
         }
 
-        delay.delay_ms(logger.period_ms()).await;
+        while let Ok(update) = receiver.try_receive() {
+            supervisor.record(update);
+        }
+
+        let evaluation = if phase.is_fault() {
+            common::services::health::WatchdogEvaluation {
+                decision: FeedDecision::DoNotFeed,
+                stale_required_mask: 0,
+                stale_degrade_mask: 0,
+            }
+        } else if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
+            common::services::health::WatchdogEvaluation {
+                decision: FeedDecision::FeedAllowed,
+                stale_required_mask: 0,
+                stale_degrade_mask: 0,
+            }
+        } else {
+            supervisor.evaluate(watchdog_now_ms())
+        };
+
+        if last_decision != Some(evaluation.decision) {
+            info!(
+                "watchdog decision={:?} stale_required=0x{=u32:08X} stale_degrade=0x{=u32:08X}",
+                evaluation.decision,
+                evaluation.stale_required_mask,
+                evaluation.stale_degrade_mask
+            );
+            last_decision = Some(evaluation.decision);
+        }
+
+        if !matches!(evaluation.decision, FeedDecision::DoNotFeed) {
+            hardware.feed();
+        }
+    }
+}
+
+#[task]
+async fn time_liveness_task(mut subscriber: RecoveryTimeSubscriber, mask: u32) -> ! {
+    loop {
+        subscriber.next_message_pure().await;
+        report_watchdog_progress(mask);
+    }
+}
+
+#[task]
+async fn imu_liveness_task(mut subscriber: RecoveryImuSubscriber, mask: u32) -> ! {
+    loop {
+        subscriber.next_message_pure().await;
+        report_watchdog_progress(mask);
+    }
+}
+
+#[task]
+async fn barometer_liveness_task(mut subscriber: RecoveryBarometerSubscriber, mask: u32) -> ! {
+    loop {
+        subscriber.next_message_pure().await;
+        report_watchdog_progress(mask);
     }
 }
 
 #[task]
 async fn recovery_i2c_sensor_task(
-    sda: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_0>,
-    scl: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_1>,
-    bus: crate::buses::RecoveryI2cBus,
+    mut barometer_source: RecoveryBmp390Source,
     bmp390_config: Bmp390RuntimeConfig,
+    mut imu_source: RecoveryMpu6050Source,
     mpu6050_config: Mpu6050RuntimeConfig,
 ) -> ! {
-    let mut i2c_config = i2c::Config::default();
-    i2c_config.frequency = bmp390_config.i2c_frequency_hz;
-
-    let i2c = I2c::new_async(bus.i2c, scl, sda, Irqs, i2c_config);
-    let shared_bus: &'static SharedRecoveryI2cBus = I2C_BUS.init(Mutex::new(i2c));
     let clock = EmbassyClock;
     let mut delay = EmbassyDelay;
-    let mut barometer_source: Option<Bmp390BarometerSource<SharedRecoveryI2cDevice>> = None;
-    let mut imu_source: Option<Mpu6050ImuSource<SharedRecoveryI2cDevice>> = None;
     let mut next_barometer_action = measurement_now();
     let mut next_imu_action = measurement_now();
-
-    Timer::after(Duration::from_millis(100)).await;
 
     loop {
         let now = measurement_now();
@@ -264,71 +403,34 @@ async fn recovery_i2c_sensor_task(
         if now >= next_barometer_action {
             did_work = true;
 
-            if let Some(source) = barometer_source.as_mut() {
-                let timestamp = clock.now();
-                match source.read_barometer_sample().await {
-                    Ok(sample) => {
-                        BAROMETER_CHANNEL
-                            .immediate_publisher()
-                            .publish_immediate(BarometerSampleStamped { timestamp, sample });
-                    }
-                    Err(error) => warn!("BMP390 acquisition error: {:?}", error),
+            let timestamp = clock.now();
+            match barometer_source.read_barometer_sample().await {
+                Ok(sample) => {
+                    BAROMETER_CHANNEL
+                        .immediate_publisher()
+                        .publish_immediate(BarometerSampleStamped { timestamp, sample });
                 }
-
-                next_barometer_action =
-                    deadline_after_ms(measurement_now(), bmp390_config.period_ms);
-            } else {
-                barometer_source = try_init_bmp390_source(shared_bus, bmp390_config).await;
-
-                if barometer_source.is_none() {
-                    warn!(
-                        "BMP390 not detected on 0x76/0x77; Bosch requires CSB high at POR for I2C and SDO strapped to GND or VDDIO"
-                    );
-                }
-
-                next_barometer_action = deadline_after_ms(
-                    measurement_now(),
-                    if barometer_source.is_some() {
-                        bmp390_config.period_ms
-                    } else {
-                        SENSOR_RETRY_PERIOD_MS
-                    },
-                );
+                Err(error) => warn!("BMP390 acquisition error: {:?}", error),
             }
+
+            next_barometer_action = deadline_after_ms(measurement_now(), bmp390_config.period_ms);
         }
 
         let now = measurement_now();
         if now >= next_imu_action {
             did_work = true;
 
-            if let Some(source) = imu_source.as_mut() {
-                let timestamp = clock.now();
-                match source.read_imu_sample().await {
-                    Ok(sample) => {
-                        IMU_CHANNEL
-                            .immediate_publisher()
-                            .publish_immediate(ImuSampleStamped::new(timestamp, sample));
-                    }
-                    Err(error) => warn!("MPU6050 acquisition error: {:?}", error),
+            let timestamp = clock.now();
+            match imu_source.read_imu_sample().await {
+                Ok(sample) => {
+                    IMU_CHANNEL
+                        .immediate_publisher()
+                        .publish_immediate(ImuSampleStamped::new(timestamp, sample));
                 }
-
-                next_imu_action = deadline_after_ms(measurement_now(), mpu6050_config.period_ms);
-            } else {
-                imu_source = try_init_mpu6050_source(shared_bus, mpu6050_config).await;
-
-                if imu_source.is_none() {
-                    warn!("MPU6050 not detected on 0x68/0x69; verify AD0 strap and device power");
-                }
-
-                next_imu_action = deadline_after_ms(
-                    measurement_now(),
-                    if imu_source.is_some() {
-                        mpu6050_config.period_ms
-                    } else {
-                        SENSOR_RETRY_PERIOD_MS
-                    },
-                );
+                Err(error) => warn!("MPU6050 acquisition error: {:?}", error),
             }
+
+            next_imu_action = deadline_after_ms(measurement_now(), mpu6050_config.period_ms);
         }
 
         if !did_work {
@@ -339,6 +441,23 @@ async fn recovery_i2c_sensor_task(
                     measurement_now(),
                 ))
                 .await;
+        }
+    }
+}
+
+#[task]
+async fn hil_control_command_task(
+    receiver: RecoveryHilControlCommandReceiver,
+    egress: RecoveryHilEgressSender,
+    mut runtime: HilControlRuntime,
+) -> ! {
+    let receiver = receiver;
+    let egress = egress;
+
+    loop {
+        let command = receiver.receive().await;
+        if let Some(ack) = runtime.accept_control_command(command) {
+            egress.send(HilEgressMessage::CommandAck(ack)).await;
         }
     }
 }
@@ -363,6 +482,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                 recovery_adc: _recovery_adc,
                 storage: storage_bus,
             },
+        watchdog: watchdog_resources,
         system:
             SystemResources {
                 usb,
@@ -372,18 +492,146 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     } = resources;
     let config = DeviceConfig::default();
 
-    usb_cdc::spawn(&spawner, usb);
+    HIL_BOOT_SIGNAL.reset();
+    usb_cdc::reset_host_connected();
+
+    let usb_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
+    let watchdog_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
+    let phase_publisher = FLIGHT_PHASE_CHANNEL.immediate_publisher();
+    let hardware_watchdog =
+        watchdog::HardwareWatchdog::new(watchdog_resources.peripheral, watchdog_resources.timeout_ms);
+    let reset_reason = hardware_watchdog.reset_reason();
+
     spawner
-        .spawn(recovery_i2c_sensor_task(
-            sda,
-            scl,
-            recovery_i2c,
-            config.bmp390,
-            config.mpu6050,
+        .spawn(hil_control_command_task(
+            HIL_CONTROL_COMMAND_CHANNEL.receiver(),
+            HIL_EGRESS_CHANNEL.sender(),
+            HilControlRuntime::new(config.hil.system_id, config.hil.component_id, SensorBackend::Hil),
+        ))
+        .unwrap();
+    usb_cdc::spawn(
+        &spawner,
+        usb,
+        config.hil,
+        HIL_EGRESS_CHANNEL.receiver(),
+        usb_phase_subscriber,
+        WATCHDOG_LIVENESS_CHANNEL.sender(),
+    );
+    spawner
+        .spawn(watchdog_task(
+            hardware_watchdog,
+            WATCHDOG_LIVENESS_CHANNEL.receiver(),
+            watchdog_phase_subscriber,
+            config.watchdog_enabled_in_hil,
         ))
         .unwrap();
 
-    if config.logging.enabled {
+    phase_publisher.publish_immediate(FlightPhase::Init);
+    info!("boot reset reason: {:?}", reset_reason);
+
+    let mut boot_ticker = Ticker::every(Duration::from_millis(100));
+    let boot_started_at = Instant::now();
+    let mut hil_requested = false;
+    let mut waiting_on_usb_host = false;
+    loop {
+        report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+        if HIL_BOOT_SIGNAL.try_take().is_some() {
+            hil_requested = true;
+            break;
+        }
+        let usb_host_connected = usb_cdc::host_connected();
+        if usb_host_connected {
+            waiting_on_usb_host = true;
+        }
+        if waiting_on_usb_host && !usb_host_connected {
+            break;
+        }
+        if !waiting_on_usb_host
+            && boot_started_at.elapsed().as_millis() as u32 >= config.hil_boot_window_ms
+        {
+            break;
+        }
+        boot_ticker.next().await;
+    }
+
+    let selected_backend = if hil_requested {
+        SensorBackend::Hil
+    } else {
+        SensorBackend::Real
+    };
+
+    let phase = match selected_backend {
+        SensorBackend::Hil => {
+            phase_publisher.publish_immediate(FlightPhase::Hil);
+            spawner
+                .spawn(time_liveness_task(
+                    TIME_CHANNEL.subscriber().unwrap(),
+                    watchdog::SOURCE_HIL_TIME,
+                ))
+                .unwrap();
+            FlightPhase::Hil
+        }
+        SensorBackend::Real => {
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+
+            let mut i2c_config = i2c::Config::default();
+            i2c_config.frequency = config.bmp390.i2c_frequency_hz;
+
+            let i2c = I2c::new_async(recovery_i2c.i2c, scl, sda, Irqs, i2c_config);
+            let shared_bus: &'static SharedRecoveryI2cBus = I2C_BUS.init(Mutex::new(i2c));
+
+            Timer::after(Duration::from_millis(100)).await;
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+
+            let barometer_source = try_init_bmp390_source(shared_bus, config.bmp390).await;
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+            if barometer_source.is_none() {
+                warn!(
+                    "BMP390 missing during INIT; Bosch requires CSB high at POR and SDO strapped to GND or VDDIO"
+                );
+            }
+
+            let imu_source = try_init_mpu6050_source(shared_bus, config.mpu6050).await;
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+            if imu_source.is_none() {
+                warn!("MPU6050 missing during INIT; verify AD0 strap and device power");
+            }
+
+            let next_phase =
+                phase_after_init(barometer_source.is_some() && imu_source.is_some());
+            phase_publisher.publish_immediate(next_phase);
+
+            if matches!(next_phase, FlightPhase::Ready) {
+                spawner
+                    .spawn(recovery_i2c_sensor_task(
+                        barometer_source.unwrap(),
+                        config.bmp390,
+                        imu_source.unwrap(),
+                        config.mpu6050,
+                    ))
+                    .unwrap();
+                spawner
+                    .spawn(barometer_liveness_task(
+                        BAROMETER_CHANNEL.subscriber().unwrap(),
+                        watchdog::SOURCE_BAROMETER,
+                    ))
+                    .unwrap();
+                spawner
+                    .spawn(imu_liveness_task(
+                        IMU_CHANNEL.subscriber().unwrap(),
+                        watchdog::SOURCE_IMU,
+                    ))
+                    .unwrap();
+            } else {
+                warn!("INIT failed: feed-critical recovery sensors are unavailable");
+            }
+
+            next_phase
+        }
+        SensorBackend::Replay => FlightPhase::Fault,
+    };
+
+    if config.logging.enabled && !phase.is_fault() {
         match storage::build_logger_engine(storage, storage_bus, config.logging) {
             Ok(mut engine) => match engine.create_new_csv(config.logging.file_prefix) {
                 Ok(log_path) => {
@@ -393,12 +641,29 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                     ) {
                         Ok(logger) => {
                             let imu_subscriber = if logger.config().sensors.imu {
-                                Some(IMU_CHANNEL.subscriber().unwrap())
+                                match selected_backend {
+                                    SensorBackend::Hil => Some(IMU_CHANNEL.subscriber().unwrap()),
+                                    SensorBackend::Real => Some(IMU_CHANNEL.subscriber().unwrap()),
+                                    SensorBackend::Replay => None,
+                                }
                             } else {
                                 None
                             };
                             let barometer_subscriber = if logger.config().sensors.barometer {
-                                Some(BAROMETER_CHANNEL.subscriber().unwrap())
+                                match selected_backend {
+                                    SensorBackend::Hil => {
+                                        Some(BAROMETER_CHANNEL.subscriber().unwrap())
+                                    }
+                                    SensorBackend::Real => {
+                                        Some(BAROMETER_CHANNEL.subscriber().unwrap())
+                                    }
+                                    SensorBackend::Replay => None,
+                                }
+                            } else {
+                                None
+                            };
+                            let time_subscriber = if matches!(selected_backend, SensorBackend::Hil) {
+                                Some(TIME_CHANNEL.subscriber().unwrap())
                             } else {
                                 None
                             };
@@ -410,6 +675,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                                     logger,
                                     imu_subscriber,
                                     barometer_subscriber,
+                                    time_subscriber,
                                     sink_state_receiver,
                                 ))
                                 .unwrap();
@@ -422,11 +688,14 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
             },
             Err(error) => warn!("sd logger engine unavailable: {:?}", error),
         }
+    } else if phase.is_fault() {
+        info!("logging skipped while waiting for watchdog reset");
     } else {
         info!("sd logging disabled by device config");
     }
 
     info!("recovery-altimeter-rp2350 resource graph initialized");
+    info!("watchdog authority: {}", watchdog::FEED_AUTHORITY);
     info!(
         "recovery altimeter I2C0: BMP390 + MPU6050 on GP{=u8}/GP{=u8}",
         pinmap::RECOVERY_I2C_SDA,
@@ -439,6 +708,14 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     info!(
         "MPU6050 runtime: addr=0x{=u8:02X} sample_period_ms={=u32}",
         config.mpu6050.address, config.mpu6050.period_ms,
+    );
+    info!(
+        "sensor_backend={:?} phase={:?} hil_boot_window_ms={} watchdog_timeout_ms={} watchdog_enabled_in_hil={}",
+        selected_backend,
+        phase,
+        config.hil_boot_window_ms,
+        config.watchdog_timeout_ms,
+        config.watchdog_enabled_in_hil
     );
     info!(
         "recovery altimeter SPI0: SD card on GP{=u8}/GP{=u8}/GP{=u8} cs=GP{=u8}",

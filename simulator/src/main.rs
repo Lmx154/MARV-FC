@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &BAROMETER_CHANNEL,
         &GPS_CHANNEL,
         &(),
+        &(),
     );
     let mut protocol = MavlinkHilMessagePump::<RX_BUFFER_LIMIT>::new();
     let mut runtime = HilRuntime::new();

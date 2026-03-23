@@ -7,5 +7,7 @@ pub mod watchdog_supervisor;
 
 pub use deadlines::DeadlineWindow;
 pub use fault_aggregation::FaultAggregation;
-pub use liveness::{LivenessClass, LivenessEvidence};
-pub use watchdog_supervisor::{FeedDecision, WatchdogSupervisor};
+pub use liveness::{LivenessClass, LivenessEvidence, LivenessUpdate};
+pub use watchdog_supervisor::{
+    FeedDecision, WatchdogContract, WatchdogEvaluation, WatchdogSource, WatchdogSupervisor,
+};

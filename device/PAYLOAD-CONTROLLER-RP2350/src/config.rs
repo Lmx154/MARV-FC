@@ -2,13 +2,14 @@
 
 use common::drivers::bmp388::BMP388_ADDR_SDO_LOW;
 use common::drivers::pressure_transducer::PressureTransducerConfig;
-use common::services::hil::SensorBackend;
 use common::services::logging::{
     SensorSnapshotLogFlags, SensorSnapshotLoggerConfig, SensorSnapshotSensorConfig,
 };
 use common::utilities::units::STANDARD_SEA_LEVEL_PRESSURE_PA;
 
 pub const STATUS_HEARTBEAT_PERIOD_MS: u64 = 1_000;
+pub const WATCHDOG_TIMEOUT_MS: u32 = 250;
+pub const WATCHDOG_ENABLED_IN_HIL: bool = false;
 pub const BMP388_I2C_FREQUENCY_HZ: u32 = 400_000;
 pub const BMP388_SAMPLE_PERIOD_MS: u32 = 50;
 pub const PRESSURE_TRANSDUCER_SAMPLE_PERIOD_MS: u32 = 50;
@@ -19,13 +20,13 @@ pub const SERVO_OPEN_ANGLE_DEG: u16 = 90;
 pub const SERVO_TRIGGER_ALTITUDE_FT: u32 = 8_000;
 pub const SERVO_SEA_LEVEL_PRESSURE_PA: u32 = STANDARD_SEA_LEVEL_PRESSURE_PA as u32;
 pub const LOG_FILE_PREFIX: &str = "PAYL";
-pub const LOG_RECORD_PERIOD_MS: u32 = 100;
+pub const LOG_RECORD_PERIOD_MS: u32 = 10;
 pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 12_000_000;
 pub const LOG_SD_FLUSH_EVERY_LINES: usize = 32;
 pub const PAYLOAD_SERVO_TEST_COMMAND_ID: u16 = 31_000;
 pub const HIL_SYSTEM_ID: u8 = 42;
 pub const HIL_COMPONENT_ID: u8 = 1;
-pub const SENSOR_BACKEND: SensorBackend = SensorBackend::Hil;
+pub const HIL_BOOT_WINDOW_MS: u32 = 1_500;
 
 #[derive(Clone, Copy, Debug)]
 pub struct Bmp388RuntimeConfig {
@@ -130,7 +131,9 @@ pub struct DeviceConfig {
     pub status_heartbeat_period_ms: u64,
     pub bmp388: Bmp388RuntimeConfig,
     pub hil: HilConfig,
-    pub sensor_backend: SensorBackend,
+    pub hil_boot_window_ms: u32,
+    pub watchdog_enabled_in_hil: bool,
+    pub watchdog_timeout_ms: u32,
     pub pressure_transducer: PressureTransducerRuntimeConfig,
     pub servo: ServoRuntimeConfig,
     pub logging: LoggingConfig,
@@ -140,6 +143,7 @@ pub struct DeviceConfig {
 pub struct HilConfig {
     pub system_id: u8,
     pub component_id: u8,
+    pub boot_window_ms: u32,
     pub payload_servo_test_command_id: u16,
 }
 
@@ -148,6 +152,7 @@ impl Default for HilConfig {
         Self {
             system_id: HIL_SYSTEM_ID,
             component_id: HIL_COMPONENT_ID,
+            boot_window_ms: HIL_BOOT_WINDOW_MS,
             payload_servo_test_command_id: PAYLOAD_SERVO_TEST_COMMAND_ID,
         }
     }
@@ -159,7 +164,9 @@ impl Default for DeviceConfig {
             status_heartbeat_period_ms: STATUS_HEARTBEAT_PERIOD_MS,
             bmp388: Bmp388RuntimeConfig::default(),
             hil: HilConfig::default(),
-            sensor_backend: SENSOR_BACKEND,
+            hil_boot_window_ms: HIL_BOOT_WINDOW_MS,
+            watchdog_enabled_in_hil: WATCHDOG_ENABLED_IN_HIL,
+            watchdog_timeout_ms: WATCHDOG_TIMEOUT_MS,
             pressure_transducer: PressureTransducerRuntimeConfig::default(),
             servo: ServoRuntimeConfig::default(),
             logging: LoggingConfig::default(),

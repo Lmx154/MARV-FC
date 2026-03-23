@@ -1,28 +1,37 @@
 use common::messages::control::StaticLedCommand;
 use common::messages::logging::LogSinkState;
+use common::messages::runtime::FlightPhase;
 use common::services::acquisition::{
     BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleSubscriber, ImuSampleSubscriber,
     MagnetometerSampleSubscriber, PressureTransducerSampleChannel,
     PressureTransducerSampleSubscriber, TimeSampleChannel, TimeSampleSubscriber,
 };
-use common::services::hil::HilMissionEvent;
+use common::services::health::LivenessUpdate;
+use common::services::hil::{HilControlCommand, HilEgressMessage};
 use common::services::logging::{LogChannel, LogSinkStateChannel};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
+use embassy_sync::pubsub::{PubSubChannel, Subscriber};
+use embassy_sync::signal::Signal;
 
 pub const SENSOR_CHANNEL_DEPTH: usize = 16;
 pub const SENSOR_CHANNEL_SUBS: usize = 2;
 pub const SENSOR_CHANNEL_PUBS: usize = 1;
 pub const BAROMETER_CHANNEL_DEPTH: usize = 16;
-pub const BAROMETER_CHANNEL_SUBS: usize = 2;
+pub const BAROMETER_CHANNEL_SUBS: usize = 4;
 pub const BAROMETER_CHANNEL_PUBS: usize = 1;
 pub const PRESSURE_TRANSDUCER_CHANNEL_DEPTH: usize = 16;
-pub const PRESSURE_TRANSDUCER_CHANNEL_SUBS: usize = 1;
+pub const PRESSURE_TRANSDUCER_CHANNEL_SUBS: usize = 2;
 pub const PRESSURE_TRANSDUCER_CHANNEL_PUBS: usize = 1;
 pub const LOG_CHANNEL_DEPTH: usize = 32;
 pub const LOG_SINK_STATE_DEPTH: usize = 4;
 pub const STATUS_LED_COMMAND_DEPTH: usize = 4;
-pub const HIL_MISSION_EVENT_DEPTH: usize = 4;
+pub const HIL_CONTROL_COMMAND_DEPTH: usize = 4;
+pub const HIL_EGRESS_DEPTH: usize = 8;
+pub const WATCHDOG_LIVENESS_DEPTH: usize = 16;
+pub const FLIGHT_PHASE_DEPTH: usize = 4;
+pub const FLIGHT_PHASE_SUBS: usize = 4;
+pub const FLIGHT_PHASE_PUBS: usize = 1;
 
 pub type PayloadBarometerChannel = BarometerSampleChannel<
     CriticalSectionRawMutex,
@@ -69,10 +78,31 @@ pub type PayloadStatusLedCommandReceiver =
     Receiver<'static, CriticalSectionRawMutex, StaticLedCommand, STATUS_LED_COMMAND_DEPTH>;
 pub type PayloadStatusLedCommandSender =
     Sender<'static, CriticalSectionRawMutex, StaticLedCommand, STATUS_LED_COMMAND_DEPTH>;
-pub type PayloadHilMissionEventReceiver =
-    Receiver<'static, CriticalSectionRawMutex, HilMissionEvent, HIL_MISSION_EVENT_DEPTH>;
-pub type PayloadHilMissionEventSender =
-    Sender<'static, CriticalSectionRawMutex, HilMissionEvent, HIL_MISSION_EVENT_DEPTH>;
+pub type PayloadHilControlCommandReceiver =
+    Receiver<'static, CriticalSectionRawMutex, HilControlCommand, HIL_CONTROL_COMMAND_DEPTH>;
+pub type PayloadHilEgressReceiver =
+    Receiver<'static, CriticalSectionRawMutex, HilEgressMessage, HIL_EGRESS_DEPTH>;
+pub type PayloadHilEgressSender =
+    Sender<'static, CriticalSectionRawMutex, HilEgressMessage, HIL_EGRESS_DEPTH>;
+pub type PayloadWatchdogLivenessReceiver =
+    Receiver<'static, CriticalSectionRawMutex, LivenessUpdate, WATCHDOG_LIVENESS_DEPTH>;
+pub type PayloadWatchdogLivenessSender =
+    Sender<'static, CriticalSectionRawMutex, LivenessUpdate, WATCHDOG_LIVENESS_DEPTH>;
+pub type PayloadFlightPhaseChannel = PubSubChannel<
+    CriticalSectionRawMutex,
+    FlightPhase,
+    FLIGHT_PHASE_DEPTH,
+    FLIGHT_PHASE_SUBS,
+    FLIGHT_PHASE_PUBS,
+>;
+pub type PayloadFlightPhaseSubscriber = Subscriber<
+    'static,
+    CriticalSectionRawMutex,
+    FlightPhase,
+    FLIGHT_PHASE_DEPTH,
+    FLIGHT_PHASE_SUBS,
+    FLIGHT_PHASE_PUBS,
+>;
 pub type DisabledImuSubscriber = ImuSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledGpsSubscriber = GpsFixSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledMagnetometerSubscriber =
@@ -92,8 +122,20 @@ pub static STATUS_LED_COMMAND_CHANNEL: embassy_sync::channel::Channel<
     StaticLedCommand,
     STATUS_LED_COMMAND_DEPTH,
 > = embassy_sync::channel::Channel::new();
-pub static HIL_MISSION_EVENT_CHANNEL: embassy_sync::channel::Channel<
+pub static HIL_CONTROL_COMMAND_CHANNEL: embassy_sync::channel::Channel<
     CriticalSectionRawMutex,
-    HilMissionEvent,
-    HIL_MISSION_EVENT_DEPTH,
+    HilControlCommand,
+    HIL_CONTROL_COMMAND_DEPTH,
 > = embassy_sync::channel::Channel::new();
+pub static HIL_EGRESS_CHANNEL: embassy_sync::channel::Channel<
+    CriticalSectionRawMutex,
+    HilEgressMessage,
+    HIL_EGRESS_DEPTH,
+> = embassy_sync::channel::Channel::new();
+pub static WATCHDOG_LIVENESS_CHANNEL: embassy_sync::channel::Channel<
+    CriticalSectionRawMutex,
+    LivenessUpdate,
+    WATCHDOG_LIVENESS_DEPTH,
+> = embassy_sync::channel::Channel::new();
+pub static FLIGHT_PHASE_CHANNEL: PayloadFlightPhaseChannel = PayloadFlightPhaseChannel::new();
+pub static HIL_BOOT_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();

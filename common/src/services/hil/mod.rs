@@ -12,12 +12,13 @@ pub use backend::SensorBackend;
 pub use egress::{HilByteWriter, HilEgressProtocol};
 pub use ingress::{HilByteReader, HilIngressProtocol};
 pub use model::{
-    HilActuatorCommand, HilBarometerSample, HilEgressMessage, HilGpsSample, HilImuSample,
+    HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult,
+    HilControlAction, HilControlCommand, HilEgressMessage, HilGpsSample, HilImuSample,
     HilIngressMessage, HilMagSample, HilMissionEvent, HilTick,
 };
 pub use routing::{
-    HilBarometerRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes, HilMagnetometerRoute,
-    HilTimeRoute,
+    HilBarometerRoute, HilControlCommandRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes,
+    HilMagnetometerRoute, HilTimeRoute,
 };
-pub use runtime::{HilDispatch, HilRuntime};
+pub use runtime::{HilControlRuntime, HilDispatch, HilRuntime};
 pub use tasks::{HilIngressLoopError, run_hil_ingress_loop, send_hil_egress_message};

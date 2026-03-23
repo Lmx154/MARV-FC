@@ -12,6 +12,7 @@ mod pressure_transducer;
 mod resources;
 mod storage;
 mod usb_cdc;
+mod watchdog;
 
 use embassy_executor::Spawner;
 use embassy_rp::block::ImageDef;

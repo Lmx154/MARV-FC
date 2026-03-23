@@ -1,4 +1,3 @@
-
 //! Portable mission task bodies.
 
 use embassy_sync::blocking_mutex::raw::RawMutex;

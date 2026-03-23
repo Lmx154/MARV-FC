@@ -3,7 +3,6 @@
 use common::drivers::bmp581::{BMP581_ADDR_PRIMARY, Bmp581Config};
 use common::messages::control::RgbLedCommand;
 use common::policies::mission::BarometerRgbLedMissionConfig;
-use common::services::hil::SensorBackend;
 use common::services::logging::{
     SensorSnapshotLogFlags, SensorSnapshotLoggerConfig, SensorSnapshotSensorConfig,
 };
@@ -11,12 +10,15 @@ use common::services::logging::{
 pub const XOSC_HZ: u32 = 12_000_000;
 pub const FAST_LOOP_HZ: u32 = 1_000;
 pub const WATCHDOG_TIMEOUT_MS: u32 = 250;
+pub const WATCHDOG_ENABLED_IN_HIL: bool = false;
 pub const STATUS_HEARTBEAT_PERIOD_MS: u64 = 1_000;
 pub const LOG_FILE_PREFIX: &str = "FLGT";
 pub const LOG_RECORD_PERIOD_MS: u32 = 10;
 pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 12_000_000;
 pub const LOG_SD_FLUSH_EVERY_LINES: usize = 64;
-pub const SENSOR_BACKEND: SensorBackend = SensorBackend::Hil;
+pub const HIL_SYSTEM_ID: u8 = 42;
+pub const HIL_COMPONENT_ID: u8 = 1;
+pub const HIL_BOOT_WINDOW_MS: u32 = 1_500;
 pub const BMP581_I2C_FREQUENCY_HZ: u32 = 400_000;
 pub const BMP581_PERIOD_MS: u32 = 20;
 
@@ -62,12 +64,31 @@ impl Default for LoggingConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceConfig {
     pub bmp581: Bmp581RuntimeConfig,
+    pub hil: HilConfig,
     pub mission: MissionConfig,
-    pub sensor_backend: SensorBackend,
     pub fast_loop_hz: u32,
+    pub hil_boot_window_ms: u32,
+    pub watchdog_enabled_in_hil: bool,
     pub watchdog_timeout_ms: u32,
     pub status_heartbeat_period_ms: u64,
     pub logging: LoggingConfig,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct HilConfig {
+    pub system_id: u8,
+    pub component_id: u8,
+    pub boot_window_ms: u32,
+}
+
+impl Default for HilConfig {
+    fn default() -> Self {
+        Self {
+            system_id: HIL_SYSTEM_ID,
+            component_id: HIL_COMPONENT_ID,
+            boot_window_ms: HIL_BOOT_WINDOW_MS,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -127,9 +148,11 @@ impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
             bmp581: Bmp581RuntimeConfig::default(),
+            hil: HilConfig::default(),
             mission: MissionConfig::default(),
-            sensor_backend: SENSOR_BACKEND,
             fast_loop_hz: FAST_LOOP_HZ,
+            hil_boot_window_ms: HIL_BOOT_WINDOW_MS,
+            watchdog_enabled_in_hil: WATCHDOG_ENABLED_IN_HIL,
             watchdog_timeout_ms: WATCHDOG_TIMEOUT_MS,
             status_heartbeat_period_ms: STATUS_HEARTBEAT_PERIOD_MS,
             logging: LoggingConfig::default(),

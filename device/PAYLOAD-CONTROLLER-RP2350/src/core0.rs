@@ -7,12 +7,14 @@ use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
 use common::messages::control::StaticLedCommand;
 use common::messages::logging::LoggedSensor;
+use common::messages::runtime::FlightPhase;
+use common::policies::modes::phase_after_init;
 use common::services::acquisition::{
     BarometerServiceConfig, Bmp388BarometerSource, PressureTransducerServiceConfig,
     run_barometer_service, run_pressure_transducer_service,
 };
-use common::services::hil::HilMissionEvent;
-use common::services::hil::SensorBackend;
+use common::services::health::{FeedDecision, LivenessUpdate, WatchdogContract, WatchdogSupervisor};
+use common::services::hil::{HilControlRuntime, HilEgressMessage, HilMissionEvent, SensorBackend};
 use common::services::logging::{
     SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
 };
@@ -29,30 +31,34 @@ use embassy_rp::clocks;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::pwm::{Config as PwmConfig, Pwm, SetDutyCycle};
-use embassy_time::{Duration, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 
 use crate::channels::{
     BAROMETER_CHANNEL, DisabledGpsSubscriber, DisabledImuSubscriber,
-    DisabledMagnetometerSubscriber, HIL_MISSION_EVENT_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
-    PRESSURE_TRANSDUCER_CHANNEL, PayloadBarometerSubscriber, PayloadHilMissionEventSender,
-    PayloadLogSinkStateReceiver, PayloadPressureTransducerSubscriber,
-    PayloadStatusLedCommandReceiver, PayloadStatusLedCommandSender, PayloadTimeSubscriber,
-    STATUS_LED_COMMAND_CHANNEL, TIME_CHANNEL,
+    DisabledMagnetometerSubscriber, FLIGHT_PHASE_CHANNEL, HIL_BOOT_SIGNAL,
+    HIL_CONTROL_COMMAND_CHANNEL, HIL_EGRESS_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
+    PRESSURE_TRANSDUCER_CHANNEL, PayloadBarometerSubscriber, PayloadFlightPhaseSubscriber,
+    PayloadHilControlCommandReceiver, PayloadHilEgressSender, PayloadLogSinkStateReceiver,
+    PayloadPressureTransducerSubscriber, PayloadStatusLedCommandReceiver,
+    PayloadStatusLedCommandSender, PayloadTimeSubscriber, PayloadWatchdogLivenessReceiver,
+    STATUS_LED_COMMAND_CHANNEL, TIME_CHANNEL, WATCHDOG_LIVENESS_CHANNEL,
 };
-use crate::config::DeviceConfig;
+use crate::config::{Bmp388RuntimeConfig, DeviceConfig};
 use crate::core1;
 use crate::pinmap;
 use crate::pressure_transducer::RpAdcPressureTransducerSource;
 use crate::resources::{DeviceResources, PayloadSensorPins, SystemResources};
 use crate::storage;
 use crate::usb_cdc;
+use crate::watchdog;
+
+type PayloadI2c = I2c<'static, embassy_rp::peripherals::I2C0, i2c::Async>;
+type PayloadBmp388Source = Bmp388BarometerSource<PayloadI2c>;
 
 bind_interrupts!(struct Irqs {
     I2C0_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
     ADC_IRQ_FIFO => adc::InterruptHandler;
 });
-
-type PayloadI2c = I2c<'static, embassy_rp::peripherals::I2C0, i2c::Async>;
 
 struct EmbassyClock;
 
@@ -72,6 +78,14 @@ impl DelayMs for EmbassyDelay {
 
 fn measurement_now() -> MeasurementTimestamp {
     MeasurementTimestamp::from_micros(embassy_time::Instant::now().as_micros())
+}
+
+fn watchdog_now_ms() -> u64 {
+    Instant::now().as_millis()
+}
+
+fn report_watchdog_progress(mask: u32) {
+    let _ = WATCHDOG_LIVENESS_CHANNEL.try_send(LivenessUpdate::new(mask, watchdog_now_ms()));
 }
 
 fn pwm_top_for_period(sys_freq_hz: u32, divider: u8, frame_period_us: u32) -> Option<u16> {
@@ -124,6 +138,27 @@ async fn probe_bmp388_address(i2c: &mut PayloadI2c, preferred_address: u8) -> Op
     }
 
     None
+}
+
+async fn try_init_bmp388_source(
+    mut i2c: PayloadI2c,
+    config: Bmp388RuntimeConfig,
+) -> Option<PayloadBmp388Source> {
+    let detected_address = probe_bmp388_address(&mut i2c, config.address).await?;
+    let driver = Bmp388::new(i2c, detected_address);
+    let mut source = Bmp388BarometerSource::new(driver);
+    let mut delay = EmbassyDelay;
+
+    match source.driver_mut().init(&mut delay).await {
+        Ok(()) => {
+            info!("BMP388 initialized");
+            Some(source)
+        }
+        Err(error) => {
+            warn!("BMP388 initialization failed: {:?}", error);
+            None
+        }
+    }
 }
 
 #[task]
@@ -181,45 +216,109 @@ async fn sensor_logging_task(
 }
 
 #[task]
-async fn bmp388_barometer_task(
-    sda: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_0>,
-    scl: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_1>,
-    bus: crate::buses::PayloadI2cBus,
-    config: crate::config::Bmp388RuntimeConfig,
+async fn watchdog_task(
+    mut hardware: watchdog::HardwareWatchdog,
+    receiver: PayloadWatchdogLivenessReceiver,
+    mut phase_subscriber: PayloadFlightPhaseSubscriber,
+    ready_contract: WatchdogContract,
+    watchdog_enabled_in_hil: bool,
 ) -> ! {
-    let mut i2c_config = i2c::Config::default();
-    i2c_config.frequency = config.i2c_frequency_hz;
+    let receiver = receiver;
+    let mut phase = FlightPhase::Init;
+    let mut supervisor = WatchdogSupervisor::<{ watchdog::SOURCE_COUNT }>::new(
+        watchdog::SOURCES,
+        watchdog::INIT_CONTRACT,
+        watchdog_now_ms(),
+    );
+    let mut ticker = Ticker::every(Duration::from_millis(50));
+    let mut last_decision = None;
 
-    let mut i2c = I2c::new_async(bus.i2c, scl, sda, Irqs, i2c_config);
-    Timer::after(Duration::from_millis(100)).await;
-    let detected_address = loop {
-        if let Some(address) = probe_bmp388_address(&mut i2c, config.address).await {
-            break address;
-        }
-
-        warn!(
-            "BMP388 not detected on 0x76/0x77; Bosch requires CSB high at POR for I2C and SDO strapped to GND or VDDIO"
-        );
-        Timer::after(Duration::from_secs(1)).await;
-    };
-
-    let driver = Bmp388::new(i2c, detected_address);
-    let mut source = Bmp388BarometerSource::new(driver);
-    let clock = EmbassyClock;
-    let mut delay = EmbassyDelay;
+    hardware.start();
 
     loop {
-        match source.driver_mut().init(&mut delay).await {
-            Ok(()) => {
-                info!("BMP388 initialized");
-                break;
-            }
-            Err(error) => {
-                warn!("BMP388 initialization failed: {:?}", error);
-                Timer::after(Duration::from_secs(1)).await;
+        ticker.next().await;
+
+        while let Some(next_phase) = phase_subscriber.try_next_message_pure() {
+            phase = next_phase;
+            let contract = match phase {
+                FlightPhase::Init => watchdog::INIT_CONTRACT,
+                FlightPhase::Hil => watchdog::HIL_CONTRACT,
+                FlightPhase::Ready | FlightPhase::Active | FlightPhase::Fault => ready_contract,
+            };
+            supervisor.set_contract(contract, watchdog_now_ms());
+            info!("watchdog phase -> {:?}", phase);
+            if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
+                info!("watchdog HIL liveness disabled by config");
             }
         }
+
+        while let Ok(update) = receiver.try_receive() {
+            supervisor.record(update);
+        }
+
+        let evaluation = if phase.is_fault() {
+            common::services::health::WatchdogEvaluation {
+                decision: FeedDecision::DoNotFeed,
+                stale_required_mask: 0,
+                stale_degrade_mask: 0,
+            }
+        } else if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
+            common::services::health::WatchdogEvaluation {
+                decision: FeedDecision::FeedAllowed,
+                stale_required_mask: 0,
+                stale_degrade_mask: 0,
+            }
+        } else {
+            supervisor.evaluate(watchdog_now_ms())
+        };
+
+        if last_decision != Some(evaluation.decision) {
+            info!(
+                "watchdog decision={:?} stale_required=0x{=u32:08X} stale_degrade=0x{=u32:08X}",
+                evaluation.decision,
+                evaluation.stale_required_mask,
+                evaluation.stale_degrade_mask
+            );
+            last_decision = Some(evaluation.decision);
+        }
+
+        if !matches!(evaluation.decision, FeedDecision::DoNotFeed) {
+            hardware.feed();
+        }
     }
+}
+
+#[task]
+async fn time_liveness_task(mut subscriber: PayloadTimeSubscriber, mask: u32) -> ! {
+    loop {
+        subscriber.next_message_pure().await;
+        report_watchdog_progress(mask);
+    }
+}
+
+#[task]
+async fn barometer_liveness_task(mut subscriber: PayloadBarometerSubscriber, mask: u32) -> ! {
+    loop {
+        subscriber.next_message_pure().await;
+        report_watchdog_progress(mask);
+    }
+}
+
+#[task]
+async fn pressure_transducer_liveness_task(
+    mut subscriber: PayloadPressureTransducerSubscriber,
+    mask: u32,
+) -> ! {
+    loop {
+        subscriber.next_message_pure().await;
+        report_watchdog_progress(mask);
+    }
+}
+
+#[task]
+async fn bmp388_barometer_task(mut source: PayloadBmp388Source, config: crate::config::Bmp388RuntimeConfig) -> ! {
+    let clock = EmbassyClock;
+    let mut delay = EmbassyDelay;
 
     run_barometer_service(
         &BAROMETER_CHANNEL,
@@ -237,17 +336,8 @@ async fn pressure_transducer_task(
     pressure_adc_pin: embassy_rp::Peri<'static, embassy_rp::peripherals::PIN_29>,
     bus: crate::buses::PressureAdcBus,
     config: crate::config::PressureTransducerRuntimeConfig,
+    driver: PressureTransducer,
 ) -> ! {
-    let driver = match PressureTransducer::try_new(config.sensor) {
-        Ok(driver) => driver,
-        Err(error) => {
-            warn!("pressure transducer config invalid: {:?}", error);
-            loop {
-                Timer::after(Duration::from_secs(1)).await;
-            }
-        }
-    };
-
     let adc = Adc::new(bus.adc, Irqs, adc::Config::default());
     let mut source = RpAdcPressureTransducerSource::new(adc, pressure_adc_pin, driver);
     let clock = EmbassyClock;
@@ -289,7 +379,7 @@ async fn servo_deploy_task(
     mut barometer_subscriber: PayloadBarometerSubscriber,
     config: crate::config::ServoRuntimeConfig,
     led_sender: PayloadStatusLedCommandSender,
-    mission_event_sender: Option<PayloadHilMissionEventSender>,
+    mission_event_sender: Option<PayloadHilEgressSender>,
     mission_event_command_id: u16,
 ) -> ! {
     if !config.enabled {
@@ -370,7 +460,7 @@ async fn servo_deploy_task(
                 deployed = true;
                 let _ = led_sender.try_send(StaticLedCommand::ON);
                 if let Some(sender) = mission_event_sender {
-                    let _ = sender.try_send(HilMissionEvent {
+                    let _ = sender.try_send(HilEgressMessage::MissionEvent(HilMissionEvent {
                         timestamp: sample.timestamp,
                         command_id: mission_event_command_id,
                         params: [
@@ -382,7 +472,7 @@ async fn servo_deploy_task(
                             0.0,
                             0.0,
                         ],
-                    });
+                    }));
                 }
                 info!(
                     "servo deployed: altitude_ft={=u32} threshold_ft={=u32} angle_deg={=u16} duty={=u16}",
@@ -393,6 +483,23 @@ async fn servo_deploy_task(
                 "servo deploy rejected: angle_deg={=u16} error={:?}",
                 config.open_angle_deg, error
             ),
+        }
+    }
+}
+
+#[task]
+async fn hil_control_command_task(
+    receiver: PayloadHilControlCommandReceiver,
+    egress: PayloadHilEgressSender,
+    mut runtime: HilControlRuntime,
+) -> ! {
+    let receiver = receiver;
+    let egress = egress;
+
+    loop {
+        let command = receiver.receive().await;
+        if let Some(ack) = runtime.accept_control_command(command) {
+            egress.send(HilEgressMessage::CommandAck(ack)).await;
         }
     }
 }
@@ -418,6 +525,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                 storage: storage_bus,
                 servo_pwm,
             },
+        watchdog: watchdog_resources,
         system:
             SystemResources {
                 usb,
@@ -433,51 +541,181 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
             STATUS_LED_COMMAND_CHANNEL.receiver(),
         ))
         .unwrap();
-    let _ = STATUS_LED_COMMAND_CHANNEL
-        .sender()
-        .try_send(StaticLedCommand::OFF);
-    match config.sensor_backend {
-        SensorBackend::Real => {
-            spawner
-                .spawn(bmp388_barometer_task(sda, scl, payload_i2c, config.bmp388))
-                .unwrap();
-            spawner
-                .spawn(pressure_transducer_task(
-                    pressure_adc,
-                    pressure_adc_bus,
-                    config.pressure_transducer,
-                ))
-                .unwrap();
+    let _ = STATUS_LED_COMMAND_CHANNEL.sender().try_send(StaticLedCommand::OFF);
+    HIL_BOOT_SIGNAL.reset();
+    usb_cdc::reset_host_connected();
+
+    let usb_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
+    let watchdog_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
+    let phase_publisher = FLIGHT_PHASE_CHANNEL.immediate_publisher();
+    let hardware_watchdog =
+        watchdog::HardwareWatchdog::new(watchdog_resources.peripheral, watchdog_resources.timeout_ms);
+    let reset_reason = hardware_watchdog.reset_reason();
+
+    spawner
+        .spawn(hil_control_command_task(
+            HIL_CONTROL_COMMAND_CHANNEL.receiver(),
+            HIL_EGRESS_CHANNEL.sender(),
+            HilControlRuntime::new(config.hil.system_id, config.hil.component_id, SensorBackend::Hil),
+        ))
+        .unwrap();
+    usb_cdc::spawn(
+        &spawner,
+        usb,
+        config.hil,
+        HIL_EGRESS_CHANNEL.receiver(),
+        usb_phase_subscriber,
+        WATCHDOG_LIVENESS_CHANNEL.sender(),
+    );
+    spawner
+        .spawn(watchdog_task(
+            hardware_watchdog,
+            WATCHDOG_LIVENESS_CHANNEL.receiver(),
+            watchdog_phase_subscriber,
+            watchdog::ready_contract(config.pressure_transducer.enabled),
+            config.watchdog_enabled_in_hil,
+        ))
+        .unwrap();
+
+    phase_publisher.publish_immediate(FlightPhase::Init);
+    info!("boot reset reason: {:?}", reset_reason);
+
+    let mut boot_ticker = Ticker::every(Duration::from_millis(100));
+    let boot_started_at = Instant::now();
+    let mut hil_requested = false;
+    let mut waiting_on_usb_host = false;
+    loop {
+        report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+        if HIL_BOOT_SIGNAL.try_take().is_some() {
+            hil_requested = true;
+            break;
         }
-        SensorBackend::Hil => {
-            usb_cdc::spawn(
-                &spawner,
-                usb,
-                config.hil,
-                HIL_MISSION_EVENT_CHANNEL.receiver(),
-            );
+        let usb_host_connected = usb_cdc::host_connected();
+        if usb_host_connected {
+            waiting_on_usb_host = true;
         }
-        SensorBackend::Replay => {}
-    }
-    if config.servo.enabled {
-        let barometer_subscriber = BAROMETER_CHANNEL.subscriber().unwrap();
-        spawner
-            .spawn(servo_deploy_task(
-                actuators.servo_pwm,
-                servo_pwm,
-                barometer_subscriber,
-                config.servo,
-                STATUS_LED_COMMAND_CHANNEL.sender(),
-                matches!(config.sensor_backend, SensorBackend::Hil)
-                    .then_some(HIL_MISSION_EVENT_CHANNEL.sender()),
-                config.hil.payload_servo_test_command_id,
-            ))
-            .unwrap();
-    } else {
-        info!("servo deployment disabled by device config");
+        if waiting_on_usb_host && !usb_host_connected {
+            break;
+        }
+        if !waiting_on_usb_host
+            && boot_started_at.elapsed().as_millis() as u32 >= config.hil_boot_window_ms
+        {
+            break;
+        }
+        boot_ticker.next().await;
     }
 
-    if config.logging.enabled {
+    let selected_backend = if hil_requested {
+        SensorBackend::Hil
+    } else {
+        SensorBackend::Real
+    };
+    let mut pressure_transducer_ready = false;
+
+    let phase = match selected_backend {
+        SensorBackend::Hil => {
+            phase_publisher.publish_immediate(FlightPhase::Hil);
+            spawner
+                .spawn(time_liveness_task(
+                    TIME_CHANNEL.subscriber().unwrap(),
+                    watchdog::SOURCE_HIL_TIME,
+                ))
+                .unwrap();
+            info!("servo deployment inhibited in HIL phase");
+            FlightPhase::Hil
+        }
+        SensorBackend::Real => {
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+
+            let mut i2c_config = i2c::Config::default();
+            i2c_config.frequency = config.bmp388.i2c_frequency_hz;
+
+            let i2c = I2c::new_async(payload_i2c.i2c, scl, sda, Irqs, i2c_config);
+            Timer::after(Duration::from_millis(100)).await;
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+
+            let barometer_source = try_init_bmp388_source(i2c, config.bmp388).await;
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+            if barometer_source.is_none() {
+                warn!(
+                    "BMP388 missing during INIT; Bosch requires CSB high at POR and SDO strapped to GND or VDDIO"
+                );
+            }
+
+            let pressure_driver = if config.pressure_transducer.enabled {
+                match PressureTransducer::try_new(config.pressure_transducer.sensor) {
+                    Ok(driver) => {
+                        pressure_transducer_ready = true;
+                        Some(driver)
+                    }
+                    Err(error) => {
+                        warn!("pressure transducer config invalid during INIT: {:?}", error);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+
+            let next_phase = phase_after_init(barometer_source.is_some());
+            phase_publisher.publish_immediate(next_phase);
+
+            if matches!(next_phase, FlightPhase::Ready) {
+                spawner
+                    .spawn(bmp388_barometer_task(barometer_source.unwrap(), config.bmp388))
+                    .unwrap();
+                spawner
+                    .spawn(barometer_liveness_task(
+                        BAROMETER_CHANNEL.subscriber().unwrap(),
+                        watchdog::SOURCE_BAROMETER,
+                    ))
+                    .unwrap();
+
+                if let Some(driver) = pressure_driver {
+                    spawner
+                        .spawn(pressure_transducer_task(
+                            pressure_adc,
+                            pressure_adc_bus,
+                            config.pressure_transducer,
+                            driver,
+                        ))
+                        .unwrap();
+                    spawner
+                        .spawn(pressure_transducer_liveness_task(
+                            PRESSURE_TRANSDUCER_CHANNEL.subscriber().unwrap(),
+                            watchdog::SOURCE_PRESSURE_TRANSDUCER,
+                        ))
+                        .unwrap();
+                } else if config.pressure_transducer.enabled {
+                    warn!("INIT degraded: pressure transducer unavailable");
+                }
+
+                if config.servo.enabled {
+                    spawner
+                        .spawn(servo_deploy_task(
+                            actuators.servo_pwm,
+                            servo_pwm,
+                            BAROMETER_CHANNEL.subscriber().unwrap(),
+                            config.servo,
+                            STATUS_LED_COMMAND_CHANNEL.sender(),
+                            None,
+                            config.hil.payload_servo_test_command_id,
+                        ))
+                        .unwrap();
+                } else {
+                    info!("servo deployment disabled by device config");
+                }
+            } else {
+                warn!("INIT failed: feed-critical payload sensors are unavailable");
+            }
+
+            next_phase
+        }
+        SensorBackend::Replay => FlightPhase::Fault,
+    };
+
+    if config.logging.enabled && !phase.is_fault() {
         match storage::build_logger_engine(storage, storage_bus, config.logging) {
             Ok(mut engine) => match engine.create_new_csv(config.logging.file_prefix) {
                 Ok(log_path) => {
@@ -486,37 +724,29 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                         config.logging.sensor_snapshot,
                     ) {
                         Ok(mut logger) => {
-                            if !matches!(config.sensor_backend, SensorBackend::Real)
-                                && logger.config().sensors.pressure_transducer
+                            if logger.config().sensors.pressure_transducer
+                                && (!matches!(selected_backend, SensorBackend::Real)
+                                    || !pressure_transducer_ready)
                             {
                                 logger.note_sensor_fault(LoggedSensor::PressureTransducer);
                             }
-                            if matches!(config.sensor_backend, SensorBackend::Replay)
-                                && logger.config().sensors.barometer
-                            {
-                                logger.note_sensor_fault(LoggedSensor::Barometer);
-                            }
 
                             let barometer_subscriber = if logger.config().sensors.barometer {
-                                match config.sensor_backend {
-                                    SensorBackend::Real | SensorBackend::Hil => {
-                                        Some(BAROMETER_CHANNEL.subscriber().unwrap())
-                                    }
-                                    SensorBackend::Replay => None,
-                                }
+                                Some(BAROMETER_CHANNEL.subscriber().unwrap())
                             } else {
                                 None
                             };
                             let pressure_transducer_subscriber =
                                 if logger.config().sensors.pressure_transducer
-                                    && matches!(config.sensor_backend, SensorBackend::Real)
+                                    && matches!(selected_backend, SensorBackend::Real)
+                                    && pressure_transducer_ready
                                 {
                                     Some(PRESSURE_TRANSDUCER_CHANNEL.subscriber().unwrap())
                                 } else {
                                     None
                                 };
                             let time_subscriber =
-                                if matches!(config.sensor_backend, SensorBackend::Hil) {
+                                if matches!(selected_backend, SensorBackend::Hil) {
                                     Some(TIME_CHANNEL.subscriber().unwrap())
                                 } else {
                                     None
@@ -542,11 +772,14 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
             },
             Err(error) => warn!("sd logger engine unavailable: {:?}", error),
         }
+    } else if phase.is_fault() {
+        info!("logging skipped while waiting for watchdog reset");
     } else {
         info!("sd logging disabled by device config");
     }
 
     info!("payload-controller-rp2350 resource graph initialized");
+    info!("watchdog authority: {}", watchdog::FEED_AUTHORITY);
     info!(
         "payload controller I2C0: BMP388 on GP{=u8}/GP{=u8}",
         pinmap::PAYLOAD_I2C_SDA,
@@ -574,7 +807,14 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         pinmap::SERVO_PWM,
         core1::ROLE_SUMMARY,
     );
-    info!("sensor_backend={:?}", config.sensor_backend);
+    info!(
+        "sensor_backend={:?} phase={:?} hil_boot_window_ms={} watchdog_timeout_ms={} watchdog_enabled_in_hil={}",
+        selected_backend,
+        phase,
+        config.hil_boot_window_ms,
+        config.watchdog_timeout_ms,
+        config.watchdog_enabled_in_hil
+    );
     info!(
         "servo runtime: closed={=u16}deg open={=u16}deg trigger_altitude_ft={=u32}",
         config.servo.closed_angle_deg,

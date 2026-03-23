@@ -1,6 +1,7 @@
 //! Routing boundary between HIL semantics and canonical portable message contracts.
 
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::channel::Channel;
 
 use crate::messages::sensor::{
     BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
@@ -10,6 +11,7 @@ use crate::services::acquisition::{
     BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, MagnetometerSampleChannel,
     TimeSampleChannel,
 };
+use crate::services::hil::model::HilControlCommand;
 
 pub trait HilTimeRoute {
     fn publish_time(&self, sample: TimeSample);
@@ -31,6 +33,10 @@ pub trait HilMagnetometerRoute {
     fn publish_magnetometer(&self, sample: MagnetometerSampleStamped);
 }
 
+pub trait HilControlCommandRoute {
+    fn publish_control_command(&self, command: HilControlCommand);
+}
+
 impl HilTimeRoute for () {
     fn publish_time(&self, _sample: TimeSample) {}
 }
@@ -45,6 +51,10 @@ impl HilBarometerRoute for () {
 
 impl HilGpsRoute for () {
     fn publish_gps(&self, _sample: GpsFixSampleStamped) {}
+}
+
+impl HilControlCommandRoute for () {
+    fn publish_control_command(&self, _command: HilControlCommand) {}
 }
 
 impl<M, const DEPTH: usize, const SUBS: usize, const PUBS: usize> HilTimeRoute
@@ -101,16 +111,26 @@ impl HilMagnetometerRoute for () {
     fn publish_magnetometer(&self, _sample: MagnetometerSampleStamped) {}
 }
 
-pub struct HilIngressRoutes<'a, Time, Imu, Barometer, Gps, Magnetometer = ()> {
+impl<M, const DEPTH: usize> HilControlCommandRoute for Channel<M, HilControlCommand, DEPTH>
+where
+    M: RawMutex,
+{
+    fn publish_control_command(&self, command: HilControlCommand) {
+        let _ = self.try_send(command);
+    }
+}
+
+pub struct HilIngressRoutes<'a, Time, Imu, Barometer, Gps, Magnetometer = (), Control = ()> {
     pub time: &'a Time,
     pub imu: &'a Imu,
     pub barometer: &'a Barometer,
     pub gps: &'a Gps,
     pub magnetometer: &'a Magnetometer,
+    pub control: &'a Control,
 }
 
-impl<'a, Time, Imu, Barometer, Gps, Magnetometer>
-    HilIngressRoutes<'a, Time, Imu, Barometer, Gps, Magnetometer>
+impl<'a, Time, Imu, Barometer, Gps, Magnetometer, Control>
+    HilIngressRoutes<'a, Time, Imu, Barometer, Gps, Magnetometer, Control>
 {
     pub const fn new(
         time: &'a Time,
@@ -118,6 +138,7 @@ impl<'a, Time, Imu, Barometer, Gps, Magnetometer>
         barometer: &'a Barometer,
         gps: &'a Gps,
         magnetometer: &'a Magnetometer,
+        control: &'a Control,
     ) -> Self {
         Self {
             time,
@@ -125,6 +146,7 @@ impl<'a, Time, Imu, Barometer, Gps, Magnetometer>
             barometer,
             gps,
             magnetometer,
+            control,
         }
     }
 }

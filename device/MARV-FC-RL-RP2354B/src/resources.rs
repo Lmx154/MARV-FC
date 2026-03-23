@@ -7,7 +7,7 @@ use crate::buses::{
     RadioLinkUart, SensorSpiBus, StatusLedPio, StorageSpiBus,
 };
 use crate::config;
-use crate::watchdog::{FeedContract, WatchdogResources};
+use crate::watchdog::WatchdogResources;
 
 pub struct SensorPins {
     pub sck: Peri<'static, peripherals::PIN_10>,
@@ -248,7 +248,6 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
         watchdog: WatchdogResources {
             peripheral: watchdog,
             timeout_ms: config::WATCHDOG_TIMEOUT_MS,
-            contract: FeedContract::marv_fc_default(),
         },
         system: SystemResources { usb, flash, core1 },
     }

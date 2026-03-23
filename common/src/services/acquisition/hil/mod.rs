@@ -48,6 +48,7 @@ impl MavlinkHilSensorBridge {
             barometer_channel,
             gps_channel,
             &(),
+            &(),
         );
         let mut messages = Vec::<_, 4>::new();
         frame_to_hil_messages(frame, &mut messages);
@@ -86,6 +87,8 @@ mod tests {
 
         let sensor_dispatch = bridge.handle_frame(
             MavlinkFrame {
+                source_system: 0,
+                source_component: 0,
                 message: DecodedMessage::HilSensor(HilSensorMessage {
                     time_usec: 10_000,
                     accel_mps2: [1.0, 2.0, 3.0],
@@ -108,6 +111,8 @@ mod tests {
 
         let gps_dispatch = bridge.handle_frame(
             MavlinkFrame {
+                source_system: 0,
+                source_component: 0,
                 message: DecodedMessage::HilGps(HilGpsMessage {
                     time_usec: 10_000,
                     fix_type: 3,
@@ -134,6 +139,8 @@ mod tests {
 
         let first_tick = bridge.handle_frame(
             MavlinkFrame {
+                source_system: 0,
+                source_component: 0,
                 message: DecodedMessage::SystemTime(SystemTimeMessage { time_boot_ms: 123 }),
             },
             &time_channel,
@@ -153,6 +160,8 @@ mod tests {
 
         let duplicate_tick = bridge.handle_frame(
             MavlinkFrame {
+                source_system: 0,
+                source_component: 0,
                 message: DecodedMessage::SystemTime(SystemTimeMessage { time_boot_ms: 123 }),
             },
             &time_channel,
