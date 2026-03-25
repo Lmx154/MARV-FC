@@ -13,14 +13,14 @@ use common::interfaces::storage::LoggerEngine;
 use common::interfaces::timing::MonotonicClock;
 use common::messages::logging::LoggedSensor;
 use common::messages::runtime::FlightPhase;
-use common::policies::modes::phase_after_init;
 use common::policies::mission::BarometerRgbLedMission;
+use common::policies::modes::phase_after_init;
 use common::services::acquisition::{
     BarometerServiceConfig, Bmp581BarometerSource, run_barometer_service,
 };
 use common::services::acquisition::{Bmi088ImuSource, Lsm6dsv32xImuSource};
-use common::services::health::{FeedDecision, LivenessUpdate, WatchdogSupervisor};
-use common::services::hil::{HilControlRuntime, HilEgressMessage, SensorBackend};
+use common::services::health::LivenessUpdate;
+use common::services::hil::{HilBootDecision, HilBootSelector, HilControlRuntime, SensorBackend};
 use common::services::logging::SensorSnapshotLogger;
 use common::tasks::background::mission::run_barometer_rgb_led_mission_task;
 use common::tasks::background::sd_logging::run_sd_logging_task;
@@ -39,10 +39,10 @@ use embedded_hal_async::delay::DelayNs;
 use crate::buses::SensorSpiBus;
 use crate::channels::{
     self, AUX_IMU_CHANNEL, BAROMETER_CHANNEL, DisabledMagnetometerSubscriber,
-    DisabledPressureTransducerSubscriber, FcBarometerSubscriber, FcGpsSubscriber, FcImuSubscriber,
-    FcFlightPhaseSubscriber, FcHilControlCommandReceiver, FcLogSinkStateReceiver,
-    FcRgbLedCommandSender, FcSensorFaultReceiver, FcTimeSubscriber,
-    FcWatchdogLivenessReceiver, FLIGHT_PHASE_CHANNEL, GPS_CHANNEL, HIL_BOOT_SIGNAL,
+    DisabledPressureTransducerSubscriber, FLIGHT_PHASE_CHANNEL, FcBarometerSubscriber,
+    FcFlightPhaseSubscriber, FcGpsSubscriber, FcHilControlCommandReceiver, FcHilEgressSender,
+    FcImuSubscriber, FcLogSinkStateReceiver, FcRgbLedCommandSender, FcSensorFaultReceiver,
+    FcTimeSubscriber, FcWatchdogLivenessReceiver, GPS_CHANNEL, HIL_BOOT_SIGNAL,
     HIL_CONTROL_COMMAND_CHANNEL, HIL_EGRESS_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL,
     LOG_SINK_STATE_CHANNEL, RGB_LED_COMMAND_CHANNEL, SENSOR_FAULT_CHANNEL, TIME_CHANNEL,
     WATCHDOG_LIVENESS_CHANNEL,
@@ -116,6 +116,16 @@ fn report_watchdog_progress(mask: u32) {
     let _ = WATCHDOG_LIVENESS_CHANNEL.try_send(LivenessUpdate::new(mask, watchdog_now_ms()));
 }
 
+impl common::services::health::WatchdogDriver for watchdog::HardwareWatchdog {
+    fn start(&mut self) {
+        watchdog::HardwareWatchdog::start(self);
+    }
+
+    fn feed(&mut self) {
+        watchdog::HardwareWatchdog::feed(self);
+    }
+}
+
 fn try_report_sensor_fault(sensor: LoggedSensor) {
     let _ = SENSOR_FAULT_CHANNEL.try_send(sensor);
 }
@@ -123,114 +133,48 @@ fn try_report_sensor_fault(sensor: LoggedSensor) {
 #[embassy_executor::task]
 async fn hil_control_command_task(
     receiver: FcHilControlCommandReceiver,
-    egress: embassy_sync::channel::Sender<
-        'static,
-        embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
-        HilEgressMessage,
-        { crate::channels::HIL_EGRESS_DEPTH },
-    >,
-    mut runtime: HilControlRuntime,
+    egress: FcHilEgressSender,
+    runtime: HilControlRuntime,
 ) -> ! {
-    let receiver = receiver;
-    let egress = egress;
-
-    loop {
-        let command = receiver.receive().await;
-        if let Some(ack) = runtime.accept_control_command(command) {
-            egress.send(HilEgressMessage::CommandAck(ack)).await;
-        }
-    }
+    common::services::hil::run_hil_control_command_loop(receiver, egress, runtime).await
 }
 
 #[embassy_executor::task]
 async fn watchdog_task(
-    mut hardware: watchdog::HardwareWatchdog,
+    hardware: watchdog::HardwareWatchdog,
     receiver: FcWatchdogLivenessReceiver,
-    mut phase_subscriber: FcFlightPhaseSubscriber,
+    phase_subscriber: FcFlightPhaseSubscriber,
     watchdog_enabled_in_hil: bool,
 ) -> ! {
-    let receiver = receiver;
-    let mut phase = FlightPhase::Init;
-    let mut supervisor = WatchdogSupervisor::<{ watchdog::SOURCE_COUNT }>::new(
+    common::services::health::run_watchdog_supervisor_loop(
+        hardware,
+        receiver,
+        phase_subscriber,
         watchdog::SOURCES,
         watchdog::INIT_CONTRACT,
-        watchdog_now_ms(),
-    );
-    let mut ticker = Ticker::every(Duration::from_millis(50));
-    let mut last_decision = None;
-
-    hardware.start();
-
-    loop {
-        ticker.next().await;
-
-        while let Some(next_phase) = phase_subscriber.try_next_message_pure() {
-            phase = next_phase;
-            supervisor.set_contract(watchdog::contract_for_phase(phase), watchdog_now_ms());
-            info!("watchdog phase -> {:?}", phase);
-            if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
-                info!("watchdog HIL liveness disabled by config");
-            }
-        }
-
-        while let Ok(update) = receiver.try_receive() {
-            supervisor.record(update);
-        }
-
-        let evaluation = if phase.is_fault() {
-            common::services::health::WatchdogEvaluation {
-                decision: FeedDecision::DoNotFeed,
-                stale_required_mask: 0,
-                stale_degrade_mask: 0,
-            }
-        } else if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
-            common::services::health::WatchdogEvaluation {
-                decision: FeedDecision::FeedAllowed,
-                stale_required_mask: 0,
-                stale_degrade_mask: 0,
-            }
-        } else {
-            supervisor.evaluate(watchdog_now_ms())
-        };
-
-        if last_decision != Some(evaluation.decision) {
-            info!(
-                "watchdog decision={:?} stale_required=0x{=u32:08X} stale_degrade=0x{=u32:08X}",
-                evaluation.decision,
-                evaluation.stale_required_mask,
-                evaluation.stale_degrade_mask
-            );
-            last_decision = Some(evaluation.decision);
-        }
-
-        if !matches!(evaluation.decision, FeedDecision::DoNotFeed) {
-            hardware.feed();
-        }
-    }
+        watchdog::contract_for_phase,
+        watchdog_enabled_in_hil,
+        watchdog_now_ms,
+    )
+    .await
 }
 
 #[embassy_executor::task]
-async fn time_liveness_task(mut subscriber: FcTimeSubscriber, mask: u32) -> ! {
-    loop {
-        subscriber.next_message_pure().await;
-        report_watchdog_progress(mask);
-    }
+async fn time_liveness_task(subscriber: FcTimeSubscriber, mask: u32) -> ! {
+    common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
+        .await
 }
 
 #[embassy_executor::task]
-async fn imu_liveness_task(mut subscriber: FcImuSubscriber, mask: u32) -> ! {
-    loop {
-        subscriber.next_message_pure().await;
-        report_watchdog_progress(mask);
-    }
+async fn imu_liveness_task(subscriber: FcImuSubscriber, mask: u32) -> ! {
+    common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
+        .await
 }
 
 #[embassy_executor::task]
-async fn barometer_liveness_task(mut subscriber: FcBarometerSubscriber, mask: u32) -> ! {
-    loop {
-        subscriber.next_message_pure().await;
-        report_watchdog_progress(mask);
-    }
+async fn barometer_liveness_task(subscriber: FcBarometerSubscriber, mask: u32) -> ! {
+    common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
+        .await
 }
 
 async fn probe_bmp581_address(
@@ -487,15 +431,21 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     let usb_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
     let watchdog_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
     let phase_publisher = FLIGHT_PHASE_CHANNEL.immediate_publisher();
-    let hardware_watchdog =
-        watchdog::HardwareWatchdog::new(watchdog_resources.peripheral, watchdog_resources.timeout_ms);
+    let hardware_watchdog = watchdog::HardwareWatchdog::new(
+        watchdog_resources.peripheral,
+        watchdog_resources.timeout_ms,
+    );
     let reset_reason = hardware_watchdog.reset_reason();
 
     spawner
         .spawn(hil_control_command_task(
             HIL_CONTROL_COMMAND_CHANNEL.receiver(),
             HIL_EGRESS_CHANNEL.sender(),
-            HilControlRuntime::new(config.hil.system_id, config.hil.component_id, SensorBackend::Hil),
+            HilControlRuntime::new(
+                config.hil.system_id,
+                config.hil.component_id,
+                SensorBackend::Hil,
+            ),
         ))
         .unwrap();
     usb_cdc::spawn(
@@ -520,25 +470,22 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
 
     let mut boot_ticker = Ticker::every(Duration::from_millis(100));
     let boot_started_at = Instant::now();
+    let mut boot_selector = HilBootSelector::new();
     let mut hil_requested = false;
-    let mut waiting_on_usb_host = false;
     loop {
         report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
-        if HIL_BOOT_SIGNAL.try_take().is_some() {
-            hil_requested = true;
-            break;
-        }
-        let usb_host_connected = usb_cdc::host_connected();
-        if usb_host_connected {
-            waiting_on_usb_host = true;
-        }
-        if waiting_on_usb_host && !usb_host_connected {
-            break;
-        }
-        if !waiting_on_usb_host
-            && boot_started_at.elapsed().as_millis() as u32 >= config.hil_boot_window_ms
-        {
-            break;
+        match boot_selector.update(
+            HIL_BOOT_SIGNAL.try_take().is_some(),
+            usb_cdc::host_connected(),
+            boot_started_at.elapsed().as_millis() as u32,
+            config.hil_boot_window_ms,
+        ) {
+            HilBootDecision::Continue => {}
+            HilBootDecision::EnterHil => {
+                hil_requested = true;
+                break;
+            }
+            HilBootDecision::SelectReal => break,
         }
         boot_ticker.next().await;
     }
@@ -593,7 +540,11 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                 auxiliary_imu: ImuSchedule::new(true, imu_period_ms),
             };
             time_sensitive_spawner
-                .spawn(spi1_sensor_cluster_task(sensor_pins, sensor_bus, imu_config))
+                .spawn(spi1_sensor_cluster_task(
+                    sensor_pins,
+                    sensor_bus,
+                    imu_config,
+                ))
                 .unwrap();
 
             let mut imu_wait_ticker = Ticker::every(Duration::from_millis(50));

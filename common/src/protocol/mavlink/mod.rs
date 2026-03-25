@@ -8,8 +8,8 @@ use crate::services::hil::backend::SensorBackend;
 use crate::services::hil::egress::HilEgressProtocol;
 use crate::services::hil::ingress::HilIngressProtocol;
 use crate::services::hil::model::{
-    HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult,
-    HilControlCommand, HilEgressMessage, HilGpsSample, HilImuSample, HilIngressMessage, HilTick,
+    HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult, HilControlCommand,
+    HilEgressMessage, HilGpsSample, HilImuSample, HilIngressMessage, HilTick,
 };
 use crate::utilities::time::MeasurementTimestamp;
 
@@ -886,13 +886,12 @@ mod tests {
     use heapless::Vec;
 
     use super::{
-        ACTUATOR_CONTROL_TARGET_ID, ActuatorControlTargetMessage, COMMAND_ACK_ID,
-        COMMAND_LONG_ID, CRC_EXTRA_SYSTEM_TIME, CommandAckMessage, CommandLongMessage,
-        DecodeError, DecodedMessage, MAV_CMD_MARV_SET_HIL_BACKEND, MAVLINK_V1_STX,
-        MAVLINK_V2_STX, SYSTEM_TIME_ID, checksum_v1, checksum_v2, decode_frame,
-        encode_actuator_control_target, encode_command_ack, encode_command_long,
-        encode_hil_backend_command, extend_slice, frame_to_hil_messages, mav_result_wire_code,
-        try_consume_frame,
+        ACTUATOR_CONTROL_TARGET_ID, ActuatorControlTargetMessage, COMMAND_ACK_ID, COMMAND_LONG_ID,
+        CRC_EXTRA_SYSTEM_TIME, CommandAckMessage, CommandLongMessage, DecodeError, DecodedMessage,
+        MAV_CMD_MARV_SET_HIL_BACKEND, MAVLINK_V1_STX, MAVLINK_V2_STX, SYSTEM_TIME_ID, checksum_v1,
+        checksum_v2, decode_frame, encode_actuator_control_target, encode_command_ack,
+        encode_command_long, encode_hil_backend_command, extend_slice, frame_to_hil_messages,
+        mav_result_wire_code, try_consume_frame,
     };
     use crate::services::hil::backend::SensorBackend;
     use crate::services::hil::model::{HilCommandAckResult, HilControlAction, HilIngressMessage};
@@ -986,7 +985,10 @@ mod tests {
             u32::from(frame[7]) | (u32::from(frame[8]) << 8) | (u32::from(frame[9]) << 16),
             COMMAND_ACK_ID
         );
-        assert_eq!(u16::from_le_bytes([frame[10], frame[11]]), MAV_CMD_MARV_SET_HIL_BACKEND);
+        assert_eq!(
+            u16::from_le_bytes([frame[10], frame[11]]),
+            MAV_CMD_MARV_SET_HIL_BACKEND
+        );
         assert_eq!(frame[12], 2);
         assert_eq!(frame[18], 12);
         assert_eq!(frame[19], 3);
@@ -1000,7 +1002,10 @@ mod tests {
         assert_eq!(mav_result_wire_code(HilCommandAckResult::Failed), 4);
         assert_eq!(mav_result_wire_code(HilCommandAckResult::InProgress), 5);
         assert_eq!(mav_result_wire_code(HilCommandAckResult::Cancelled), 6);
-        assert_eq!(mav_result_wire_code(HilCommandAckResult::CommandLongOnly), 7);
+        assert_eq!(
+            mav_result_wire_code(HilCommandAckResult::CommandLongOnly),
+            7
+        );
         assert_eq!(mav_result_wire_code(HilCommandAckResult::CommandIntOnly), 8);
         assert_eq!(
             mav_result_wire_code(HilCommandAckResult::UnsupportedMavFrame),

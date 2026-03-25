@@ -1,8 +1,10 @@
 //! Shared `INIT` transition rules.
 
 use crate::messages::runtime::FlightPhase;
-use crate::services::hil::model::{HilCommandAck, HilCommandAckResult, HilControlAction, HilControlCommand};
 use crate::services::hil::SensorBackend;
+use crate::services::hil::model::{
+    HilCommandAck, HilCommandAckResult, HilControlAction, HilControlCommand,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct InitHilCommandDecision {
@@ -39,7 +41,8 @@ pub fn evaluate_init_hil_command(
     hil_boot_window_ms: u32,
 ) -> InitHilCommandDecision {
     let system_matches = command.target_system == 0 || command.target_system == system_id;
-    let component_matches = command.target_component == 0 || command.target_component == component_id;
+    let component_matches =
+        command.target_component == 0 || command.target_component == component_id;
 
     if !(system_matches && component_matches) {
         return InitHilCommandDecision::ignored();

@@ -1,12 +1,11 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use common::messages::runtime::FlightPhase;
-use common::policies::modes::evaluate_init_hil_command;
 use common::protocol::mavlink::{DecodeError, MavlinkHilEgressEncoder, MavlinkHilMessagePump};
 use common::services::health::LivenessUpdate;
 use common::services::hil::{
-    HilByteWriter, HilEgressMessage, HilIngressMessage, HilIngressRoutes, HilRuntime,
-    send_hil_egress_message,
+    HilByteWriter, HilEgressMessage, HilEgressTrySender, HilIngressMessage, HilIngressRoutes,
+    HilRuntime, UsbHilMode, evaluate_usb_init_control_command, send_hil_egress_message,
+    should_report_init_probe_liveness, usb_hil_mode_for_phase,
 };
 use defmt::{info, warn};
 use embassy_executor::{Spawner, task};
@@ -38,13 +37,6 @@ type RpUsbReceiver = Receiver<'static, RpUsbDriver>;
 
 struct UsbHilWriter {
     class: RpUsbSender,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
-enum UsbHilMode {
-    InitProbe,
-    HilActive,
-    Passive,
 }
 
 bind_interrupts!(struct Irqs {
@@ -87,14 +79,6 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
-fn mode_for_phase(phase: FlightPhase) -> UsbHilMode {
-    match phase {
-        FlightPhase::Init => UsbHilMode::InitProbe,
-        FlightPhase::Hil => UsbHilMode::HilActive,
-        FlightPhase::Ready | FlightPhase::Active | FlightPhase::Fault => UsbHilMode::Passive,
-    }
-}
-
 fn apply_phase_updates(
     phase_subscriber: &mut RecoveryFlightPhaseSubscriber,
     mode: &mut UsbHilMode,
@@ -102,7 +86,7 @@ fn apply_phase_updates(
     runtime: &mut HilRuntime,
 ) {
     while let Some(phase) = phase_subscriber.try_next_message_pure() {
-        let next_mode = mode_for_phase(phase);
+        let next_mode = usb_hil_mode_for_phase(phase);
         if next_mode == *mode {
             continue;
         }
@@ -115,35 +99,34 @@ fn apply_phase_updates(
 }
 
 fn report_init_probe_liveness(sender: &RecoveryWatchdogLivenessSender, mode: UsbHilMode) {
-    if matches!(mode, UsbHilMode::InitProbe) {
+    if should_report_init_probe_liveness(mode) {
         let _ = sender.try_send(LivenessUpdate::new(watchdog::SOURCE_USB_PROBE, now_ms()));
     }
 }
 
-fn handle_control_command(
+fn handle_control_command<E>(
     command: common::services::hil::HilControlCommand,
     hil_config: HilConfig,
     mode: UsbHilMode,
     boot_started_at: Instant,
-    egress: &RecoveryHilEgressSender,
-) {
-    let elapsed_ms = match mode {
-        UsbHilMode::InitProbe if host_connected() => 0,
-        UsbHilMode::InitProbe => boot_started_at.elapsed().as_millis() as u32,
-        UsbHilMode::HilActive | UsbHilMode::Passive => hil_config.boot_window_ms.saturating_add(1),
-    };
-    let decision = evaluate_init_hil_command(
+    egress: &E,
+) where
+    E: HilEgressTrySender,
+{
+    let outcome = evaluate_usb_init_control_command(
         command,
         hil_config.system_id,
         hil_config.component_id,
-        elapsed_ms,
+        mode,
+        host_connected(),
+        boot_started_at.elapsed().as_millis() as u32,
         hil_config.boot_window_ms,
     );
 
-    if let Some(ack) = decision.into_ack(command) {
-        let _ = egress.try_send(HilEgressMessage::CommandAck(ack));
+    if let Some(ack) = outcome.ack {
+        let _ = egress.try_send_hil_egress(HilEgressMessage::CommandAck(ack));
     }
-    if decision.enter_hil {
+    if outcome.enter_hil {
         HIL_BOOT_SIGNAL.signal(());
     }
 }
@@ -171,7 +154,12 @@ async fn usb_cdc_ingest_task(
     let mut mode = UsbHilMode::InitProbe;
 
     loop {
-        apply_phase_updates(&mut phase_subscriber, &mut mode, &mut protocol, &mut runtime);
+        apply_phase_updates(
+            &mut phase_subscriber,
+            &mut mode,
+            &mut protocol,
+            &mut runtime,
+        );
         match with_timeout(
             Duration::from_millis(INIT_PROBE_POLL_MS),
             class.wait_connection(),
@@ -188,7 +176,12 @@ async fn usb_cdc_ingest_task(
     }
 
     loop {
-        apply_phase_updates(&mut phase_subscriber, &mut mode, &mut protocol, &mut runtime);
+        apply_phase_updates(
+            &mut phase_subscriber,
+            &mut mode,
+            &mut protocol,
+            &mut runtime,
+        );
 
         match with_timeout(
             Duration::from_millis(INIT_PROBE_POLL_MS),
@@ -205,7 +198,7 @@ async fn usb_cdc_ingest_task(
                 while let Some(message) = protocol.try_next_message() {
                     match message {
                         Ok(HilIngressMessage::ControlCommand(command)) => {
-                            if matches!(mode, UsbHilMode::HilActive) {
+                            if mode.is_hil_active() {
                                 let _ = HIL_CONTROL_COMMAND_CHANNEL.try_send(command);
                             } else {
                                 handle_control_command(
@@ -217,7 +210,7 @@ async fn usb_cdc_ingest_task(
                                 );
                             }
                         }
-                        Ok(message) if matches!(mode, UsbHilMode::HilActive) => {
+                        Ok(message) if mode.is_hil_active() => {
                             let dispatch = runtime.accept(message, &routes);
                             if dispatch.tick.is_some() {
                                 let _ = liveness.try_send(LivenessUpdate::new(
@@ -241,12 +234,17 @@ async fn usb_cdc_ingest_task(
                 runtime.reset();
 
                 loop {
-                    apply_phase_updates(&mut phase_subscriber, &mut mode, &mut protocol, &mut runtime);
+                    apply_phase_updates(
+                        &mut phase_subscriber,
+                        &mut mode,
+                        &mut protocol,
+                        &mut runtime,
+                    );
                     match with_timeout(
                         Duration::from_millis(INIT_PROBE_POLL_MS),
                         class.wait_connection(),
-                        )
-                        .await
+                    )
+                    .await
                     {
                         Ok(()) => {
                             set_host_connected(true);

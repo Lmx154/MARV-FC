@@ -82,6 +82,8 @@ pub type FcHilControlCommandReceiver =
     Receiver<'static, CriticalSectionRawMutex, HilControlCommand, HIL_CONTROL_COMMAND_DEPTH>;
 pub type FcHilEgressReceiver =
     Receiver<'static, CriticalSectionRawMutex, HilEgressMessage, HIL_EGRESS_DEPTH>;
+pub type FcHilEgressSender =
+    Sender<'static, CriticalSectionRawMutex, HilEgressMessage, HIL_EGRESS_DEPTH>;
 pub type FcWatchdogLivenessReceiver =
     Receiver<'static, CriticalSectionRawMutex, LivenessUpdate, WATCHDOG_LIVENESS_DEPTH>;
 pub type FcWatchdogLivenessSender =

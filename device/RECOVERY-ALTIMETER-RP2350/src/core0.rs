@@ -12,8 +12,8 @@ use common::messages::runtime::FlightPhase;
 use common::messages::sensor::{BarometerSampleStamped, ImuSampleStamped};
 use common::policies::modes::phase_after_init;
 use common::services::acquisition::{Bmp390BarometerSource, Mpu6050ImuSource};
-use common::services::health::{FeedDecision, LivenessUpdate, WatchdogSupervisor};
-use common::services::hil::{HilControlRuntime, HilEgressMessage, SensorBackend};
+use common::services::health::LivenessUpdate;
+use common::services::hil::{HilBootDecision, HilBootSelector, HilControlRuntime, SensorBackend};
 use common::services::logging::{
     SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
 };
@@ -86,6 +86,16 @@ fn watchdog_now_ms() -> u64 {
 
 fn report_watchdog_progress(mask: u32) {
     let _ = WATCHDOG_LIVENESS_CHANNEL.try_send(LivenessUpdate::new(mask, watchdog_now_ms()));
+}
+
+impl common::services::health::WatchdogDriver for watchdog::HardwareWatchdog {
+    fn start(&mut self) {
+        watchdog::HardwareWatchdog::start(self);
+    }
+
+    fn feed(&mut self) {
+        watchdog::HardwareWatchdog::feed(self);
+    }
 }
 
 fn deadline_after_ms(now: MeasurementTimestamp, delay_ms: u32) -> MeasurementTimestamp {
@@ -295,93 +305,40 @@ async fn sensor_logging_task(
 
 #[task]
 async fn watchdog_task(
-    mut hardware: watchdog::HardwareWatchdog,
+    hardware: watchdog::HardwareWatchdog,
     receiver: RecoveryWatchdogLivenessReceiver,
-    mut phase_subscriber: RecoveryFlightPhaseSubscriber,
+    phase_subscriber: RecoveryFlightPhaseSubscriber,
     watchdog_enabled_in_hil: bool,
 ) -> ! {
-    let receiver = receiver;
-    let mut phase = FlightPhase::Init;
-    let mut supervisor = WatchdogSupervisor::<{ watchdog::SOURCE_COUNT }>::new(
+    common::services::health::run_watchdog_supervisor_loop(
+        hardware,
+        receiver,
+        phase_subscriber,
         watchdog::SOURCES,
         watchdog::INIT_CONTRACT,
-        watchdog_now_ms(),
-    );
-    let mut ticker = Ticker::every(Duration::from_millis(50));
-    let mut last_decision = None;
-
-    hardware.start();
-
-    loop {
-        ticker.next().await;
-
-        while let Some(next_phase) = phase_subscriber.try_next_message_pure() {
-            phase = next_phase;
-            supervisor.set_contract(watchdog::contract_for_phase(phase), watchdog_now_ms());
-            info!("watchdog phase -> {:?}", phase);
-            if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
-                info!("watchdog HIL liveness disabled by config");
-            }
-        }
-
-        while let Ok(update) = receiver.try_receive() {
-            supervisor.record(update);
-        }
-
-        let evaluation = if phase.is_fault() {
-            common::services::health::WatchdogEvaluation {
-                decision: FeedDecision::DoNotFeed,
-                stale_required_mask: 0,
-                stale_degrade_mask: 0,
-            }
-        } else if matches!(phase, FlightPhase::Hil) && !watchdog_enabled_in_hil {
-            common::services::health::WatchdogEvaluation {
-                decision: FeedDecision::FeedAllowed,
-                stale_required_mask: 0,
-                stale_degrade_mask: 0,
-            }
-        } else {
-            supervisor.evaluate(watchdog_now_ms())
-        };
-
-        if last_decision != Some(evaluation.decision) {
-            info!(
-                "watchdog decision={:?} stale_required=0x{=u32:08X} stale_degrade=0x{=u32:08X}",
-                evaluation.decision,
-                evaluation.stale_required_mask,
-                evaluation.stale_degrade_mask
-            );
-            last_decision = Some(evaluation.decision);
-        }
-
-        if !matches!(evaluation.decision, FeedDecision::DoNotFeed) {
-            hardware.feed();
-        }
-    }
+        watchdog::contract_for_phase,
+        watchdog_enabled_in_hil,
+        watchdog_now_ms,
+    )
+    .await
 }
 
 #[task]
-async fn time_liveness_task(mut subscriber: RecoveryTimeSubscriber, mask: u32) -> ! {
-    loop {
-        subscriber.next_message_pure().await;
-        report_watchdog_progress(mask);
-    }
+async fn time_liveness_task(subscriber: RecoveryTimeSubscriber, mask: u32) -> ! {
+    common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
+        .await
 }
 
 #[task]
-async fn imu_liveness_task(mut subscriber: RecoveryImuSubscriber, mask: u32) -> ! {
-    loop {
-        subscriber.next_message_pure().await;
-        report_watchdog_progress(mask);
-    }
+async fn imu_liveness_task(subscriber: RecoveryImuSubscriber, mask: u32) -> ! {
+    common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
+        .await
 }
 
 #[task]
-async fn barometer_liveness_task(mut subscriber: RecoveryBarometerSubscriber, mask: u32) -> ! {
-    loop {
-        subscriber.next_message_pure().await;
-        report_watchdog_progress(mask);
-    }
+async fn barometer_liveness_task(subscriber: RecoveryBarometerSubscriber, mask: u32) -> ! {
+    common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
+        .await
 }
 
 #[task]
@@ -449,17 +406,9 @@ async fn recovery_i2c_sensor_task(
 async fn hil_control_command_task(
     receiver: RecoveryHilControlCommandReceiver,
     egress: RecoveryHilEgressSender,
-    mut runtime: HilControlRuntime,
+    runtime: HilControlRuntime,
 ) -> ! {
-    let receiver = receiver;
-    let egress = egress;
-
-    loop {
-        let command = receiver.receive().await;
-        if let Some(ack) = runtime.accept_control_command(command) {
-            egress.send(HilEgressMessage::CommandAck(ack)).await;
-        }
-    }
+    common::services::hil::run_hil_control_command_loop(receiver, egress, runtime).await
 }
 
 pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
@@ -498,15 +447,21 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     let usb_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
     let watchdog_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();
     let phase_publisher = FLIGHT_PHASE_CHANNEL.immediate_publisher();
-    let hardware_watchdog =
-        watchdog::HardwareWatchdog::new(watchdog_resources.peripheral, watchdog_resources.timeout_ms);
+    let hardware_watchdog = watchdog::HardwareWatchdog::new(
+        watchdog_resources.peripheral,
+        watchdog_resources.timeout_ms,
+    );
     let reset_reason = hardware_watchdog.reset_reason();
 
     spawner
         .spawn(hil_control_command_task(
             HIL_CONTROL_COMMAND_CHANNEL.receiver(),
             HIL_EGRESS_CHANNEL.sender(),
-            HilControlRuntime::new(config.hil.system_id, config.hil.component_id, SensorBackend::Hil),
+            HilControlRuntime::new(
+                config.hil.system_id,
+                config.hil.component_id,
+                SensorBackend::Hil,
+            ),
         ))
         .unwrap();
     usb_cdc::spawn(
@@ -531,25 +486,22 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
 
     let mut boot_ticker = Ticker::every(Duration::from_millis(100));
     let boot_started_at = Instant::now();
+    let mut boot_selector = HilBootSelector::new();
     let mut hil_requested = false;
-    let mut waiting_on_usb_host = false;
     loop {
         report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
-        if HIL_BOOT_SIGNAL.try_take().is_some() {
-            hil_requested = true;
-            break;
-        }
-        let usb_host_connected = usb_cdc::host_connected();
-        if usb_host_connected {
-            waiting_on_usb_host = true;
-        }
-        if waiting_on_usb_host && !usb_host_connected {
-            break;
-        }
-        if !waiting_on_usb_host
-            && boot_started_at.elapsed().as_millis() as u32 >= config.hil_boot_window_ms
-        {
-            break;
+        match boot_selector.update(
+            HIL_BOOT_SIGNAL.try_take().is_some(),
+            usb_cdc::host_connected(),
+            boot_started_at.elapsed().as_millis() as u32,
+            config.hil_boot_window_ms,
+        ) {
+            HilBootDecision::Continue => {}
+            HilBootDecision::EnterHil => {
+                hil_requested = true;
+                break;
+            }
+            HilBootDecision::SelectReal => break,
         }
         boot_ticker.next().await;
     }
@@ -597,8 +549,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                 warn!("MPU6050 missing during INIT; verify AD0 strap and device power");
             }
 
-            let next_phase =
-                phase_after_init(barometer_source.is_some() && imu_source.is_some());
+            let next_phase = phase_after_init(barometer_source.is_some() && imu_source.is_some());
             phase_publisher.publish_immediate(next_phase);
 
             if matches!(next_phase, FlightPhase::Ready) {
@@ -662,7 +613,8 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                             } else {
                                 None
                             };
-                            let time_subscriber = if matches!(selected_backend, SensorBackend::Hil) {
+                            let time_subscriber = if matches!(selected_backend, SensorBackend::Hil)
+                            {
                                 Some(TIME_CHANNEL.subscriber().unwrap())
                             } else {
                                 None

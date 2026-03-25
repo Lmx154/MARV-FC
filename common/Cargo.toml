@@ -21,6 +21,7 @@ lora-phy = { git = "https://github.com/Lmx154/lora-rs", features = ["defmt-03"] 
 portable-atomic = { version = "1.11.1", default-features = false, features = ["critical-section", "fallback"] }
 embassy-sync = "0.7.2"
 embassy-futures = "0.1.2"
+embassy-time = "0.5.0"
 embedded-sdmmc = { version = "0.7.0", default-features = false, features = ["defmt-log"] }
 nalgebra = { version = "0.33", default-features = false, features = ["libm"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }

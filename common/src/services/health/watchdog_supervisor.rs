@@ -151,9 +151,7 @@ impl<const N: usize> WatchdogSupervisor<N> {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        FeedDecision, WatchdogContract, WatchdogSource, WatchdogSupervisor,
-    };
+    use super::{FeedDecision, WatchdogContract, WatchdogSource, WatchdogSupervisor};
     use crate::services::health::LivenessUpdate;
 
     #[test]
@@ -195,7 +193,10 @@ mod tests {
     #[test]
     fn contract_switch_reseeds_deadlines_for_new_phase() {
         let mut supervisor = WatchdogSupervisor::new(
-            [WatchdogSource::new(1 << 0, 50), WatchdogSource::new(1 << 1, 50)],
+            [
+                WatchdogSource::new(1 << 0, 50),
+                WatchdogSource::new(1 << 1, 50),
+            ],
             WatchdogContract::new(1 << 0, 0),
             0,
         );
