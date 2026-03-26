@@ -244,6 +244,31 @@ This preserves the same mental model across:
 - host SITL
 - replay
 
+### 8.1 Control-plane state model
+
+The current migration direction uses an explicit HIL session state model:
+
+- `Inactive`
+- `Limbo` (HIL entered, mode not selected yet)
+- `Selected(HilSubmode)`
+
+Data ingress should only drive canonical sample publication while in `Selected(...)`.
+During `Limbo`, control commands are accepted and acknowledged but sample ingress is intentionally held.
+
+### 8.2 Command ACK determinism
+
+Known HIL control commands must always produce deterministic command ACK behavior when they target the device, including invalid payloads.
+Invalid payloads for known command IDs should map to explicit `Unsupported`/`Denied` policy outcomes rather than being silently dropped.
+
+This keeps command-plane behavior observable and testable at wire level.
+
+### 8.3 Transitional host exception
+
+Until host runtime command-plane wiring is complete, any simulator-only state-estimation bootstrap override must live in `common/services/hil` as an explicit transitional helper.
+
+The override must not be hard-coded in compatibility shims or random target modules.
+The long-term target remains full enter/limbo/select parity across embedded and host runtimes.
+
 ## 9. Reusable Task Model
 
 Task wrappers are target-specific. Task bodies should be reusable.

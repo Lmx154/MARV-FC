@@ -43,9 +43,9 @@ use crate::channels::{
     FcFlightPhaseSubscriber, FcGpsSubscriber, FcHilControlCommandReceiver, FcHilEgressSender,
     FcImuSubscriber, FcLogSinkStateReceiver, FcRgbLedCommandSender, FcSensorFaultReceiver,
     FcTimeSubscriber, FcWatchdogLivenessReceiver, GPS_CHANNEL, HIL_BOOT_SIGNAL,
-    HIL_CONTROL_COMMAND_CHANNEL, HIL_EGRESS_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL,
-    LOG_SINK_STATE_CHANNEL, RGB_LED_COMMAND_CHANNEL, SENSOR_FAULT_CHANNEL, TIME_CHANNEL,
-    WATCHDOG_LIVENESS_CHANNEL,
+    HIL_CONTROL_COMMAND_CHANNEL, HIL_EGRESS_CHANNEL, HIL_SESSION_STATE_CHANNEL, IMU_CHANNEL,
+    IMU_INIT_SIGNAL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL, RGB_LED_COMMAND_CHANNEL,
+    SENSOR_FAULT_CHANNEL, TIME_CHANNEL, WATCHDOG_LIVENESS_CHANNEL,
 };
 use crate::config::{DeviceConfig, STATUS_HEARTBEAT_PERIOD_MS};
 use crate::core1;
@@ -136,7 +136,13 @@ async fn hil_control_command_task(
     egress: FcHilEgressSender,
     runtime: HilControlRuntime,
 ) -> ! {
-    common::services::hil::run_hil_control_command_loop(receiver, egress, runtime).await
+    common::services::hil::run_hil_control_command_loop(
+        receiver,
+        egress,
+        &HIL_SESSION_STATE_CHANNEL,
+        runtime,
+    )
+    .await
 }
 
 #[embassy_executor::task]
@@ -441,11 +447,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         .spawn(hil_control_command_task(
             HIL_CONTROL_COMMAND_CHANNEL.receiver(),
             HIL_EGRESS_CHANNEL.sender(),
-            HilControlRuntime::new(
-                config.hil.system_id,
-                config.hil.component_id,
-                SensorBackend::Hil,
-            ),
+            HilControlRuntime::new(config.hil.system_id, config.hil.component_id),
         ))
         .unwrap();
     usb_cdc::spawn(
@@ -454,6 +456,8 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         config.hil,
         HIL_EGRESS_CHANNEL.receiver(),
         usb_phase_subscriber,
+        HIL_SESSION_STATE_CHANNEL.subscriber().unwrap(),
+        HIL_CONTROL_COMMAND_CHANNEL.sender(),
         WATCHDOG_LIVENESS_CHANNEL.sender(),
     );
     spawner

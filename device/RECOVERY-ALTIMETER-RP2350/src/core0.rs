@@ -34,11 +34,11 @@ use static_cell::StaticCell;
 
 use crate::channels::{
     BAROMETER_CHANNEL, FLIGHT_PHASE_CHANNEL, HIL_BOOT_SIGNAL, HIL_CONTROL_COMMAND_CHANNEL,
-    HIL_EGRESS_CHANNEL, IMU_CHANNEL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
-    RecoveryBarometerSubscriber, RecoveryFlightPhaseSubscriber, RecoveryHilControlCommandReceiver,
-    RecoveryHilEgressSender, RecoveryImuSubscriber, RecoveryLogSinkStateReceiver,
-    RecoveryTimeSubscriber, RecoveryWatchdogLivenessReceiver, TIME_CHANNEL,
-    WATCHDOG_LIVENESS_CHANNEL,
+    HIL_EGRESS_CHANNEL, HIL_SESSION_STATE_CHANNEL, IMU_CHANNEL, LOG_CHANNEL,
+    LOG_SINK_STATE_CHANNEL, RecoveryBarometerSubscriber, RecoveryFlightPhaseSubscriber,
+    RecoveryHilControlCommandReceiver, RecoveryHilEgressSender, RecoveryImuSubscriber,
+    RecoveryLogSinkStateReceiver, RecoveryTimeSubscriber, RecoveryWatchdogLivenessReceiver,
+    TIME_CHANNEL, WATCHDOG_LIVENESS_CHANNEL,
 };
 use crate::config::{Bmp390RuntimeConfig, DeviceConfig, Mpu6050RuntimeConfig};
 use crate::core1;
@@ -408,7 +408,13 @@ async fn hil_control_command_task(
     egress: RecoveryHilEgressSender,
     runtime: HilControlRuntime,
 ) -> ! {
-    common::services::hil::run_hil_control_command_loop(receiver, egress, runtime).await
+    common::services::hil::run_hil_control_command_loop(
+        receiver,
+        egress,
+        &HIL_SESSION_STATE_CHANNEL,
+        runtime,
+    )
+    .await
 }
 
 pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
@@ -457,11 +463,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         .spawn(hil_control_command_task(
             HIL_CONTROL_COMMAND_CHANNEL.receiver(),
             HIL_EGRESS_CHANNEL.sender(),
-            HilControlRuntime::new(
-                config.hil.system_id,
-                config.hil.component_id,
-                SensorBackend::Hil,
-            ),
+            HilControlRuntime::new(config.hil.system_id, config.hil.component_id),
         ))
         .unwrap();
     usb_cdc::spawn(
@@ -470,6 +472,8 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         config.hil,
         HIL_EGRESS_CHANNEL.receiver(),
         usb_phase_subscriber,
+        HIL_SESSION_STATE_CHANNEL.subscriber().unwrap(),
+        HIL_CONTROL_COMMAND_CHANNEL.sender(),
         WATCHDOG_LIVENESS_CHANNEL.sender(),
     );
     spawner

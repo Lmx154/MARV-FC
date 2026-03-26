@@ -7,7 +7,7 @@ use common::services::acquisition::{
     PressureTransducerSampleSubscriber, TimeSampleChannel, TimeSampleSubscriber,
 };
 use common::services::health::LivenessUpdate;
-use common::services::hil::{HilControlCommand, HilEgressMessage};
+use common::services::hil::{HilControlCommand, HilEgressMessage, HilSessionState};
 use common::services::logging::{LogChannel, LogSinkStateChannel};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{Receiver, Sender};
@@ -28,6 +28,9 @@ pub const LOG_SINK_STATE_DEPTH: usize = 4;
 pub const STATUS_LED_COMMAND_DEPTH: usize = 4;
 pub const HIL_CONTROL_COMMAND_DEPTH: usize = 4;
 pub const HIL_EGRESS_DEPTH: usize = 8;
+pub const HIL_SESSION_STATE_DEPTH: usize = 4;
+pub const HIL_SESSION_STATE_SUBS: usize = 2;
+pub const HIL_SESSION_STATE_PUBS: usize = 1;
 pub const WATCHDOG_LIVENESS_DEPTH: usize = 16;
 pub const FLIGHT_PHASE_DEPTH: usize = 4;
 pub const FLIGHT_PHASE_SUBS: usize = 4;
@@ -80,10 +83,27 @@ pub type PayloadStatusLedCommandSender =
     Sender<'static, CriticalSectionRawMutex, StaticLedCommand, STATUS_LED_COMMAND_DEPTH>;
 pub type PayloadHilControlCommandReceiver =
     Receiver<'static, CriticalSectionRawMutex, HilControlCommand, HIL_CONTROL_COMMAND_DEPTH>;
+pub type PayloadHilControlCommandSender =
+    Sender<'static, CriticalSectionRawMutex, HilControlCommand, HIL_CONTROL_COMMAND_DEPTH>;
 pub type PayloadHilEgressReceiver =
     Receiver<'static, CriticalSectionRawMutex, HilEgressMessage, HIL_EGRESS_DEPTH>;
 pub type PayloadHilEgressSender =
     Sender<'static, CriticalSectionRawMutex, HilEgressMessage, HIL_EGRESS_DEPTH>;
+pub type PayloadHilSessionStateChannel = PubSubChannel<
+    CriticalSectionRawMutex,
+    HilSessionState,
+    HIL_SESSION_STATE_DEPTH,
+    HIL_SESSION_STATE_SUBS,
+    HIL_SESSION_STATE_PUBS,
+>;
+pub type PayloadHilSessionStateSubscriber = Subscriber<
+    'static,
+    CriticalSectionRawMutex,
+    HilSessionState,
+    HIL_SESSION_STATE_DEPTH,
+    HIL_SESSION_STATE_SUBS,
+    HIL_SESSION_STATE_PUBS,
+>;
 pub type PayloadWatchdogLivenessReceiver =
     Receiver<'static, CriticalSectionRawMutex, LivenessUpdate, WATCHDOG_LIVENESS_DEPTH>;
 pub type PayloadWatchdogLivenessSender =
@@ -132,6 +152,8 @@ pub static HIL_EGRESS_CHANNEL: embassy_sync::channel::Channel<
     HilEgressMessage,
     HIL_EGRESS_DEPTH,
 > = embassy_sync::channel::Channel::new();
+pub static HIL_SESSION_STATE_CHANNEL: PayloadHilSessionStateChannel =
+    PayloadHilSessionStateChannel::new();
 pub static WATCHDOG_LIVENESS_CHANNEL: embassy_sync::channel::Channel<
     CriticalSectionRawMutex,
     LivenessUpdate,

@@ -2,13 +2,14 @@
 
 use crate::services::hil::egress::{HilByteWriter, HilEgressProtocol};
 use crate::services::hil::ingress::{HilByteReader, HilIngressProtocol};
-use crate::services::hil::model::{HilControlCommand, HilEgressMessage};
+use crate::services::hil::model::{HilControlCommand, HilEgressMessage, HilSessionState};
 use crate::services::hil::routing::{
     HilBarometerRoute, HilControlCommandRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes,
     HilMagnetometerRoute, HilTimeRoute,
 };
 use crate::services::hil::runtime::{HilControlRuntime, HilDispatch, HilRuntime};
 use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::pubsub::PubSubChannel;
 
 #[allow(async_fn_in_trait)]
 pub trait HilControlCommandReceiver {
@@ -54,24 +55,44 @@ where
     }
 }
 
+pub trait HilSessionStateSender {
+    fn publish_hil_session_state(&self, state: HilSessionState);
+}
+
+impl<Mutex, const DEPTH: usize, const SUBS: usize, const PUBS: usize> HilSessionStateSender
+    for PubSubChannel<Mutex, HilSessionState, DEPTH, SUBS, PUBS>
+where
+    Mutex: RawMutex,
+{
+    fn publish_hil_session_state(&self, state: HilSessionState) {
+        self.immediate_publisher().publish_immediate(state);
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HilIngressLoopError<TransportError, DispatchError> {
     Transport(TransportError),
     Dispatch(DispatchError),
 }
 
-pub async fn run_hil_control_command_loop<Receiver, Egress>(
+pub async fn run_hil_control_command_loop<Receiver, Egress, State>(
     mut receiver: Receiver,
     mut egress: Egress,
+    state: &State,
     mut runtime: HilControlRuntime,
 ) -> !
 where
     Receiver: HilControlCommandReceiver,
     Egress: HilEgressSender,
+    State: HilSessionStateSender,
 {
     loop {
         let command = receiver.receive_hil_control_command().await;
-        if let Some(ack) = runtime.accept_control_command(command) {
+        let outcome = runtime.accept_control_command(command);
+        if let Some(next_state) = outcome.session_state {
+            state.publish_hil_session_state(next_state);
+        }
+        if let Some(ack) = outcome.ack {
             egress
                 .send_hil_egress(HilEgressMessage::CommandAck(ack))
                 .await;

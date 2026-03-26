@@ -7,16 +7,30 @@ use crate::protocol::mavlink::{MavlinkFrame, frame_to_hil_messages};
 use crate::services::acquisition::{
     BarometerSampleChannel, GpsFixSampleChannel, ImuSampleChannel, TimeSampleChannel,
 };
-use crate::services::hil::{HilIngressRoutes, HilRuntime};
+use crate::services::hil::HilIngressRoutes;
+use crate::services::hil::HilRuntime;
 
 pub type HilMavlinkDispatch = crate::services::hil::HilDispatch;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct MavlinkHilSensorBridge {
     runtime: HilRuntime,
 }
 
+impl Default for MavlinkHilSensorBridge {
+    fn default() -> Self {
+        Self {
+            runtime: HilRuntime::new(),
+        }
+    }
+}
+
 impl MavlinkHilSensorBridge {
+    pub fn enable_transitional_host_state_estimation_mode(&mut self) {
+        // Transitional compatibility path for host-side callers until control-plane parity lands.
+        self.runtime.set_transitional_host_state_estimation_mode();
+    }
+
     pub fn handle_frame<
         M,
         const TIME_DEPTH: usize,
@@ -84,6 +98,7 @@ mod tests {
         let mut baro_subscriber = baro_channel.subscriber().unwrap();
         let mut gps_subscriber = gps_channel.subscriber().unwrap();
         let mut bridge = MavlinkHilSensorBridge::default();
+        bridge.enable_transitional_host_state_estimation_mode();
 
         let sensor_dispatch = bridge.handle_frame(
             MavlinkFrame {

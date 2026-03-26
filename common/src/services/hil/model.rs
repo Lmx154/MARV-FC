@@ -1,6 +1,5 @@
 //! Protocol-neutral HIL semantic message model.
 
-use crate::services::hil::backend::SensorBackend;
 use crate::utilities::time::MeasurementTimestamp;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,8 +49,60 @@ pub enum HilIngressMessage {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HilSubmode {
+    FullRun,
+    StateEstimation,
+}
+
+impl HilSubmode {
+    pub const fn wire_code(self) -> u8 {
+        match self {
+            Self::FullRun => 1,
+            Self::StateEstimation => 2,
+        }
+    }
+
+    pub const fn from_wire_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::FullRun),
+            2 => Some(Self::StateEstimation),
+            _ => None,
+        }
+    }
+
+    pub fn from_wire_param(value: f32) -> Option<Self> {
+        if !value.is_finite() || value < 0.0 {
+            return None;
+        }
+
+        let code = value as u8;
+        if (code as f32) != value {
+            return None;
+        }
+
+        Self::from_wire_code(code)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HilSessionState {
+    #[default]
+    Inactive,
+    Limbo,
+    Selected(HilSubmode),
+}
+
+impl HilSessionState {
+    pub const fn accepts_data(self) -> bool {
+        matches!(self, Self::Selected(_))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HilControlAction {
-    RequestBackend(SensorBackend),
+    EnterHilMode,
+    SelectSubmode(HilSubmode),
+    InvalidPayload,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,9 +117,8 @@ pub struct HilControlCommand {
 }
 
 impl HilControlCommand {
-    pub const fn request_backend(
+    pub const fn enter_hil_mode(
         command_id: u16,
-        backend: SensorBackend,
         source_system: u8,
         source_component: u8,
         target_system: u8,
@@ -77,7 +127,27 @@ impl HilControlCommand {
     ) -> Self {
         Self {
             command_id,
-            action: HilControlAction::RequestBackend(backend),
+            action: HilControlAction::EnterHilMode,
+            source_system,
+            source_component,
+            target_system,
+            target_component,
+            confirmation,
+        }
+    }
+
+    pub const fn select_submode(
+        command_id: u16,
+        submode: HilSubmode,
+        source_system: u8,
+        source_component: u8,
+        target_system: u8,
+        target_component: u8,
+        confirmation: u8,
+    ) -> Self {
+        Self {
+            command_id,
+            action: HilControlAction::SelectSubmode(submode),
             source_system,
             source_component,
             target_system,

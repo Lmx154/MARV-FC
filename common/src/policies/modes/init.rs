@@ -1,7 +1,6 @@
 //! Shared `INIT` transition rules.
 
 use crate::messages::runtime::FlightPhase;
-use crate::services::hil::SensorBackend;
 use crate::services::hil::model::{
     HilCommandAck, HilCommandAckResult, HilControlAction, HilControlCommand,
 };
@@ -49,7 +48,7 @@ pub fn evaluate_init_hil_command(
     }
 
     match command.action {
-        HilControlAction::RequestBackend(SensorBackend::Hil) => {
+        HilControlAction::EnterHilMode => {
             if boot_elapsed_ms <= hil_boot_window_ms {
                 InitHilCommandDecision {
                     ack_result: Some(HilCommandAckResult::Accepted),
@@ -62,8 +61,12 @@ pub fn evaluate_init_hil_command(
                 }
             }
         }
-        HilControlAction::RequestBackend(_) => InitHilCommandDecision {
-            ack_result: Some(HilCommandAckResult::Denied),
+        HilControlAction::SelectSubmode(_) => InitHilCommandDecision {
+            ack_result: Some(HilCommandAckResult::TemporarilyRejected),
+            enter_hil: false,
+        },
+        HilControlAction::InvalidPayload => InitHilCommandDecision {
+            ack_result: Some(HilCommandAckResult::Unsupported),
             enter_hil: false,
         },
     }
@@ -82,12 +85,12 @@ mod tests {
     use super::{evaluate_init_hil_command, phase_after_init};
     use crate::messages::runtime::FlightPhase;
     use crate::services::hil::model::HilCommandAckResult;
-    use crate::services::hil::{HilControlCommand, SensorBackend};
+    use crate::services::hil::{HilControlCommand, HilSubmode};
 
     #[test]
     fn accepts_targeted_hil_request_during_boot_window() {
         let decision = evaluate_init_hil_command(
-            HilControlCommand::request_backend(31_010, SensorBackend::Hil, 7, 9, 42, 3, 0),
+            HilControlCommand::enter_hil_mode(31_010, 7, 9, 42, 3, 0),
             42,
             3,
             500,
@@ -101,7 +104,7 @@ mod tests {
     #[test]
     fn ignores_commands_for_other_targets() {
         let decision = evaluate_init_hil_command(
-            HilControlCommand::request_backend(31_010, SensorBackend::Hil, 7, 9, 24, 3, 0),
+            HilControlCommand::enter_hil_mode(31_010, 7, 9, 24, 3, 0),
             42,
             3,
             500,
@@ -115,7 +118,7 @@ mod tests {
     #[test]
     fn rejects_late_hil_request_after_init_window() {
         let decision = evaluate_init_hil_command(
-            HilControlCommand::request_backend(31_010, SensorBackend::Hil, 7, 9, 42, 3, 0),
+            HilControlCommand::enter_hil_mode(31_010, 7, 9, 42, 3, 0),
             42,
             3,
             1_501,
@@ -130,16 +133,19 @@ mod tests {
     }
 
     #[test]
-    fn denies_targeted_non_hil_backend_request() {
+    fn rejects_submode_selection_before_hil_phase() {
         let decision = evaluate_init_hil_command(
-            HilControlCommand::request_backend(31_010, SensorBackend::Real, 7, 9, 42, 3, 0),
+            HilControlCommand::select_submode(31_011, HilSubmode::FullRun, 7, 9, 42, 3, 0),
             42,
             3,
             500,
             1_500,
         );
 
-        assert_eq!(decision.ack_result, Some(HilCommandAckResult::Denied));
+        assert_eq!(
+            decision.ack_result,
+            Some(HilCommandAckResult::TemporarilyRejected)
+        );
         assert!(!decision.enter_hil);
     }
 

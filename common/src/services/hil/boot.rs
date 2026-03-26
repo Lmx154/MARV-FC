@@ -33,6 +33,7 @@ pub const fn should_report_init_probe_liveness(mode: UsbHilMode) -> bool {
 pub struct InitControlCommandOutcome {
     pub ack: Option<HilCommandAck>,
     pub enter_hil: bool,
+    pub relay_to_control_runtime: bool,
 }
 
 pub fn evaluate_usb_init_control_command(
@@ -58,8 +59,13 @@ pub fn evaluate_usb_init_control_command(
     );
 
     InitControlCommandOutcome {
-        ack: decision.into_ack(command),
+        ack: if decision.enter_hil {
+            None
+        } else {
+            decision.into_ack(command)
+        },
         enter_hil: decision.enter_hil,
+        relay_to_control_runtime: decision.enter_hil,
     }
 }
 
@@ -114,7 +120,7 @@ mod tests {
         should_report_init_probe_liveness, usb_hil_mode_for_phase,
     };
     use crate::messages::runtime::FlightPhase;
-    use crate::services::hil::{HilControlCommand, SensorBackend};
+    use crate::services::hil::{HilControlCommand, HilSubmode};
 
     #[test]
     fn flight_phase_maps_to_usb_mode() {
@@ -142,7 +148,7 @@ mod tests {
     #[test]
     fn connected_host_keeps_init_command_inside_boot_window() {
         let outcome = evaluate_usb_init_control_command(
-            HilControlCommand::request_backend(31_010, SensorBackend::Hil, 7, 9, 42, 3, 0),
+            HilControlCommand::enter_hil_mode(31_010, 7, 9, 42, 3, 0),
             42,
             3,
             UsbHilMode::InitProbe,
@@ -152,7 +158,25 @@ mod tests {
         );
 
         assert!(outcome.enter_hil);
+        assert!(outcome.ack.is_none());
+        assert!(outcome.relay_to_control_runtime);
+    }
+
+    #[test]
+    fn init_probe_rejects_submode_selection_before_hil_phase() {
+        let outcome = evaluate_usb_init_control_command(
+            HilControlCommand::select_submode(31_011, HilSubmode::FullRun, 7, 9, 42, 3, 0),
+            42,
+            3,
+            UsbHilMode::InitProbe,
+            true,
+            10,
+            1_500,
+        );
+
+        assert!(!outcome.enter_hil);
         assert!(outcome.ack.is_some());
+        assert!(!outcome.relay_to_control_runtime);
     }
 
     #[test]

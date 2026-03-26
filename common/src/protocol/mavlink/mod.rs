@@ -8,8 +8,9 @@ use crate::services::hil::backend::SensorBackend;
 use crate::services::hil::egress::HilEgressProtocol;
 use crate::services::hil::ingress::HilIngressProtocol;
 use crate::services::hil::model::{
-    HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult, HilControlCommand,
-    HilEgressMessage, HilGpsSample, HilImuSample, HilIngressMessage, HilTick,
+    HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult, HilControlAction,
+    HilControlCommand, HilEgressMessage, HilGpsSample, HilImuSample, HilIngressMessage, HilSubmode,
+    HilTick,
 };
 use crate::utilities::time::MeasurementTimestamp;
 
@@ -29,7 +30,9 @@ pub const HIL_GPS_ID: u32 = 113;
 pub const ACTUATOR_CONTROL_TARGET_ID: u32 = 140;
 pub const COMMAND_LONG_ID: u32 = 76;
 pub const COMMAND_ACK_ID: u32 = 77;
-pub const MAV_CMD_MARV_SET_HIL_BACKEND: u16 = 31_010;
+pub const MAV_CMD_MARV_ENTER_HIL_MODE: u16 = 31_010;
+pub const MAV_CMD_MARV_SET_HIL_BACKEND: u16 = MAV_CMD_MARV_ENTER_HIL_MODE;
+pub const MAV_CMD_MARV_SELECT_HIL_SUBMODE: u16 = 31_011;
 
 const CRC_EXTRA_SYSTEM_TIME: u8 = 137;
 const CRC_EXTRA_HIL_SENSOR: u8 = 108;
@@ -384,17 +387,42 @@ fn decode_hil_control_command(
     source_component: u8,
 ) -> Option<HilControlCommand> {
     match message.command {
-        MAV_CMD_MARV_SET_HIL_BACKEND => {
-            let backend = SensorBackend::from_wire_param(message.params[0])?;
-            Some(HilControlCommand::request_backend(
-                message.command,
-                backend,
+        MAV_CMD_MARV_ENTER_HIL_MODE => {
+            let action = if matches!(
+                SensorBackend::from_wire_param(message.params[0]),
+                Some(SensorBackend::Hil)
+            ) {
+                HilControlAction::EnterHilMode
+            } else {
+                HilControlAction::InvalidPayload
+            };
+
+            Some(HilControlCommand {
+                command_id: message.command,
+                action,
                 source_system,
                 source_component,
-                message.target_system,
-                message.target_component,
-                message.confirmation,
-            ))
+                target_system: message.target_system,
+                target_component: message.target_component,
+                confirmation: message.confirmation,
+            })
+        }
+        MAV_CMD_MARV_SELECT_HIL_SUBMODE => {
+            let action = if let Some(submode) = HilSubmode::from_wire_param(message.params[0]) {
+                HilControlAction::SelectSubmode(submode)
+            } else {
+                HilControlAction::InvalidPayload
+            };
+
+            Some(HilControlCommand {
+                command_id: message.command,
+                action,
+                source_system,
+                source_component,
+                target_system: message.target_system,
+                target_component: message.target_component,
+                confirmation: message.confirmation,
+            })
         }
         _ => None,
     }
@@ -737,6 +765,31 @@ pub fn encode_command_ack(
     frame
 }
 
+pub fn encode_enter_hil_mode_command(
+    target_system: u8,
+    target_component: u8,
+    confirmation: u8,
+    sequence: u8,
+    system_id: u8,
+    component_id: u8,
+) -> Vec<u8, MAX_MAVLINK_FRAME_LEN> {
+    let mut params = [0.0; 7];
+    params[0] = SensorBackend::Hil.wire_code() as f32;
+
+    encode_command_long(
+        &CommandLongMessage {
+            params,
+            command: MAV_CMD_MARV_ENTER_HIL_MODE,
+            target_system,
+            target_component,
+            confirmation,
+        },
+        sequence,
+        system_id,
+        component_id,
+    )
+}
+
 pub fn encode_hil_backend_command(
     backend: SensorBackend,
     target_system: u8,
@@ -752,7 +805,33 @@ pub fn encode_hil_backend_command(
     encode_command_long(
         &CommandLongMessage {
             params,
-            command: MAV_CMD_MARV_SET_HIL_BACKEND,
+            command: MAV_CMD_MARV_ENTER_HIL_MODE,
+            target_system,
+            target_component,
+            confirmation,
+        },
+        sequence,
+        system_id,
+        component_id,
+    )
+}
+
+pub fn encode_hil_submode_command(
+    submode: HilSubmode,
+    target_system: u8,
+    target_component: u8,
+    confirmation: u8,
+    sequence: u8,
+    system_id: u8,
+    component_id: u8,
+) -> Vec<u8, MAX_MAVLINK_FRAME_LEN> {
+    let mut params = [0.0; 7];
+    params[0] = submode.wire_code() as f32;
+
+    encode_command_long(
+        &CommandLongMessage {
+            params,
+            command: MAV_CMD_MARV_SELECT_HIL_SUBMODE,
             target_system,
             target_component,
             confirmation,
@@ -888,13 +967,16 @@ mod tests {
     use super::{
         ACTUATOR_CONTROL_TARGET_ID, ActuatorControlTargetMessage, COMMAND_ACK_ID, COMMAND_LONG_ID,
         CRC_EXTRA_SYSTEM_TIME, CommandAckMessage, CommandLongMessage, DecodeError, DecodedMessage,
-        MAV_CMD_MARV_SET_HIL_BACKEND, MAVLINK_V1_STX, MAVLINK_V2_STX, SYSTEM_TIME_ID, checksum_v1,
-        checksum_v2, decode_frame, encode_actuator_control_target, encode_command_ack,
-        encode_command_long, encode_hil_backend_command, extend_slice, frame_to_hil_messages,
-        mav_result_wire_code, try_consume_frame,
+        MAV_CMD_MARV_ENTER_HIL_MODE, MAV_CMD_MARV_SELECT_HIL_SUBMODE, MAV_CMD_MARV_SET_HIL_BACKEND,
+        MAVLINK_V1_STX, MAVLINK_V2_STX, SYSTEM_TIME_ID, checksum_v1, checksum_v2, decode_frame,
+        encode_actuator_control_target, encode_command_ack, encode_command_long,
+        encode_hil_backend_command, encode_hil_submode_command, extend_slice,
+        frame_to_hil_messages, mav_result_wire_code, try_consume_frame,
     };
     use crate::services::hil::backend::SensorBackend;
-    use crate::services::hil::model::{HilCommandAckResult, HilControlAction, HilIngressMessage};
+    use crate::services::hil::model::{
+        HilCommandAckResult, HilControlAction, HilIngressMessage, HilSubmode,
+    };
 
     #[test]
     fn actuator_encoding_places_group_after_controls() {
@@ -943,7 +1025,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_maps_backend_command_long_into_hil_control_command() {
+    fn decode_maps_enter_hil_command_long_into_hil_control_command() {
         let frame = encode_hil_backend_command(SensorBackend::Hil, 42, 7, 1, 9, 12, 3);
         let decoded = decode_frame(&frame).unwrap();
 
@@ -959,7 +1041,76 @@ mod tests {
                     && command.target_system == 42
                     && command.target_component == 7
                     && command.confirmation == 1
-                    && matches!(command.action, HilControlAction::RequestBackend(SensorBackend::Hil))
+                    && matches!(command.action, HilControlAction::EnterHilMode)
+        ));
+    }
+
+    #[test]
+    fn decode_maps_submode_command_long_into_hil_control_command() {
+        let frame = encode_hil_submode_command(HilSubmode::StateEstimation, 42, 7, 1, 9, 12, 3);
+        let decoded = decode_frame(&frame).unwrap();
+
+        let mut messages = Vec::<HilIngressMessage, 4>::new();
+        frame_to_hil_messages(decoded, &mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0],
+            HilIngressMessage::ControlCommand(command)
+                if command.source_system == 12
+                    && command.source_component == 3
+                    && command.target_system == 42
+                    && command.target_component == 7
+                    && command.confirmation == 1
+                    && matches!(
+                        command.action,
+                        HilControlAction::SelectSubmode(HilSubmode::StateEstimation)
+                    )
+        ));
+    }
+
+    #[test]
+    fn decode_maps_invalid_enter_hil_payload_into_invalid_control_command() {
+        let frame = encode_hil_backend_command(SensorBackend::Real, 42, 7, 1, 9, 12, 3);
+        let decoded = decode_frame(&frame).unwrap();
+
+        let mut messages = Vec::<HilIngressMessage, 4>::new();
+        frame_to_hil_messages(decoded, &mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0],
+            HilIngressMessage::ControlCommand(command)
+                if matches!(command.action, HilControlAction::InvalidPayload)
+        ));
+    }
+
+    #[test]
+    fn decode_maps_invalid_submode_payload_into_invalid_control_command() {
+        let mut params = [0.0; 7];
+        params[0] = 99.0;
+        let frame = encode_command_long(
+            &CommandLongMessage {
+                params,
+                command: MAV_CMD_MARV_SELECT_HIL_SUBMODE,
+                target_system: 42,
+                target_component: 7,
+                confirmation: 1,
+            },
+            9,
+            12,
+            3,
+        );
+        let decoded = decode_frame(&frame).unwrap();
+
+        let mut messages = Vec::<HilIngressMessage, 4>::new();
+        frame_to_hil_messages(decoded, &mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert!(matches!(
+            messages[0],
+            HilIngressMessage::ControlCommand(command)
+                if matches!(command.action, HilControlAction::InvalidPayload)
         ));
     }
 
@@ -1021,7 +1172,21 @@ mod tests {
         assert!(matches!(
             decoded.message,
             DecodedMessage::CommandLong(CommandLongMessage {
-                command: MAV_CMD_MARV_SET_HIL_BACKEND,
+                command: MAV_CMD_MARV_ENTER_HIL_MODE,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn command_long_decode_preserves_select_submode_command_id() {
+        let frame = encode_hil_submode_command(HilSubmode::FullRun, 1, 2, 0, 3, 4, 5);
+        let decoded = decode_frame(&frame).unwrap();
+
+        assert!(matches!(
+            decoded.message,
+            DecodedMessage::CommandLong(CommandLongMessage {
+                command: MAV_CMD_MARV_SELECT_HIL_SUBMODE,
                 ..
             })
         ));

@@ -19,14 +19,15 @@ pub use ingress::{HilByteReader, HilIngressProtocol};
 pub use model::{
     HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult, HilControlAction,
     HilControlCommand, HilEgressMessage, HilGpsSample, HilImuSample, HilIngressMessage,
-    HilMagSample, HilMissionEvent, HilTick,
+    HilMagSample, HilMissionEvent, HilSessionState, HilSubmode, HilTick,
 };
 pub use routing::{
     HilBarometerRoute, HilControlCommandRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes,
     HilMagnetometerRoute, HilTimeRoute,
 };
-pub use runtime::{HilControlRuntime, HilDispatch, HilRuntime};
+pub use runtime::{HilControlCommandOutcome, HilControlRuntime, HilDispatch, HilRuntime};
 pub use tasks::{
     HilControlCommandReceiver, HilEgressSender, HilEgressTrySender, HilIngressLoopError,
-    run_hil_control_command_loop, run_hil_ingress_loop, send_hil_egress_message,
+    HilSessionStateSender, run_hil_control_command_loop, run_hil_ingress_loop,
+    send_hil_egress_message,
 };

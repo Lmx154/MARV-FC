@@ -4,9 +4,10 @@ use crate::messages::sensor::{
     BarometerSample, BarometerSampleStamped, GpsFixSample, GpsFixSampleStamped, ImuSample,
     ImuSampleStamped, MagnetometerSample, MagnetometerSampleStamped, TimeSample,
 };
-use crate::services::hil::backend::SensorBackend;
+use crate::services::hil::boot::UsbHilMode;
 use crate::services::hil::model::{
     HilCommandAck, HilCommandAckResult, HilControlAction, HilControlCommand, HilIngressMessage,
+    HilSessionState, HilSubmode,
 };
 use crate::services::hil::routing::{
     HilBarometerRoute, HilControlCommandRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes,
@@ -41,44 +42,105 @@ impl HilDispatch {
 pub struct HilRuntime {
     last_tick_timestamp: Option<MeasurementTimestamp>,
     last_time_boot_ms: Option<u32>,
+    session_state: HilSessionState,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HilControlRuntime {
     system_id: u8,
     component_id: u8,
-    active_backend: SensorBackend,
+    session_state: HilSessionState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HilControlCommandOutcome {
+    pub ack: Option<HilCommandAck>,
+    pub session_state: Option<HilSessionState>,
 }
 
 impl HilControlRuntime {
-    pub const fn new(system_id: u8, component_id: u8, active_backend: SensorBackend) -> Self {
+    pub const fn new(system_id: u8, component_id: u8) -> Self {
+        Self::with_session_state(system_id, component_id, HilSessionState::Inactive)
+    }
+
+    pub const fn with_session_state(
+        system_id: u8,
+        component_id: u8,
+        session_state: HilSessionState,
+    ) -> Self {
         Self {
             system_id,
             component_id,
-            active_backend,
+            session_state,
         }
     }
 
-    pub fn accept_control_command(&mut self, command: HilControlCommand) -> Option<HilCommandAck> {
+    pub fn accept_control_command(
+        &mut self,
+        command: HilControlCommand,
+    ) -> HilControlCommandOutcome {
         if !self.matches_target(command) {
-            return None;
+            return HilControlCommandOutcome {
+                ack: None,
+                session_state: None,
+            };
         }
 
-        let result = match command.action {
-            HilControlAction::RequestBackend(requested_backend)
-                if requested_backend == self.active_backend =>
-            {
-                HilCommandAckResult::Accepted
-            }
-            HilControlAction::RequestBackend(_) => HilCommandAckResult::Denied,
-        };
+        match command.action {
+            HilControlAction::EnterHilMode => {
+                let session_state = match self.session_state {
+                    HilSessionState::Inactive => {
+                        let next_state = HilSessionState::Limbo;
+                        self.session_state = next_state;
+                        Some(next_state)
+                    }
+                    HilSessionState::Limbo | HilSessionState::Selected(_) => None,
+                };
 
-        Some(HilCommandAck::new(
-            command.command_id,
-            result,
-            command.source_system,
-            command.source_component,
-        ))
+                HilControlCommandOutcome {
+                    ack: Some(HilCommandAck::new(
+                        command.command_id,
+                        HilCommandAckResult::Accepted,
+                        command.source_system,
+                        command.source_component,
+                    )),
+                    session_state,
+                }
+            }
+            HilControlAction::SelectSubmode(submode) => {
+                let (result, session_state) = match self.session_state {
+                    HilSessionState::Inactive => (HilCommandAckResult::TemporarilyRejected, None),
+                    HilSessionState::Limbo => {
+                        let next_state = HilSessionState::Selected(submode);
+                        self.session_state = next_state;
+                        (HilCommandAckResult::Accepted, Some(next_state))
+                    }
+                    HilSessionState::Selected(current) if current == submode => {
+                        (HilCommandAckResult::Accepted, None)
+                    }
+                    HilSessionState::Selected(_) => (HilCommandAckResult::Denied, None),
+                };
+
+                HilControlCommandOutcome {
+                    ack: Some(HilCommandAck::new(
+                        command.command_id,
+                        result,
+                        command.source_system,
+                        command.source_component,
+                    )),
+                    session_state,
+                }
+            }
+            HilControlAction::InvalidPayload => HilControlCommandOutcome {
+                ack: Some(HilCommandAck::new(
+                    command.command_id,
+                    HilCommandAckResult::Unsupported,
+                    command.source_system,
+                    command.source_component,
+                )),
+                session_state: None,
+            },
+        }
     }
 
     const fn matches_target(&self, command: HilControlCommand) -> bool {
@@ -95,12 +157,40 @@ impl HilRuntime {
         Self {
             last_tick_timestamp: None,
             last_time_boot_ms: None,
+            session_state: HilSessionState::Inactive,
         }
     }
 
     pub fn reset(&mut self) {
         self.last_tick_timestamp = None;
         self.last_time_boot_ms = None;
+    }
+
+    pub fn set_session_state(&mut self, session_state: HilSessionState) {
+        if self.session_state != session_state {
+            self.session_state = session_state;
+            self.reset();
+        }
+    }
+
+    pub fn reconcile_usb_hil_mode(&mut self, mode: UsbHilMode) {
+        let next_state = match mode {
+            UsbHilMode::InitProbe | UsbHilMode::Passive => HilSessionState::Inactive,
+            UsbHilMode::HilActive => match self.session_state {
+                HilSessionState::Inactive => HilSessionState::Limbo,
+                HilSessionState::Limbo | HilSessionState::Selected(_) => self.session_state,
+            },
+        };
+        self.set_session_state(next_state);
+    }
+
+    pub const fn session_state(&self) -> HilSessionState {
+        self.session_state
+    }
+
+    pub fn set_transitional_host_state_estimation_mode(&mut self) {
+        // Transitional host-runtime bootstrap until host command-plane parity lands.
+        self.set_session_state(HilSessionState::Selected(HilSubmode::StateEstimation));
     }
 
     pub fn accept<Time, Imu, Barometer, Gps, Magnetometer, Control>(
@@ -116,6 +206,12 @@ impl HilRuntime {
         Magnetometer: HilMagnetometerRoute,
         Control: HilControlCommandRoute,
     {
+        if !matches!(message, HilIngressMessage::ControlCommand(_))
+            && !self.session_state.accepts_data()
+        {
+            return HilDispatch::default();
+        }
+
         match message {
             HilIngressMessage::Tick(tick) => {
                 self.accept_tick(tick.timestamp, tick.time_boot_ms, routes)
@@ -225,55 +321,99 @@ impl HilRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::HilControlRuntime;
-    use crate::services::hil::backend::SensorBackend;
-    use crate::services::hil::model::{HilCommandAckResult, HilControlCommand};
+    use super::{HilControlRuntime, HilRuntime};
+    use crate::messages::sensor::{ImuSample, ImuSampleStamped, TimeSample};
+    use crate::services::hil::boot::UsbHilMode;
+    use crate::services::hil::model::{
+        HilCommandAckResult, HilControlCommand, HilIngressMessage, HilSessionState, HilSubmode,
+        HilTick,
+    };
+    use crate::services::hil::routing::{HilImuRoute, HilIngressRoutes, HilTimeRoute};
+    use crate::utilities::time::MeasurementTimestamp;
 
-    #[test]
-    fn control_runtime_accepts_commands_for_current_backend() {
-        let mut runtime = HilControlRuntime::new(42, 3, SensorBackend::Hil);
-        let ack = runtime
-            .accept_control_command(HilControlCommand::request_backend(
-                31_010,
-                SensorBackend::Hil,
-                7,
-                9,
-                42,
-                3,
-                0,
-            ))
-            .unwrap();
+    #[derive(Default)]
+    struct TestTimeRoute {
+        last_tick: Option<TimeSample>,
+    }
 
-        assert_eq!(ack.command_id, 31_010);
-        assert_eq!(ack.result, HilCommandAckResult::Accepted);
-        assert_eq!(ack.target_system, 7);
-        assert_eq!(ack.target_component, 9);
+    impl HilTimeRoute for core::cell::RefCell<TestTimeRoute> {
+        fn publish_time(&self, sample: TimeSample) {
+            self.borrow_mut().last_tick = Some(sample);
+        }
+    }
+
+    #[derive(Default)]
+    struct TestImuRoute {
+        last_sample: Option<ImuSampleStamped>,
+    }
+
+    impl HilImuRoute for core::cell::RefCell<TestImuRoute> {
+        fn publish_imu(&self, sample: ImuSampleStamped) {
+            self.borrow_mut().last_sample = Some(sample);
+        }
     }
 
     #[test]
-    fn control_runtime_denies_backend_switch_it_cannot_apply() {
-        let mut runtime = HilControlRuntime::new(42, 3, SensorBackend::Hil);
-        let ack = runtime
-            .accept_control_command(HilControlCommand::request_backend(
-                31_010,
-                SensorBackend::Real,
-                7,
-                9,
-                42,
-                3,
-                0,
-            ))
-            .unwrap();
+    fn control_runtime_accepts_enter_hil_mode_command() {
+        let mut runtime = HilControlRuntime::new(42, 3);
+        let outcome = runtime
+            .accept_control_command(HilControlCommand::enter_hil_mode(31_010, 7, 9, 42, 3, 0));
 
-        assert_eq!(ack.result, HilCommandAckResult::Denied);
+        let ack = outcome.ack.unwrap();
+        assert_eq!(ack.command_id, 31_010);
+        assert_eq!(ack.result, HilCommandAckResult::Accepted);
+        assert_eq!(outcome.session_state, Some(HilSessionState::Limbo));
+    }
+
+    #[test]
+    fn control_runtime_selects_submode_from_limbo() {
+        let mut runtime = HilControlRuntime::with_session_state(42, 3, HilSessionState::Limbo);
+        let outcome = runtime.accept_control_command(HilControlCommand::select_submode(
+            31_011,
+            HilSubmode::FullRun,
+            7,
+            9,
+            42,
+            3,
+            0,
+        ));
+
+        let ack = outcome.ack.unwrap();
+        assert_eq!(ack.command_id, 31_011);
+        assert_eq!(ack.result, HilCommandAckResult::Accepted);
+        assert_eq!(
+            outcome.session_state,
+            Some(HilSessionState::Selected(HilSubmode::FullRun))
+        );
+    }
+
+    #[test]
+    fn control_runtime_denies_submode_switch_after_selection() {
+        let mut runtime = HilControlRuntime::with_session_state(
+            42,
+            3,
+            HilSessionState::Selected(HilSubmode::FullRun),
+        );
+        let outcome = runtime.accept_control_command(HilControlCommand::select_submode(
+            31_011,
+            HilSubmode::StateEstimation,
+            7,
+            9,
+            42,
+            3,
+            0,
+        ));
+
+        assert_eq!(outcome.ack.unwrap().result, HilCommandAckResult::Denied);
+        assert_eq!(outcome.session_state, None);
     }
 
     #[test]
     fn control_runtime_ignores_commands_for_other_targets() {
-        let mut runtime = HilControlRuntime::new(42, 3, SensorBackend::Hil);
-        let ack = runtime.accept_control_command(HilControlCommand::request_backend(
-            31_010,
-            SensorBackend::Hil,
+        let mut runtime = HilControlRuntime::with_session_state(42, 3, HilSessionState::Limbo);
+        let outcome = runtime.accept_control_command(HilControlCommand::select_submode(
+            31_011,
+            HilSubmode::FullRun,
             7,
             9,
             24,
@@ -281,6 +421,107 @@ mod tests {
             0,
         ));
 
-        assert!(ack.is_none());
+        assert!(outcome.ack.is_none());
+    }
+
+    #[test]
+    fn control_runtime_acks_invalid_payload_as_unsupported() {
+        let mut runtime = HilControlRuntime::with_session_state(42, 3, HilSessionState::Limbo);
+        let outcome = runtime.accept_control_command(HilControlCommand {
+            command_id: 31_011,
+            action: crate::services::hil::model::HilControlAction::InvalidPayload,
+            source_system: 7,
+            source_component: 9,
+            target_system: 42,
+            target_component: 3,
+            confirmation: 0,
+        });
+
+        assert_eq!(
+            outcome.ack.unwrap().result,
+            HilCommandAckResult::Unsupported
+        );
+        assert_eq!(outcome.session_state, None);
+    }
+
+    #[test]
+    fn hil_runtime_promotes_hil_phase_to_limbo_once() {
+        let mut runtime = HilRuntime::new();
+        runtime.reconcile_usb_hil_mode(UsbHilMode::HilActive);
+        assert_eq!(runtime.session_state(), HilSessionState::Limbo);
+
+        runtime.set_session_state(HilSessionState::Selected(HilSubmode::FullRun));
+        runtime.reconcile_usb_hil_mode(UsbHilMode::HilActive);
+        assert_eq!(
+            runtime.session_state(),
+            HilSessionState::Selected(HilSubmode::FullRun)
+        );
+    }
+
+    #[test]
+    fn hil_runtime_demotes_non_hil_modes_to_inactive() {
+        let mut runtime = HilRuntime::new();
+        runtime.set_session_state(HilSessionState::Selected(HilSubmode::StateEstimation));
+
+        runtime.reconcile_usb_hil_mode(UsbHilMode::Passive);
+        assert_eq!(runtime.session_state(), HilSessionState::Inactive);
+    }
+
+    #[test]
+    fn hil_runtime_drops_sensor_data_until_submode_is_selected() {
+        let time = core::cell::RefCell::new(TestTimeRoute::default());
+        let imu = core::cell::RefCell::new(TestImuRoute::default());
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut runtime = HilRuntime::new();
+        runtime.set_session_state(HilSessionState::Limbo);
+
+        let dispatch = runtime.accept(
+            HilIngressMessage::Tick(HilTick {
+                timestamp: MeasurementTimestamp::from_micros(1_000),
+                time_boot_ms: 1,
+            }),
+            &routes,
+        );
+        assert!(dispatch.tick.is_none());
+        assert!(time.borrow().last_tick.is_none());
+    }
+
+    #[test]
+    fn hil_runtime_routes_sensor_data_after_submode_selection() {
+        let time = core::cell::RefCell::new(TestTimeRoute::default());
+        let imu = core::cell::RefCell::new(TestImuRoute::default());
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut runtime = HilRuntime::new();
+        runtime.set_session_state(HilSessionState::Selected(HilSubmode::StateEstimation));
+
+        let tick = runtime.accept(
+            HilIngressMessage::Tick(HilTick {
+                timestamp: MeasurementTimestamp::from_micros(1_000),
+                time_boot_ms: 1,
+            }),
+            &routes,
+        );
+        assert_eq!(tick.tick.unwrap().time_boot_ms, 1);
+        assert_eq!(time.borrow().last_tick.unwrap().time_boot_ms, 1);
+
+        let imu_dispatch = runtime.accept(
+            HilIngressMessage::ImuSample(crate::services::hil::model::HilImuSample {
+                timestamp: MeasurementTimestamp::from_micros(2_000),
+                accel_mps2: [1.0, 2.0, 3.0],
+                gyro_rad_s: [4.0, 5.0, 6.0],
+            }),
+            &routes,
+        );
+        assert!(imu_dispatch.imu_published);
+        assert_eq!(
+            imu.borrow().last_sample.unwrap(),
+            ImuSampleStamped::new(
+                MeasurementTimestamp::from_micros(2_000),
+                ImuSample {
+                    accel_mps2: [1.0, 2.0, 3.0],
+                    gyro_rad_s: [4.0, 5.0, 6.0],
+                },
+            )
+        );
     }
 }

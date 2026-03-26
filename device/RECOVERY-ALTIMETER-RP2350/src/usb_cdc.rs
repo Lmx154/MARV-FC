@@ -19,9 +19,9 @@ use embassy_usb::{Builder, Config, UsbDevice};
 use static_cell::StaticCell;
 
 use crate::channels::{
-    BAROMETER_CHANNEL, HIL_BOOT_SIGNAL, HIL_CONTROL_COMMAND_CHANNEL, IMU_CHANNEL,
-    RecoveryFlightPhaseSubscriber, RecoveryHilEgressReceiver, RecoveryHilEgressSender,
-    RecoveryWatchdogLivenessSender, TIME_CHANNEL,
+    BAROMETER_CHANNEL, HIL_BOOT_SIGNAL, IMU_CHANNEL, RecoveryFlightPhaseSubscriber,
+    RecoveryHilControlCommandSender, RecoveryHilEgressReceiver, RecoveryHilEgressSender,
+    RecoveryHilSessionStateSubscriber, RecoveryWatchdogLivenessSender, TIME_CHANNEL,
 };
 use crate::config::HilConfig;
 use crate::watchdog;
@@ -93,8 +93,17 @@ fn apply_phase_updates(
 
         *mode = next_mode;
         protocol.reset();
-        runtime.reset();
+        runtime.reconcile_usb_hil_mode(next_mode);
         info!("usb cdc mode -> {:?}", next_mode);
+    }
+}
+
+fn apply_session_state_updates(
+    state_subscriber: &mut RecoveryHilSessionStateSubscriber,
+    runtime: &mut HilRuntime,
+) {
+    while let Some(state) = state_subscriber.try_next_message_pure() {
+        runtime.set_session_state(state);
     }
 }
 
@@ -104,11 +113,12 @@ fn report_init_probe_liveness(sender: &RecoveryWatchdogLivenessSender, mode: Usb
     }
 }
 
-fn handle_control_command<E>(
+async fn handle_control_command<E>(
     command: common::services::hil::HilControlCommand,
     hil_config: HilConfig,
     mode: UsbHilMode,
     boot_started_at: Instant,
+    control_sender: &RecoveryHilControlCommandSender,
     egress: &E,
 ) where
     E: HilEgressTrySender,
@@ -127,6 +137,9 @@ fn handle_control_command<E>(
         let _ = egress.try_send_hil_egress(HilEgressMessage::CommandAck(ack));
     }
     if outcome.enter_hil {
+        if outcome.relay_to_control_runtime {
+            control_sender.send(command).await;
+        }
         HIL_BOOT_SIGNAL.signal(());
     }
 }
@@ -136,6 +149,8 @@ async fn usb_cdc_ingest_task(
     mut class: RpUsbReceiver,
     hil_config: HilConfig,
     mut phase_subscriber: RecoveryFlightPhaseSubscriber,
+    mut state_subscriber: RecoveryHilSessionStateSubscriber,
+    control_sender: RecoveryHilControlCommandSender,
     egress: RecoveryHilEgressSender,
     liveness: RecoveryWatchdogLivenessSender,
 ) -> ! {
@@ -146,7 +161,7 @@ async fn usb_cdc_ingest_task(
         &BAROMETER_CHANNEL,
         &(),
         &(),
-        &HIL_CONTROL_COMMAND_CHANNEL,
+        &(),
     );
     let mut protocol = MavlinkHilMessagePump::<MAVLINK_STREAM_CAPACITY>::new();
     let mut runtime = HilRuntime::new();
@@ -160,6 +175,7 @@ async fn usb_cdc_ingest_task(
             &mut protocol,
             &mut runtime,
         );
+        apply_session_state_updates(&mut state_subscriber, &mut runtime);
         match with_timeout(
             Duration::from_millis(INIT_PROBE_POLL_MS),
             class.wait_connection(),
@@ -182,6 +198,7 @@ async fn usb_cdc_ingest_task(
             &mut protocol,
             &mut runtime,
         );
+        apply_session_state_updates(&mut state_subscriber, &mut runtime);
 
         match with_timeout(
             Duration::from_millis(INIT_PROBE_POLL_MS),
@@ -199,15 +216,17 @@ async fn usb_cdc_ingest_task(
                     match message {
                         Ok(HilIngressMessage::ControlCommand(command)) => {
                             if mode.is_hil_active() {
-                                let _ = HIL_CONTROL_COMMAND_CHANNEL.try_send(command);
+                                control_sender.send(command).await;
                             } else {
                                 handle_control_command(
                                     command,
                                     hil_config,
                                     mode,
                                     boot_started_at,
+                                    &control_sender,
                                     &egress,
-                                );
+                                )
+                                .await;
                             }
                         }
                         Ok(message) if mode.is_hil_active() => {
@@ -240,6 +259,7 @@ async fn usb_cdc_ingest_task(
                         &mut protocol,
                         &mut runtime,
                     );
+                    apply_session_state_updates(&mut state_subscriber, &mut runtime);
                     match with_timeout(
                         Duration::from_millis(INIT_PROBE_POLL_MS),
                         class.wait_connection(),
@@ -292,6 +312,8 @@ pub fn spawn(
     hil_config: HilConfig,
     receiver: RecoveryHilEgressReceiver,
     phase_subscriber: RecoveryFlightPhaseSubscriber,
+    state_subscriber: RecoveryHilSessionStateSubscriber,
+    control_sender: RecoveryHilControlCommandSender,
     liveness: RecoveryWatchdogLivenessSender,
 ) {
     let driver = Driver::new(usb, Irqs);
@@ -321,6 +343,8 @@ pub fn spawn(
             receiver_class,
             hil_config,
             phase_subscriber,
+            state_subscriber,
+            control_sender,
             crate::channels::HIL_EGRESS_CHANNEL.sender(),
             liveness,
         ))

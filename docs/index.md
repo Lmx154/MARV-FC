@@ -1,136 +1,46 @@
-# MARV Firmware Architecture Design Documents
+# MARV Firmware Architecture Docs
 
-This document set defines the architectural guard rails for the MARV firmware stack across:
+This repo now splits architecture material into:
 
-- Rocket launcher stack (`RL`)
-- Senior project drone stack (`SP`)
-- Flight controller (`FC`)
-- Radio
-- Ground station (`GS`)
-- SITL backends
+- canonical docs: small, always-loadable rules and contracts
+- reference docs: rationale, examples, diagrams, target notes, and migration source material
+- templates: change-steering and deviation logging helpers
 
-Primary goals:
+If a canonical doc conflicts with a reference or an older doc, the canonical doc wins.
 
-- Separate HAL-dependent and HAL-agnostic logic
-- Preserve portability across RP2354 targets and SITL
-- Protect timing-critical execution paths
-- Keep task creation deliberate
-- Make watchdog supervision a first-class architectural concern
-- Maintain explicit ownership of buses, channels, cores, and responsibilities
+## Canonical Docs
 
-## Repository Architecture Tree
+1. [`00-system-definition-spine.md`](./00-system-definition-spine.md)
+2. [`01-architecture-rules.md`](./01-architecture-rules.md)
+3. [`02-interface-contracts.md`](./02-interface-contracts.md)
+4. [`03-verification-strategy.md`](./03-verification-strategy.md)
+5. [`04-review-checklist.md`](./04-review-checklist.md)
+6. [`05-current-deviations-and-migration.md`](./05-current-deviations-and-migration.md)
 
-This is the target repository shape the docs define. It is the architecture we are
-aligning the workspace toward, even where legacy crates or legacy module names
-still exist during migration.
+## Reference Docs
 
-```text
-MARV-FC/
-├── common/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── interfaces/
-│       │   ├── sensors/
-│       │   ├── comms/
-│       │   ├── storage/
-│       │   ├── actuators/
-│       │   ├── timing/
-│       │   ├── health/
-│       │   └── system/
-│       ├── messages/
-│       │   ├── sensor/
-│       │   ├── estimate/
-│       │   ├── control/
-│       │   ├── telemetry/
-│       │   ├── logging/
-│       │   └── fault/
-│       ├── drivers/
-│       │   ├── sensors/
-│       │   ├── storage/
-│       │   ├── radio/
-│       │   └── leds/
-│       ├── protocol/
-│       │   ├── mavlink/
-│       │   ├── ubx/
-│       │   ├── framing/
-│       │   ├── crc/
-│       │   └── packet_types/
-│       ├── comms/
-│       │   ├── links/
-│       │   ├── routing/
-│       │   ├── session/
-│       │   ├── retry/
-│       │   └── bridge/
-│       ├── policies/
-│       │   ├── arming/
-│       │   ├── modes/
-│       │   ├── faults/
-│       │   ├── failsafe/
-│       │   └── mission/
-│       ├── localization/
-│       │   ├── attitude/
-│       │   ├── navigation/
-│       │   ├── sensor_fusion/
-│       │   ├── calibration/
-│       │   └── state/
-│       ├── control/
-│       │   ├── rate/
-│       │   ├── attitude/
-│       │   ├── guidance/
-│       │   ├── mixing/
-│       │   └── outputs/
-│       ├── services/
-│       │   ├── acquisition/
-│       │   ├── estimation/
-│       │   ├── control/
-│       │   ├── telemetry/
-│       │   ├── logging/
-│       │   ├── health/
-│       │   └── status/
-│       ├── tasks/
-│       │   ├── fast_loop/
-│       │   ├── medium_loop/
-│       │   ├── slow_loop/
-│       │   └── background/
-│       ├── utilities/
-│       │   ├── math/
-│       │   ├── filters/
-│       │   ├── buffers/
-│       │   ├── units/
-│       │   ├── time/
-│       │   └── ids/
-│       └── prelude/
-├── device/
-│   ├── MARV-FC-RL-RP2354B/
-│   │   └── src/
-│   │       ├── resources.rs
-│   │       ├── pinmap.rs
-│   │       ├── interrupts.rs
-│   │       ├── config.rs
-│   │       ├── clocks.rs
-│   │       ├── buses.rs
-│   │       ├── channels.rs
-│   │       ├── watchdog.rs
-│   │       ├── core0.rs
-│   │       ├── core1.rs
-│   │       └── main.rs
-│   ├── MARV-RADIO-*/
-│   ├── MARV-GS-*/
-│   └── MARV-*-SITL/
-├── sim/
-│   ├── shared/
-│   ├── backends/
-│   └── MARV-*-SITL/
-└── docs/
-```
+1. [`references/overview-and-rationale.md`](./references/overview-and-rationale.md)
+2. [`references/layer-reference.md`](./references/layer-reference.md)
+3. [`references/timing-and-core-notes.md`](./references/timing-and-core-notes.md)
+4. [`references/bus-and-dataflow-notes.md`](./references/bus-and-dataflow-notes.md)
+5. [`references/watchdog-notes.md`](./references/watchdog-notes.md)
+6. [`references/target-guidance.md`](./references/target-guidance.md)
+7. [`references/simulator-notes.md`](./references/simulator-notes.md)
+8. [`references/localization-notes.md`](./references/localization-notes.md)
+9. [`references/diagrams.md`](./references/diagrams.md)
 
-Current migration note:
+## Templates
 
-- The preserved LoRa implementation remains parked under
-  `common/src/coms/transport/lora/` and should be moved into
-  `common/src/comms/links/lora/` only as a deliberate follow-up migration.
+1. [`templates/ai-change-spec.md`](./templates/ai-change-spec.md)
+2. [`templates/architecture-deviation-entry.md`](./templates/architecture-deviation-entry.md)
 
-## Document Index
+## Repo AI Guidance
+
+1. [`.github/copilot-instructions.md`](../.github/copilot-instructions.md)
+
+## Legacy Source Docs Retained During Migration
+
+These remain useful as longer-form source material while the repo converges on the new structure:
 
 1. [`01-overview-and-scope.md`](./01-overview-and-scope.md)
 2. [`02-core-principles-and-guard-rails.md`](./02-core-principles-and-guard-rails.md)
@@ -143,32 +53,25 @@ Current migration note:
 9. [`09-target-guidance-and-milestones.md`](./09-target-guidance-and-milestones.md)
 10. [`10-architecture-and-abstractions-visualization.md`](./10-architecture-and-abstractions-visualization.md)
 11. [`11-hil-framework-plan.md`](./11-hil-framework-plan.md)
+12. [`FC_SITL_ICD.md`](./FC_SITL_ICD.md)
+13. [`simulator.md`](./simulator.md)
+14. [`localization.md`](./localization.md)
+15. [`pcbhardware.md`](./pcbhardware.md)
 
 ## Reading Order
 
-Recommended order:
+For most work:
 
-1. Overview and scope
-2. Core principles and guard rails
-3. Repository structure
-4. Layer responsibilities
-5. Function classification and task policy
-6. Timing isolation and core partitioning
-7. Communication, buses, and dataflow
-8. Watchdog architecture and liveness supervision
-9. Target-specific guidance and milestones
-10. Architecture and abstractions visualization
-11. HIL framework plan
+1. `docs/00-system-definition-spine.md`
+2. `docs/01-architecture-rules.md`
+3. `docs/02-interface-contracts.md`
+4. `.github/copilot-instructions.md`
+5. `docs/templates/ai-change-spec.md`
+6. one targeted file under `docs/references/`
 
-## Intended Use
+## Current Migration Notes
 
-These documents are intended to serve as:
-
-- architectural guard rails
-- onboarding material
-- design review reference
-- implementation boundary reference
-- SITL parity reference
-- long-term maintainability constraints
-
-This document set is intentionally detailed at the architectural level, but it does not define implementation specifics beyond module boundaries, ownership, and system behavior constraints.
+- `common/` and `device/` already exist in the intended roles.
+- Host-side simulation is currently implemented in the `simulator/` crate rather than the long-term `sim/` directory layout.
+- Preserved LoRa transport code remains under `common/src/coms/transport/lora/` until a deliberate migration moves it under `common/src/comms/links/lora/`.
+- Repo-reality mismatches belong in [`05-current-deviations-and-migration.md`](./05-current-deviations-and-migration.md).

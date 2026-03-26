@@ -96,6 +96,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     );
     let mut protocol = MavlinkHilMessagePump::<RX_BUFFER_LIMIT>::new();
     let mut runtime = HilRuntime::new();
+    runtime.set_transitional_host_state_estimation_mode();
     let mut receive_buffer = [0u8; 512];
     let mut timeout_reported = false;
 
