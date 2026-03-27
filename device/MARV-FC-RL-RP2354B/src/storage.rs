@@ -1,8 +1,10 @@
 use common::drivers::storage::{MicrosdLogger, MicrosdLoggerConfig};
 use common::interfaces::storage::LogError;
+use defmt::warn;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::peripherals::SPI0;
 use embassy_rp::spi::{Blocking, Config as SpiConfig, Spi};
+use embassy_time::Duration;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::sdcard::{DummyCsPin, SdCard};
 use embedded_sdmmc::{TimeSource, Timestamp};
@@ -33,7 +35,25 @@ pub fn build_logger_engine(
 
     let mut logger_config = MicrosdLoggerConfig::default();
     logger_config.flush_every_lines = config.sd_flush_every_lines.max(1);
-    MicrosdLogger::<_, _, 8, 4, 1>::new(sdcard, FixedTimeSource, logger_config)
+    let sd_init_attempts = config.sd_init_attempts.max(1);
+    let sd_init_retry_backoff_ms = config.sd_init_retry_backoff_ms;
+    let sd_spi_frequency_hz = config.sd_spi_frequency_hz;
+
+    MicrosdLogger::<_, _, 8, 4, 1>::new_with_retry(
+        sdcard,
+        FixedTimeSource,
+        logger_config,
+        sd_init_attempts,
+        |attempt, error| {
+            warn!(
+                "sd logger init attempt {}/{} failed at {} Hz: {:?}; retrying in {} ms",
+                attempt, sd_init_attempts, sd_spi_frequency_hz, error, sd_init_retry_backoff_ms
+            );
+            if sd_init_retry_backoff_ms > 0 {
+                embassy_time::block_for(Duration::from_millis(sd_init_retry_backoff_ms));
+            }
+        },
+    )
 }
 
 pub(crate) struct FixedTimeSource;

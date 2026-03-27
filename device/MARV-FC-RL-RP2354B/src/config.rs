@@ -14,8 +14,11 @@ pub const WATCHDOG_ENABLED_IN_HIL: bool = false;
 pub const STATUS_HEARTBEAT_PERIOD_MS: u64 = 1_000;
 pub const LOG_FILE_PREFIX: &str = "FLGT";
 pub const LOG_RECORD_PERIOD_MS: u32 = 10;
-pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 12_000_000;
+pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 100_000;
 pub const LOG_SD_FLUSH_EVERY_LINES: usize = 64;
+pub const LOG_SD_STARTUP_DELAY_MS: u64 = 5_000;
+pub const LOG_SD_INIT_ATTEMPTS: u32 = 4;
+pub const LOG_SD_INIT_RETRY_BACKOFF_MS: u64 = 250;
 pub const HIL_SYSTEM_ID: u8 = 42;
 pub const HIL_COMPONENT_ID: u8 = 1;
 pub const HIL_BOOT_WINDOW_MS: u32 = 1_500;
@@ -28,6 +31,9 @@ pub struct LoggingConfig {
     pub file_prefix: &'static str,
     pub sd_spi_frequency_hz: u32,
     pub sd_flush_every_lines: usize,
+    pub sd_startup_delay_ms: u64,
+    pub sd_init_attempts: u32,
+    pub sd_init_retry_backoff_ms: u64,
     pub sensor_snapshot: SensorSnapshotLoggerConfig,
 }
 
@@ -38,6 +44,9 @@ impl Default for LoggingConfig {
             file_prefix: LOG_FILE_PREFIX,
             sd_spi_frequency_hz: LOG_SD_SPI_FREQUENCY_HZ,
             sd_flush_every_lines: LOG_SD_FLUSH_EVERY_LINES,
+            sd_startup_delay_ms: LOG_SD_STARTUP_DELAY_MS,
+            sd_init_attempts: LOG_SD_INIT_ATTEMPTS,
+            sd_init_retry_backoff_ms: LOG_SD_INIT_RETRY_BACKOFF_MS,
             sensor_snapshot: SensorSnapshotLoggerConfig {
                 period_ms: LOG_RECORD_PERIOD_MS,
                 emit_header: true,

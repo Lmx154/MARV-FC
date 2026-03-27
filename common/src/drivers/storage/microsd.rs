@@ -88,23 +88,49 @@ where
         time_source: TS,
         config: MicrosdLoggerConfig,
     ) -> Result<Self, LogError> {
+        Self::new_with_retry(block_device, time_source, config, 1, |_, _| {})
+    }
+
+    pub fn new_with_retry<F>(
+        block_device: D,
+        time_source: TS,
+        config: MicrosdLoggerConfig,
+        attempts: u32,
+        mut on_retry: F,
+    ) -> Result<Self, LogError>
+    where
+        F: FnMut(u32, LogError),
+    {
         let mut volume_mgr =
             VolumeManager::<D, TS, MAX_DIRS, MAX_FILES, MAX_VOLUMES>::new_with_limits(
                 block_device,
                 time_source,
                 0,
             );
-        let volume = volume_mgr
-            .open_raw_volume(config.volume_idx)
-            .map_err(map_sd_error)?;
+        let attempts = attempts.max(1);
+        let mut last_error = LogError::Filesystem;
 
-        Ok(Self {
-            volume_mgr,
-            volume,
-            config,
-            active_file: None,
-            pending_lines: 0,
-        })
+        for attempt in 1..=attempts {
+            match volume_mgr.open_raw_volume(config.volume_idx) {
+                Ok(volume) => {
+                    return Ok(Self {
+                        volume_mgr,
+                        volume,
+                        config,
+                        active_file: None,
+                        pending_lines: 0,
+                    });
+                }
+                Err(error) => {
+                    last_error = map_sd_error(error);
+                    if attempt < attempts {
+                        on_retry(attempt, last_error);
+                    }
+                }
+            }
+        }
+
+        Err(last_error)
     }
 
     fn close_active_file(&mut self) -> Result<(), LogError> {

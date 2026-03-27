@@ -171,7 +171,7 @@ async fn time_liveness_task(subscriber: FcTimeSubscriber, mask: u32) -> ! {
         .await
 }
 
-#[embassy_executor::task]
+#[embassy_executor::task(pool_size = 2)]
 async fn imu_liveness_task(subscriber: FcImuSubscriber, mask: u32) -> ! {
     common::services::health::run_watchdog_liveness_loop(subscriber, mask, report_watchdog_progress)
         .await
@@ -530,10 +530,16 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                     EnvironmentalI2cIrqs,
                     i2c_config,
                 );
-                bmp581_detected_address =
-                    probe_bmp581_address(&mut environmental_i2c, config.bmp581.address).await;
-                if bmp581_detected_address.is_none() {
-                    warn!("BMP581 missing during INIT");
+                loop {
+                    bmp581_detected_address =
+                        probe_bmp581_address(&mut environmental_i2c, config.bmp581.address).await;
+                    if bmp581_detected_address.is_some() {
+                        break;
+                    }
+
+                    warn!("BMP581 missing during INIT, retrying");
+                    report_watchdog_progress(watchdog::SOURCE_BOOT_COORDINATOR);
+                    Timer::after(Duration::from_secs(1)).await;
                 }
                 bmp581_i2c = Some(environmental_i2c);
             }
@@ -629,6 +635,17 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     }
 
     if config.logging.enabled && !phase.is_fault() {
+        let sd_init_attempts = config.logging.sd_init_attempts.max(1);
+        if config.logging.sd_startup_delay_ms > 0 {
+            info!(
+                "delaying SD logger init by {} ms (spi_hz={} attempts={} retry_backoff_ms={})",
+                config.logging.sd_startup_delay_ms,
+                config.logging.sd_spi_frequency_hz,
+                sd_init_attempts,
+                config.logging.sd_init_retry_backoff_ms
+            );
+            Timer::after(Duration::from_millis(config.logging.sd_startup_delay_ms)).await;
+        }
         match storage::build_logger_engine(storage_pins, storage_bus, config.logging) {
             Ok(mut engine) => match engine.create_new_csv(config.logging.file_prefix) {
                 Ok(log_path) => match SensorSnapshotLogger::new(
@@ -710,9 +727,15 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                     }
                     Err(error) => warn!("sensor logger config invalid: {:?}", error),
                 },
-                Err(error) => warn!("sd log file allocation failed: {:?}", error),
+                Err(error) => warn!(
+                    "sd log file allocation failed after logger init; continuing without SD logging: {:?}",
+                    error
+                ),
             },
-            Err(error) => warn!("sd logger engine unavailable: {:?}", error),
+            Err(error) => warn!(
+                "sd logger engine unavailable after {} attempt(s); continuing without SD logging: {:?}",
+                sd_init_attempts, error
+            ),
         }
     } else if phase.is_fault() {
         info!("logging skipped while waiting for watchdog reset");

@@ -263,15 +263,22 @@ where
         delay: &mut D,
         config: Lsm6dsv32xConfig,
     ) -> Result<(), Error> {
+        info!("LSM6DSV32X: forcing primary SPI interface");
         self.force_primary_spi_interface().await?;
         delay.delay_ms(INTERFACE_RECOVERY_DELAY_MS).await;
 
+        info!("LSM6DSV32X: issuing soft reset");
         self.soft_reset(delay).await?;
+        info!("LSM6DSV32X: restoring primary SPI interface after reset");
         self.force_primary_spi_interface().await?;
         delay.delay_ms(INTERFACE_RECOVERY_DELAY_MS).await;
+        info!("LSM6DSV32X: verifying chip ID");
         self.verify_chip_id(delay).await?;
+        info!("LSM6DSV32X: configuring primary SPI interface");
         self.configure_primary_spi_interface().await?;
+        info!("LSM6DSV32X: enabling BDU and auto-increment");
         self.enable_bdu_and_auto_increment().await?;
+        info!("LSM6DSV32X: applying runtime config");
         self.apply_config(config).await
     }
 
