@@ -50,6 +50,50 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Build MARV-FC-SP-RP2354B",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-SP-RP2354B"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash MARV-FC-SP-RP2354B",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-SP-RP2354B",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach MARV-FC-SP-RP2354B",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-fc-sp-rp2354b"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-SP-RP2354B",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Build PAYLOAD-CONTROLLER-RP2350",
 			"type": "shell",
 			"command": "cargo",

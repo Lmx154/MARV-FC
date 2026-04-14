@@ -27,8 +27,7 @@ impl Default for MavlinkHilSensorBridge {
 
 impl MavlinkHilSensorBridge {
     pub fn enable_transitional_host_state_estimation_mode(&mut self) {
-        // Transitional compatibility path for host-side callers until control-plane parity lands.
-        self.runtime.set_transitional_host_state_estimation_mode();
+        self.runtime.enable_virtual_sensor_streaming();
     }
 
     pub fn handle_frame<

@@ -1110,6 +1110,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "marv-fc-sp-rp2354b"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "cortex-m-rt",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-sdmmc",
+ "futures",
+ "panic-probe",
+ "smart-leds",
+ "static_cell",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"

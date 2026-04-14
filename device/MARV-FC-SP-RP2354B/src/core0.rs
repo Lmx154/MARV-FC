@@ -703,7 +703,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         info!("logging disabled by device config");
     }
 
-    info!("MARV-FC-RL-RP2354B resource graph initialized");
+    info!("MARV-FC-SP-RP2354B resource graph initialized");
     info!(
         "core0 owns SPI1 sensors, I2C domains, actuator outputs, time-sensitive logging, and watchdog feed"
     );

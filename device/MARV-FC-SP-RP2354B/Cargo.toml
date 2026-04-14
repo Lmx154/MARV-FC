@@ -1,5 +1,5 @@
 [package]
-name = "marv-fc-rl-rp2354b"
+name = "marv-fc-sp-rp2354b"
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -33,5 +33,5 @@ futures = { version = "0.3", default-features = false, features = ["std", "execu
 
 [package.metadata.embassy]
 build = [
-  { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/marv-fc-rl-rp2354b" }
+  { target = "thumbv8m.main-none-eabihf", artifact-dir = "out/examples/marv-fc-sp-rp2354b" }
 ]

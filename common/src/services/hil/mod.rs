@@ -3,6 +3,7 @@
 pub mod backend;
 pub mod boot;
 pub mod egress;
+pub mod events;
 pub mod ingress;
 pub mod model;
 pub mod routing;
@@ -15,6 +16,7 @@ pub use boot::{
     evaluate_usb_init_control_command, should_report_init_probe_liveness, usb_hil_mode_for_phase,
 };
 pub use egress::{HilByteWriter, HilEgressProtocol};
+pub use events::{MAV_CMD_MARV_RUNTIME_PHASE_EVENT, runtime_phase_event};
 pub use ingress::{HilByteReader, HilIngressProtocol};
 pub use model::{
     HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult, HilControlAction,

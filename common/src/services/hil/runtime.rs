@@ -7,7 +7,7 @@ use crate::messages::sensor::{
 use crate::services::hil::boot::UsbHilMode;
 use crate::services::hil::model::{
     HilCommandAck, HilCommandAckResult, HilControlAction, HilControlCommand, HilIngressMessage,
-    HilSessionState, HilSubmode,
+    HilSessionState,
 };
 use crate::services::hil::routing::{
     HilBarometerRoute, HilControlCommandRoute, HilGpsRoute, HilImuRoute, HilIngressRoutes,
@@ -43,6 +43,7 @@ pub struct HilRuntime {
     last_tick_timestamp: Option<MeasurementTimestamp>,
     last_time_boot_ms: Option<u32>,
     session_state: HilSessionState,
+    virtual_sensor_streaming_enabled: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -158,12 +159,27 @@ impl HilRuntime {
             last_tick_timestamp: None,
             last_time_boot_ms: None,
             session_state: HilSessionState::Inactive,
+            virtual_sensor_streaming_enabled: false,
         }
     }
 
     pub fn reset(&mut self) {
         self.last_tick_timestamp = None;
         self.last_time_boot_ms = None;
+    }
+
+    pub fn enable_virtual_sensor_streaming(&mut self) {
+        if !self.virtual_sensor_streaming_enabled {
+            self.virtual_sensor_streaming_enabled = true;
+            self.reset();
+        }
+    }
+
+    pub fn disable_virtual_sensor_streaming(&mut self) {
+        if self.virtual_sensor_streaming_enabled {
+            self.virtual_sensor_streaming_enabled = false;
+            self.reset();
+        }
     }
 
     pub fn set_session_state(&mut self, session_state: HilSessionState) {
@@ -174,6 +190,10 @@ impl HilRuntime {
     }
 
     pub fn reconcile_usb_hil_mode(&mut self, mode: UsbHilMode) {
+        if self.virtual_sensor_streaming_enabled {
+            return;
+        }
+
         let next_state = match mode {
             UsbHilMode::InitProbe | UsbHilMode::Passive => HilSessionState::Inactive,
             UsbHilMode::HilActive => match self.session_state {
@@ -189,8 +209,11 @@ impl HilRuntime {
     }
 
     pub fn set_transitional_host_state_estimation_mode(&mut self) {
-        // Transitional host-runtime bootstrap until host command-plane parity lands.
-        self.set_session_state(HilSessionState::Selected(HilSubmode::StateEstimation));
+        self.enable_virtual_sensor_streaming();
+    }
+
+    fn accepts_virtual_sensor_data(&self) -> bool {
+        self.virtual_sensor_streaming_enabled || self.session_state.accepts_data()
     }
 
     pub fn accept<Time, Imu, Barometer, Gps, Magnetometer, Control>(
@@ -207,7 +230,7 @@ impl HilRuntime {
         Control: HilControlCommandRoute,
     {
         if !matches!(message, HilIngressMessage::ControlCommand(_))
-            && !self.session_state.accepts_data()
+            && !self.accepts_virtual_sensor_data()
         {
             return HilDispatch::default();
         }
@@ -484,6 +507,26 @@ mod tests {
         );
         assert!(dispatch.tick.is_none());
         assert!(time.borrow().last_tick.is_none());
+    }
+
+    #[test]
+    fn hil_runtime_accepts_sensor_data_when_virtual_streaming_is_enabled() {
+        let time = core::cell::RefCell::new(TestTimeRoute::default());
+        let imu = core::cell::RefCell::new(TestImuRoute::default());
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut runtime = HilRuntime::new();
+        runtime.enable_virtual_sensor_streaming();
+
+        let tick = runtime.accept(
+            HilIngressMessage::Tick(HilTick {
+                timestamp: MeasurementTimestamp::from_micros(1_000),
+                time_boot_ms: 1,
+            }),
+            &routes,
+        );
+
+        assert_eq!(tick.tick.unwrap().time_boot_ms, 1);
+        assert_eq!(time.borrow().last_tick.unwrap().time_boot_ms, 1);
     }
 
     #[test]
