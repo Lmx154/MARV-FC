@@ -2,6 +2,7 @@
 
 pub mod crc;
 pub mod framing;
+pub mod hilink;
 pub mod mavlink;
 pub mod packet_types;
 pub mod ubx;

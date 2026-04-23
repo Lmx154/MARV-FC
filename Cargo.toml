@@ -6,6 +6,7 @@ members = [
     "device/PAYLOAD-CONTROLLER-RP2350",
     "device/RECOVERY-ALTIMETER-RP2350",
     "device/RP2354B-CROSSCORE-TESTS",
+    "device/RP235X-TEST",
     "simulator",
 ]
 resolver = "3"

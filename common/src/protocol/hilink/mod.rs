@@ -1,0 +1,997 @@
+//! HILink wire protocol.
+//!
+//! Wire layout:
+//! `COBS(Header + Payload + CRC16-CCITT-FALSE little-endian) + 0x00 delimiter`.
+//! Public packet structs are `repr(C)` for sharing shape, but the wire format is
+//! explicit little-endian serialization.
+
+use core::convert::TryFrom;
+
+pub const PROTOCOL_VERSION: u8 = 1;
+pub const HEADER_LEN: usize = 12;
+pub const CRC_LEN: usize = 2;
+pub const FRAME_DELIMITER: u8 = 0;
+
+pub type Result<T> = core::result::Result<T, Error>;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Error {
+    BufferTooSmall,
+    PayloadTooLarge,
+    HeaderTooShort,
+    PayloadLenMismatch,
+    BadDelimiter,
+    CobsDecodeZero,
+    CobsDecodeOverrun,
+    CrcMismatch,
+    UnknownMsgType,
+    InvalidPayloadLength,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MsgType {
+    Ping = 1,
+    Pong = 2,
+    Ack = 3,
+    Nack = 4,
+    Heartbeat = 5,
+
+    HilSensorFrame = 10,
+    HilResponseFrame = 11,
+    HilReady = 12,
+
+    Arm = 40,
+    Disarm = 41,
+}
+
+impl TryFrom<u8> for MsgType {
+    type Error = Error;
+
+    fn try_from(value: u8) -> Result<Self> {
+        match value {
+            1 => Ok(Self::Ping),
+            2 => Ok(Self::Pong),
+            3 => Ok(Self::Ack),
+            4 => Ok(Self::Nack),
+            5 => Ok(Self::Heartbeat),
+            10 => Ok(Self::HilSensorFrame),
+            11 => Ok(Self::HilResponseFrame),
+            12 => Ok(Self::HilReady),
+            40 => Ok(Self::Arm),
+            41 => Ok(Self::Disarm),
+            _ => Err(Error::UnknownMsgType),
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Header {
+    pub version: u8,
+    pub msg_type: u8,
+    pub flags: u8,
+    pub reserved: u8,
+    pub seq: u16,
+    pub send_time_ms: u32,
+    pub payload_len: u16,
+}
+
+impl Header {
+    pub const WIRE_LEN: usize = HEADER_LEN;
+
+    pub const fn new(msg_type: MsgType, seq: u16, send_time_ms: u32, payload_len: u16) -> Self {
+        Self {
+            version: PROTOCOL_VERSION,
+            msg_type: msg_type as u8,
+            flags: 0,
+            reserved: 0,
+            seq,
+            send_time_ms,
+            payload_len,
+        }
+    }
+
+    pub fn message_type(&self) -> Result<MsgType> {
+        MsgType::try_from(self.msg_type)
+    }
+
+    pub fn encode(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u8(self.version)?;
+        w.u8(self.msg_type)?;
+        w.u8(self.flags)?;
+        w.u8(self.reserved)?;
+        w.u16(self.seq)?;
+        w.u32(self.send_time_ms)?;
+        w.u16(self.payload_len)?;
+        Ok(w.len())
+    }
+
+    pub fn decode(input: &[u8]) -> Result<Self> {
+        if input.len() < HEADER_LEN {
+            return Err(Error::HeaderTooShort);
+        }
+
+        let mut r = Reader::new(&input[..HEADER_LEN]);
+        Ok(Self {
+            version: r.u8()?,
+            msg_type: r.u8()?,
+            flags: r.u8()?,
+            reserved: r.u8()?,
+            seq: r.u16()?,
+            send_time_ms: r.u32()?,
+            payload_len: r.u16()?,
+        })
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SimStamp {
+    pub sim_tick: u64,
+    pub sim_time_us: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HilSensorFrame {
+    pub stamp: SimStamp,
+    pub valid_flags: u32,
+
+    pub accel_mps2: [f32; 3],
+    pub gyro_rps: [f32; 3],
+    pub mag_ut: [f32; 3],
+
+    pub pressure_pa: f32,
+    pub baro_altitude_m: f32,
+    pub temperature_c: f32,
+
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub alt_msl_m: f32,
+    pub vel_ned_mps: [f32; 3],
+    pub sats: u8,
+    pub fix_type: u8,
+    pub reserved0: [u8; 3],
+
+    pub battery_voltage_v: f32,
+    pub rssi_dbm: i16,
+    pub snr_db_x100: i16,
+    pub loss_pct_x100: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HilResponseFrame {
+    pub stamp: SimStamp,
+    pub system_state: u8,
+    pub reserved0: [u8; 3],
+    pub flags: u32,
+
+    pub position_ned_m: [f32; 3],
+    pub velocity_ned_mps: [f32; 3],
+    pub attitude_quat: [f32; 4],
+
+    pub motor_cmd: [u16; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HeartbeatPayload {
+    pub stamp: SimStamp,
+    pub system_state: u8,
+    pub reserved0: [u8; 3],
+    pub flags: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct AckPayload {
+    pub acked_seq: u16,
+    pub acked_msg_type: u8,
+    pub status: u8,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct NackPayload {
+    pub rejected_seq: u16,
+    pub rejected_msg_type: u8,
+    pub reason: u8,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PingPayload;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PongPayload;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct HilReadyPayload;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ArmPayload;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DisarmPayload;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DecodedPacket<'a> {
+    pub header: Header,
+    pub payload: &'a [u8],
+}
+
+pub mod valid {
+    pub const ACCEL: u32 = 1 << 0;
+    pub const GYRO: u32 = 1 << 1;
+    pub const MAG: u32 = 1 << 2;
+    pub const BARO: u32 = 1 << 3;
+    pub const GPS: u32 = 1 << 4;
+    pub const BATTERY: u32 = 1 << 5;
+    pub const RADIO: u32 = 1 << 6;
+}
+
+pub mod response_flags {
+    pub const ARMED: u32 = 1 << 0;
+    pub const FAILSAFE: u32 = 1 << 1;
+    pub const ESTIMATOR_VALID: u32 = 1 << 2;
+    pub const MOTORS_VALID: u32 = 1 << 3;
+}
+
+pub trait WirePayload: Sized {
+    const MSG_TYPE: MsgType;
+    const WIRE_LEN: usize;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize>;
+    fn decode_payload(input: &[u8]) -> Result<Self>;
+}
+
+pub const fn raw_frame_len(payload_len: usize) -> usize {
+    HEADER_LEN + payload_len + CRC_LEN
+}
+
+pub const fn encoded_frame_len(payload_len: usize) -> usize {
+    let raw_len = raw_frame_len(payload_len);
+    raw_len + (raw_len / 254) + 2
+}
+
+pub fn encode_packet<P: WirePayload>(
+    payload: &P,
+    seq: u16,
+    send_time_ms: u32,
+    raw_scratch: &mut [u8],
+    out: &mut [u8],
+) -> Result<usize> {
+    if P::WIRE_LEN > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let header = Header::new(P::MSG_TYPE, seq, send_time_ms, P::WIRE_LEN as u16);
+    encode_packet_raw(&header, payload, raw_scratch, out)
+}
+
+pub fn encode_packet_raw<P: WirePayload>(
+    header: &Header,
+    payload: &P,
+    raw_scratch: &mut [u8],
+    out: &mut [u8],
+) -> Result<usize> {
+    let payload_len = usize::from(header.payload_len);
+    if payload_len != P::WIRE_LEN {
+        return Err(Error::PayloadLenMismatch);
+    }
+
+    let raw_len = raw_frame_len(payload_len);
+    if raw_scratch.len() < raw_len {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let mut pos = header.encode(raw_scratch)?;
+    let written = payload.encode_payload(&mut raw_scratch[pos..pos + payload_len])?;
+    if written != payload_len {
+        return Err(Error::InvalidPayloadLength);
+    }
+    pos += written;
+
+    let crc = crc16_ccitt_false(&raw_scratch[..pos]);
+    raw_scratch[pos..pos + CRC_LEN].copy_from_slice(&crc.to_le_bytes());
+    pos += CRC_LEN;
+
+    let encoded_len = cobs_encode(&raw_scratch[..pos], out)?;
+    if out.len() <= encoded_len {
+        return Err(Error::BufferTooSmall);
+    }
+    out[encoded_len] = FRAME_DELIMITER;
+    Ok(encoded_len + 1)
+}
+
+pub fn decode_packet<'a>(input: &[u8], raw_scratch: &'a mut [u8]) -> Result<DecodedPacket<'a>> {
+    let encoded = match input.last() {
+        Some(&FRAME_DELIMITER) => &input[..input.len() - 1],
+        Some(_) | None => return Err(Error::BadDelimiter),
+    };
+
+    let raw_len = cobs_decode(encoded, raw_scratch)?;
+    if raw_len < HEADER_LEN + CRC_LEN {
+        return Err(Error::HeaderTooShort);
+    }
+
+    let packet_len = raw_len - CRC_LEN;
+    let stored_crc = u16::from_le_bytes([raw_scratch[packet_len], raw_scratch[packet_len + 1]]);
+    let computed_crc = crc16_ccitt_false(&raw_scratch[..packet_len]);
+    if stored_crc != computed_crc {
+        return Err(Error::CrcMismatch);
+    }
+
+    let header = Header::decode(&raw_scratch[..HEADER_LEN])?;
+    let payload_end = HEADER_LEN + usize::from(header.payload_len);
+    if payload_end != packet_len {
+        return Err(Error::PayloadLenMismatch);
+    }
+
+    Ok(DecodedPacket {
+        header,
+        payload: &raw_scratch[HEADER_LEN..payload_end],
+    })
+}
+
+pub fn decode_payload<P: WirePayload>(packet: &DecodedPacket<'_>) -> Result<P> {
+    if packet.header.message_type()? != P::MSG_TYPE {
+        return Err(Error::UnknownMsgType);
+    }
+
+    P::decode_payload(packet.payload)
+}
+
+pub fn crc16_ccitt_false(bytes: &[u8]) -> u16 {
+    let mut crc = 0xFFFFu16;
+    for &byte in bytes {
+        crc ^= (byte as u16) << 8;
+        for _ in 0..8 {
+            if (crc & 0x8000) != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+pub fn cobs_encode(input: &[u8], out: &mut [u8]) -> Result<usize> {
+    if out.is_empty() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let mut read_index = 0;
+    let mut write_index = 1;
+    let mut code_index = 0;
+    let mut code = 1u8;
+
+    while read_index < input.len() {
+        if write_index >= out.len() {
+            return Err(Error::BufferTooSmall);
+        }
+
+        if input[read_index] == 0 {
+            out[code_index] = code;
+            code_index = write_index;
+            write_index += 1;
+            code = 1;
+        } else {
+            out[write_index] = input[read_index];
+            write_index += 1;
+            code += 1;
+
+            if code == 0xFF {
+                out[code_index] = code;
+                code_index = write_index;
+                write_index += 1;
+                code = 1;
+            }
+        }
+
+        read_index += 1;
+    }
+
+    if code_index >= out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+    out[code_index] = code;
+    Ok(write_index)
+}
+
+pub fn cobs_decode(input: &[u8], out: &mut [u8]) -> Result<usize> {
+    let mut read_index = 0;
+    let mut write_index = 0;
+
+    while read_index < input.len() {
+        let code = input[read_index];
+        if code == 0 {
+            return Err(Error::CobsDecodeZero);
+        }
+        read_index += 1;
+
+        let copy_len = usize::from(code - 1);
+        if read_index + copy_len > input.len() {
+            return Err(Error::CobsDecodeOverrun);
+        }
+        if write_index + copy_len > out.len() {
+            return Err(Error::BufferTooSmall);
+        }
+
+        out[write_index..write_index + copy_len]
+            .copy_from_slice(&input[read_index..read_index + copy_len]);
+        write_index += copy_len;
+        read_index += copy_len;
+
+        if code != 0xFF && read_index < input.len() {
+            if write_index >= out.len() {
+                return Err(Error::BufferTooSmall);
+            }
+            out[write_index] = 0;
+            write_index += 1;
+        }
+    }
+
+    Ok(write_index)
+}
+
+macro_rules! impl_empty_payload {
+    ($ty:ty, $msg_type:expr) => {
+        impl WirePayload for $ty {
+            const MSG_TYPE: MsgType = $msg_type;
+            const WIRE_LEN: usize = 0;
+
+            fn encode_payload(&self, _out: &mut [u8]) -> Result<usize> {
+                Ok(0)
+            }
+
+            fn decode_payload(input: &[u8]) -> Result<Self> {
+                expect_len(input, Self::WIRE_LEN)?;
+                Ok(Self)
+            }
+        }
+    };
+}
+
+impl_empty_payload!(PingPayload, MsgType::Ping);
+impl_empty_payload!(PongPayload, MsgType::Pong);
+impl_empty_payload!(HilReadyPayload, MsgType::HilReady);
+impl_empty_payload!(ArmPayload, MsgType::Arm);
+impl_empty_payload!(DisarmPayload, MsgType::Disarm);
+
+impl WirePayload for HilSensorFrame {
+    const MSG_TYPE: MsgType = MsgType::HilSensorFrame;
+    const WIRE_LEN: usize = 115;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.u32(self.valid_flags)?;
+        w.f32x3(self.accel_mps2)?;
+        w.f32x3(self.gyro_rps)?;
+        w.f32x3(self.mag_ut)?;
+        w.f32(self.pressure_pa)?;
+        w.f32(self.baro_altitude_m)?;
+        w.f32(self.temperature_c)?;
+        w.f64(self.lat_deg)?;
+        w.f64(self.lon_deg)?;
+        w.f32(self.alt_msl_m)?;
+        w.f32x3(self.vel_ned_mps)?;
+        w.u8(self.sats)?;
+        w.u8(self.fix_type)?;
+        w.bytes(&self.reserved0)?;
+        w.f32(self.battery_voltage_v)?;
+        w.i16(self.rssi_dbm)?;
+        w.i16(self.snr_db_x100)?;
+        w.u16(self.loss_pct_x100)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            valid_flags: r.u32()?,
+            accel_mps2: r.f32x3()?,
+            gyro_rps: r.f32x3()?,
+            mag_ut: r.f32x3()?,
+            pressure_pa: r.f32()?,
+            baro_altitude_m: r.f32()?,
+            temperature_c: r.f32()?,
+            lat_deg: r.f64()?,
+            lon_deg: r.f64()?,
+            alt_msl_m: r.f32()?,
+            vel_ned_mps: r.f32x3()?,
+            sats: r.u8()?,
+            fix_type: r.u8()?,
+            reserved0: r.bytes3()?,
+            battery_voltage_v: r.f32()?,
+            rssi_dbm: r.i16()?,
+            snr_db_x100: r.i16()?,
+            loss_pct_x100: r.u16()?,
+        })
+    }
+}
+
+impl WirePayload for HilResponseFrame {
+    const MSG_TYPE: MsgType = MsgType::HilResponseFrame;
+    const WIRE_LEN: usize = 72;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.u8(self.system_state)?;
+        w.bytes(&self.reserved0)?;
+        w.u32(self.flags)?;
+        w.f32x3(self.position_ned_m)?;
+        w.f32x3(self.velocity_ned_mps)?;
+        w.f32x4(self.attitude_quat)?;
+        w.u16x4(self.motor_cmd)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            system_state: r.u8()?,
+            reserved0: r.bytes3()?,
+            flags: r.u32()?,
+            position_ned_m: r.f32x3()?,
+            velocity_ned_mps: r.f32x3()?,
+            attitude_quat: r.f32x4()?,
+            motor_cmd: r.u16x4()?,
+        })
+    }
+}
+
+impl WirePayload for HeartbeatPayload {
+    const MSG_TYPE: MsgType = MsgType::Heartbeat;
+    const WIRE_LEN: usize = 24;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.u8(self.system_state)?;
+        w.bytes(&self.reserved0)?;
+        w.u32(self.flags)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            system_state: r.u8()?,
+            reserved0: r.bytes3()?,
+            flags: r.u32()?,
+        })
+    }
+}
+
+impl WirePayload for AckPayload {
+    const MSG_TYPE: MsgType = MsgType::Ack;
+    const WIRE_LEN: usize = 4;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u16(self.acked_seq)?;
+        w.u8(self.acked_msg_type)?;
+        w.u8(self.status)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            acked_seq: r.u16()?,
+            acked_msg_type: r.u8()?,
+            status: r.u8()?,
+        })
+    }
+}
+
+impl WirePayload for NackPayload {
+    const MSG_TYPE: MsgType = MsgType::Nack;
+    const WIRE_LEN: usize = 4;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u16(self.rejected_seq)?;
+        w.u8(self.rejected_msg_type)?;
+        w.u8(self.reason)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            rejected_seq: r.u16()?,
+            rejected_msg_type: r.u8()?,
+            reason: r.u8()?,
+        })
+    }
+}
+
+fn expect_len(input: &[u8], expected: usize) -> Result<()> {
+    if input.len() == expected {
+        Ok(())
+    } else {
+        Err(Error::InvalidPayloadLength)
+    }
+}
+
+struct Writer<'a> {
+    out: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> Writer<'a> {
+    const fn new(out: &'a mut [u8]) -> Self {
+        Self { out, pos: 0 }
+    }
+
+    const fn len(&self) -> usize {
+        self.pos
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.pos + bytes.len() > self.out.len() {
+            return Err(Error::BufferTooSmall);
+        }
+        self.out[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
+        self.pos += bytes.len();
+        Ok(())
+    }
+
+    fn u8(&mut self, value: u8) -> Result<()> {
+        self.bytes(&[value])
+    }
+
+    fn u16(&mut self, value: u16) -> Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn i16(&mut self, value: i16) -> Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u32(&mut self, value: u32) -> Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn u64(&mut self, value: u64) -> Result<()> {
+        self.bytes(&value.to_le_bytes())
+    }
+
+    fn f32(&mut self, value: f32) -> Result<()> {
+        self.u32(value.to_bits())
+    }
+
+    fn f64(&mut self, value: f64) -> Result<()> {
+        self.u64(value.to_bits())
+    }
+
+    fn sim_stamp(&mut self, stamp: SimStamp) -> Result<()> {
+        self.u64(stamp.sim_tick)?;
+        self.u64(stamp.sim_time_us)
+    }
+
+    fn f32x3(&mut self, values: [f32; 3]) -> Result<()> {
+        for value in values {
+            self.f32(value)?;
+        }
+        Ok(())
+    }
+
+    fn f32x4(&mut self, values: [f32; 4]) -> Result<()> {
+        for value in values {
+            self.f32(value)?;
+        }
+        Ok(())
+    }
+
+    fn u16x4(&mut self, values: [u16; 4]) -> Result<()> {
+        for value in values {
+            self.u16(value)?;
+        }
+        Ok(())
+    }
+}
+
+struct Reader<'a> {
+    input: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    const fn new(input: &'a [u8]) -> Self {
+        Self { input, pos: 0 }
+    }
+
+    fn take<const N: usize>(&mut self) -> Result<[u8; N]> {
+        if self.pos + N > self.input.len() {
+            return Err(Error::InvalidPayloadLength);
+        }
+        let mut out = [0u8; N];
+        out.copy_from_slice(&self.input[self.pos..self.pos + N]);
+        self.pos += N;
+        Ok(out)
+    }
+
+    fn u8(&mut self) -> Result<u8> {
+        Ok(self.take::<1>()?[0])
+    }
+
+    fn u16(&mut self) -> Result<u16> {
+        Ok(u16::from_le_bytes(self.take::<2>()?))
+    }
+
+    fn i16(&mut self) -> Result<i16> {
+        Ok(i16::from_le_bytes(self.take::<2>()?))
+    }
+
+    fn u32(&mut self) -> Result<u32> {
+        Ok(u32::from_le_bytes(self.take::<4>()?))
+    }
+
+    fn u64(&mut self) -> Result<u64> {
+        Ok(u64::from_le_bytes(self.take::<8>()?))
+    }
+
+    fn f32(&mut self) -> Result<f32> {
+        Ok(f32::from_bits(self.u32()?))
+    }
+
+    fn f64(&mut self) -> Result<f64> {
+        Ok(f64::from_bits(self.u64()?))
+    }
+
+    fn sim_stamp(&mut self) -> Result<SimStamp> {
+        Ok(SimStamp {
+            sim_tick: self.u64()?,
+            sim_time_us: self.u64()?,
+        })
+    }
+
+    fn bytes3(&mut self) -> Result<[u8; 3]> {
+        self.take::<3>()
+    }
+
+    fn f32x3(&mut self) -> Result<[f32; 3]> {
+        Ok([self.f32()?, self.f32()?, self.f32()?])
+    }
+
+    fn f32x4(&mut self) -> Result<[f32; 4]> {
+        Ok([self.f32()?, self.f32()?, self.f32()?, self.f32()?])
+    }
+
+    fn u16x4(&mut self) -> Result<[u16; 4]> {
+        Ok([self.u16()?, self.u16()?, self.u16()?, self.u16()?])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crc16_known_check_value() {
+        assert_eq!(crc16_ccitt_false(b"123456789"), 0x29B1);
+    }
+
+    #[test]
+    fn cobs_round_trips_zeroes() {
+        let input = [0, 1, 2, 0, 3, 4, 5, 0];
+        let mut encoded = [0u8; 16];
+        let mut decoded = [0u8; 16];
+
+        let encoded_len = cobs_encode(&input, &mut encoded).unwrap();
+        let decoded_len = cobs_decode(&encoded[..encoded_len], &mut decoded).unwrap();
+
+        assert_eq!(&decoded[..decoded_len], input);
+    }
+
+    #[test]
+    fn hil_ready_round_trips() {
+        let ready = HilReadyPayload;
+        let mut raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilReadyPayload::WIRE_LEN)];
+        let encoded_len = encode_packet(&ready, 9, 2222, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<HilReadyPayload>(&packet).unwrap();
+
+        assert_eq!(packet.header.message_type().unwrap(), MsgType::HilReady);
+        assert_eq!(packet.header.seq, 9);
+        assert_eq!(packet.header.send_time_ms, 2222);
+        assert_eq!(decoded, ready);
+    }
+
+    #[test]
+    fn ping_pong_round_trips() {
+        let ping = PingPayload;
+        let mut raw = [0u8; raw_frame_len(PingPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(PingPayload::WIRE_LEN)];
+        let encoded_len = encode_packet(&ping, 1, 100, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(PingPayload::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<PingPayload>(&packet).unwrap();
+
+        assert_eq!(packet.header.message_type().unwrap(), MsgType::Ping);
+        assert_eq!(decoded, ping);
+
+        let pong = PongPayload;
+        let encoded_len = encode_packet(&pong, 2, 101, &mut raw, &mut encoded).unwrap();
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<PongPayload>(&packet).unwrap();
+
+        assert_eq!(packet.header.message_type().unwrap(), MsgType::Pong);
+        assert_eq!(decoded, pong);
+    }
+
+    #[test]
+    fn command_ack_nack_and_heartbeat_payloads_round_trip() {
+        let heartbeat = HeartbeatPayload {
+            stamp: SimStamp {
+                sim_tick: 100,
+                sim_time_us: 50_000,
+            },
+            system_state: 2,
+            reserved0: [0; 3],
+            flags: response_flags::ARMED | response_flags::MOTORS_VALID,
+        };
+        round_trip_payload(&heartbeat, 10, 1_000);
+
+        let ack = AckPayload {
+            acked_seq: 4,
+            acked_msg_type: MsgType::Arm as u8,
+            status: 0,
+        };
+        round_trip_payload(&ack, 11, 1_001);
+
+        let nack = NackPayload {
+            rejected_seq: 5,
+            rejected_msg_type: MsgType::Disarm as u8,
+            reason: 1,
+        };
+        round_trip_payload(&nack, 12, 1_002);
+
+        round_trip_payload(&ArmPayload, 13, 1_003);
+        round_trip_payload(&DisarmPayload, 14, 1_004);
+    }
+
+    #[test]
+    fn hil_sensor_frame_round_trips() {
+        let frame = HilSensorFrame {
+            stamp: SimStamp {
+                sim_tick: 15_234,
+                sim_time_us: 76_170_000,
+            },
+            valid_flags: valid::ACCEL | valid::GYRO | valid::GPS,
+            accel_mps2: [1.0, 2.0, 3.0],
+            gyro_rps: [0.1, 0.2, 0.3],
+            mag_ut: [10.0, 11.0, 12.0],
+            pressure_pa: 101_325.0,
+            baro_altitude_m: 12.5,
+            temperature_c: 25.0,
+            lat_deg: 30.2672,
+            lon_deg: -97.7431,
+            alt_msl_m: 171.0,
+            vel_ned_mps: [4.0, 5.0, -0.5],
+            sats: 12,
+            fix_type: 3,
+            reserved0: [0; 3],
+            battery_voltage_v: 16.2,
+            rssi_dbm: -48,
+            snr_db_x100: 1_150,
+            loss_pct_x100: 25,
+        };
+
+        let mut raw = [0u8; raw_frame_len(HilSensorFrame::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilSensorFrame::WIRE_LEN)];
+        let encoded_len = encode_packet(&frame, 7, 1234, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilSensorFrame::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<HilSensorFrame>(&packet).unwrap();
+
+        assert_eq!(packet.header.seq, 7);
+        assert_eq!(packet.header.send_time_ms, 1234);
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn hil_response_frame_round_trips() {
+        let frame = HilResponseFrame {
+            stamp: SimStamp {
+                sim_tick: 42,
+                sim_time_us: 210_000,
+            },
+            system_state: 2,
+            reserved0: [0; 3],
+            flags: response_flags::ARMED | response_flags::ESTIMATOR_VALID,
+            position_ned_m: [1.0, 2.0, -3.0],
+            velocity_ned_mps: [0.1, 0.2, 0.3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
+            motor_cmd: [1000, 1100, 1200, 1300],
+        };
+
+        let mut raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilResponseFrame::WIRE_LEN)];
+        let encoded_len = encode_packet(&frame, 8, 1235, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<HilResponseFrame>(&packet).unwrap();
+
+        assert_eq!(
+            packet.header.message_type().unwrap(),
+            MsgType::HilResponseFrame
+        );
+        assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn corrupt_crc_is_rejected() {
+        let mut raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilReadyPayload::WIRE_LEN)];
+
+        let header = Header::new(MsgType::HilReady, 9, 2222, 0);
+        let mut raw_len = header.encode(&mut raw).unwrap();
+        raw[raw_len..raw_len + CRC_LEN].copy_from_slice(&0x1234u16.to_le_bytes());
+        raw_len += CRC_LEN;
+
+        let cobs_len = cobs_encode(&raw[..raw_len], &mut encoded).unwrap();
+        encoded[cobs_len] = FRAME_DELIMITER;
+        let encoded_len = cobs_len + 1;
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        assert_eq!(
+            decode_packet(&encoded[..encoded_len], &mut decoded_raw),
+            Err(Error::CrcMismatch)
+        );
+    }
+
+    #[test]
+    fn missing_delimiter_is_rejected() {
+        let ready = HilReadyPayload;
+        let mut raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilReadyPayload::WIRE_LEN)];
+        let encoded_len = encode_packet(&ready, 9, 2222, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilReadyPayload::WIRE_LEN)];
+        assert_eq!(
+            decode_packet(&encoded[..encoded_len - 1], &mut decoded_raw),
+            Err(Error::BadDelimiter)
+        );
+    }
+
+    fn round_trip_payload<P>(payload: &P, seq: u16, send_time_ms: u32)
+    where
+        P: WirePayload + Copy + PartialEq + core::fmt::Debug,
+    {
+        let mut raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilResponseFrame::WIRE_LEN)];
+        let encoded_len =
+            encode_packet(payload, seq, send_time_ms, &mut raw, &mut encoded).unwrap();
+
+        let mut decoded_raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
+        let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
+        let decoded = decode_payload::<P>(&packet).unwrap();
+
+        assert_eq!(packet.header.seq, seq);
+        assert_eq!(packet.header.send_time_ms, send_time_ms);
+        assert_eq!(decoded, *payload);
+    }
+}

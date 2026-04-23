@@ -224,6 +224,50 @@
 				}
 			},
 			"problemMatcher": []
+		},
+		{
+			"label": "Build RP235X-TEST",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP235X-TEST"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash RP235X-TEST",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP235X-TEST",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach RP235X-TEST",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/rp235x-test"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP235X-TEST",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
 		}
 	]
 }

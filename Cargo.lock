@@ -1574,6 +1574,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rp235x-test"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "cortex-m-rt",
+ "defmt 1.0.1",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "heapless 0.8.0",
+ "panic-probe",
+ "static_cell",
+]
+
+[[package]]
 name = "rustc_version"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
