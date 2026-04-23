@@ -11,10 +11,19 @@ use common::protocol::hilink::{
 use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
+use embassy_rp::Peri;
 use embassy_rp::bind_interrupts;
 use embassy_rp::block::ImageDef;
-use embassy_rp::peripherals::USB;
-use embassy_rp::usb::{Driver, InterruptHandler};
+use embassy_rp::gpio::{Drive, SlewRate};
+use embassy_rp::peripherals::{PIN_35, PIN_36, PIN_38, PIN_39, PIO0, USB};
+use embassy_rp::pio::program as pio_program;
+use embassy_rp::pio::{
+    Common, Config as PioConfig, Direction, FifoJoin, Instance,
+    InterruptHandler as PioInterruptHandler, LoadedProgram, Pio, PioPin, ShiftConfig,
+    ShiftDirection, StateMachine,
+};
+use embassy_rp::pio_programs::clock_divider::calculate_pio_clock_divider;
+use embassy_rp::usb::{Driver, InterruptHandler as UsbInterruptHandler};
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Instant, Ticker};
@@ -34,6 +43,21 @@ const STATE_IDLE: u8 = 1;
 const STATE_ARMED: u8 = 2;
 const ACK_STATUS_ACCEPTED: u8 = 0;
 const NACK_REASON_INVALID_PAYLOAD: u8 = 1;
+const DSHOT_BITS: u8 = 16;
+const DSHOT_BIT_RATE_HZ: u32 = 300_000;
+const DSHOT_CYCLES_PER_BIT: u32 = 20;
+const DSHOT_PIO_CLOCK_HZ: u32 = DSHOT_BIT_RATE_HZ * DSHOT_CYCLES_PER_BIT;
+const MOTOR_TEST_BOOT_DELAY_FRAMES: u16 = 5_000;
+const MOTOR_TEST_FRAME_PERIOD: Duration = Duration::from_millis(1);
+const MOTOR_TEST_BURST_FRAMES: u8 = 4;
+const MOTOR_TEST_SEQUENCE: [(u16, u16); 6] = [
+    (0, 500),
+    (220, 250),
+    (320, 250),
+    (450, 350),
+    (600, 750),
+    (0, 500),
+];
 
 type RpUsbDriver = Driver<'static, USB>;
 type RpUsbDevice = UsbDevice<'static, RpUsbDriver>;
@@ -65,7 +89,8 @@ enum OutboundMessage {
 }
 
 bind_interrupts!(struct Irqs {
-    USBCTRL_IRQ => InterruptHandler<USB>;
+    USBCTRL_IRQ => UsbInterruptHandler<USB>;
+    PIO0_IRQ_0 => PioInterruptHandler<PIO0>;
 });
 
 static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
@@ -81,6 +106,182 @@ static RESPONSE_FLAGS: AtomicU32 = AtomicU32::new(response_flags::MOTORS_VALID);
 #[unsafe(link_section = ".start_block")]
 #[used]
 static IMAGE_DEF: ImageDef = ImageDef::secure_exe();
+
+struct DshotProgram<'d, PIO: Instance> {
+    prg: LoadedProgram<'d, PIO>,
+}
+
+impl<'d, PIO: Instance> DshotProgram<'d, PIO> {
+    fn new(common: &mut Common<'d, PIO>) -> Self {
+        let side_set = pio_program::SideSet::new(false, 1, false);
+        let mut assembler: pio_program::Assembler<32> =
+            pio_program::Assembler::new_with_side_set(side_set);
+
+        let mut wrap_target = assembler.label();
+        let mut wrap_source = assembler.label();
+        let mut do_zero = assembler.label();
+
+        assembler.set_with_side_set(pio_program::SetDestination::PINDIRS, 1, 0);
+        assembler.bind(&mut wrap_target);
+        assembler.out_with_delay_and_side_set(
+            pio_program::OutDestination::X,
+            1,
+            6,
+            1,
+        );
+        assembler.jmp_with_delay_and_side_set(
+            pio_program::JmpCondition::XIsZero,
+            &mut do_zero,
+            0,
+            1,
+        );
+        assembler.nop_with_delay_and_side_set(6, 1);
+        assembler.nop_with_delay_and_side_set(3, 0);
+        assembler.jmp_with_delay_and_side_set(pio_program::JmpCondition::Always, &mut wrap_target, 0, 0);
+        assembler.bind(&mut do_zero);
+        assembler.nop_with_delay_and_side_set(10, 0);
+        assembler.jmp_with_delay_and_side_set(pio_program::JmpCondition::Always, &mut wrap_target, 0, 0);
+        assembler.bind(&mut wrap_source);
+
+        let prg = assembler.assemble_with_wrap(wrap_source, wrap_target);
+        let prg = common.load_program(&prg);
+
+        Self { prg }
+    }
+}
+
+fn dshot_frame(command: u16, request_telemetry: bool) -> u16 {
+    let payload = ((command & 0x07ff) << 1) | u16::from(request_telemetry);
+    let checksum = (payload ^ (payload >> 4) ^ (payload >> 8)) & 0x0f;
+
+    (payload << 4) | checksum
+}
+
+fn dshot_word(command: u16) -> u32 {
+    u32::from(dshot_frame(command, false)) << (32 - DSHOT_BITS)
+}
+
+fn configure_dshot_sm<'d, PIO, PIN, const SM: usize>(
+    common: &mut Common<'d, PIO>,
+    mut sm: StateMachine<'d, PIO, SM>,
+    pin: Peri<'d, PIN>,
+    program: &DshotProgram<'d, PIO>,
+) -> StateMachine<'d, PIO, SM>
+where
+    PIO: Instance + 'd,
+    PIN: PioPin + 'd,
+{
+    let mut pin = common.make_pio_pin(pin);
+    pin.set_drive_strength(Drive::_4mA);
+    pin.set_slew_rate(SlewRate::Fast);
+
+    sm.set_pin_dirs(Direction::Out, &[&pin]);
+
+    let mut config = PioConfig::default();
+    config.set_set_pins(&[&pin]);
+    config.use_program(&program.prg, &[&pin]);
+    config.clock_divider = calculate_pio_clock_divider(DSHOT_PIO_CLOCK_HZ);
+    config.fifo_join = FifoJoin::TxOnly;
+    config.shift_out = ShiftConfig {
+        auto_fill: true,
+        threshold: DSHOT_BITS,
+        direction: ShiftDirection::Left,
+    };
+
+    sm.set_config(&config);
+    sm.set_enable(true);
+    sm
+}
+
+async fn push_motor_frames(
+    motor1: &mut StateMachine<'static, PIO0, 0>,
+    motor2: &mut StateMachine<'static, PIO0, 1>,
+    motor3: &mut StateMachine<'static, PIO0, 2>,
+    motor4: &mut StateMachine<'static, PIO0, 3>,
+    word: u32,
+) {
+    motor1.tx().wait_push(word).await;
+    motor2.tx().wait_push(word).await;
+    motor3.tx().wait_push(word).await;
+    motor4.tx().wait_push(word).await;
+}
+
+async fn push_motor_burst(
+    motor1: &mut StateMachine<'static, PIO0, 0>,
+    motor2: &mut StateMachine<'static, PIO0, 1>,
+    motor3: &mut StateMachine<'static, PIO0, 2>,
+    motor4: &mut StateMachine<'static, PIO0, 3>,
+    word: u32,
+) {
+    for _ in 0..MOTOR_TEST_BURST_FRAMES {
+        push_motor_frames(motor1, motor2, motor3, motor4, word).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn dshot_motor_test_task(
+    pio_peripheral: Peri<'static, PIO0>,
+    motor1_pin: Peri<'static, PIN_39>,
+    motor2_pin: Peri<'static, PIN_38>,
+    motor3_pin: Peri<'static, PIN_35>,
+    motor4_pin: Peri<'static, PIN_36>,
+) -> ! {
+    let mut pio = Pio::new(pio_peripheral, Irqs);
+    let program = DshotProgram::new(&mut pio.common);
+    let mut motor1 = configure_dshot_sm(&mut pio.common, pio.sm0, motor1_pin, &program);
+    let mut motor2 = configure_dshot_sm(&mut pio.common, pio.sm1, motor2_pin, &program);
+    let mut motor3 = configure_dshot_sm(&mut pio.common, pio.sm2, motor3_pin, &program);
+    let mut motor4 = configure_dshot_sm(&mut pio.common, pio.sm3, motor4_pin, &program);
+    let stop_word = dshot_word(0);
+    let mut ticker = Ticker::every(MOTOR_TEST_FRAME_PERIOD);
+
+    info!(
+        "dshot motor test armed: GP39/GP38/GP35/GP36 stop for 5s, then stepped retry ramp with {=u8}x burst resend",
+        MOTOR_TEST_BURST_FRAMES,
+    );
+
+    for _ in 0..MOTOR_TEST_BOOT_DELAY_FRAMES {
+        push_motor_burst(
+            &mut motor1,
+            &mut motor2,
+            &mut motor3,
+            &mut motor4,
+            stop_word,
+        )
+        .await;
+        ticker.next().await;
+    }
+
+    info!("dshot motor test starting retry ramp on all four motors");
+
+    loop {
+        for (throttle, frames) in MOTOR_TEST_SEQUENCE {
+            let word = dshot_word(throttle);
+
+            if throttle == 0 {
+                info!("dshot motor test neutral reset for {=u16} ms", frames);
+            } else {
+                info!(
+                    "dshot motor test throttle step {=u16} for {=u16} ms",
+                    throttle,
+                    frames
+                );
+            }
+
+            for _ in 0..frames {
+                push_motor_burst(
+                    &mut motor1,
+                    &mut motor2,
+                    &mut motor3,
+                    &mut motor4,
+                    word,
+                )
+                .await;
+                ticker.next().await;
+            }
+        }
+    }
+}
 
 #[embassy_executor::task]
 async fn usb_device_task(mut usb: RpUsbDevice) -> ! {
@@ -423,4 +624,13 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb_device_task(usb)).unwrap();
     spawner.spawn(usb_rx_task(receiver)).unwrap();
     spawner.spawn(usb_tx_task(sender)).unwrap();
+    spawner
+        .spawn(dshot_motor_test_task(
+            peripherals.PIO0,
+            peripherals.PIN_39,
+            peripherals.PIN_38,
+            peripherals.PIN_35,
+            peripherals.PIN_36,
+        ))
+        .unwrap();
 }
