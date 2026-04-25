@@ -1,9 +1,11 @@
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use common::protocol::hilink::{
-    self, AckPayload, ArmPayload, DisarmPayload, HeartbeatPayload, HilReadyPayload,
-    HilResponseFrame, HilSensorFrame, MsgType, NackPayload, PingPayload, PongPayload, SimStamp,
-    WirePayload, response_flags,
+    self, AckPayload, ActuatorStatusPayload, ActuatorStatusRequestPayload, ArmPayload,
+    BenchDisablePayload, BenchEnablePayload, DisarmPayload, DshotCommandPayload, HeartbeatPayload,
+    HilReadyPayload, HilResponseFrame, HilSensorFrame, MotorStopPayload, MotorSweepPayload,
+    MotorTestPayload, MsgType, NackPayload, PingPayload, PongPayload, SimStamp, WirePayload,
+    response_flags,
 };
 use defmt::{info, warn};
 use embassy_executor::Spawner;
@@ -19,6 +21,8 @@ use rp235x_base::usb_cdc::{
     write_packet_chunks,
 };
 
+use crate::dshot;
+
 const RX_FRAME_CAPACITY: usize = hilink::encoded_frame_len(HilSensorFrameMaxPayload::WIRE_LEN);
 const RAW_FRAME_CAPACITY: usize = hilink::raw_frame_len(HilSensorFrameMaxPayload::WIRE_LEN);
 const TX_FRAME_CAPACITY: usize = hilink::encoded_frame_len(HilResponseFrameMaxPayload::WIRE_LEN);
@@ -27,6 +31,8 @@ const STATE_IDLE: u8 = 1;
 const STATE_ARMED: u8 = 2;
 const ACK_STATUS_ACCEPTED: u8 = 0;
 const NACK_REASON_INVALID_PAYLOAD: u8 = 1;
+const NACK_REASON_REJECTED: u8 = 2;
+const NACK_REASON_UNSUPPORTED: u8 = 3;
 
 type RxFrame = Vec<u8, RX_FRAME_CAPACITY>;
 type TxFrame = Vec<u8, TX_FRAME_CAPACITY>;
@@ -50,11 +56,13 @@ enum OutboundMessage {
     Ack(AckPayload),
     Nack(NackPayload),
     HilResponse(HilResponseFrame),
+    ActuatorStatus(ActuatorStatusPayload),
 }
 
 static TX_CHANNEL: Channel<CriticalSectionRawMutex, OutboundMessage, 8> = Channel::new();
 static SYSTEM_STATE: AtomicU8 = AtomicU8::new(STATE_IDLE);
 static RESPONSE_FLAGS: AtomicU32 = AtomicU32::new(response_flags::MOTORS_VALID);
+static BENCH_REQUESTED: AtomicU8 = AtomicU8::new(0);
 
 pub fn spawn(spawner: &Spawner, usb: Peri<'static, USB>) {
     let usb = spawn_cdc_acm(
@@ -209,6 +217,13 @@ fn handle_protocol_frame(frame: &[u8], raw_scratch: &mut [u8; RAW_FRAME_CAPACITY
         }
         Ok(MsgType::Arm) => handle_arm_packet(&packet),
         Ok(MsgType::Disarm) => handle_disarm_packet(&packet),
+        Ok(MsgType::BenchEnable) => handle_bench_enable_packet(&packet),
+        Ok(MsgType::BenchDisable) => handle_bench_disable_packet(&packet),
+        Ok(MsgType::MotorTest) => handle_motor_test_packet(&packet),
+        Ok(MsgType::MotorSweep) => handle_motor_sweep_packet(&packet),
+        Ok(MsgType::MotorStop) => handle_motor_stop_packet(&packet),
+        Ok(MsgType::DshotCommand) => handle_dshot_command_packet(&packet),
+        Ok(MsgType::ActuatorStatusRequest) => handle_actuator_status_request_packet(&packet),
         Ok(MsgType::HilSensorFrame) => handle_hil_sensor_frame(&packet),
         Ok(_) => {
             warn!("rp235x-test ignoring unsupported hilink message");
@@ -243,7 +258,113 @@ fn handle_disarm_packet(packet: &hilink::DecodedPacket<'_>) {
 
     SYSTEM_STATE.store(STATE_IDLE, Ordering::Relaxed);
     RESPONSE_FLAGS.store(response_flags::MOTORS_VALID, Ordering::Relaxed);
+    BENCH_REQUESTED.store(0, Ordering::Relaxed);
+    let _ = dshot::submit_motor_stop();
+    let _ = dshot::submit_bench_disable();
     enqueue_outbound(ack_for(packet));
+}
+
+fn handle_bench_enable_packet(packet: &hilink::DecodedPacket<'_>) {
+    let payload = match hilink::decode_payload::<BenchEnablePayload>(packet) {
+        Ok(payload) => payload,
+        Err(_) => {
+            warn!("rp235x-test rejected invalid bench enable payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    };
+
+    if !is_armed() || !dshot::submit_bench_enable(payload) {
+        warn!("rp235x-test rejected bench enable");
+        enqueue_outbound(rejected_nack(packet));
+        return;
+    }
+
+    BENCH_REQUESTED.store(1, Ordering::Relaxed);
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_bench_disable_packet(packet: &hilink::DecodedPacket<'_>) {
+    if hilink::decode_payload::<BenchDisablePayload>(packet).is_err() {
+        warn!("rp235x-test rejected invalid bench disable payload");
+        enqueue_outbound(invalid_payload_nack(packet));
+        return;
+    }
+
+    if dshot::submit_bench_disable() {
+        BENCH_REQUESTED.store(0, Ordering::Relaxed);
+        enqueue_outbound(ack_for(packet));
+    } else {
+        enqueue_outbound(rejected_nack(packet));
+    }
+}
+
+fn handle_motor_test_packet(packet: &hilink::DecodedPacket<'_>) {
+    let payload = match hilink::decode_payload::<MotorTestPayload>(packet) {
+        Ok(payload) => payload,
+        Err(_) => {
+            warn!("rp235x-test rejected invalid motor test payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    };
+
+    if !is_armed()
+        || BENCH_REQUESTED.load(Ordering::Relaxed) == 0
+        || !dshot::submit_motor_test(payload)
+    {
+        warn!("rp235x-test rejected motor test");
+        enqueue_outbound(rejected_nack(packet));
+        return;
+    }
+
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_motor_sweep_packet(packet: &hilink::DecodedPacket<'_>) {
+    if hilink::decode_payload::<MotorSweepPayload>(packet).is_err() {
+        warn!("rp235x-test rejected invalid motor sweep payload");
+        enqueue_outbound(invalid_payload_nack(packet));
+        return;
+    }
+
+    warn!("rp235x-test motor sweep command is not implemented yet");
+    enqueue_outbound(unsupported_nack(packet));
+}
+
+fn handle_motor_stop_packet(packet: &hilink::DecodedPacket<'_>) {
+    if hilink::decode_payload::<MotorStopPayload>(packet).is_err() {
+        warn!("rp235x-test rejected invalid motor stop payload");
+        enqueue_outbound(invalid_payload_nack(packet));
+        return;
+    }
+
+    if dshot::submit_motor_stop() {
+        enqueue_outbound(ack_for(packet));
+    } else {
+        enqueue_outbound(rejected_nack(packet));
+    }
+}
+
+fn handle_dshot_command_packet(packet: &hilink::DecodedPacket<'_>) {
+    if hilink::decode_payload::<DshotCommandPayload>(packet).is_err() {
+        warn!("rp235x-test rejected invalid dshot command payload");
+        enqueue_outbound(invalid_payload_nack(packet));
+        return;
+    }
+
+    warn!("rp235x-test dshot special commands are not implemented yet");
+    enqueue_outbound(unsupported_nack(packet));
+}
+
+fn handle_actuator_status_request_packet(packet: &hilink::DecodedPacket<'_>) {
+    if hilink::decode_payload::<ActuatorStatusRequestPayload>(packet).is_err() {
+        warn!("rp235x-test rejected invalid actuator status request payload");
+        enqueue_outbound(invalid_payload_nack(packet));
+        return;
+    }
+
+    enqueue_outbound(OutboundMessage::ActuatorStatus(dshot::actuator_status()));
 }
 
 fn handle_hil_sensor_frame(packet: &hilink::DecodedPacket<'_>) {
@@ -295,6 +416,22 @@ fn invalid_payload_nack(packet: &hilink::DecodedPacket<'_>) -> OutboundMessage {
         rejected_seq: packet.header.seq,
         rejected_msg_type: packet.header.msg_type,
         reason: NACK_REASON_INVALID_PAYLOAD,
+    })
+}
+
+fn rejected_nack(packet: &hilink::DecodedPacket<'_>) -> OutboundMessage {
+    OutboundMessage::Nack(NackPayload {
+        rejected_seq: packet.header.seq,
+        rejected_msg_type: packet.header.msg_type,
+        reason: NACK_REASON_REJECTED,
+    })
+}
+
+fn unsupported_nack(packet: &hilink::DecodedPacket<'_>) -> OutboundMessage {
+    OutboundMessage::Nack(NackPayload {
+        rejected_seq: packet.header.seq,
+        rejected_msg_type: packet.header.msg_type,
+        reason: NACK_REASON_UNSUPPORTED,
     })
 }
 
@@ -366,6 +503,9 @@ fn encode_outbound(
             hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
         }
         OutboundMessage::HilResponse(payload) => {
+            hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
+        }
+        OutboundMessage::ActuatorStatus(payload) => {
             hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
         }
     }
