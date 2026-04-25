@@ -1587,6 +1587,7 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
+ "embedded-hal-async",
  "heapless 0.8.0",
  "panic-probe",
  "rp235x-base",

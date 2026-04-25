@@ -41,8 +41,24 @@ pub enum MsgType {
     HilResponseFrame = 11,
     HilReady = 12,
 
+    Imu = 20,
+    Mag = 21,
+    Baro = 22,
+    Gps = 23,
+    Battery = 24,
+    SystemState = 25,
+    MotorState = 26,
+    EstimatorState = 27,
+    RadioStatus = 28,
+    TelemetrySnapshot = 29,
+
     Arm = 40,
     Disarm = 41,
+    ControlWaypoint = 42,
+    CvWaypoint = 43,
+    TofWaypoint = 44,
+    MissionWaypoint = 45,
+    Rtl = 46,
 
     BenchEnable = 60,
     BenchDisable = 61,
@@ -67,8 +83,23 @@ impl TryFrom<u8> for MsgType {
             10 => Ok(Self::HilSensorFrame),
             11 => Ok(Self::HilResponseFrame),
             12 => Ok(Self::HilReady),
+            20 => Ok(Self::Imu),
+            21 => Ok(Self::Mag),
+            22 => Ok(Self::Baro),
+            23 => Ok(Self::Gps),
+            24 => Ok(Self::Battery),
+            25 => Ok(Self::SystemState),
+            26 => Ok(Self::MotorState),
+            27 => Ok(Self::EstimatorState),
+            28 => Ok(Self::RadioStatus),
+            29 => Ok(Self::TelemetrySnapshot),
             40 => Ok(Self::Arm),
             41 => Ok(Self::Disarm),
+            42 => Ok(Self::ControlWaypoint),
+            43 => Ok(Self::CvWaypoint),
+            44 => Ok(Self::TofWaypoint),
+            45 => Ok(Self::MissionWaypoint),
+            46 => Ok(Self::Rtl),
             60 => Ok(Self::BenchEnable),
             61 => Ok(Self::BenchDisable),
             62 => Ok(Self::MotorTest),
@@ -195,6 +226,62 @@ pub struct HilResponseFrame {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ImuPayload {
+    pub stamp: SimStamp,
+    pub accel_mps2: [f32; 3],
+    pub gyro_rps: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BaroPayload {
+    pub stamp: SimStamp,
+    pub pressure_pa: f32,
+    pub altitude_m: f32,
+    pub temperature_c: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GpsPayload {
+    pub stamp: SimStamp,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub alt_msl_m: f32,
+    pub vel_ned_mps: [f32; 3],
+    pub sats: u8,
+    pub fix_type: u8,
+    pub reserved0: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SystemStatePayload {
+    pub stamp: SimStamp,
+    pub system_state: u8,
+    pub reserved0: [u8; 3],
+    pub flags: u32,
+    pub battery_voltage_v: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TelemetrySnapshotPayload {
+    pub stamp: SimStamp,
+    pub system_state: u8,
+    pub reserved0: [u8; 3],
+    pub flags: u32,
+    pub position_ned_m: [f32; 3],
+    pub velocity_ned_mps: [f32; 3],
+    pub attitude_quat: [f32; 4],
+    pub battery_voltage_v: f32,
+    pub rssi_dbm: i16,
+    pub snr_db_x100: i16,
+    pub loss_pct_x100: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct HeartbeatPayload {
     pub stamp: SimStamp,
     pub system_state: u8,
@@ -232,6 +319,36 @@ pub struct ArmPayload;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct DisarmPayload;
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct GlobalWaypointPayload {
+    pub ref_stamp: SimStamp,
+    pub lat_deg: f64,
+    pub lon_deg: f64,
+    pub alt_msl_m: f32,
+    pub yaw_deg: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CvWaypointPayload {
+    pub ref_stamp: SimStamp,
+    pub dir_body: [f32; 3],
+    pub confidence: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TofWaypointPayload {
+    pub ref_stamp: SimStamp,
+    pub distance_m: f32,
+    pub bearing_deg: f32,
+    pub elevation_deg: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RtlPayload;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -568,9 +685,101 @@ impl_empty_payload!(PongPayload, MsgType::Pong);
 impl_empty_payload!(HilReadyPayload, MsgType::HilReady);
 impl_empty_payload!(ArmPayload, MsgType::Arm);
 impl_empty_payload!(DisarmPayload, MsgType::Disarm);
+impl_empty_payload!(RtlPayload, MsgType::Rtl);
 impl_empty_payload!(BenchDisablePayload, MsgType::BenchDisable);
 impl_empty_payload!(MotorStopPayload, MsgType::MotorStop);
 impl_empty_payload!(ActuatorStatusRequestPayload, MsgType::ActuatorStatusRequest);
+
+impl WirePayload for GlobalWaypointPayload {
+    const MSG_TYPE: MsgType = MsgType::ControlWaypoint;
+    const WIRE_LEN: usize = 40;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.ref_stamp)?;
+        w.f64(self.lat_deg)?;
+        w.f64(self.lon_deg)?;
+        w.f32(self.alt_msl_m)?;
+        w.f32(self.yaw_deg)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            ref_stamp: r.sim_stamp()?,
+            lat_deg: r.f64()?,
+            lon_deg: r.f64()?,
+            alt_msl_m: r.f32()?,
+            yaw_deg: r.f32()?,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MissionWaypointPayload(pub GlobalWaypointPayload);
+
+impl WirePayload for MissionWaypointPayload {
+    const MSG_TYPE: MsgType = MsgType::MissionWaypoint;
+    const WIRE_LEN: usize = <GlobalWaypointPayload as WirePayload>::WIRE_LEN;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        self.0.encode_payload(out)
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        Ok(Self(GlobalWaypointPayload::decode_payload(input)?))
+    }
+}
+
+impl WirePayload for CvWaypointPayload {
+    const MSG_TYPE: MsgType = MsgType::CvWaypoint;
+    const WIRE_LEN: usize = 32;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.ref_stamp)?;
+        w.f32x3(self.dir_body)?;
+        w.f32(self.confidence)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            ref_stamp: r.sim_stamp()?,
+            dir_body: r.f32x3()?,
+            confidence: r.f32()?,
+        })
+    }
+}
+
+impl WirePayload for TofWaypointPayload {
+    const MSG_TYPE: MsgType = MsgType::TofWaypoint;
+    const WIRE_LEN: usize = 28;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.ref_stamp)?;
+        w.f32(self.distance_m)?;
+        w.f32(self.bearing_deg)?;
+        w.f32(self.elevation_deg)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            ref_stamp: r.sim_stamp()?,
+            distance_m: r.f32()?,
+            bearing_deg: r.f32()?,
+            elevation_deg: r.f32()?,
+        })
+    }
+}
 
 impl WirePayload for BenchEnablePayload {
     const MSG_TYPE: MsgType = MsgType::BenchEnable;
@@ -805,6 +1014,153 @@ impl WirePayload for HilResponseFrame {
             velocity_ned_mps: r.f32x3()?,
             attitude_quat: r.f32x4()?,
             motor_cmd: r.u16x4()?,
+        })
+    }
+}
+
+impl WirePayload for ImuPayload {
+    const MSG_TYPE: MsgType = MsgType::Imu;
+    const WIRE_LEN: usize = 40;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.f32x3(self.accel_mps2)?;
+        w.f32x3(self.gyro_rps)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            accel_mps2: r.f32x3()?,
+            gyro_rps: r.f32x3()?,
+        })
+    }
+}
+
+impl WirePayload for BaroPayload {
+    const MSG_TYPE: MsgType = MsgType::Baro;
+    const WIRE_LEN: usize = 28;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.f32(self.pressure_pa)?;
+        w.f32(self.altitude_m)?;
+        w.f32(self.temperature_c)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            pressure_pa: r.f32()?,
+            altitude_m: r.f32()?,
+            temperature_c: r.f32()?,
+        })
+    }
+}
+
+impl WirePayload for GpsPayload {
+    const MSG_TYPE: MsgType = MsgType::Gps;
+    const WIRE_LEN: usize = 52;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.f64(self.lat_deg)?;
+        w.f64(self.lon_deg)?;
+        w.f32(self.alt_msl_m)?;
+        w.f32x3(self.vel_ned_mps)?;
+        w.u8(self.sats)?;
+        w.u8(self.fix_type)?;
+        w.bytes(&self.reserved0)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            lat_deg: r.f64()?,
+            lon_deg: r.f64()?,
+            alt_msl_m: r.f32()?,
+            vel_ned_mps: r.f32x3()?,
+            sats: r.u8()?,
+            fix_type: r.u8()?,
+            reserved0: r.take::<2>()?,
+        })
+    }
+}
+
+impl WirePayload for SystemStatePayload {
+    const MSG_TYPE: MsgType = MsgType::SystemState;
+    const WIRE_LEN: usize = 28;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.u8(self.system_state)?;
+        w.bytes(&self.reserved0)?;
+        w.u32(self.flags)?;
+        w.f32(self.battery_voltage_v)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            system_state: r.u8()?,
+            reserved0: r.bytes3()?,
+            flags: r.u32()?,
+            battery_voltage_v: r.f32()?,
+        })
+    }
+}
+
+impl WirePayload for TelemetrySnapshotPayload {
+    const MSG_TYPE: MsgType = MsgType::TelemetrySnapshot;
+    const WIRE_LEN: usize = 74;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.u8(self.system_state)?;
+        w.bytes(&self.reserved0)?;
+        w.u32(self.flags)?;
+        w.f32x3(self.position_ned_m)?;
+        w.f32x3(self.velocity_ned_mps)?;
+        w.f32x4(self.attitude_quat)?;
+        w.f32(self.battery_voltage_v)?;
+        w.i16(self.rssi_dbm)?;
+        w.i16(self.snr_db_x100)?;
+        w.u16(self.loss_pct_x100)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            system_state: r.u8()?,
+            reserved0: r.bytes3()?,
+            flags: r.u32()?,
+            position_ned_m: r.f32x3()?,
+            velocity_ned_mps: r.f32x3()?,
+            attitude_quat: r.f32x4()?,
+            battery_voltage_v: r.f32()?,
+            rssi_dbm: r.i16()?,
+            snr_db_x100: r.i16()?,
+            loss_pct_x100: r.u16()?,
         })
     }
 }
@@ -1128,6 +1484,60 @@ mod tests {
 
         round_trip_payload(&ArmPayload, 13, 1_003);
         round_trip_payload(&DisarmPayload, 14, 1_004);
+        round_trip_payload(
+            &GlobalWaypointPayload {
+                ref_stamp: SimStamp {
+                    sim_tick: 15,
+                    sim_time_us: 30_000,
+                },
+                lat_deg: 30.2672,
+                lon_deg: -97.7431,
+                alt_msl_m: 171.0,
+                yaw_deg: 45.0,
+            },
+            15,
+            1_005,
+        );
+        round_trip_payload(
+            &MissionWaypointPayload(GlobalWaypointPayload {
+                ref_stamp: SimStamp {
+                    sim_tick: 16,
+                    sim_time_us: 32_000,
+                },
+                lat_deg: 30.2673,
+                lon_deg: -97.7432,
+                alt_msl_m: 172.0,
+                yaw_deg: 90.0,
+            }),
+            16,
+            1_006,
+        );
+        round_trip_payload(
+            &CvWaypointPayload {
+                ref_stamp: SimStamp {
+                    sim_tick: 17,
+                    sim_time_us: 34_000,
+                },
+                dir_body: [1.0, 0.0, 0.0],
+                confidence: 0.75,
+            },
+            17,
+            1_007,
+        );
+        round_trip_payload(
+            &TofWaypointPayload {
+                ref_stamp: SimStamp {
+                    sim_tick: 18,
+                    sim_time_us: 36_000,
+                },
+                distance_m: 1.5,
+                bearing_deg: 10.0,
+                elevation_deg: -2.0,
+            },
+            18,
+            1_008,
+        );
+        round_trip_payload(&RtlPayload, 19, 1_009);
     }
 
     #[test]
@@ -1226,11 +1636,11 @@ mod tests {
             loss_pct_x100: 25,
         };
 
-        let mut raw = [0u8; raw_frame_len(HilSensorFrame::WIRE_LEN)];
-        let mut encoded = [0u8; encoded_frame_len(HilSensorFrame::WIRE_LEN)];
+        let mut raw = [0u8; 256];
+        let mut encoded = [0u8; 256];
         let encoded_len = encode_packet(&frame, 7, 1234, &mut raw, &mut encoded).unwrap();
 
-        let mut decoded_raw = [0u8; raw_frame_len(HilSensorFrame::WIRE_LEN)];
+        let mut decoded_raw = [0u8; 256];
         let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
         let decoded = decode_payload::<HilSensorFrame>(&packet).unwrap();
 
@@ -1255,11 +1665,11 @@ mod tests {
             motor_cmd: [1000, 1100, 1200, 1300],
         };
 
-        let mut raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
-        let mut encoded = [0u8; encoded_frame_len(HilResponseFrame::WIRE_LEN)];
+        let mut raw = [0u8; raw_frame_len(HilSensorFrame::WIRE_LEN)];
+        let mut encoded = [0u8; encoded_frame_len(HilSensorFrame::WIRE_LEN)];
         let encoded_len = encode_packet(&frame, 8, 1235, &mut raw, &mut encoded).unwrap();
 
-        let mut decoded_raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
+        let mut decoded_raw = [0u8; raw_frame_len(HilSensorFrame::WIRE_LEN)];
         let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
         let decoded = decode_payload::<HilResponseFrame>(&packet).unwrap();
 
@@ -1268,6 +1678,76 @@ mod tests {
             MsgType::HilResponseFrame
         );
         assert_eq!(decoded, frame);
+    }
+
+    #[test]
+    fn telemetry_payloads_round_trip() {
+        let stamp = SimStamp {
+            sim_tick: 101,
+            sim_time_us: 2_020_000,
+        };
+
+        round_trip_payload(
+            &ImuPayload {
+                stamp,
+                accel_mps2: [1.0, 2.0, -9.81],
+                gyro_rps: [0.1, 0.2, 0.3],
+            },
+            30,
+            3_000,
+        );
+        round_trip_payload(
+            &BaroPayload {
+                stamp,
+                pressure_pa: 101_325.0,
+                altitude_m: 171.0,
+                temperature_c: 25.0,
+            },
+            31,
+            3_001,
+        );
+        round_trip_payload(
+            &GpsPayload {
+                stamp,
+                lat_deg: 30.2672,
+                lon_deg: -97.7431,
+                alt_msl_m: 171.0,
+                vel_ned_mps: [0.0, 0.0, 0.0],
+                sats: 12,
+                fix_type: 3,
+                reserved0: [0; 2],
+            },
+            32,
+            3_002,
+        );
+        round_trip_payload(
+            &SystemStatePayload {
+                stamp,
+                system_state: 2,
+                reserved0: [0; 3],
+                flags: response_flags::ARMED | response_flags::MOTORS_VALID,
+                battery_voltage_v: 16.2,
+            },
+            33,
+            3_003,
+        );
+        round_trip_payload(
+            &TelemetrySnapshotPayload {
+                stamp,
+                system_state: 2,
+                reserved0: [0; 3],
+                flags: response_flags::ARMED | response_flags::ESTIMATOR_VALID,
+                position_ned_m: [1.0, 2.0, -3.0],
+                velocity_ned_mps: [0.1, 0.2, 0.3],
+                attitude_quat: [1.0, 0.0, 0.0, 0.0],
+                battery_voltage_v: 16.2,
+                rssi_dbm: -48,
+                snr_db_x100: 1_150,
+                loss_pct_x100: 25,
+            },
+            34,
+            3_004,
+        );
     }
 
     #[test]
@@ -1309,12 +1789,12 @@ mod tests {
     where
         P: WirePayload + Copy + PartialEq + core::fmt::Debug,
     {
-        let mut raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
-        let mut encoded = [0u8; encoded_frame_len(HilResponseFrame::WIRE_LEN)];
+        let mut raw = [0u8; 256];
+        let mut encoded = [0u8; 256];
         let encoded_len =
             encode_packet(payload, seq, send_time_ms, &mut raw, &mut encoded).unwrap();
 
-        let mut decoded_raw = [0u8; raw_frame_len(HilResponseFrame::WIRE_LEN)];
+        let mut decoded_raw = [0u8; 256];
         let packet = decode_packet(&encoded[..encoded_len], &mut decoded_raw).unwrap();
         let decoded = decode_payload::<P>(&packet).unwrap();
 

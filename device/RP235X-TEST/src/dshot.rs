@@ -1,8 +1,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use common::protocol::hilink::{
-    ActuatorStatusPayload, BenchEnablePayload, MotorTestPayload, actuator_flags, bench,
-    motor_test_mode,
+    ActuatorStatusPayload, BenchEnablePayload, DshotCommandPayload, MotorSweepPayload,
+    MotorTestPayload, actuator_flags, bench, motor_test_mode,
 };
 use defmt::{info, warn};
 use embassy_executor::Spawner;
@@ -34,13 +34,32 @@ const DSHOT_OUTPUT_PERIOD: Duration = Duration::from_millis(1);
 const DSHOT_PREARM_ZERO_FRAMES: u16 = 500;
 const MOTOR_COUNT: usize = 4;
 const DSHOT_MIN_THROTTLE: u16 = 48;
+const DSHOT_MAX_SPECIAL_COMMAND: u8 = 47;
 
 #[derive(Clone, Copy)]
 enum BenchCommand {
     Enable(BenchEnablePayload),
     Disable,
     MotorTest(MotorTestPayload),
+    MotorSweep(MotorSweepPayload),
+    DshotCommand(DshotCommandPayload),
     Stop,
+}
+
+#[derive(Clone, Copy)]
+struct SweepState {
+    motor_mask: u8,
+    mode: u8,
+    start_value: u16,
+    current_value: u16,
+    end_value: u16,
+    step_value: u16,
+    step_duration_ms: u16,
+    zero_between_ms: u16,
+    repeat_count: u8,
+    ascending: bool,
+    step_remaining_ms: u16,
+    zero_remaining_ms: u16,
 }
 
 bind_interrupts!(struct PioIrqs {
@@ -145,6 +164,20 @@ pub fn submit_motor_test(payload: MotorTestPayload) -> bool {
             .is_ok()
 }
 
+pub fn submit_motor_sweep(payload: MotorSweepPayload) -> bool {
+    valid_motor_sweep(payload)
+        && BENCH_COMMANDS
+            .try_send(BenchCommand::MotorSweep(payload))
+            .is_ok()
+}
+
+pub fn submit_dshot_command(payload: DshotCommandPayload) -> bool {
+    valid_dshot_command(payload)
+        && BENCH_COMMANDS
+            .try_send(BenchCommand::DshotCommand(payload))
+            .is_ok()
+}
+
 fn dshot_frame(command: u16, request_telemetry: bool) -> u16 {
     let command = command.min(DSHOT_MAX_COMMAND);
     let payload = (command << 1) | u16::from(request_telemetry);
@@ -177,6 +210,38 @@ fn valid_motor_test(payload: MotorTestPayload) -> bool {
     valid_mask && valid_mode && valid_duration && valid_value
 }
 
+fn valid_motor_sweep(payload: MotorSweepPayload) -> bool {
+    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
+    let valid_mode = matches!(
+        payload.mode,
+        motor_test_mode::RAW_DSHOT | motor_test_mode::NORMALIZED
+    );
+    let valid_step = payload.step_value > 0;
+    let valid_duration =
+        payload.step_duration_ms > 0 && payload.step_duration_ms <= bench::MAX_TEST_DURATION_MS;
+    let valid_repeat = payload.repeat_count > 0;
+    let valid_values = match payload.mode {
+        motor_test_mode::RAW_DSHOT => {
+            let start = payload.start_value;
+            let end = payload.end_value;
+            (start == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&start))
+                && (end == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&end))
+        }
+        motor_test_mode::NORMALIZED => true,
+        _ => false,
+    };
+
+    valid_mask && valid_mode && valid_step && valid_duration && valid_repeat && valid_values
+}
+
+fn valid_dshot_command(payload: DshotCommandPayload) -> bool {
+    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
+    let valid_command = payload.command <= DSHOT_MAX_SPECIAL_COMMAND;
+    let valid_repeat = payload.repeat_count > 0;
+
+    valid_mask && valid_command && valid_repeat
+}
+
 fn normalized_to_dshot(value: u16) -> u16 {
     if value == 0 {
         0
@@ -192,6 +257,41 @@ fn command_value_to_dshot(mode: u8, value: u16) -> u16 {
         motor_test_mode::NORMALIZED => normalized_to_dshot(value),
         _ => 0,
     }
+}
+
+fn next_sweep_value(state: &SweepState) -> Option<u16> {
+    if state.current_value == state.end_value {
+        return None;
+    }
+
+    let next = if state.ascending {
+        state.current_value.saturating_add(state.step_value)
+    } else {
+        state.current_value.saturating_sub(state.step_value)
+    };
+
+    if state.ascending {
+        Some(next.min(state.end_value))
+    } else {
+        Some(next.max(state.end_value))
+    }
+}
+
+fn advance_sweep_step(state: &mut SweepState) -> bool {
+    if let Some(next_value) = next_sweep_value(state) {
+        state.current_value = next_value;
+        state.step_remaining_ms = state.step_duration_ms;
+        return true;
+    }
+
+    if state.repeat_count <= 1 {
+        return false;
+    }
+
+    state.repeat_count -= 1;
+    state.current_value = state.start_value;
+    state.step_remaining_ms = state.step_duration_ms;
+    true
 }
 
 fn motor_mask_words(mask: u8, dshot: u16) -> [u16; MOTOR_COUNT] {
@@ -315,6 +415,8 @@ async fn dshot_motor_test_task(
     let mut command_mode = motor_test_mode::STOP;
     let mut commanded_dshot = stop_commands;
     let mut command_remaining_ms = 0u16;
+    let mut sweep_state: Option<SweepState> = None;
+    let mut dshot_special_remaining_frames = 0u8;
     let mut last_command_age_ms = u16::MAX;
     let mut status_flags = 0u32;
 
@@ -343,6 +445,8 @@ async fn dshot_motor_test_task(
             command_mode = motor_test_mode::STOP;
             commanded_dshot = stop_commands;
             command_remaining_ms = 0;
+            sweep_state = None;
+            dshot_special_remaining_frames = 0;
         }
 
         while let Ok(command) = BENCH_COMMANDS.try_receive() {
@@ -360,6 +464,8 @@ async fn dshot_motor_test_task(
                     command_mode = motor_test_mode::STOP;
                     commanded_dshot = stop_commands;
                     command_remaining_ms = 0;
+                    sweep_state = None;
+                    dshot_special_remaining_frames = 0;
                     info!("dshot bench disabled");
                 }
                 BenchCommand::Stop => {
@@ -367,6 +473,8 @@ async fn dshot_motor_test_task(
                     command_mode = motor_test_mode::STOP;
                     commanded_dshot = stop_commands;
                     command_remaining_ms = 0;
+                    sweep_state = None;
+                    dshot_special_remaining_frames = 0;
                     last_command_age_ms = 0;
                     info!("dshot bench motor stop");
                 }
@@ -381,6 +489,8 @@ async fn dshot_motor_test_task(
                         } else {
                             payload.duration_ms
                         };
+                        sweep_state = None;
+                        dshot_special_remaining_frames = 0;
                         last_command_age_ms = 0;
                         status_flags &= !actuator_flags::COMMAND_TIMEOUT;
                         warn!(
@@ -392,8 +502,85 @@ async fn dshot_motor_test_task(
                         command_mode = motor_test_mode::STOP;
                         commanded_dshot = stop_commands;
                         command_remaining_ms = 0;
+                        sweep_state = None;
+                        dshot_special_remaining_frames = 0;
                         status_flags |= actuator_flags::REJECTED_WHILE_DISARMED;
                         warn!("dshot rejected motor test while disarmed or bench-disabled");
+                    }
+                }
+                BenchCommand::MotorSweep(payload) => {
+                    if armed && bench_enabled && valid_motor_sweep(payload) {
+                        let ascending = payload.start_value <= payload.end_value;
+                        let current_dshot =
+                            command_value_to_dshot(payload.mode, payload.start_value);
+                        commanded_dshot = motor_mask_words(payload.motor_mask, current_dshot);
+                        active_motor_mask = if current_dshot == 0 {
+                            0
+                        } else {
+                            payload.motor_mask
+                        };
+                        command_mode = payload.mode;
+                        command_remaining_ms = 0;
+                        sweep_state = Some(SweepState {
+                            motor_mask: payload.motor_mask,
+                            mode: payload.mode,
+                            start_value: payload.start_value,
+                            current_value: payload.start_value,
+                            end_value: payload.end_value,
+                            step_value: payload.step_value,
+                            step_duration_ms: payload.step_duration_ms,
+                            zero_between_ms: payload.zero_between_ms,
+                            repeat_count: payload.repeat_count,
+                            ascending,
+                            step_remaining_ms: payload.step_duration_ms,
+                            zero_remaining_ms: 0,
+                        });
+                        dshot_special_remaining_frames = 0;
+                        last_command_age_ms = 0;
+                        status_flags &= !actuator_flags::COMMAND_TIMEOUT;
+                        warn!(
+                            "dshot bench motor sweep mask=0x{=u8:02x} mode={=u8} start={=u16} end={=u16} step={=u16}",
+                            payload.motor_mask,
+                            payload.mode,
+                            payload.start_value,
+                            payload.end_value,
+                            payload.step_value,
+                        );
+                    } else {
+                        active_motor_mask = 0;
+                        command_mode = motor_test_mode::STOP;
+                        commanded_dshot = stop_commands;
+                        command_remaining_ms = 0;
+                        sweep_state = None;
+                        dshot_special_remaining_frames = 0;
+                        status_flags |= actuator_flags::REJECTED_WHILE_DISARMED;
+                        warn!("dshot rejected motor sweep while disarmed or bench-disabled");
+                    }
+                }
+                BenchCommand::DshotCommand(payload) => {
+                    if armed && bench_enabled && valid_dshot_command(payload) {
+                        commanded_dshot =
+                            motor_mask_words(payload.motor_mask, u16::from(payload.command));
+                        active_motor_mask = payload.motor_mask;
+                        command_mode = motor_test_mode::RAW_DSHOT;
+                        command_remaining_ms = 0;
+                        sweep_state = None;
+                        dshot_special_remaining_frames = payload.repeat_count;
+                        last_command_age_ms = 0;
+                        status_flags &= !actuator_flags::COMMAND_TIMEOUT;
+                        warn!(
+                            "dshot special command mask=0x{=u8:02x} command={=u8} repeat={=u8}",
+                            payload.motor_mask, payload.command, payload.repeat_count,
+                        );
+                    } else {
+                        active_motor_mask = 0;
+                        command_mode = motor_test_mode::STOP;
+                        commanded_dshot = stop_commands;
+                        command_remaining_ms = 0;
+                        sweep_state = None;
+                        dshot_special_remaining_frames = 0;
+                        status_flags |= actuator_flags::REJECTED_WHILE_DISARMED;
+                        warn!("dshot rejected special command while disarmed or bench-disabled");
                     }
                 }
             }
@@ -407,12 +594,63 @@ async fn dshot_motor_test_task(
                 command_mode = motor_test_mode::STOP;
                 commanded_dshot = stop_commands;
                 command_remaining_ms = 0;
+                sweep_state = None;
+                dshot_special_remaining_frames = 0;
                 status_flags |= actuator_flags::COMMAND_TIMEOUT;
                 warn!("dshot bench mode timed out");
             }
         }
 
-        if command_remaining_ms > 0 {
+        let mut clear_special_after_output = false;
+        let mut clear_sweep = false;
+        let mut sweep_completed = false;
+        if let Some(sweep) = sweep_state.as_mut() {
+            last_command_age_ms = last_command_age_ms.saturating_add(1);
+            if !armed || !bench_enabled {
+                active_motor_mask = 0;
+                command_mode = motor_test_mode::STOP;
+                commanded_dshot = stop_commands;
+                clear_sweep = true;
+            } else if sweep.zero_remaining_ms > 0 {
+                sweep.zero_remaining_ms -= 1;
+                active_motor_mask = 0;
+                commanded_dshot = stop_commands;
+                if sweep.zero_remaining_ms == 0 && !advance_sweep_step(sweep) {
+                    sweep_completed = true;
+                }
+            } else if sweep.step_remaining_ms > 0 {
+                sweep.step_remaining_ms -= 1;
+                let dshot = command_value_to_dshot(sweep.mode, sweep.current_value);
+                commanded_dshot = motor_mask_words(sweep.motor_mask, dshot);
+                active_motor_mask = if dshot == 0 { 0 } else { sweep.motor_mask };
+                command_mode = sweep.mode;
+                if sweep.step_remaining_ms == 0 {
+                    if sweep.zero_between_ms > 0 {
+                        sweep.zero_remaining_ms = sweep.zero_between_ms;
+                        active_motor_mask = 0;
+                        commanded_dshot = stop_commands;
+                    } else if !advance_sweep_step(sweep) {
+                        sweep_completed = true;
+                    }
+                }
+            }
+
+            if clear_sweep || sweep_completed {
+                active_motor_mask = 0;
+                command_mode = motor_test_mode::STOP;
+                commanded_dshot = stop_commands;
+                sweep_state = None;
+                if sweep_completed {
+                    info!("dshot bench motor sweep completed");
+                }
+            }
+        } else if dshot_special_remaining_frames > 0 {
+            dshot_special_remaining_frames -= 1;
+            last_command_age_ms = last_command_age_ms.saturating_add(1);
+            if dshot_special_remaining_frames == 0 {
+                clear_special_after_output = true;
+            }
+        } else if command_remaining_ms > 0 {
             command_remaining_ms -= 1;
             last_command_age_ms = last_command_age_ms.saturating_add(1);
             if command_remaining_ms == 0 {
@@ -469,6 +707,12 @@ async fn dshot_motor_test_task(
             output_words,
         )
         .await;
+
+        if clear_special_after_output {
+            active_motor_mask = 0;
+            command_mode = motor_test_mode::STOP;
+            commanded_dshot = stop_commands;
+        }
         last_armed = armed;
         ticker.next().await;
     }

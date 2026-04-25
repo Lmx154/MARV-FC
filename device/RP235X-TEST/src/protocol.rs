@@ -1,12 +1,16 @@
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
+use common::messages::sensor::{BarometerSampleStamped, ImuSampleStamped};
 use common::protocol::hilink::{
-    self, AckPayload, ActuatorStatusPayload, ActuatorStatusRequestPayload, ArmPayload,
-    BenchDisablePayload, BenchEnablePayload, DisarmPayload, DshotCommandPayload, HeartbeatPayload,
-    HilReadyPayload, HilResponseFrame, HilSensorFrame, MotorStopPayload, MotorSweepPayload,
-    MotorTestPayload, MsgType, NackPayload, PingPayload, PongPayload, SimStamp, WirePayload,
-    response_flags,
+    self, AckPayload, ActuatorStatusPayload, ActuatorStatusRequestPayload, ArmPayload, BaroPayload,
+    BenchDisablePayload, BenchEnablePayload, CvWaypointPayload, DisarmPayload, DshotCommandPayload,
+    GlobalWaypointPayload, HeartbeatPayload, HilReadyPayload, HilResponseFrame, HilSensorFrame,
+    ImuPayload, MissionWaypointPayload, MotorStopPayload, MotorSweepPayload, MotorTestPayload,
+    MsgType, NackPayload, PingPayload, PongPayload, RtlPayload, SimStamp, TofWaypointPayload,
+    WirePayload, response_flags,
 };
+use common::utilities::time::MeasurementTimestamp;
+use common::utilities::units::{STANDARD_SEA_LEVEL_PRESSURE_PA, pressure_altitude_m};
 use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, select};
@@ -14,6 +18,7 @@ use embassy_rp::Peri;
 use embassy_rp::peripherals::USB;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Duration, Instant, Ticker};
 use heapless::Vec;
 use rp235x_base::usb_cdc::{
@@ -21,18 +26,19 @@ use rp235x_base::usb_cdc::{
     write_packet_chunks,
 };
 
+use crate::channels::{BAROMETER_CHANNEL, IMU_CHANNEL, TestBarometerSubscriber, TestImuSubscriber};
 use crate::dshot;
 
 const RX_FRAME_CAPACITY: usize = hilink::encoded_frame_len(HilSensorFrameMaxPayload::WIRE_LEN);
 const RAW_FRAME_CAPACITY: usize = hilink::raw_frame_len(HilSensorFrameMaxPayload::WIRE_LEN);
 const TX_FRAME_CAPACITY: usize = hilink::encoded_frame_len(HilResponseFrameMaxPayload::WIRE_LEN);
 const TX_RAW_CAPACITY: usize = hilink::raw_frame_len(HilResponseFrameMaxPayload::WIRE_LEN);
+const SENSOR_TELEMETRY_PERIOD: Duration = Duration::from_millis(20);
 const STATE_IDLE: u8 = 1;
 const STATE_ARMED: u8 = 2;
 const ACK_STATUS_ACCEPTED: u8 = 0;
 const NACK_REASON_INVALID_PAYLOAD: u8 = 1;
 const NACK_REASON_REJECTED: u8 = 2;
-const NACK_REASON_UNSUPPORTED: u8 = 3;
 
 type RxFrame = Vec<u8, RX_FRAME_CAPACITY>;
 type TxFrame = Vec<u8, TX_FRAME_CAPACITY>;
@@ -56,10 +62,12 @@ enum OutboundMessage {
     Ack(AckPayload),
     Nack(NackPayload),
     HilResponse(HilResponseFrame),
+    Imu(ImuPayload),
+    Baro(BaroPayload),
     ActuatorStatus(ActuatorStatusPayload),
 }
 
-static TX_CHANNEL: Channel<CriticalSectionRawMutex, OutboundMessage, 8> = Channel::new();
+static TX_CHANNEL: Channel<CriticalSectionRawMutex, OutboundMessage, 16> = Channel::new();
 static SYSTEM_STATE: AtomicU8 = AtomicU8::new(STATE_IDLE);
 static RESPONSE_FLAGS: AtomicU32 = AtomicU32::new(response_flags::MOTORS_VALID);
 static BENCH_REQUESTED: AtomicU8 = AtomicU8::new(0);
@@ -79,6 +87,12 @@ pub fn spawn(spawner: &Spawner, usb: Peri<'static, USB>) {
 
     spawner.spawn(usb_rx_task(usb.receiver)).unwrap();
     spawner.spawn(usb_tx_task(usb.sender)).unwrap();
+    spawner
+        .spawn(sensor_telemetry_task(
+            IMU_CHANNEL.subscriber().unwrap(),
+            BAROMETER_CHANNEL.subscriber().unwrap(),
+        ))
+        .unwrap();
 }
 
 pub fn is_armed() -> bool {
@@ -217,6 +231,11 @@ fn handle_protocol_frame(frame: &[u8], raw_scratch: &mut [u8; RAW_FRAME_CAPACITY
         }
         Ok(MsgType::Arm) => handle_arm_packet(&packet),
         Ok(MsgType::Disarm) => handle_disarm_packet(&packet),
+        Ok(MsgType::ControlWaypoint) => handle_control_waypoint_packet(&packet),
+        Ok(MsgType::CvWaypoint) => handle_cv_waypoint_packet(&packet),
+        Ok(MsgType::TofWaypoint) => handle_tof_waypoint_packet(&packet),
+        Ok(MsgType::MissionWaypoint) => handle_mission_waypoint_packet(&packet),
+        Ok(MsgType::Rtl) => handle_rtl_packet(&packet),
         Ok(MsgType::BenchEnable) => handle_bench_enable_packet(&packet),
         Ok(MsgType::BenchDisable) => handle_bench_disable_packet(&packet),
         Ok(MsgType::MotorTest) => handle_motor_test_packet(&packet),
@@ -261,6 +280,73 @@ fn handle_disarm_packet(packet: &hilink::DecodedPacket<'_>) {
     BENCH_REQUESTED.store(0, Ordering::Relaxed);
     let _ = dshot::submit_motor_stop();
     let _ = dshot::submit_bench_disable();
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_control_waypoint_packet(packet: &hilink::DecodedPacket<'_>) {
+    match hilink::decode_payload::<GlobalWaypointPayload>(packet) {
+        Ok(_) => {}
+        Err(_) => {
+            warn!("rp235x-test rejected invalid control waypoint payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    }
+
+    info!("rp235x-test accepted control waypoint");
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_cv_waypoint_packet(packet: &hilink::DecodedPacket<'_>) {
+    match hilink::decode_payload::<CvWaypointPayload>(packet) {
+        Ok(_) => {}
+        Err(_) => {
+            warn!("rp235x-test rejected invalid cv waypoint payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    }
+
+    info!("rp235x-test accepted cv waypoint");
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_tof_waypoint_packet(packet: &hilink::DecodedPacket<'_>) {
+    match hilink::decode_payload::<TofWaypointPayload>(packet) {
+        Ok(_) => {}
+        Err(_) => {
+            warn!("rp235x-test rejected invalid tof waypoint payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    }
+
+    info!("rp235x-test accepted tof waypoint");
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_mission_waypoint_packet(packet: &hilink::DecodedPacket<'_>) {
+    match hilink::decode_payload::<MissionWaypointPayload>(packet) {
+        Ok(_) => {}
+        Err(_) => {
+            warn!("rp235x-test rejected invalid mission waypoint payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    }
+
+    info!("rp235x-test accepted mission waypoint");
+    enqueue_outbound(ack_for(packet));
+}
+
+fn handle_rtl_packet(packet: &hilink::DecodedPacket<'_>) {
+    if hilink::decode_payload::<RtlPayload>(packet).is_err() {
+        warn!("rp235x-test rejected invalid rtl payload");
+        enqueue_outbound(invalid_payload_nack(packet));
+        return;
+    }
+
+    info!("rp235x-test accepted rtl command");
     enqueue_outbound(ack_for(packet));
 }
 
@@ -322,14 +408,25 @@ fn handle_motor_test_packet(packet: &hilink::DecodedPacket<'_>) {
 }
 
 fn handle_motor_sweep_packet(packet: &hilink::DecodedPacket<'_>) {
-    if hilink::decode_payload::<MotorSweepPayload>(packet).is_err() {
-        warn!("rp235x-test rejected invalid motor sweep payload");
-        enqueue_outbound(invalid_payload_nack(packet));
+    let payload = match hilink::decode_payload::<MotorSweepPayload>(packet) {
+        Ok(payload) => payload,
+        Err(_) => {
+            warn!("rp235x-test rejected invalid motor sweep payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    };
+
+    if !is_armed()
+        || BENCH_REQUESTED.load(Ordering::Relaxed) == 0
+        || !dshot::submit_motor_sweep(payload)
+    {
+        warn!("rp235x-test rejected motor sweep");
+        enqueue_outbound(rejected_nack(packet));
         return;
     }
 
-    warn!("rp235x-test motor sweep command is not implemented yet");
-    enqueue_outbound(unsupported_nack(packet));
+    enqueue_outbound(ack_for(packet));
 }
 
 fn handle_motor_stop_packet(packet: &hilink::DecodedPacket<'_>) {
@@ -347,14 +444,25 @@ fn handle_motor_stop_packet(packet: &hilink::DecodedPacket<'_>) {
 }
 
 fn handle_dshot_command_packet(packet: &hilink::DecodedPacket<'_>) {
-    if hilink::decode_payload::<DshotCommandPayload>(packet).is_err() {
-        warn!("rp235x-test rejected invalid dshot command payload");
-        enqueue_outbound(invalid_payload_nack(packet));
+    let payload = match hilink::decode_payload::<DshotCommandPayload>(packet) {
+        Ok(payload) => payload,
+        Err(_) => {
+            warn!("rp235x-test rejected invalid dshot command payload");
+            enqueue_outbound(invalid_payload_nack(packet));
+            return;
+        }
+    };
+
+    if !is_armed()
+        || BENCH_REQUESTED.load(Ordering::Relaxed) == 0
+        || !dshot::submit_dshot_command(payload)
+    {
+        warn!("rp235x-test rejected dshot special command");
+        enqueue_outbound(rejected_nack(packet));
         return;
     }
 
-    warn!("rp235x-test dshot special commands are not implemented yet");
-    enqueue_outbound(unsupported_nack(packet));
+    enqueue_outbound(ack_for(packet));
 }
 
 fn handle_actuator_status_request_packet(packet: &hilink::DecodedPacket<'_>) {
@@ -427,17 +535,79 @@ fn rejected_nack(packet: &hilink::DecodedPacket<'_>) -> OutboundMessage {
     })
 }
 
-fn unsupported_nack(packet: &hilink::DecodedPacket<'_>) -> OutboundMessage {
-    OutboundMessage::Nack(NackPayload {
-        rejected_seq: packet.header.seq,
-        rejected_msg_type: packet.header.msg_type,
-        reason: NACK_REASON_UNSUPPORTED,
-    })
-}
-
 fn enqueue_outbound(message: OutboundMessage) {
     if TX_CHANNEL.try_send(message).is_err() {
         warn!("rp235x-test tx queue full");
+    }
+}
+
+fn enqueue_telemetry_outbound(message: OutboundMessage) {
+    let _ = TX_CHANNEL.try_send(message);
+}
+
+fn stamp_from_measurement(timestamp: MeasurementTimestamp) -> SimStamp {
+    let micros = timestamp.as_micros();
+    SimStamp {
+        sim_tick: micros / 1_000,
+        sim_time_us: micros,
+    }
+}
+
+fn imu_payload(sample: ImuSampleStamped) -> ImuPayload {
+    ImuPayload {
+        stamp: stamp_from_measurement(sample.timestamp),
+        accel_mps2: sample.sample.accel_mps2,
+        gyro_rps: sample.sample.gyro_rad_s,
+    }
+}
+
+fn baro_payload(sample: BarometerSampleStamped) -> BaroPayload {
+    BaroPayload {
+        stamp: stamp_from_measurement(sample.timestamp),
+        pressure_pa: sample.sample.pressure_pa,
+        altitude_m: pressure_altitude_m(sample.sample.pressure_pa, STANDARD_SEA_LEVEL_PRESSURE_PA)
+            .unwrap_or(0.0),
+        temperature_c: sample.sample.temperature_c,
+    }
+}
+
+fn drain_latest_imu(subscriber: &mut TestImuSubscriber) -> Option<ImuSampleStamped> {
+    let mut latest = None;
+    while let Some(message) = subscriber.try_next_message() {
+        if let WaitResult::Message(sample) = message {
+            latest = Some(sample);
+        }
+    }
+    latest
+}
+
+fn drain_latest_baro(subscriber: &mut TestBarometerSubscriber) -> Option<BarometerSampleStamped> {
+    let mut latest = None;
+    while let Some(message) = subscriber.try_next_message() {
+        if let WaitResult::Message(sample) = message {
+            latest = Some(sample);
+        }
+    }
+    latest
+}
+
+#[embassy_executor::task]
+async fn sensor_telemetry_task(
+    mut imu_subscriber: TestImuSubscriber,
+    mut barometer_subscriber: TestBarometerSubscriber,
+) -> ! {
+    let mut ticker = Ticker::every(SENSOR_TELEMETRY_PERIOD);
+
+    loop {
+        ticker.next().await;
+
+        if let Some(sample) = drain_latest_imu(&mut imu_subscriber) {
+            enqueue_telemetry_outbound(OutboundMessage::Imu(imu_payload(sample)));
+        }
+
+        if let Some(sample) = drain_latest_baro(&mut barometer_subscriber) {
+            enqueue_telemetry_outbound(OutboundMessage::Baro(baro_payload(sample)));
+        }
     }
 }
 
@@ -503,6 +673,12 @@ fn encode_outbound(
             hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
         }
         OutboundMessage::HilResponse(payload) => {
+            hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
+        }
+        OutboundMessage::Imu(payload) => {
+            hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
+        }
+        OutboundMessage::Baro(payload) => {
             hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
         }
         OutboundMessage::ActuatorStatus(payload) => {

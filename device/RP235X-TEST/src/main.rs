@@ -2,11 +2,15 @@
 #![no_main]
 
 mod buses;
+mod channels;
 mod dshot;
 mod gps;
 mod pinmap;
 mod protocol;
 mod resources;
+mod sensor_spi;
+mod sensors;
+mod spi1_sensor_cluster;
 
 use defmt::info;
 use embassy_executor::Spawner;
@@ -31,5 +35,12 @@ async fn main(spawner: Spawner) {
         &spawner,
         resources.buses.gps_pio_uart,
         resources.pins.gps_pio_uart,
+    );
+    sensors::spawn(
+        &spawner,
+        resources.buses.sensors,
+        resources.pins.sensors,
+        resources.buses.environmental,
+        resources.pins.environmental,
     );
 }
