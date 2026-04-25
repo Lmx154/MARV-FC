@@ -1,3 +1,1 @@
-pub fn hal_config() -> embassy_rp::config::Config {
-    embassy_rp::config::Config::default()
-}
+pub use rp235x_base::clocks::hal_config;

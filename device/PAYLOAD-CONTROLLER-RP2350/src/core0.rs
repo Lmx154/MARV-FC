@@ -92,16 +92,6 @@ fn report_watchdog_progress(mask: u32) {
     let _ = WATCHDOG_LIVENESS_CHANNEL.try_send(LivenessUpdate::new(mask, watchdog_now_ms()));
 }
 
-impl common::services::health::WatchdogDriver for watchdog::HardwareWatchdog {
-    fn start(&mut self) {
-        watchdog::HardwareWatchdog::start(self);
-    }
-
-    fn feed(&mut self) {
-        watchdog::HardwareWatchdog::feed(self);
-    }
-}
-
 fn pwm_top_for_period(sys_freq_hz: u32, divider: u8, frame_period_us: u32) -> Option<u16> {
     if divider == 0 || frame_period_us == 0 {
         return None;

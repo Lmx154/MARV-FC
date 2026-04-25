@@ -1098,15 +1098,10 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
- "embassy-usb",
- "embedded-hal 1.0.0",
  "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-sdmmc",
  "futures",
  "panic-probe",
- "smart-leds",
- "static_cell",
+ "rp235x-base",
 ]
 
 [[package]]
@@ -1121,15 +1116,10 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
- "embassy-usb",
- "embedded-hal 1.0.0",
  "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-sdmmc",
  "futures",
  "panic-probe",
- "smart-leds",
- "static_cell",
+ "rp235x-base",
 ]
 
 [[package]]
@@ -1306,14 +1296,9 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
- "embassy-usb",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-sdmmc",
  "heapless 0.8.0",
  "panic-probe",
- "static_cell",
+ "rp235x-base",
 ]
 
 [[package]]
@@ -1481,13 +1466,10 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
- "embassy-usb",
- "embedded-hal 1.0.0",
  "embedded-hal-async",
- "embedded-hal-bus",
- "embedded-sdmmc",
  "heapless 0.8.0",
  "panic-probe",
+ "rp235x-base",
  "static_cell",
 ]
 
@@ -1574,6 +1556,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "rp235x-base"
+version = "0.1.0"
+dependencies = [
+ "common",
+ "defmt 1.0.1",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-sync",
+ "embassy-time",
+ "embassy-usb",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-hal-bus",
+ "embedded-sdmmc",
+ "smart-leds",
+ "static_cell",
+]
+
+[[package]]
 name = "rp235x-test"
 version = "0.1.0"
 dependencies = [
@@ -1586,10 +1587,9 @@ dependencies = [
  "embassy-rp",
  "embassy-sync",
  "embassy-time",
- "embassy-usb",
  "heapless 0.8.0",
  "panic-probe",
- "static_cell",
+ "rp235x-base",
 ]
 
 [[package]]

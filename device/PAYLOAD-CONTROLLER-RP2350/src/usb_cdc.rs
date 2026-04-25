@@ -3,20 +3,17 @@ use core::sync::atomic::{AtomicBool, Ordering};
 use common::protocol::mavlink::{DecodeError, MavlinkHilEgressEncoder, MavlinkHilMessagePump};
 use common::services::health::LivenessUpdate;
 use common::services::hil::{
-    HilByteWriter, HilEgressMessage, HilEgressTrySender, HilIngressMessage, HilIngressRoutes,
-    HilRuntime, UsbHilMode, evaluate_usb_init_control_command, send_hil_egress_message,
+    HilEgressMessage, HilEgressTrySender, HilIngressMessage, HilIngressRoutes, HilRuntime,
+    UsbHilMode, evaluate_usb_init_control_command, send_hil_egress_message,
     should_report_init_probe_liveness, usb_hil_mode_for_phase,
 };
 use defmt::{info, warn};
 use embassy_executor::{Spawner, task};
-use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::USB;
-use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_time::{Duration, Instant, TimeoutError, with_timeout};
-use embassy_usb::class::cdc_acm::{CdcAcmClass, Receiver, Sender, State};
-use embassy_usb::driver::EndpointError;
-use embassy_usb::{Builder, Config, UsbDevice};
-use static_cell::StaticCell;
+use rp235x_base::usb_cdc::{
+    RpUsbReceiver, RpUsbSender, USB_PACKET_SIZE, UsbCdcConfig, UsbHilWriter, spawn_cdc_acm,
+};
 
 use crate::channels::{
     BAROMETER_CHANNEL, HIL_BOOT_SIGNAL, PayloadFlightPhaseSubscriber,
@@ -26,43 +23,11 @@ use crate::channels::{
 use crate::config::HilConfig;
 use crate::watchdog;
 
-const USB_PACKET_SIZE: u16 = 64;
 const MAVLINK_STREAM_CAPACITY: usize = 4096;
 const INIT_PROBE_POLL_MS: u64 = 100;
 const USB_BANNER: &[u8] = b"payload-controller-rp2350\r\n";
 
-type RpUsbDriver = Driver<'static, USB>;
-type RpUsbDevice = UsbDevice<'static, RpUsbDriver>;
-type RpUsbSender = Sender<'static, RpUsbDriver>;
-type RpUsbReceiver = Receiver<'static, RpUsbDriver>;
-
-struct UsbHilWriter {
-    class: RpUsbSender,
-}
-
-bind_interrupts!(struct Irqs {
-    USBCTRL_IRQ => InterruptHandler<USB>;
-});
-
-static CONFIG_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
-static BOS_DESCRIPTOR: StaticCell<[u8; 256]> = StaticCell::new();
-static MSOS_DESCRIPTOR: StaticCell<[u8; 0]> = StaticCell::new();
-static CONTROL_BUF: StaticCell<[u8; 64]> = StaticCell::new();
-static CDC_ACM_STATE: StaticCell<State<'static>> = StaticCell::new();
 static USB_CDC_HOST_CONNECTED: AtomicBool = AtomicBool::new(false);
-
-#[task]
-async fn usb_device_task(mut usb: RpUsbDevice) -> ! {
-    usb.run().await
-}
-
-impl HilByteWriter for UsbHilWriter {
-    type Error = EndpointError;
-
-    async fn write(&mut self, bytes: &[u8]) -> Result<(), Self::Error> {
-        self.class.write_packet(bytes).await
-    }
-}
 
 pub fn reset_host_connected() {
     USB_CDC_HOST_CONNECTED.store(false, Ordering::Relaxed);
@@ -311,31 +276,21 @@ pub fn spawn(
     control_sender: PayloadHilControlCommandSender,
     liveness: PayloadWatchdogLivenessSender,
 ) {
-    let driver = Driver::new(usb, Irqs);
-
-    let mut usb_config = Config::new(0x1209, 0x0001);
-    usb_config.manufacturer = Some("MARV");
-    usb_config.product = Some("Payload Controller");
-    usb_config.serial_number = Some("PAYLOAD-CONTROLLER-RP2350");
-    usb_config.max_packet_size_0 = 64;
-
-    let mut builder = Builder::new(
-        driver,
-        usb_config,
-        CONFIG_DESCRIPTOR.init([0; 256]),
-        BOS_DESCRIPTOR.init([0; 256]),
-        MSOS_DESCRIPTOR.init([0; 0]),
-        CONTROL_BUF.init([0; 64]),
+    let parts = spawn_cdc_acm(
+        spawner,
+        usb,
+        UsbCdcConfig::new(
+            0x1209,
+            0x0001,
+            "MARV",
+            "Payload Controller",
+            "PAYLOAD-CONTROLLER-RP2350",
+        ),
     );
-    let state = CDC_ACM_STATE.init(State::new());
-    let class = CdcAcmClass::new(&mut builder, state, USB_PACKET_SIZE);
-    let (sender, receiver_class) = class.split();
-    let usb = builder.build();
 
-    spawner.spawn(usb_device_task(usb)).unwrap();
     spawner
         .spawn(usb_cdc_ingest_task(
-            receiver_class,
+            parts.receiver,
             hil_config,
             phase_subscriber,
             state_subscriber,
@@ -345,6 +300,6 @@ pub fn spawn(
         ))
         .unwrap();
     spawner
-        .spawn(usb_cdc_egress_task(sender, hil_config, receiver))
+        .spawn(usb_cdc_egress_task(parts.sender, hil_config, receiver))
         .unwrap();
 }

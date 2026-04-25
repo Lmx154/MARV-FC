@@ -1,11 +1,8 @@
 #![allow(dead_code)]
 
-use common::messages::fault::ResetReason;
 use common::messages::runtime::FlightPhase;
 use common::services::health::{WatchdogContract, WatchdogSource};
-use embassy_rp::watchdog::{ResetReason as RpResetReason, Watchdog};
-use embassy_rp::{Peri, peripherals};
-use embassy_time::Duration;
+pub use rp235x_base::watchdog::{HardwareWatchdog, WatchdogResources};
 
 pub const FEED_AUTHORITY: &str = "core0 watchdog supervisor";
 
@@ -48,43 +45,6 @@ pub const fn contract_for_phase(
         FlightPhase::Hil => HIL_CONTRACT,
         FlightPhase::Ready | FlightPhase::Active | FlightPhase::Fault => {
             ready_contract(pressure_transducer_enabled)
-        }
-    }
-}
-
-pub struct WatchdogResources {
-    pub peripheral: Peri<'static, peripherals::WATCHDOG>,
-    pub timeout_ms: u32,
-}
-
-pub struct HardwareWatchdog {
-    inner: Watchdog,
-    timeout_ms: u32,
-}
-
-impl HardwareWatchdog {
-    pub fn new(peripheral: Peri<'static, peripherals::WATCHDOG>, timeout_ms: u32) -> Self {
-        Self {
-            inner: Watchdog::new(peripheral),
-            timeout_ms,
-        }
-    }
-
-    pub fn start(&mut self) {
-        self.inner.pause_on_debug(true);
-        self.inner
-            .start(Duration::from_millis(u64::from(self.timeout_ms.max(1))));
-    }
-
-    pub fn feed(&mut self) {
-        self.inner.feed();
-    }
-
-    pub fn reset_reason(&self) -> ResetReason {
-        match self.inner.reset_reason() {
-            Some(RpResetReason::Forced) => ResetReason::Software,
-            Some(RpResetReason::TimedOut) => ResetReason::Watchdog,
-            None => ResetReason::Unknown,
         }
     }
 }

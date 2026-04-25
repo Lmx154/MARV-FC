@@ -51,6 +51,13 @@ This document outlines the hardware configurations and pin assignments for the M
     - IO2: GP29
     - IO3: GP30
     - IO4: GP31
+  - **External ADC**: ADC
+    - ADC1: RPB_GPIO42_ADC2 (GP42 / ADC2) - SAM-M10Q GPS PIO UART TX
+    - ADC2: RPB_GPIO43_ADC3 (GP43 / ADC3) - SAM-M10Q GPS PIO UART RX
+    - ADC3: RPB_GPIO44_ADC4 (GP44 / ADC4)
+    - ADC4: RPB_GPIO45_ADC5 (GP45 / ADC5)
+    - ADC5: RPB_GPIO46_ADC6 (GP46 / ADC6)
+    - ADC6: RPB_GPIO47_ADC7 (GP47 / ADC7)
   - **ESC Pads**
     - C/CURRENT_SENSE: 
     - 1/PWM1: GP39

@@ -88,16 +88,6 @@ fn report_watchdog_progress(mask: u32) {
     let _ = WATCHDOG_LIVENESS_CHANNEL.try_send(LivenessUpdate::new(mask, watchdog_now_ms()));
 }
 
-impl common::services::health::WatchdogDriver for watchdog::HardwareWatchdog {
-    fn start(&mut self) {
-        watchdog::HardwareWatchdog::start(self);
-    }
-
-    fn feed(&mut self) {
-        watchdog::HardwareWatchdog::feed(self);
-    }
-}
-
 fn deadline_after_ms(now: MeasurementTimestamp, delay_ms: u32) -> MeasurementTimestamp {
     MeasurementTimestamp::from_micros(
         now.as_micros()
