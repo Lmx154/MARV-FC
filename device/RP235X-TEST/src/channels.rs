@@ -1,6 +1,6 @@
 use common::services::acquisition::{
     BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleChannel, GpsFixSampleSubscriber,
-    ImuSampleChannel, ImuSampleSubscriber,
+    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleChannel, MagnetometerSampleSubscriber,
 };
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
@@ -33,6 +33,12 @@ pub type TestBarometerChannel = BarometerSampleChannel<
     SENSOR_CHANNEL_SUBS,
     SENSOR_CHANNEL_PUBS,
 >;
+pub type TestMagnetometerChannel = MagnetometerSampleChannel<
+    CriticalSectionRawMutex,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
+>;
 pub type TestGpsChannel = GpsFixSampleChannel<
     CriticalSectionRawMutex,
     GPS_CHANNEL_DEPTH,
@@ -53,6 +59,13 @@ pub type TestBarometerSubscriber = BarometerSampleSubscriber<
     SENSOR_CHANNEL_SUBS,
     SENSOR_CHANNEL_PUBS,
 >;
+pub type TestMagnetometerSubscriber = MagnetometerSampleSubscriber<
+    'static,
+    CriticalSectionRawMutex,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
+>;
 pub type TestGpsSubscriber = GpsFixSampleSubscriber<
     'static,
     CriticalSectionRawMutex,
@@ -64,5 +77,6 @@ pub type TestGpsSubscriber = GpsFixSampleSubscriber<
 pub static IMU_CHANNEL: TestImuChannel = TestImuChannel::new();
 pub static AUX_IMU_CHANNEL: TestImuChannel = TestImuChannel::new();
 pub static BAROMETER_CHANNEL: TestBarometerChannel = TestBarometerChannel::new();
+pub static MAGNETOMETER_CHANNEL: TestMagnetometerChannel = TestMagnetometerChannel::new();
 pub static GPS_CHANNEL: TestGpsChannel = TestGpsChannel::new();
 pub static IMU_INIT_SIGNAL: Signal<CriticalSectionRawMutex, ImuInitReport> = Signal::new();

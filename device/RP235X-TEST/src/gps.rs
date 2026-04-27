@@ -9,8 +9,8 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Pin, Pull};
 use embassy_rp::peripherals::PIO1;
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
-use embassy_rp::pio_programs::uart::{PioUartRx, PioUartTx};
-use embassy_time::{Duration, Instant, Ticker, Timer};
+use embassy_rp::pio_programs::uart::PioUartTx;
+use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use rp235x_base::pio_uart::new_duplex_pio_uart;
 
 use crate::buses::GpsPioUartBus;
@@ -26,9 +26,10 @@ const GPS_RX_LOG_INTERVAL_BYTES: u32 = 2_048;
 const GPS_CONFIG_INITIAL_RETRIES: u32 = 3;
 const GPS_CONFIG_RESEND_INTERVAL_TICKS: u32 = 5;
 const GPS_NO_RX_LOG_INTERVAL_TICKS: u32 = 5;
-const GPS_RX_EDGE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
-const GPS_PIO_UART_DIAGNOSTIC_PING: bool = true;
-const GPS_DIAGNOSTIC_PING_PERIOD: Duration = Duration::from_secs(1);
+const GPS_GPIO_EDGE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const GPS_GPIO_EDGE_PROBE_SLICE: Duration = Duration::from_millis(10);
+const GPS_GPIO_EDGE_PROBE_SLICES: usize = 200;
+const GPS_GPIO_EDGE_PROBE_CAP: u32 = 64;
 
 bind_interrupts!(struct GpsPioIrqs {
     PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
@@ -41,9 +42,15 @@ pub fn spawn(spawner: &Spawner, bus: GpsPioUartBus, pins: GpsPioUartPins) {
 #[embassy_executor::task]
 async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUartPins) -> ! {
     Timer::after(GPS_BOOT_DELAY).await;
-    // Diagnostic only: clone the pin before the PIO driver owns it so we can tell
-    // whether the GPS TX line is electrically active at all.
-    probe_rx_pin_activity(unsafe { pins.rx.clone_unchecked() }).await;
+
+    probe_pio_pin_activity(pinmap::GPS_PIO_UART_TX, unsafe {
+        pins.tx.clone_unchecked()
+    })
+    .await;
+    probe_pio_pin_activity(pinmap::GPS_PIO_UART_RX, unsafe {
+        pins.rx.clone_unchecked()
+    })
+    .await;
 
     let mut pio = Pio::new(pio_peripheral, GpsPioIrqs);
     let (mut gps_tx, mut gps_rx) = new_duplex_pio_uart(
@@ -53,6 +60,8 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
         pins,
         pinmap::GPS_PIO_UART_BAUD,
     );
+    let mut gps = UbloxM10::new();
+
     info!(
         "sam-m10q gps pio uart ready: tx=GP{=u8} rx=GP{=u8} baud={=u32} nav_hz={=u8}",
         pinmap::GPS_PIO_UART_TX,
@@ -61,11 +70,6 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
         GPS_NAV_RATE_HZ,
     );
 
-    if GPS_PIO_UART_DIAGNOSTIC_PING {
-        gps_uart_diagnostic_ping(&mut gps_tx, &mut gps_rx).await;
-    }
-
-    let mut gps = UbloxM10::new();
     let config = SamM10qConfig {
         baud_rate: pinmap::GPS_PIO_UART_BAUD,
         nav_rate_hz: GPS_NAV_RATE_HZ,
@@ -73,7 +77,6 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
     };
     let mut payload_scratch = [0u8; 1];
     let mut tx_frame = [0u8; MAX_CFG_VALSET_FRAME_LEN];
-
     let mut poll_frame = [0u8; 8];
     let mut config_acknowledged = false;
     let mut rx_byte_count = 0u32;
@@ -101,7 +104,7 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
 
                 if rx_byte_count == 0 && retry_ticks % GPS_NO_RX_LOG_INTERVAL_TICKS == 0 {
                     warn!(
-                        "sam-m10q no rx bytes yet after {=u32}s; check gps tx->GP{=u8}, ground, power, and baud",
+                        "sam-m10q no pio uart rx bytes yet after {=u32}s; check gps tx->GP{=u8}, ground, power, and baud",
                         retry_ticks,
                         pinmap::GPS_PIO_UART_RX,
                     );
@@ -129,19 +132,19 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
         rx_byte_count = rx_byte_count.wrapping_add(1);
         if !first_rx_logged {
             first_rx_logged = true;
-            info!("sam-m10q first rx byte=0x{=u8:02x}", byte);
+            info!("sam-m10q pio uart first rx byte=0x{=u8:02x}", byte);
         }
         if byte == b'$' {
-            info!("sam-m10q nmea start byte observed");
+            info!("sam-m10q pio uart nmea start byte observed");
         }
         if previous_rx_byte == 0xb5 && byte == 0x62 {
-            info!("sam-m10q ubx sync observed");
+            info!("sam-m10q pio uart ubx sync observed");
         }
         previous_rx_byte = byte;
 
         if rx_byte_count % GPS_RX_LOG_INTERVAL_BYTES == 0 {
             info!(
-                "sam-m10q rx bytes={=u32} nav_pvt={=u32}",
+                "sam-m10q pio uart rx bytes={=u32} nav_pvt={=u32}",
                 rx_byte_count, nav_pvt_count,
             );
         }
@@ -149,7 +152,7 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
         let event = match gps.push_byte(byte) {
             Ok(event) => event,
             Err(_) => {
-                warn!("sam-m10q ubx parser error; resetting parser");
+                warn!("sam-m10q pio uart ubx parser error; resetting parser");
                 gps.reset_parser();
                 continue;
             }
@@ -158,7 +161,7 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
         match event {
             Some(Event::Ack(ack)) if ack.acknowledged => {
                 info!(
-                    "sam-m10q ack class=0x{=u8:02x} id=0x{=u8:02x}",
+                    "sam-m10q pio uart ack class=0x{=u8:02x} id=0x{=u8:02x}",
                     ack.class_id, ack.message_id,
                 );
                 if ack.class_id == 0x06 && ack.message_id == 0x8a {
@@ -167,7 +170,7 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
             }
             Some(Event::Ack(ack)) => {
                 warn!(
-                    "sam-m10q nack class=0x{=u8:02x} id=0x{=u8:02x}",
+                    "sam-m10q pio uart nack class=0x{=u8:02x} id=0x{=u8:02x}",
                     ack.class_id, ack.message_id,
                 );
             }
@@ -186,62 +189,42 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
     }
 }
 
-async fn gps_uart_diagnostic_ping(
-    gps_tx: &mut PioUartTx<'_, PIO1, 0>,
-    gps_rx: &mut PioUartRx<'_, PIO1, 1>,
-) -> ! {
-    let mut ticker = Ticker::every(GPS_DIAGNOSTIC_PING_PERIOD);
-    let mut tx_count = 0u32;
-    let mut rx_count = 0u32;
-
-    warn!(
-        "gps pio uart diagnostic ping enabled: tx=GP{=u8} rx=GP{=u8} baud={=u32}",
-        pinmap::GPS_PIO_UART_TX,
-        pinmap::GPS_PIO_UART_RX,
-        pinmap::GPS_PIO_UART_BAUD,
-    );
-
-    loop {
-        match select(gps_rx.read_u8(), ticker.next()).await {
-            Either::First(byte) => {
-                rx_count = rx_count.wrapping_add(1);
-                info!(
-                    "gps pio diag rx count={=u32} byte=0x{=u8:02x} ascii={=u8}",
-                    rx_count, byte, byte,
-                );
-            }
-            Either::Second(()) => {
-                tx_count = tx_count.wrapping_add(1);
-                write_gps_bytes(gps_tx, b"MARV-PIO-PING\n").await;
-                info!("gps pio diag tx ping count={=u32}", tx_count);
-            }
-        }
-    }
-}
-
-async fn probe_rx_pin_activity<RxPin>(rx_pin: Peri<'static, RxPin>)
+async fn probe_pio_pin_activity<P>(pin_number: u8, pin: Peri<'static, P>)
 where
-    RxPin: Pin + 'static,
+    P: Pin + 'static,
 {
-    let mut input = Input::new(rx_pin, Pull::None);
+    let mut input = Input::new(pin, Pull::None);
     info!(
-        "sam-m10q rx pin GP{=u8} idle_high={=bool}",
-        pinmap::GPS_PIO_UART_RX,
+        "sam-m10q pio probe GP{=u8} idle_high={=bool}",
+        pin_number,
         input.is_high(),
     );
 
-    if embassy_time::with_timeout(GPS_RX_EDGE_PROBE_TIMEOUT, input.wait_for_any_edge())
-        .await
-        .is_ok()
-    {
-        info!(
-            "sam-m10q rx pin GP{=u8} edge observed before pio uart",
-            pinmap::GPS_PIO_UART_RX,
+    let mut edge_count = 0u32;
+    for _ in 0..GPS_GPIO_EDGE_PROBE_SLICES {
+        if edge_count >= GPS_GPIO_EDGE_PROBE_CAP {
+            break;
+        }
+        if with_timeout(GPS_GPIO_EDGE_PROBE_SLICE, input.wait_for_any_edge())
+            .await
+            .is_ok()
+        {
+            edge_count = edge_count.wrapping_add(1);
+        }
+    }
+
+    if edge_count == 0 {
+        warn!(
+            "sam-m10q pio probe GP{=u8} no edges for {=u64}ms",
+            pin_number,
+            GPS_GPIO_EDGE_PROBE_TIMEOUT.as_millis(),
         );
     } else {
-        warn!(
-            "sam-m10q rx pin GP{=u8} had no edges during pre-pio probe",
-            pinmap::GPS_PIO_UART_RX,
+        info!(
+            "sam-m10q pio probe GP{=u8} edges={=u32} in {=u64}ms",
+            pin_number,
+            edge_count,
+            GPS_GPIO_EDGE_PROBE_TIMEOUT.as_millis(),
         );
     }
 }
@@ -257,11 +240,11 @@ async fn send_startup_config(
         Ok(len) => {
             write_gps_bytes(gps_tx, &tx_frame[..len]).await;
             info!(
-                "sam-m10q startup config sent bytes={=usize} attempt={=u32}",
+                "sam-m10q pio uart startup config sent bytes={=usize} attempt={=u32}",
                 len, attempt,
             );
         }
-        Err(_) => warn!("sam-m10q startup config encode failed"),
+        Err(_) => warn!("sam-m10q pio uart startup config encode failed"),
     }
 }
 

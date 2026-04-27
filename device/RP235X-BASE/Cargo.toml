@@ -24,5 +24,6 @@ embedded-hal-async = "1.0"
 embedded-hal-bus = "0.2"
 embedded-sdmmc = { version = "0.7.0", default-features = false, features = ["defmt-log"] }
 embassy-sync = "0.7.2"
+fixed = "1.29.0"
 smart-leds = "0.4"
 static_cell = "2.1.1"

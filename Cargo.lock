@@ -1580,6 +1580,7 @@ dependencies = [
  "embedded-hal-async",
  "embedded-hal-bus",
  "embedded-sdmmc",
+ "fixed",
  "smart-leds",
  "static_cell",
 ]

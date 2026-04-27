@@ -2,6 +2,9 @@
 
 pub const FC_RADIO_TX: u8 = 0;
 pub const FC_RADIO_RX: u8 = 1;
+pub const GPS_UART0_TX: u8 = FC_RADIO_TX;
+pub const GPS_UART0_RX: u8 = FC_RADIO_RX;
+pub const GPS_UART0_BAUD: u32 = 9_600;
 
 pub const AUX_I2C_SDA: u8 = 2;
 pub const AUX_I2C_SCL: u8 = 3;
@@ -41,7 +44,7 @@ pub const ESC_PWM_2: u8 = 38;
 pub const ESC_PWM_1: u8 = 39;
 
 // u-blox SAM-M10Q GPS on the RP235X test hardware:
-// ADC1 is GP42 and is treated as PIO UART TX; ADC2 is GP43 and is treated as PIO UART RX.
-pub const GPS_PIO_UART_TX: u8 = 42;
-pub const GPS_PIO_UART_RX: u8 = 43;
-pub const GPS_PIO_UART_BAUD: u32 = 115_200;
+// ADC2 is GP43 and is treated as PIO UART TX; ADC1 is GP42 and is treated as PIO UART RX.
+pub const GPS_PIO_UART_TX: u8 = 43;
+pub const GPS_PIO_UART_RX: u8 = 42;
+pub const GPS_PIO_UART_BAUD: u32 = 9_600;

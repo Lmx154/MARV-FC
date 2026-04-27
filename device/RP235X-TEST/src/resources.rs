@@ -8,7 +8,7 @@ use crate::buses::{
     GpsPioUartBus, RadioLinkUart, SensorSpiBus, StatusLedPio, StorageSpiBus,
 };
 
-pub type GpsPioUartPins = PioUartPins<peripherals::PIN_42, peripherals::PIN_43>;
+pub type GpsPioUartPins = PioUartPins<peripherals::PIN_43, peripherals::PIN_42>;
 
 pub struct SensorPins {
     pub sck: Peri<'static, peripherals::PIN_10>,
@@ -128,8 +128,8 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
         PIN_37: esc_telemetry,
         PIN_38: esc_pwm_2,
         PIN_39: esc_pwm_1,
-        PIN_42: gps_pio_uart_tx,
-        PIN_43: gps_pio_uart_rx,
+        PIN_42: gps_pio_uart_rx,
+        PIN_43: gps_pio_uart_tx,
         SPI0: storage_spi,
         SPI1: sensor_spi,
         I2C0: environmental_i2c,

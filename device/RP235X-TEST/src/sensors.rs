@@ -3,6 +3,7 @@ use core::cell::RefCell;
 use common::drivers::bmi088::{
     AccelRange as Bmi088AccelRange, Bmi088, GyroRange as Bmi088GyroRange,
 };
+use common::drivers::bmm350::{BMM350_ADDR, Bmm350};
 use common::drivers::bmp581::{
     BMP581_ADDR_ALT, BMP581_ADDR_PRIMARY, BMP581_CHIP_ID_ALT, BMP581_CHIP_ID_PRIMARY, Bmp581,
     Bmp581Config, read_bmp581_chip_id,
@@ -12,8 +13,9 @@ use common::drivers::lsm6dsv32x::{
 };
 use common::interfaces::timing::MonotonicClock;
 use common::services::acquisition::{
-    BarometerServiceConfig, Bmi088ImuSource, Bmp581BarometerSource, Lsm6dsv32xImuSource,
-    run_barometer_service,
+    BarometerServiceConfig, Bmi088ImuSource, Bmm350MagnetometerSource, Bmp581BarometerSource,
+    Lsm6dsv32xImuSource, MagnetometerServiceConfig, run_barometer_service,
+    run_magnetometer_service,
 };
 use common::utilities::time::MeasurementTimestamp;
 use defmt::{info, warn};
@@ -25,9 +27,11 @@ use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_time::{Duration, Timer};
 use embedded_hal_async::delay::DelayNs;
 
-use crate::buses::{EnvironmentalI2cBus, SensorSpiBus};
-use crate::channels::{AUX_IMU_CHANNEL, BAROMETER_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL};
-use crate::resources::{EnvironmentalPins, SensorPins};
+use crate::buses::{AuxiliaryNavigationI2cBus, EnvironmentalI2cBus, SensorSpiBus};
+use crate::channels::{
+    AUX_IMU_CHANNEL, BAROMETER_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL, MAGNETOMETER_CHANNEL,
+};
+use crate::resources::{AuxiliaryNavigationPins, EnvironmentalPins, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
 use crate::spi1_sensor_cluster::{
     ImuSchedule, SensorSpiClusterConfig, SensorSpiClusterError, run_spi1_sensor_cluster,
@@ -37,9 +41,12 @@ const SENSOR_SPI_FREQUENCY_HZ: u32 = 1_000_000;
 const SENSOR_IMU_PERIOD_MS: u32 = 1;
 const BMP581_I2C_FREQUENCY_HZ: u32 = 400_000;
 const BMP581_PERIOD_MS: u32 = 20;
+const BMM350_I2C_FREQUENCY_HZ: u32 = 400_000;
+const BMM350_PERIOD_MS: u32 = 40;
 
 bind_interrupts!(struct EnvironmentalI2cIrqs {
     I2C0_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
+    I2C1_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C1>;
 });
 
 struct EmbassyClock;
@@ -70,6 +77,8 @@ pub fn spawn(
     sensor_pins: SensorPins,
     environmental_bus: EnvironmentalI2cBus,
     environmental_pins: EnvironmentalPins,
+    auxiliary_navigation_bus: AuxiliaryNavigationI2cBus,
+    auxiliary_navigation_pins: AuxiliaryNavigationPins,
 ) {
     IMU_INIT_SIGNAL.reset();
     spawner
@@ -77,6 +86,12 @@ pub fn spawn(
         .unwrap();
     spawner
         .spawn(bmp581_barometer_task(environmental_bus, environmental_pins))
+        .unwrap();
+    spawner
+        .spawn(bmm350_magnetometer_task(
+            auxiliary_navigation_bus,
+            auxiliary_navigation_pins,
+        ))
         .unwrap();
 }
 
@@ -234,6 +249,52 @@ async fn bmp581_barometer_task(bus: EnvironmentalI2cBus, pins: EnvironmentalPins
         &mut delay,
         BarometerServiceConfig::new(true, BMP581_PERIOD_MS),
         |error| warn!("BMP581 acquisition error: {:?}", error),
+    )
+    .await
+}
+
+#[embassy_executor::task]
+async fn bmm350_magnetometer_task(
+    bus: AuxiliaryNavigationI2cBus,
+    pins: AuxiliaryNavigationPins,
+) -> ! {
+    let mut i2c_config = i2c::Config::default();
+    i2c_config.frequency = BMM350_I2C_FREQUENCY_HZ;
+
+    let i2c = I2c::new_async(
+        bus.i2c,
+        pins.scl,
+        pins.sda,
+        EnvironmentalI2cIrqs,
+        i2c_config,
+    );
+
+    let mut driver = Bmm350::new(i2c, BMM350_ADDR);
+    let mut init_delay = EmbassyDelay;
+
+    loop {
+        match driver.init(&mut init_delay).await {
+            Ok(()) => {
+                info!("BMM350 initialized at I2C address 0x{=u8:02X}", BMM350_ADDR);
+                break;
+            }
+            Err(error) => {
+                warn!("BMM350 initialization failed: {:?}", error);
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    }
+
+    let mut source = Bmm350MagnetometerSource::new(driver, EmbassyDelay);
+    let clock = EmbassyClock;
+    let mut delay = EmbassyDelay;
+    run_magnetometer_service(
+        &MAGNETOMETER_CHANNEL,
+        &mut source,
+        &clock,
+        &mut delay,
+        MagnetometerServiceConfig::new(true, BMM350_PERIOD_MS),
+        |error| warn!("BMM350 acquisition error: {:?}", error),
     )
     .await
 }

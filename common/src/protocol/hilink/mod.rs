@@ -234,6 +234,13 @@ pub struct ImuPayload {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MagPayload {
+    pub stamp: SimStamp,
+    pub field_ut: [f32; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BaroPayload {
     pub stamp: SimStamp,
     pub pressure_pa: f32,
@@ -1041,6 +1048,27 @@ impl WirePayload for ImuPayload {
     }
 }
 
+impl WirePayload for MagPayload {
+    const MSG_TYPE: MsgType = MsgType::Mag;
+    const WIRE_LEN: usize = 28;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.f32x3(self.field_ut)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            field_ut: r.f32x3()?,
+        })
+    }
+}
+
 impl WirePayload for BaroPayload {
     const MSG_TYPE: MsgType = MsgType::Baro;
     const WIRE_LEN: usize = 28;
@@ -1707,6 +1735,14 @@ mod tests {
             3_001,
         );
         round_trip_payload(
+            &MagPayload {
+                stamp,
+                field_ut: [10.0, -20.0, 30.0],
+            },
+            32,
+            3_002,
+        );
+        round_trip_payload(
             &GpsPayload {
                 stamp,
                 lat_deg: 30.2672,
@@ -1717,8 +1753,8 @@ mod tests {
                 fix_type: 3,
                 reserved0: [0; 2],
             },
-            32,
-            3_002,
+            33,
+            3_003,
         );
         round_trip_payload(
             &SystemStatePayload {
@@ -1728,8 +1764,8 @@ mod tests {
                 flags: response_flags::ARMED | response_flags::MOTORS_VALID,
                 battery_voltage_v: 16.2,
             },
-            33,
-            3_003,
+            34,
+            3_004,
         );
         round_trip_payload(
             &TelemetrySnapshotPayload {
@@ -1745,8 +1781,8 @@ mod tests {
                 snr_db_x100: 1_150,
                 loss_pct_x100: 25,
             },
-            34,
-            3_004,
+            35,
+            3_005,
         );
     }
 

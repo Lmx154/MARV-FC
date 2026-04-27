@@ -3,6 +3,7 @@
 pub mod barometer_service;
 pub mod channels;
 pub mod hil;
+pub mod magnetometer_service;
 pub mod pressure_transducer_service;
 pub mod sources;
 
@@ -19,10 +20,11 @@ pub use channels::{
     TimeSampleWaitResult,
 };
 pub use hil::{HilMavlinkDispatch, MavlinkHilSensorBridge};
+pub use magnetometer_service::{MagnetometerServiceConfig, run_magnetometer_service};
 pub use pressure_transducer_service::{
     PressureTransducerServiceConfig, run_pressure_transducer_service,
 };
 pub use sources::{
-    Bmi088ImuSource, Bmp388BarometerSource, Bmp390BarometerSource, Bmp581BarometerSource,
-    Lsm6dsv32xImuSource, Mpu6050ImuSource,
+    Bmi088ImuSource, Bmm350MagnetometerSource, Bmp388BarometerSource, Bmp390BarometerSource,
+    Bmp581BarometerSource, Lsm6dsv32xImuSource, Mpu6050ImuSource,
 };

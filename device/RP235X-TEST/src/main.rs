@@ -42,5 +42,7 @@ async fn main(spawner: Spawner) {
         resources.pins.sensors,
         resources.buses.environmental,
         resources.pins.environmental,
+        resources.buses.auxiliary_navigation,
+        resources.pins.auxiliary_navigation,
     );
 }
