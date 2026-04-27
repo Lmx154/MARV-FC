@@ -30,6 +30,7 @@ pub struct HilGpsSample {
     pub alt_m: f32,
     pub vel_ned_mps: [f32; 3],
     pub sats: u8,
+    pub fix_type: u8,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

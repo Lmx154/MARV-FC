@@ -1,13 +1,13 @@
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use common::messages::sensor::{BarometerSampleStamped, ImuSampleStamped};
+use common::messages::sensor::{BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped};
 use common::protocol::hilink::{
     self, AckPayload, ActuatorStatusPayload, ActuatorStatusRequestPayload, ArmPayload, BaroPayload,
     BenchDisablePayload, BenchEnablePayload, CvWaypointPayload, DisarmPayload, DshotCommandPayload,
-    GlobalWaypointPayload, HeartbeatPayload, HilReadyPayload, HilResponseFrame, HilSensorFrame,
-    ImuPayload, MissionWaypointPayload, MotorStopPayload, MotorSweepPayload, MotorTestPayload,
-    MsgType, NackPayload, PingPayload, PongPayload, RtlPayload, SimStamp, TofWaypointPayload,
-    WirePayload, response_flags,
+    GlobalWaypointPayload, GpsPayload, HeartbeatPayload, HilReadyPayload, HilResponseFrame,
+    HilSensorFrame, ImuPayload, MissionWaypointPayload, MotorStopPayload, MotorSweepPayload,
+    MotorTestPayload, MsgType, NackPayload, PingPayload, PongPayload, RtlPayload, SimStamp,
+    TofWaypointPayload, WirePayload, response_flags,
 };
 use common::utilities::time::MeasurementTimestamp;
 use common::utilities::units::{STANDARD_SEA_LEVEL_PRESSURE_PA, pressure_altitude_m};
@@ -26,7 +26,10 @@ use rp235x_base::usb_cdc::{
     write_packet_chunks,
 };
 
-use crate::channels::{BAROMETER_CHANNEL, IMU_CHANNEL, TestBarometerSubscriber, TestImuSubscriber};
+use crate::channels::{
+    BAROMETER_CHANNEL, GPS_CHANNEL, IMU_CHANNEL, TestBarometerSubscriber, TestGpsSubscriber,
+    TestImuSubscriber,
+};
 use crate::dshot;
 
 const RX_FRAME_CAPACITY: usize = hilink::encoded_frame_len(HilSensorFrameMaxPayload::WIRE_LEN);
@@ -64,6 +67,7 @@ enum OutboundMessage {
     HilResponse(HilResponseFrame),
     Imu(ImuPayload),
     Baro(BaroPayload),
+    Gps(GpsPayload),
     ActuatorStatus(ActuatorStatusPayload),
 }
 
@@ -91,6 +95,7 @@ pub fn spawn(spawner: &Spawner, usb: Peri<'static, USB>) {
         .spawn(sensor_telemetry_task(
             IMU_CHANNEL.subscriber().unwrap(),
             BAROMETER_CHANNEL.subscriber().unwrap(),
+            GPS_CHANNEL.subscriber().unwrap(),
         ))
         .unwrap();
 }
@@ -571,6 +576,19 @@ fn baro_payload(sample: BarometerSampleStamped) -> BaroPayload {
     }
 }
 
+fn gps_payload(sample: GpsFixSampleStamped) -> GpsPayload {
+    GpsPayload {
+        stamp: stamp_from_measurement(sample.timestamp),
+        lat_deg: sample.sample.lat_deg,
+        lon_deg: sample.sample.lon_deg,
+        alt_msl_m: sample.sample.alt_m,
+        vel_ned_mps: sample.sample.vel_ned_mps,
+        sats: sample.sample.sats,
+        fix_type: sample.sample.fix_type,
+        reserved0: [0; 2],
+    }
+}
+
 fn drain_latest_imu(subscriber: &mut TestImuSubscriber) -> Option<ImuSampleStamped> {
     let mut latest = None;
     while let Some(message) = subscriber.try_next_message() {
@@ -591,10 +609,21 @@ fn drain_latest_baro(subscriber: &mut TestBarometerSubscriber) -> Option<Baromet
     latest
 }
 
+fn drain_latest_gps(subscriber: &mut TestGpsSubscriber) -> Option<GpsFixSampleStamped> {
+    let mut latest = None;
+    while let Some(message) = subscriber.try_next_message() {
+        if let WaitResult::Message(sample) = message {
+            latest = Some(sample);
+        }
+    }
+    latest
+}
+
 #[embassy_executor::task]
 async fn sensor_telemetry_task(
     mut imu_subscriber: TestImuSubscriber,
     mut barometer_subscriber: TestBarometerSubscriber,
+    mut gps_subscriber: TestGpsSubscriber,
 ) -> ! {
     let mut ticker = Ticker::every(SENSOR_TELEMETRY_PERIOD);
 
@@ -607,6 +636,10 @@ async fn sensor_telemetry_task(
 
         if let Some(sample) = drain_latest_baro(&mut barometer_subscriber) {
             enqueue_telemetry_outbound(OutboundMessage::Baro(baro_payload(sample)));
+        }
+
+        if let Some(sample) = drain_latest_gps(&mut gps_subscriber) {
+            enqueue_telemetry_outbound(OutboundMessage::Gps(gps_payload(sample)));
         }
     }
 }
@@ -679,6 +712,9 @@ fn encode_outbound(
             hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
         }
         OutboundMessage::Baro(payload) => {
+            hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
+        }
+        OutboundMessage::Gps(payload) => {
             hilink::encode_packet(&payload, seq, send_time_ms, raw_scratch, encoded)
         }
         OutboundMessage::ActuatorStatus(payload) => {

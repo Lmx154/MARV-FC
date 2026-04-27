@@ -368,6 +368,7 @@ pub fn frame_to_hil_messages<const N: usize>(
                         (message.vd_cm_s as f32) / 100.0,
                     ],
                     sats: message.satellites_visible,
+                    fix_type: message.fix_type,
                 }));
             }
         }

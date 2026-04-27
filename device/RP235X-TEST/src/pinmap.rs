@@ -44,4 +44,4 @@ pub const ESC_PWM_1: u8 = 39;
 // ADC1 is GP42 and is treated as PIO UART TX; ADC2 is GP43 and is treated as PIO UART RX.
 pub const GPS_PIO_UART_TX: u8 = 42;
 pub const GPS_PIO_UART_RX: u8 = 43;
-pub const GPS_PIO_UART_BAUD: u32 = 9_600;
+pub const GPS_PIO_UART_BAUD: u32 = 115_200;

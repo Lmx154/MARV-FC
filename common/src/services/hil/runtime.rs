@@ -274,6 +274,7 @@ impl HilRuntime {
                         alt_m: sample.alt_m,
                         vel_ned_mps: sample.vel_ned_mps,
                         sats: sample.sats,
+                        fix_type: sample.fix_type,
                     },
                 });
                 HilDispatch {

@@ -25,6 +25,7 @@ embassy-time = "0.5.0"
 embedded-sdmmc = { version = "0.7.0", default-features = false, features = ["defmt-log"] }
 nalgebra = { version = "0.33", default-features = false, features = ["libm"] }
 num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+ublox = { version = "0.10", default-features = false, features = ["ubx_proto33"] }
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }

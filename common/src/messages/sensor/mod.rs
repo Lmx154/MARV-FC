@@ -84,6 +84,7 @@ pub struct GpsFixSample {
     pub alt_m: f32,
     pub vel_ned_mps: [f32; 3],
     pub sats: u8,
+    pub fix_type: u8,
 }
 
 /// GPS fix plus acquisition timestamp.

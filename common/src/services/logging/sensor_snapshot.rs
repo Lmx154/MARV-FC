@@ -753,6 +753,7 @@ mod tests {
                     alt_m: 100.0,
                     vel_ned_mps: [1.0, 2.0, 3.0],
                     sats: 10,
+                    fix_type: 3,
                 },
             });
 
