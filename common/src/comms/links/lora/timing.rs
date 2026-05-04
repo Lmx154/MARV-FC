@@ -4,10 +4,10 @@ use super::{LoraProfile, frame::FRAME_HEADER_LEN};
 pub struct LoraLinkTiming {
     pub frame_airtime_us: u32,
     pub pong_wait_ms: u64,
-    pub idle_timeout_ms: u64,
+    pub peer_timeout_ms: u64,
     pub rx_window_symbols: u16,
     pub pong_rx_attempts: u8,
-    pub idle_rx_attempts: u8,
+    pub peer_rx_attempts: u8,
     pub degraded_after_misses: u8,
     pub lost_after_misses: u8,
     pub rx_restart_retry_limit: u8,
@@ -19,15 +19,15 @@ impl LoraLinkTiming {
     pub const fn from_profile(
         profile: &LoraProfile,
         max_payload_len: u8,
-        ping_period_ms: u64,
+        keepalive_period_ms: u64,
     ) -> Self {
         let frame_len = FRAME_HEADER_LEN as u8 + max_payload_len;
         let frame_airtime_us = profile.time_on_air_us(frame_len);
         let frame_airtime_ms = ceil_div_u64(frame_airtime_us as u64, 1_000);
         let exchange_margin_ms = frame_airtime_ms.saturating_mul(6).saturating_add(250);
-        let period_margin_ms = ping_period_ms.saturating_mul(3) / 4;
+        let period_margin_ms = keepalive_period_ms.saturating_mul(3) / 4;
         let pong_wait_ms = max_u64(exchange_margin_ms, period_margin_ms);
-        let idle_timeout_ms = ping_period_ms
+        let peer_timeout_ms = keepalive_period_ms
             .saturating_mul(4)
             .saturating_add(pong_wait_ms);
         let rx_window_symbols = clamp_u16(
@@ -43,11 +43,11 @@ impl LoraLinkTiming {
         Self {
             frame_airtime_us,
             pong_wait_ms,
-            idle_timeout_ms,
+            peer_timeout_ms,
             rx_window_symbols,
             pong_rx_attempts: clamp_u64_to_u8(ceil_div_u64(pong_wait_ms, rx_window_ms), 1, u8::MAX),
-            idle_rx_attempts: clamp_u64_to_u8(
-                ceil_div_u64(idle_timeout_ms, rx_window_ms),
+            peer_rx_attempts: clamp_u64_to_u8(
+                ceil_div_u64(peer_timeout_ms, rx_window_ms),
                 1,
                 u8::MAX,
             ),
@@ -105,6 +105,6 @@ mod tests {
         assert!(timing.rx_window_symbols > 0);
         assert!(timing.rx_window_symbols <= SX126X_MAX_RX_TIMEOUT_SYMBOLS);
         assert!(window_ms.saturating_mul(timing.pong_rx_attempts as u64) >= timing.pong_wait_ms);
-        assert!(window_ms.saturating_mul(timing.idle_rx_attempts as u64) >= timing.idle_timeout_ms);
+        assert!(window_ms.saturating_mul(timing.peer_rx_attempts as u64) >= timing.peer_timeout_ms);
     }
 }

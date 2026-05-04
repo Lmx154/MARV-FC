@@ -27,6 +27,9 @@ pub enum LoraFrameKind {
     Ping = 1,
     Pong = 2,
     Beacon = 3,
+    Data = 4,
+    LinkStatus = 5,
+    Heartbeat = 6,
 }
 
 impl LoraFrameKind {
@@ -35,6 +38,9 @@ impl LoraFrameKind {
             1 => Some(Self::Ping),
             2 => Some(Self::Pong),
             3 => Some(Self::Beacon),
+            4 => Some(Self::Data),
+            5 => Some(Self::LinkStatus),
+            6 => Some(Self::Heartbeat),
             _ => None,
         }
     }
@@ -121,7 +127,7 @@ mod tests {
         let mut buf = [0; 32];
         let frame = LoraFrame {
             source: LoraNodeRole::Radio,
-            kind: LoraFrameKind::Ping,
+            kind: LoraFrameKind::Data,
             payload: b"hello",
         };
 
@@ -129,7 +135,7 @@ mod tests {
         let decoded = decode_frame(&buf[..len]).unwrap();
 
         assert_eq!(decoded.source, LoraNodeRole::Radio);
-        assert_eq!(decoded.kind, LoraFrameKind::Ping);
+        assert_eq!(decoded.kind, LoraFrameKind::Data);
         assert_eq!(decoded.payload, b"hello");
     }
 

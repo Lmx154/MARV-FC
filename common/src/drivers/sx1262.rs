@@ -17,7 +17,6 @@ pub struct RawRx {
     pub len: u8,
     pub rssi: i16,
     pub snr_x4: i16,
-    pub irq_instant_us: u64,
 }
 
 #[derive(Debug)]
@@ -70,11 +69,6 @@ where
 }
 
 pub type Sx1262<SPI, CTRL, WAIT, DLY> = WaveshareSx1262<SPI, CTRL, WAIT, DLY>;
-
-pub fn set_irq_timestamp_fn(_f: fn() -> u64) {
-    // The published lora-phy API no longer exposes the fork-only IRQ
-    // timestamp hook. Keep this shim so callers can migrate gradually.
-}
 
 impl<SPI, CTRL, WAIT, DLY> WaveshareSx1262<SPI, CTRL, WAIT, DLY>
 where
@@ -205,7 +199,6 @@ where
             len,
             rssi: status.rssi,
             snr_x4: status.snr.saturating_mul(4),
-            irq_instant_us: 0,
         }))
     }
 }

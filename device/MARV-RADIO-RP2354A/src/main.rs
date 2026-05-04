@@ -8,7 +8,7 @@ mod config;
 mod core0;
 mod core1;
 mod interrupts;
-mod lora_demo;
+mod lora_bridge;
 mod pinmap;
 mod resources;
 mod status_indicator;

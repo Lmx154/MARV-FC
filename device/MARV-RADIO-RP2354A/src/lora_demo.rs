@@ -69,13 +69,13 @@ async fn lora_demo_task(
     publish_state(indicator, health.state()).await;
 
     info!(
-        "sx1262 lora demo ready: role={:?} freq={=u32}Hz spi={=u32}Hz airtime={=u32}us pong_wait={=u64}ms idle_timeout={=u64}ms rx_window_symbols={=u16}",
+        "sx1262 lora demo ready: role={:?} freq={=u32}Hz spi={=u32}Hz airtime={=u32}us pong_wait={=u64}ms peer_timeout={=u64}ms rx_window_symbols={=u16}",
         role,
         ACTIVE.frequency_hz,
         config::LORA_SPI_FREQUENCY_HZ,
         timing.frame_airtime_us,
         timing.pong_wait_ms,
-        timing.idle_timeout_ms,
+        timing.peer_timeout_ms,
         timing.rx_window_symbols
     );
 
@@ -443,7 +443,7 @@ where
     }
 
     loop {
-        match receive_for_attempts(radio, timing, timing.idle_rx_attempts, &mut rx_buf).await {
+        match receive_for_attempts(radio, timing, timing.peer_rx_attempts, &mut rx_buf).await {
             Ok(Some(rx)) => match decode_frame(&rx_buf[..rx.len as usize]) {
                 Ok(frame) => {
                     if let Some(seq) =
@@ -508,7 +508,7 @@ where
                 if should_log_miss(previous, health.state(), health.consecutive_misses()) {
                     warn!(
                         "lora link idle timeout after {=u64}ms misses={=u8}",
-                        timing.idle_timeout_ms,
+                        timing.peer_timeout_ms,
                         health.consecutive_misses()
                     );
                 }

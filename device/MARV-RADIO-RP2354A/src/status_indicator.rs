@@ -2,21 +2,17 @@ use common::comms::links::lora::state::LoraLinkState;
 use common::messages::control::RgbLedCommand;
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, with_timeout};
 
 use crate::channels::{
     STATUS_INDICATOR_CHANNEL, STATUS_LED_COMMAND_CHANNEL, StatusIndicatorEvent,
     StatusIndicatorReceiver,
 };
-use crate::config;
 
 const UNPAIRED_COLOR: RgbLedCommand = RgbLedCommand::new(4, 4, 4);
 const PAIRED_COLOR: RgbLedCommand = RgbLedCommand::new(0, 0, 32);
 const DEGRADED_COLOR: RgbLedCommand = RgbLedCommand::new(32, 8, 0);
 const LOST_COLOR: RgbLedCommand = RgbLedCommand::new(16, 0, 0);
 const RADIO_FAULT_COLOR: RgbLedCommand = RgbLedCommand::new(32, 0, 0);
-const PING_COLOR: RgbLedCommand = RgbLedCommand::new(32, 18, 0);
-const PONG_COLOR: RgbLedCommand = RgbLedCommand::new(0, 32, 0);
 
 fn state_color(state: LoraLinkState) -> RgbLedCommand {
     match state {
@@ -32,15 +28,11 @@ fn state_color(state: LoraLinkState) -> RgbLedCommand {
 async fn status_indicator_task(receiver: StatusIndicatorReceiver) -> ! {
     let led = STATUS_LED_COMMAND_CHANNEL.sender();
     let mut link_state = LoraLinkState::Acquiring;
-    let mut pending_event = None;
 
     led.send(state_color(link_state)).await;
 
     loop {
-        let event = match pending_event.take() {
-            Some(event) => event,
-            None => receiver.receive().await,
-        };
+        let event = receiver.receive().await;
 
         match event {
             StatusIndicatorEvent::LinkState(state) => {
@@ -49,30 +41,6 @@ async fn status_indicator_task(receiver: StatusIndicatorReceiver) -> ! {
                     info!("lora link state changed: {:?}", link_state);
                 }
                 led.send(state_color(link_state)).await;
-            }
-            StatusIndicatorEvent::Ping => {
-                led.send(PING_COLOR).await;
-                match with_timeout(
-                    Duration::from_millis(config::LORA_LED_EVENT_HOLD_MS),
-                    receiver.receive(),
-                )
-                .await
-                {
-                    Ok(event) => pending_event = Some(event),
-                    Err(_) => led.send(state_color(link_state)).await,
-                }
-            }
-            StatusIndicatorEvent::Pong => {
-                led.send(PONG_COLOR).await;
-                match with_timeout(
-                    Duration::from_millis(config::LORA_LED_EVENT_HOLD_MS),
-                    receiver.receive(),
-                )
-                .await
-                {
-                    Ok(event) => pending_event = Some(event),
-                    Err(_) => led.send(state_color(link_state)).await,
-                }
             }
         }
     }
