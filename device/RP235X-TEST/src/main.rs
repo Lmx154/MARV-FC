@@ -35,6 +35,8 @@ async fn main(spawner: Spawner) {
         &spawner,
         resources.buses.gps_pio_uart,
         resources.pins.gps_pio_uart,
+        resources.buses.radio_link,
+        resources.pins.radio_link,
     );
     sensors::spawn(
         &spawner,

@@ -32,6 +32,13 @@ impl HardwareWatchdog {
         self.inner.feed();
     }
 
+    pub fn trigger_reset(&mut self) -> ! {
+        self.inner.trigger_reset();
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
     pub fn reset_reason(&self) -> ResetReason {
         match self.inner.reset_reason() {
             Some(RpResetReason::Forced) => ResetReason::Software,

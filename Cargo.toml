@@ -3,6 +3,7 @@ members = [
     "common",
     "device/MARV-FC-RL-RP2354B",
     "device/MARV-FC-SP-RP2354B",
+    "device/MARV-RADIO-RP2354A",
     "device/PAYLOAD-CONTROLLER-RP2350",
     "device/RECOVERY-ALTIMETER-RP2350",
     "device/RP235X-BASE",

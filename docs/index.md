@@ -73,5 +73,5 @@ For most work:
 
 - `common/` and `device/` already exist in the intended roles.
 - Host-side simulation is currently implemented in the `simulator/` crate rather than the long-term `sim/` directory layout.
-- Preserved LoRa transport code remains under `common/src/coms/transport/lora/` until a deliberate migration moves it under `common/src/comms/links/lora/`.
+- LoRa physical link profiles live under `common/src/comms/links/lora/`; the previous `coms` compatibility path has been removed.
 - Repo-reality mismatches belong in [`05-current-deviations-and-migration.md`](./05-current-deviations-and-migration.md).

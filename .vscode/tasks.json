@@ -94,6 +94,84 @@
 			"problemMatcher": []
 		},
 		{
+			"label": "Check MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["check", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Build MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Check MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["check", "--no-default-features", "--features", "ground-station", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Build MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release", "--no-default-features", "--features", "ground-station", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release", "--no-default-features", "--features", "ground-station", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
 			"label": "Build PAYLOAD-CONTROLLER-RP2350",
 			"type": "shell",
 			"command": "cargo",

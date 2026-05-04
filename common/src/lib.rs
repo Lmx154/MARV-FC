@@ -64,6 +64,4 @@ pub mod services;
 pub mod tasks;
 pub mod utilities;
 
-// Temporary compatibility shims kept while the documented architecture settles.
-pub mod coms;
 pub mod utils;
