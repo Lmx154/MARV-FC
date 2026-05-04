@@ -276,6 +276,68 @@ impl LinkStatusEmitter {
     }
 }
 
+struct HilinkBridgeSmokeTest {
+    seq: u16,
+    next_ping_at: Instant,
+}
+
+impl HilinkBridgeSmokeTest {
+    fn new() -> Self {
+        Self {
+            seq: 0,
+            next_ping_at: Instant::now()
+                + Duration::from_millis(config::HILINK_BRIDGE_SMOKE_TEST_PERIOD_MS),
+        }
+    }
+
+    fn next_seq(&mut self) -> u16 {
+        let seq = self.seq;
+        self.seq = self.seq.wrapping_add(1);
+        seq
+    }
+
+    fn note_ping_sent(&mut self, now: Instant) {
+        self.next_ping_at = now + Duration::from_millis(config::HILINK_BRIDGE_SMOKE_TEST_PERIOD_MS);
+    }
+}
+
+fn encode_hilink_smoke_frame<P: WirePayload>(payload: &P, seq: u16) -> Option<HilinkBridgeFrame> {
+    let mut raw = [0u8; HILINK_BRIDGE_FRAME_BYTES];
+    let mut encoded = [0u8; HILINK_BRIDGE_FRAME_BYTES];
+    let len = match hilink::encode_packet(payload, seq, status_time_ms(), &mut raw, &mut encoded) {
+        Ok(len) => len,
+        Err(_) => {
+            warn!("hilink bridge smoke-test encode failed");
+            return None;
+        }
+    };
+
+    let mut frame = HilinkBridgeFrame::new();
+    frame.bytes[..len].copy_from_slice(&encoded[..len]);
+    frame.len = len;
+    Some(frame)
+}
+
+fn decode_hilink_smoke_ping(payload: &[u8]) -> Option<u16> {
+    let mut raw = [0u8; HILINK_BRIDGE_FRAME_BYTES];
+    let packet = hilink::decode_packet(payload, &mut raw).ok()?;
+    if packet.header.message_type().ok()? != hilink::MsgType::Ping {
+        return None;
+    }
+    hilink::decode_payload::<hilink::PingPayload>(&packet).ok()?;
+    Some(packet.header.seq)
+}
+
+fn decode_hilink_smoke_pong(payload: &[u8]) -> Option<u16> {
+    let mut raw = [0u8; HILINK_BRIDGE_FRAME_BYTES];
+    let packet = hilink::decode_packet(payload, &mut raw).ok()?;
+    if packet.header.message_type().ok()? != hilink::MsgType::Pong {
+        return None;
+    }
+    hilink::decode_payload::<hilink::PongPayload>(&packet).ok()?;
+    Some(packet.header.seq)
+}
+
 fn link_quality_fields(role: FirmwareRole, stats: &LoraLinkStats) -> (i8, i8, i8, i8) {
     let rssi = if stats.rx_packets == 0 {
         hilink::lora_scaling::RSSI_MIN_DBM
@@ -432,6 +494,88 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
     .await;
 }
 
+async fn transmit_hilink_smoke_ping_if_due<SPI, CTRL, WAIT>(
+    radio: &mut Sx1262<SPI, CTRL, WAIT, Delay>,
+    role: FirmwareRole,
+    source: LoraNodeRole,
+    indicator: StatusIndicatorSender,
+    health: &mut LoraLinkHealth,
+    smoke_test: &mut HilinkBridgeSmokeTest,
+) where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+    CTRL: embedded_hal::digital::OutputPin,
+    WAIT: embedded_hal_async::digital::Wait,
+{
+    if !config::HILINK_BRIDGE_SMOKE_TEST_ENABLED || role != FirmwareRole::Radio {
+        return;
+    }
+
+    let now = Instant::now();
+    if now < smoke_test.next_ping_at {
+        return;
+    }
+
+    smoke_test.note_ping_sent(now);
+    let seq = smoke_test.next_seq();
+    let Some(frame) = encode_hilink_smoke_frame(&hilink::PingPayload, seq) else {
+        return;
+    };
+
+    info!(
+        "hilink bridge smoke-test ping tx seq={=u16} bytes={=usize}",
+        seq, frame.len
+    );
+    transmit_lora_frame(
+        radio,
+        source,
+        LoraFrameKind::Data,
+        frame.as_slice(),
+        indicator,
+        health,
+        "hilink smoke-test ping tx failed",
+    )
+    .await;
+}
+
+fn prepare_hilink_smoke_pong(
+    role: FirmwareRole,
+    frame: LoraFrame<'_>,
+    smoke_test: &mut HilinkBridgeSmokeTest,
+) -> Option<(u16, u16, HilinkBridgeFrame)> {
+    if !config::HILINK_BRIDGE_SMOKE_TEST_ENABLED
+        || role != FirmwareRole::GroundStation
+        || frame.source != LoraNodeRole::Radio
+        || frame.kind != LoraFrameKind::Data
+    {
+        return None;
+    }
+
+    let peer_seq = decode_hilink_smoke_ping(frame.payload)?;
+    let reply_seq = smoke_test.next_seq();
+    let reply = encode_hilink_smoke_frame(&hilink::PongPayload, reply_seq)?;
+    Some((peer_seq, reply_seq, reply))
+}
+
+fn note_hilink_smoke_rx(role: FirmwareRole, frame: LoraFrame<'_>) {
+    if !config::HILINK_BRIDGE_SMOKE_TEST_ENABLED || frame.kind != LoraFrameKind::Data {
+        return;
+    }
+
+    match role {
+        FirmwareRole::Radio if frame.source == LoraNodeRole::GroundStation => {
+            if let Some(seq) = decode_hilink_smoke_pong(frame.payload) {
+                info!("hilink bridge smoke-test pong rx seq={=u16}", seq);
+            }
+        }
+        FirmwareRole::GroundStation if frame.source == LoraNodeRole::Radio => {
+            if let Some(seq) = decode_hilink_smoke_ping(frame.payload) {
+                info!("hilink bridge smoke-test ping rx seq={=u16}", seq);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn receive_next_host_frame() -> Option<HilinkBridgeFrame> {
     if let Ok(frame) = HOST_TO_LORA_P0_CHANNEL.receiver().try_receive() {
         Some(frame)
@@ -579,9 +723,12 @@ where
     let mut rx_buf = [0u8; MAX_FRAME_LEN];
     let mut schedule = BridgeSchedule::new(role, timing);
     let mut link_status = LinkStatusEmitter::new();
+    let mut smoke_test = HilinkBridgeSmokeTest::new();
 
     loop {
         transmit_queued_host_frame(radio, source, indicator, health).await;
+        transmit_hilink_smoke_ping_if_due(radio, role, source, indicator, health, &mut smoke_test)
+            .await;
         transmit_keepalive_if_due(radio, source, indicator, health, &mut schedule).await;
         emit_link_status_if_due(role, health, &mut schedule, &mut link_status).await;
 
@@ -596,6 +743,8 @@ where
         match radio.receive(&mut rx_buf).await {
             Ok(Some(rx)) => match decode_frame(&rx_buf[..rx.len as usize]) {
                 Ok(frame) => {
+                    let smoke_pong = prepare_hilink_smoke_pong(role, frame, &mut smoke_test);
+                    note_hilink_smoke_rx(role, frame);
                     handle_rx_frame(
                         frame,
                         role,
@@ -608,6 +757,22 @@ where
                         &mut schedule,
                     )
                     .await;
+                    if let Some((peer_seq, reply_seq, reply)) = smoke_pong {
+                        info!(
+                            "hilink bridge smoke-test pong tx peer_seq={=u16} seq={=u16} bytes={=usize}",
+                            peer_seq, reply_seq, reply.len
+                        );
+                        transmit_lora_frame(
+                            radio,
+                            source,
+                            LoraFrameKind::Data,
+                            reply.as_slice(),
+                            indicator,
+                            health,
+                            "hilink smoke-test pong tx failed",
+                        )
+                        .await;
+                    }
                 }
                 Err(err) => {
                     health.note_malformed_frame();

@@ -133,6 +133,23 @@
 			]
 		},
 		{
+			"label": "RTT attach MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-radio-rp2354a"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
 			"label": "Check MARV-GS-RP2354A",
 			"type": "shell",
 			"command": "cargo",
@@ -170,6 +187,23 @@
 			"problemMatcher": [
 				"$rustc"
 			]
+		},
+		{
+			"label": "RTT attach MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-radio-rp2354a"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
 		},
 		{
 			"label": "Build PAYLOAD-CONTROLLER-RP2350",
