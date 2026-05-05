@@ -1,4 +1,3 @@
-use common::protocol::hilink;
 use defmt::{info, warn};
 use embassy_executor::Spawner;
 use embassy_rp::uart::{BufferedUart, BufferedUartRx, BufferedUartTx, Config as UartConfig};
@@ -6,14 +5,16 @@ use embassy_time::Timer;
 use embedded_io_async::{Read, Write};
 use static_cell::StaticCell;
 
+use common::protocol::hilink;
+
 use crate::buses::HostUartBus;
 use crate::channels::{
-    HILINK_BRIDGE_FRAME_BYTES, HilinkBridgeFrame, HilinkBridgePriority, HilinkBridgeReceiver,
-    LORA_TO_HOST_CHANNEL, host_to_lora_sender,
+    HilinkBridgeFrame, HilinkBridgeReceiver, LORA_TO_HOST_CHANNEL, host_to_lora_sender,
 };
 use crate::config::{self, DeviceConfig};
 use crate::interrupts::HostUartIrqs;
 use crate::lora_bridge;
+use crate::radio_dialect::scheduler::classify_host_frame;
 use crate::resources::{DeviceResources, HostUartPins};
 use crate::status_indicator;
 use crate::status_led;
@@ -28,45 +29,6 @@ async fn host_uart_tx_task(mut tx: BufferedUartTx, receiver: HilinkBridgeReceive
         if tx.write_all(frame.as_slice()).await.is_err() {
             warn!("host uart protocol write failed");
         }
-    }
-}
-
-fn classify_hilink_frame(frame: &HilinkBridgeFrame) -> HilinkBridgePriority {
-    let mut raw = [0u8; HILINK_BRIDGE_FRAME_BYTES];
-    let Ok(packet) = hilink::decode_packet(frame.as_slice(), &mut raw) else {
-        return HilinkBridgePriority::P3Snapshot;
-    };
-    let Ok(msg_type) = packet.header.message_type() else {
-        return HilinkBridgePriority::P3Snapshot;
-    };
-
-    match msg_type {
-        hilink::MsgType::Disarm | hilink::MsgType::MotorStop => HilinkBridgePriority::P0Critical,
-        hilink::MsgType::LoRaCommand => {
-            match hilink::decode_payload::<hilink::LoRaCommandPayload>(&packet) {
-                Ok(command)
-                    if command.command_id == hilink::lora_command_id::ABORT
-                        || command.command_id == hilink::lora_command_id::DISARM
-                        || command.command_id == hilink::lora_command_id::MOTOR_STOP =>
-                {
-                    HilinkBridgePriority::P0Critical
-                }
-                Ok(_) | Err(_) => HilinkBridgePriority::P1Command,
-            }
-        }
-        hilink::MsgType::Ack
-        | hilink::MsgType::Nack
-        | hilink::MsgType::LoRaCommandAck
-        | hilink::MsgType::LoRaSetProfile
-        | hilink::MsgType::LoRaRequestSnapshot => HilinkBridgePriority::P1Command,
-        hilink::MsgType::LoRaFaults | hilink::MsgType::LoRaEvent => HilinkBridgePriority::P2Event,
-        hilink::MsgType::LoRaFlightSnapshot
-        | hilink::MsgType::TelemetrySnapshot
-        | hilink::MsgType::HilSensorFrame => HilinkBridgePriority::P3Snapshot,
-        hilink::MsgType::LoRaGpsSnapshot | hilink::MsgType::LoRaLinkStatus => {
-            HilinkBridgePriority::P4Background
-        }
-        _ => HilinkBridgePriority::P3Snapshot,
     }
 }
 
@@ -98,7 +60,7 @@ async fn host_uart_rx_task(mut rx: BufferedUartRx) -> ! {
 
                     if byte == hilink::FRAME_DELIMITER {
                         if frame.len > 1 {
-                            let priority = classify_hilink_frame(&frame);
+                            let priority = classify_host_frame(&frame).into_bridge_priority();
                             let sender = host_to_lora_sender(priority);
                             if sender.try_send(frame).is_err() {
                                 warn!(

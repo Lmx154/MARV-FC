@@ -16,11 +16,11 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 
 use crate::buses::LoraSpiBus;
 use crate::channels::{
-    HILINK_BRIDGE_FRAME_BYTES, HOST_TO_LORA_P0_CHANNEL, HOST_TO_LORA_P1_CHANNEL,
-    HOST_TO_LORA_P2_CHANNEL, HOST_TO_LORA_P3_CHANNEL, HOST_TO_LORA_P4_CHANNEL, HilinkBridgeFrame,
-    LORA_TO_HOST_CHANNEL, STATUS_INDICATOR_CHANNEL, StatusIndicatorEvent, StatusIndicatorSender,
+    HILINK_BRIDGE_FRAME_BYTES, HilinkBridgeFrame, LORA_TO_HOST_CHANNEL, STATUS_INDICATOR_CHANNEL,
+    StatusIndicatorEvent, StatusIndicatorSender,
 };
 use crate::config::{self, FirmwareRole};
+use crate::radio_dialect::{rf, scheduler, translate};
 use crate::resources::LoraPins;
 use crate::watchdog::WatchdogResources;
 
@@ -481,12 +481,14 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
     let Some(host_frame) = receive_next_host_frame() else {
         return;
     };
+    let translate::HostToRfDecision::LegacyPassThrough(payload) =
+        translate::host_to_rf_legacy_pass_through(&host_frame);
 
     transmit_lora_frame(
         radio,
         source,
         LoraFrameKind::Data,
-        host_frame.as_slice(),
+        payload,
         indicator,
         health,
         "data tx failed",
@@ -577,19 +579,7 @@ fn note_hilink_smoke_rx(role: FirmwareRole, frame: LoraFrame<'_>) {
 }
 
 fn receive_next_host_frame() -> Option<HilinkBridgeFrame> {
-    if let Ok(frame) = HOST_TO_LORA_P0_CHANNEL.receiver().try_receive() {
-        Some(frame)
-    } else if let Ok(frame) = HOST_TO_LORA_P1_CHANNEL.receiver().try_receive() {
-        Some(frame)
-    } else if let Ok(frame) = HOST_TO_LORA_P2_CHANNEL.receiver().try_receive() {
-        Some(frame)
-    } else if let Ok(frame) = HOST_TO_LORA_P3_CHANNEL.receiver().try_receive() {
-        Some(frame)
-    } else if let Ok(frame) = HOST_TO_LORA_P4_CHANNEL.receiver().try_receive() {
-        Some(frame)
-    } else {
-        None
-    }
+    scheduler::receive_next_host_frame()
 }
 
 async fn transmit_keepalive_if_due<SPI, CTRL, WAIT>(
@@ -683,7 +673,7 @@ async fn handle_rx_frame(
     }
 
     let mut host_frame = HilinkBridgeFrame::new();
-    if frame.payload.len() > host_frame.bytes.len() {
+    if rf::copy_legacy_payload_to_hilink_frame(frame.payload, &mut host_frame).is_err() {
         warn!(
             "lora bridge rx data too large payload={=usize} rx_len={=u8}",
             frame.payload.len(),
@@ -691,8 +681,6 @@ async fn handle_rx_frame(
         );
         return;
     }
-    host_frame.bytes[..frame.payload.len()].copy_from_slice(frame.payload);
-    host_frame.len = frame.payload.len();
 
     if LORA_TO_HOST_CHANNEL.sender().try_send(host_frame).is_err() {
         warn!("lora-to-host bridge channel full; dropping frame");

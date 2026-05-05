@@ -9,6 +9,7 @@ mod core0;
 mod core1;
 mod interrupts;
 mod pinmap;
+mod radio_link;
 mod resources;
 mod sensor_spi;
 mod spi1_sensor_cluster;

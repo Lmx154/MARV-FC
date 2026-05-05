@@ -49,6 +49,7 @@ use crate::channels::{
 use crate::config::{DeviceConfig, STATUS_HEARTBEAT_PERIOD_MS};
 use crate::core1;
 use crate::pinmap;
+use crate::radio_link;
 use crate::resources::{DeviceResources, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
 use crate::spi1_sensor_cluster::{
@@ -420,13 +421,16 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     let time_sensitive_spawner = start_core0_time_sensitive_executor();
     let sensor_pins = pins.sensors;
     let storage_pins = pins.storage;
+    let radio_link_pins = pins.radio_link;
     let status_pins = pins.status;
     let sensor_bus = buses.sensors;
     let storage_bus = buses.storage;
+    let radio_link_bus = buses.radio_link;
     let environmental_bus = buses.environmental;
     let status_led_bus = buses.status_led;
 
     status_led::spawn(&spawner, status_pins.data, status_led_bus);
+    radio_link::spawn(&spawner, radio_link_bus, radio_link_pins);
     IMU_INIT_SIGNAL.reset();
 
     let watchdog_phase_subscriber = FLIGHT_PHASE_CHANNEL.subscriber().unwrap();

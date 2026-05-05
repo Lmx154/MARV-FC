@@ -20,6 +20,9 @@ pub const HIL_SYSTEM_ID: u8 = 42;
 pub const HIL_COMPONENT_ID: u8 = 1;
 pub const BMP581_I2C_FREQUENCY_HZ: u32 = 400_000;
 pub const BMP581_PERIOD_MS: u32 = 20;
+pub const RADIO_LINK_UART_BAUD: u32 = 115_200;
+pub const RADIO_LINK_UART_BUFFER_BYTES: usize = 256;
+pub const RADIO_LINK_RX_LED_PULSE_MS: u64 = 120;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LoggingConfig {
@@ -33,7 +36,7 @@ pub struct LoggingConfig {
 impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             file_prefix: LOG_FILE_PREFIX,
             sd_spi_frequency_hz: LOG_SD_SPI_FREQUENCY_HZ,
             sd_flush_every_lines: LOG_SD_FLUSH_EVERY_LINES,

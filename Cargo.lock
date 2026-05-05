@@ -1010,9 +1010,11 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-hal-async",
+ "embedded-io-async",
  "futures",
  "panic-probe",
  "rp235x-base",
+ "static_cell",
 ]
 
 [[package]]
@@ -1028,9 +1030,11 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-hal-async",
+ "embedded-io-async",
  "futures",
  "panic-probe",
  "rp235x-base",
+ "static_cell",
 ]
 
 [[package]]

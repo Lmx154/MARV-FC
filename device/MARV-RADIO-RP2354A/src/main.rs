@@ -10,6 +10,7 @@ mod core1;
 mod interrupts;
 mod lora_bridge;
 mod pinmap;
+mod radio_dialect;
 mod resources;
 mod status_indicator;
 mod status_led;
