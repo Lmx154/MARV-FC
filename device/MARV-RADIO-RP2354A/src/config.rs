@@ -18,9 +18,6 @@ pub const LORA_LINK_STATUS_PERIOD_MS: u64 = 2_000;
 pub const LORA_LED_EVENT_HOLD_MS: u64 = 1_000;
 pub const LORA_PACKET_LOG_EVERY: u32 = 10;
 pub const LORA_MISS_LOG_EVERY: u8 = 6;
-pub const HILINK_BRIDGE_SMOKE_TEST_ENABLED: bool = true;
-pub const HILINK_BRIDGE_SMOKE_TEST_PERIOD_MS: u64 = 2_000;
-
 #[derive(Clone, Copy, Debug, defmt::Format, PartialEq, Eq)]
 pub enum FirmwareRole {
     Radio,
