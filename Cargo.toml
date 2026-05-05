@@ -9,14 +9,15 @@ members = [
     "device/RP235X-BASE",
     "device/RP2354B-CROSSCORE-TESTS",
     "device/RP235X-TEST",
-    "simulator",
+    "cerberus",
+    "telemetry-app/src-tauri",
 ]
 resolver = "3"
 
 # Build only host-friendly members by default. Device targets should be built explicitly.
 default-members = [
     "common",
-    "simulator",
+    "cerberus",
 ]
 
 [profile.release]

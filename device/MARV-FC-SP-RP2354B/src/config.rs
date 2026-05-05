@@ -23,6 +23,9 @@ pub const BMP581_PERIOD_MS: u32 = 20;
 pub const RADIO_LINK_UART_BAUD: u32 = 115_200;
 pub const RADIO_LINK_UART_BUFFER_BYTES: usize = 256;
 pub const RADIO_LINK_RX_LED_PULSE_MS: u64 = 120;
+pub const RADIO_LINK_STATUS_PERIOD_MS: u64 = 1_000;
+pub const RADIO_LINK_TELEMETRY_SNAPSHOT_PERIOD_MS: u64 = 200;
+pub const RADIO_LINK_GPS_PERIOD_MS: u64 = 1_000;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LoggingConfig {

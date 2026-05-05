@@ -258,6 +258,19 @@ firmware/
 │       ├── scenario.rs
 │       └── main.rs
 │
+├── cerberus/
+│   ├── src/
+│   │   ├── backend/
+│   │   ├── bridge/
+│   │   ├── frontend/
+│   │   ├── app.rs
+│   │   └── main.rs
+│   │
+│   └── gazebo_bridge/
+│       ├── include/
+│       ├── src/
+│       └── CMakeLists.txt
+│
 └── docs/
     ├── architecture/
     ├── timing/
@@ -281,6 +294,17 @@ Holds embedded runtime assembly and concrete ownership of hardware resources.
 ### `sim/`
 
 Holds simulation-specific platform assembly and interface-compatible virtual backends.
+
+### `cerberus/`
+
+Holds the host-side visualization and HIL control UI.
+
+Cerberus is part of the repo because it consumes the same firmware contracts it visualizes:
+
+* `src/backend/` owns host services and parsers
+* `src/bridge/` maps backend state into UI state
+* `src/frontend/` owns the egui presentation
+* `gazebo_bridge/` owns the C++ Gazebo transport bridge used by the UI backend
 
 ### `docs/`
 

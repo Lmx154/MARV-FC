@@ -27,6 +27,11 @@ impl RadioPriority {
 }
 
 pub const DEFAULT_COMMAND_EXPIRES_MS: u16 = 2_000;
+pub const VEHICLE_FLIGHT_SNAPSHOT_PERIOD_MS: u32 = 200;
+pub const VEHICLE_GPS_SNAPSHOT_PERIOD_MS: u32 = 1_000;
+pub const LINK_STATUS_PERIOD_MS: u32 = 2_000;
+pub const PENDING_LORA_EVENT_DEPTH: usize = 4;
+pub const DEFAULT_TELEMETRY_RATE_HZ: u8 = 5;
 
 pub fn classify_normal_msg(packet: &hilink::DecodedPacket<'_>) -> RadioPriority {
     let Ok(msg_type) = packet.header.message_type() else {
@@ -38,6 +43,7 @@ pub fn classify_normal_msg(packet: &hilink::DecodedPacket<'_>) -> RadioPriority 
         hilink::MsgType::Ack
         | hilink::MsgType::Nack
         | hilink::MsgType::Arm
+        | hilink::MsgType::Ping
         | hilink::MsgType::Rtl
         | hilink::MsgType::BenchEnable
         | hilink::MsgType::BenchDisable

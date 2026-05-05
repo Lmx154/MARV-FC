@@ -14,11 +14,11 @@ use embedded_hal_bus::spi::ExclusiveDevice;
 
 use crate::buses::LoraSpiBus;
 use crate::channels::{
-    HILINK_BRIDGE_FRAME_BYTES, HilinkBridgeFrame, LORA_TO_HOST_CHANNEL, STATUS_INDICATOR_CHANNEL,
-    StatusIndicatorEvent, StatusIndicatorSender,
+    HILINK_BRIDGE_CHANNEL_DEPTH, HILINK_BRIDGE_FRAME_BYTES, HilinkBridgeFrame,
+    LORA_TO_HOST_CHANNEL, STATUS_INDICATOR_CHANNEL, StatusIndicatorEvent, StatusIndicatorSender,
 };
 use crate::config::{self, FirmwareRole};
-use crate::radio_dialect::{scheduler, state_cache::RadioStateCache, translate};
+use crate::radio_dialect::{policy, scheduler, state_cache::RadioStateCache, translate};
 use crate::resources::LoraPins;
 use crate::watchdog::WatchdogResources;
 
@@ -292,21 +292,47 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
     CTRL: embedded_hal::digital::OutputPin,
     WAIT: embedded_hal_async::digital::Wait,
 {
-    let Some(host_frame) = receive_next_host_frame() else {
+    for _ in 0..HILINK_BRIDGE_CHANNEL_DEPTH * 5 {
+        let Some(host_frame) = receive_next_host_frame() else {
+            break;
+        };
+        let translated = translate::host_to_rf(role, &host_frame, dialect_cache, status_time_ms());
+        match translated {
+            translate::HostToRfDecision::Translated(frame) => {
+                transmit_lora_frame(
+                    radio,
+                    source,
+                    LoraFrameKind::Data,
+                    frame.as_slice(),
+                    indicator,
+                    health,
+                    "data tx failed",
+                )
+                .await;
+                return;
+            }
+            translate::HostToRfDecision::Cached => {}
+            translate::HostToRfDecision::Drop => {
+                warn!(
+                    "radio dialect dropped unsupported host frame bytes={=usize}",
+                    host_frame.len
+                );
+            }
+        }
+    }
+
+    let now_ms = status_time_ms();
+    dialect_cache.refresh_lora_link_status(
+        now_ms,
+        policy::LINK_STATUS_PERIOD_MS,
+        health.stats(),
+        0,
+        policy::DEFAULT_TELEMETRY_RATE_HZ,
+    );
+
+    let Some(payload) = scheduler::select_scheduled_rf_frame(role, dialect_cache, now_ms) else {
         return;
     };
-    let translated = translate::host_to_rf(role, &host_frame, dialect_cache, status_time_ms());
-    let payload = match translated {
-        translate::HostToRfDecision::Translated(frame) => frame,
-        translate::HostToRfDecision::Drop => {
-            warn!(
-                "radio dialect dropped unsupported host frame bytes={=usize}",
-                host_frame.len
-            );
-            return;
-        }
-    };
-
     transmit_lora_frame(
         radio,
         source,
@@ -314,7 +340,7 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
         payload.as_slice(),
         indicator,
         health,
-        "data tx failed",
+        "scheduled data tx failed",
     )
     .await;
 }
@@ -402,6 +428,11 @@ async fn handle_rx_frame(
     let host_frame =
         match translate::rf_to_host(role, frame.payload, dialect_cache, status_time_ms()) {
             translate::RfToHostDecision::Translated(frame) => frame,
+            translate::RfToHostDecision::Handled => {
+                schedule.note_peer_rx(timing);
+                note_valid_peer_rx(indicator, health, rssi, snr_x4).await;
+                return;
+            }
             translate::RfToHostDecision::Drop => {
                 warn!(
                     "lora bridge rx data dropped payload={=usize} rx_len={=u8}",

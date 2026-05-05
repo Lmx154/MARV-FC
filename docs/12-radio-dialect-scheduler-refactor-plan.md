@@ -202,6 +202,31 @@ FC should not know:
 - RF packet size
 ```
 
+Phase 3 implementation checkpoint:
+
+```text
+- Vehicle normal TelemetrySnapshot/Gps no longer transmit immediately over RF.
+- Vehicle radio translates FC telemetry into compact RF snapshots and stores
+  them as latest-only scheduler state.
+- Vehicle scheduler emits compact flight snapshots at 5 Hz and GPS snapshots at
+  1 Hz when fresh data has arrived.
+- Vehicle command ACK/NACK remains P1/immediate and uses stored normal/RF
+  correlation.
+- Vehicle RF command duplicate detection prevents duplicate commands from being
+  re-forwarded to the FC and queues compact duplicate ACKs back to RF.
+- Unsupported vehicle RF commands are rejected at the radio boundary with a
+  compact command ACK instead of leaking RF dialect details to the FC.
+```
+
+Still remaining for later scheduler phases:
+
+```text
+- event/fault queueing and latching
+- profile-driven/adaptive telemetry rates
+- command retry windows and expiry based on send-time metadata
+- generated LoRaLinkStatus/normal link-health publication
+```
+
 ## Phase 4: Scheduler Design
 
 The scheduler should be the core of the radio firmware.
@@ -276,6 +301,20 @@ Fault/event: on change, repeated briefly until observed or aged out
 Commands/acks: immediate/preemptive
 ```
 
+Phase 4 implementation checkpoint:
+
+```text
+- Scheduler selection is now semantic RF traffic, not opaque HILink traffic:
+  P1 command ACKs, P2 events/fault snapshots, P3 flight snapshots, then P4
+  GPS/link status.
+- FC SystemState/TelemetrySnapshot changes can queue compact state-change
+  events and update a compact fault snapshot without exposing RF dialect to FC.
+- Link status is generated locally from LoRa health counters and emitted as a
+  compact RF status at the background rate.
+- Flight/GPS telemetry remains latest-only and cannot starve command ACKs or
+  event/fault traffic.
+```
+
 ## Phase 5: RF Dialect Encoder/Decoder
 
 The RF dialect should be internal to radio firmware.
@@ -331,6 +370,18 @@ Normal Ack/Nack
   -> Normal Ack/Nack or command response
 ```
 
+Phase 5 implementation checkpoint:
+
+```text
+- RF packets are strictly `rf_msg_type + fixed payload + crc16`.
+- Decoder rejects unknown RF message types and CRC-valid packets with the wrong
+  payload length for their RF message type.
+- Encoder exposes bounded max RF payload/packet sizes and asserts that the
+  largest compact RF packet fits inside the LoRa frame payload budget.
+- Payload-specific decoding rechecks the expected message type and exact payload
+  length before producing a typed RF payload.
+```
+
 ## Phase 6: FC Changes
 
 Target: `device/MARV-FC-SP-RP2354B`
@@ -375,6 +426,21 @@ LoRaGpsSnapshot
 LoRaLinkStatus
 RF profile commands
 RF scheduling concepts
+```
+
+Phase 6 implementation checkpoint:
+
+```text
+- FC radio UART endpoint no longer imports LoRa frame sizing or RF/link-budget
+  constants; its buffering is sized from normal HILink payload contracts.
+- FC radio endpoint accepts only normal HILink frames and explicitly handles
+  Ping, Arm, Disarm, Rtl, MotorStop, ActuatorStatusRequest, and HilSensorFrame.
+- Ping receives normal Pong. ActuatorStatusRequest receives normal
+  ActuatorStatus plus Ack.
+- Arm/Disarm/Rtl/MotorStop/HilSensorFrame are decoded as normal HILink and
+  rejected with normal Nack until the FC command/HIL execution services exist.
+- FC radio endpoint emits normal Heartbeat and SystemState periodically using
+  FlightPhase wire codes; no RF dialect message is emitted by FC firmware.
 ```
 
 ## Phase 7: Ground Control Software Changes
@@ -464,3 +530,274 @@ GS radio:
 GCS:
   normal HILink client/UI
 ```
+
+## Bench Solidification Implementation Plan
+
+This section captures the next implementation pass after Phase 6 bring-up. The
+goal is to harden the radio link itself while accepting that GPS, estimator,
+battery, and actuator/mixer data are not fully available yet.
+
+The guiding rule remains:
+
+```text
+PC/GCS and FC speak normal HILink.
+GS and vehicle radio own RF dialect, scheduling, retries, compact payloads,
+and link-health policy.
+```
+
+### Milestone A: Command Correlation and Response Behavior
+
+Goal: prove every public command sent by the PC is either matched to the
+correct normal `Ack`/`Nack`/`Pong`, or times out cleanly in the PC tool.
+
+Implementation tasks:
+
+```text
+1. Add explicit bench tests for normal Ping, Arm, Disarm, and MotorStop.
+2. Verify GS stores normal seq/msg_type -> RF command_id/command_seq
+   correlation before RF transmit.
+3. Verify vehicle radio stores RF command_id/command_seq -> normal seq/msg_type
+   correlation before forwarding to FC.
+4. Verify FC unsupported commands return normal Nack with original seq/msg_type.
+5. Verify vehicle radio translates normal Nack into LoRaCommandAck.
+6. Verify GS translates LoRaCommandAck back into normal Nack with the original
+   PC seq/msg_type.
+7. Keep Ping special-cased as normal Ping -> RF command -> FC Pong -> RF ack
+   -> normal Pong until the public protocol grows a correlated Pong.
+```
+
+Acceptance checks:
+
+```text
+- PC sends Arm seq=N and receives Nack(rejected_seq=N, rejected_msg_type=Arm).
+- PC sends Disarm seq=N and receives Nack(rejected_seq=N, rejected_msg_type=Disarm).
+- PC sends MotorStop seq=N and receives Nack(rejected_seq=N, rejected_msg_type=MotorStop).
+- PC sends Ping and receives normal Pong.
+- Unmatched RF command acks are dropped and counted, not emitted as bogus
+  normal acks.
+```
+
+Later, when FC command execution exists:
+
+```text
+- Replace unsupported Nack behavior with real command dispatch.
+- Preserve the same correlation path for Ack/Nack.
+- Add command-result reasons for denied state, safety inhibit, busy, invalid
+  argument, and execution failure.
+```
+
+### Milestone B: Duplicate and Stale Command Behavior
+
+Goal: prevent RF retransmits or operator command spam from causing repeated FC
+execution.
+
+Implementation tasks:
+
+```text
+1. Make the vehicle radio duplicate cache explicit in policy:
+   command_id + command_seq history depth, eviction behavior, and reason codes.
+2. On duplicate RF command:
+   - do not forward to FC again
+   - queue LoRaCommandAck with DUPLICATE_ACCEPTED or DUPLICATE_REJECTED based
+     on the original outcome policy
+3. Add command expiry checks using LoRaCommand.expires_ms and receive time.
+4. Reject expired commands at the vehicle radio boundary with LoRaCommandAck
+   status=REJECTED reason=EXPIRED.
+5. Add unit tests around wraparound command_seq and duplicate history eviction.
+```
+
+Acceptance checks:
+
+```text
+- Replaying the same RF command_id/command_seq does not produce a second FC
+  normal command frame.
+- Expired RF command produces a normal Nack at the PC after GS rehydration.
+- New command_seq for the same command_id still forwards normally.
+```
+
+### Milestone C: Link Status Visibility
+
+Goal: expose RF health to the PC/GCS as normal public telemetry, not RF dialect.
+
+Implementation tasks:
+
+```text
+1. Decide the normal public message:
+   - Prefer RadioStatus if its payload is sufficient.
+   - Otherwise add a normal-facing link-health payload before exposing raw
+     LoRaLinkStatus.
+2. Continue generating LoRaLinkStatus inside radio firmware only.
+3. On GS, translate LoRaLinkStatus into the selected normal public status
+   message.
+4. Include at least:
+   - link state
+   - latest RSSI/SNR
+   - rx/tx packet deltas
+   - missed/lost packet deltas
+   - active profile
+   - telemetry rate
+5. Keep link status unsolicited and low rate.
+```
+
+Acceptance checks:
+
+```text
+- PC receives normal link-status telemetry without knowing LoRaLinkStatus.
+- Link status continues when no commands are being sent.
+- Link status does not starve command acks or flight snapshots.
+```
+
+### Milestone D: Queue and Backpressure Behavior
+
+Goal: command acknowledgements and safety commands must not be starved by
+telemetry, and command spam must not wedge telemetry forever.
+
+Implementation tasks:
+
+```text
+1. Document queue depths for each priority class in policy.rs.
+2. Add counters for each queue overflow/drop path.
+3. Ensure scheduler order is:
+   - pending command acks
+   - P0/P1 host command traffic
+   - event/fault traffic
+   - flight snapshot
+   - GPS snapshot
+   - link status/background
+4. Add an anti-wedge policy for sustained P0/P1 load:
+   - command acks remain immediate
+   - low-rate telemetry gets occasional slots once command queues drain or
+     after a bounded starvation interval
+5. Make latest-only telemetry overwrite older snapshots instead of queueing
+   multiple stale copies.
+```
+
+Acceptance checks:
+
+```text
+- A command ack is sent before queued telemetry.
+- Telemetry burst cannot delay Ack/Nack beyond one scheduler opportunity.
+- Command spam increments drop/backpressure counters instead of blocking the
+  bridge task.
+- Latest telemetry after a burst is current, not a backlog of old snapshots.
+```
+
+### Milestone E: Bench Observability
+
+Goal: make bench failures diagnosable from logs and counters without needing to
+guess which boundary failed.
+
+Implementation tasks:
+
+```text
+1. Add structured defmt logs for:
+   - normal host frame accepted/dropped
+   - normal msg_type -> RF msg_type translation
+   - RF msg_type -> normal msg_type translation
+   - scheduler-selected RF payload kind
+   - command correlation stored/taken/missed
+   - queue overflows
+   - stale snapshot drops/overwrites
+2. Add rate-limiting for noisy telemetry logs.
+3. Add per-boundary counters in RadioStateCache or a small stats module:
+   - host_rx_frames
+   - host_rx_dropped
+   - rf_tx_frames
+   - rf_rx_frames
+   - rf_rx_dropped
+   - normal_to_rf_translated
+   - rf_to_normal_translated
+   - command_correlation_miss
+   - duplicate_command_rejected_or_acked
+   - expired_command_rejected
+   - queue_overflow_by_priority
+4. Expose a compact summary in logs every N seconds during bench builds.
+```
+
+Acceptance checks:
+
+```text
+- Given only GS, vehicle radio, and FC logs, the failed hop can be identified.
+- Sending one Ping produces one clear trace through each relevant boundary.
+- Telemetry logs are useful without flooding RTT.
+```
+
+### Milestone F: Rate Policy Cleanup
+
+Goal: make telemetry and status rates explicit, tunable, and owned by radio
+policy rather than scattered constants.
+
+Implementation tasks:
+
+```text
+1. Keep default bench rates:
+   - flight snapshot: 5 Hz
+   - GPS snapshot: 1 Hz
+   - link status: 0.5 Hz to 1 Hz
+2. Move radio scheduler rates into policy.rs with names tied to behavior:
+   VEHICLE_FLIGHT_SNAPSHOT_PERIOD_MS
+   VEHICLE_GPS_SNAPSHOT_PERIOD_MS
+   LINK_STATUS_PERIOD_MS
+3. Keep FC normal telemetry emitter rates in FC config while estimator/GPS are
+   not fully wired, but name them as FC normal endpoint rates.
+4. Add comments stating that RF rates are controlled by radio scheduler, not FC
+   or PC software.
+5. Later, add profile-driven rates through LoRaSetProfile or a normal public
+   profile command translated by GS.
+```
+
+Acceptance checks:
+
+```text
+- Rate changes require editing one obvious policy/config location.
+- PC software does not need to request telemetry to receive it.
+- FC can emit normal data faster than RF without increasing RF rate; vehicle
+  radio coalesces latest-only snapshots.
+```
+
+### Milestone G: Temporary Debug Surfaces
+
+Goal: support bench investigation without polluting the flight radio contract.
+
+Implementation tasks:
+
+```text
+1. Decide if raw IMU/baro debug is needed over radio.
+2. If needed, add an explicit bench/debug mode with low rates:
+   - raw baro: 1 Hz
+   - raw IMU summary, not full-rate stream: 1 Hz to 2 Hz
+3. Keep debug messages normal HILink at PC/FC boundaries.
+4. Translate debug traffic through either:
+   - a compact RF debug payload, or
+   - a deliberately low-priority normal debug message if the payload fits
+5. Ensure debug traffic is P5/background and never competes with command acks.
+6. Make debug mode compile-time or explicitly command-enabled so it cannot
+   accidentally become the flight default.
+```
+
+Acceptance checks:
+
+```text
+- Debug mode off: no raw sensor traffic crosses RF.
+- Debug mode on: low-rate raw/summarized debug appears at PC.
+- Command/Pong/Nack behavior is unchanged with debug enabled.
+```
+
+## Suggested Execution Order
+
+Use this order so each step improves bench confidence without depending on the
+future estimator or motor stack:
+
+```text
+1. Milestone A: command correlation bench checks.
+2. Milestone E: observability counters/logs for the existing path.
+3. Milestone B: duplicate/stale command rejection.
+4. Milestone D: queue/backpressure counters and scheduler fairness.
+5. Milestone F: rate policy cleanup.
+6. Milestone C: normal GCS-visible link status.
+7. Milestone G: optional explicit debug surface.
+```
+
+The missing GPS, estimator, battery, and mixer systems should populate richer
+normal payloads later. They should not change the radio boundary or require the
+PC/FC to learn RF dialect details.

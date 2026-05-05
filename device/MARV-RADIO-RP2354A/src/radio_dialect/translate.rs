@@ -7,12 +7,14 @@ use crate::radio_dialect::{normal, policy, rf, state_cache::RadioStateCache};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HostToRfDecision {
     Translated(HilinkBridgeFrame),
+    Cached,
     Drop,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RfToHostDecision {
     Translated(HilinkBridgeFrame),
+    Handled,
     Drop,
 }
 
@@ -30,8 +32,7 @@ pub fn host_to_rf(
     match role {
         FirmwareRole::GroundStation => ground_station_normal_to_rf(&packet, cache, now_ms)
             .map_or(HostToRfDecision::Drop, HostToRfDecision::Translated),
-        FirmwareRole::Radio => vehicle_normal_to_rf(&packet, cache)
-            .map_or(HostToRfDecision::Drop, HostToRfDecision::Translated),
+        FirmwareRole::Radio => vehicle_normal_to_rf(&packet, cache, now_ms),
     }
 }
 
@@ -46,10 +47,8 @@ pub fn rf_to_host(
     };
 
     match role {
-        FirmwareRole::GroundStation => ground_station_rf_to_normal(&packet, cache, now_ms)
-            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated),
-        FirmwareRole::Radio => vehicle_rf_to_normal(&packet, cache, now_ms)
-            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated),
+        FirmwareRole::GroundStation => ground_station_rf_to_normal(&packet, cache, now_ms),
+        FirmwareRole::Radio => vehicle_rf_to_normal(&packet, cache, now_ms),
     }
 }
 
@@ -81,29 +80,39 @@ fn ground_station_rf_to_normal(
     packet: &rf::DecodedRfPacket<'_>,
     cache: &mut RadioStateCache,
     now_ms: u32,
-) -> Option<HilinkBridgeFrame> {
+) -> RfToHostDecision {
     match packet.msg_type {
         rf::RfMsgType::LoRaCommandAck => {
             translate_lora_command_ack_to_normal(packet, cache, now_ms)
+                .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
         }
         rf::RfMsgType::LoRaFlightSnapshot => {
-            let snapshot =
-                rf::decode_rf_payload::<hilink::LoRaFlightSnapshotPayload>(packet).ok()?;
+            let Ok(snapshot) = rf::decode_rf_payload::<hilink::LoRaFlightSnapshotPayload>(packet)
+            else {
+                return RfToHostDecision::Drop;
+            };
             encode_normal_frame(
                 &lora_flight_to_telemetry_snapshot(snapshot),
                 cache.next_normal_tx_seq(),
                 now_ms,
             )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
         }
         rf::RfMsgType::LoRaGpsSnapshot => {
-            let gps = rf::decode_rf_payload::<hilink::LoRaGpsSnapshotPayload>(packet).ok()?;
+            let Ok(gps) = rf::decode_rf_payload::<hilink::LoRaGpsSnapshotPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
             encode_normal_frame(
                 &lora_gps_to_normal_gps(gps),
                 cache.next_normal_tx_seq(),
                 now_ms,
             )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
         }
-        _ => None,
+        rf::RfMsgType::LoRaEvent | rf::RfMsgType::LoRaFaults | rf::RfMsgType::LoRaLinkStatus => {
+            RfToHostDecision::Handled
+        }
+        _ => RfToHostDecision::Drop,
     }
 }
 
@@ -111,33 +120,72 @@ fn vehicle_rf_to_normal(
     packet: &rf::DecodedRfPacket<'_>,
     cache: &mut RadioStateCache,
     now_ms: u32,
-) -> Option<HilinkBridgeFrame> {
+) -> RfToHostDecision {
     match packet.msg_type {
         rf::RfMsgType::LoRaCommand => {
-            let command = rf::decode_rf_payload::<hilink::LoRaCommandPayload>(packet).ok()?;
+            let Ok(command) = rf::decode_rf_payload::<hilink::LoRaCommandPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            let Some(normal_msg_type) = normal_msg_type_for_lora_command(command.command_id) else {
+                cache.queue_pending_lora_command_ack(lora_command_ack(
+                    command,
+                    hilink::lora_command_status::REJECTED,
+                    hilink::lora_command_reason::UNSUPPORTED,
+                ));
+                return RfToHostDecision::Handled;
+            };
+
+            if cache.vehicle_command_is_duplicate(command.command_id, command.command_seq) {
+                cache.queue_pending_lora_command_ack(lora_command_ack(
+                    command,
+                    hilink::lora_command_status::DUPLICATE_ACCEPTED,
+                    hilink::lora_command_reason::DUPLICATE,
+                ));
+                return RfToHostDecision::Handled;
+            }
+
             let normal_seq = cache.next_normal_tx_seq();
-            let frame = lora_command_to_normal_command(command, normal_seq, now_ms)?;
-            let normal_msg_type = normal_msg_type_for_lora_command(command.command_id)?;
+            let Some(frame) = lora_command_to_normal_command(command, normal_seq, now_ms) else {
+                cache.queue_pending_lora_command_ack(lora_command_ack(
+                    command,
+                    hilink::lora_command_status::REJECTED,
+                    hilink::lora_command_reason::UNSUPPORTED,
+                ));
+                return RfToHostDecision::Handled;
+            };
+            cache.note_vehicle_command_forwarded(command.command_id, command.command_seq);
             cache.store_command_correlation(
                 hilink::Header::new(normal_msg_type, normal_seq, now_ms, 0),
                 command.command_seq,
                 command.command_id,
             );
-            Some(frame)
+            RfToHostDecision::Translated(frame)
         }
-        _ => None,
+        rf::RfMsgType::LoRaEvent | rf::RfMsgType::LoRaFaults | rf::RfMsgType::LoRaLinkStatus => {
+            RfToHostDecision::Handled
+        }
+        _ => RfToHostDecision::Drop,
     }
 }
 
 fn vehicle_normal_to_rf(
     packet: &hilink::DecodedPacket<'_>,
     cache: &mut RadioStateCache,
-) -> Option<HilinkBridgeFrame> {
-    let msg_type = packet.header.message_type().ok()?;
+    now_ms: u32,
+) -> HostToRfDecision {
+    let Ok(msg_type) = packet.header.message_type() else {
+        return HostToRfDecision::Drop;
+    };
     match msg_type {
         hilink::MsgType::Ack => {
-            let ack = hilink::decode_payload::<hilink::AckPayload>(packet).ok()?;
-            let correlation = cache.take_normal_correlation(ack.acked_seq, ack.acked_msg_type)?;
+            let Ok(ack) = hilink::decode_payload::<hilink::AckPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            let Some(correlation) =
+                cache.take_normal_correlation(ack.acked_seq, ack.acked_msg_type)
+            else {
+                return HostToRfDecision::Drop;
+            };
             let rf_ack = hilink::LoRaCommandAckPayload {
                 command_id: correlation.command_id,
                 command_seq: correlation.command_seq,
@@ -147,12 +195,18 @@ fn vehicle_normal_to_rf(
                 reserved: 0,
                 detail: 0,
             };
-            rf::encode_rf_frame(&rf_ack).ok()
+            rf::encode_rf_frame(&rf_ack)
+                .map_or(HostToRfDecision::Drop, HostToRfDecision::Translated)
         }
         hilink::MsgType::Nack => {
-            let nack = hilink::decode_payload::<hilink::NackPayload>(packet).ok()?;
-            let correlation =
-                cache.take_normal_correlation(nack.rejected_seq, nack.rejected_msg_type)?;
+            let Ok(nack) = hilink::decode_payload::<hilink::NackPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            let Some(correlation) =
+                cache.take_normal_correlation(nack.rejected_seq, nack.rejected_msg_type)
+            else {
+                return HostToRfDecision::Drop;
+            };
             let rf_ack = hilink::LoRaCommandAckPayload {
                 command_id: correlation.command_id,
                 command_seq: correlation.command_seq,
@@ -162,22 +216,81 @@ fn vehicle_normal_to_rf(
                 reserved: 0,
                 detail: 0,
             };
-            rf::encode_rf_frame(&rf_ack).ok()
+            rf::encode_rf_frame(&rf_ack)
+                .map_or(HostToRfDecision::Drop, HostToRfDecision::Translated)
+        }
+        hilink::MsgType::Pong => {
+            if hilink::decode_payload::<hilink::PongPayload>(packet).is_err() {
+                return HostToRfDecision::Drop;
+            }
+            let Some(correlation) =
+                cache.take_first_normal_correlation_for_msg_type(hilink::MsgType::Ping)
+            else {
+                return HostToRfDecision::Drop;
+            };
+            let rf_ack = hilink::LoRaCommandAckPayload {
+                command_id: correlation.command_id,
+                command_seq: correlation.command_seq,
+                status: hilink::lora_command_status::ACCEPTED,
+                reason: hilink::lora_command_reason::NONE,
+                state: 0,
+                reserved: 0,
+                detail: 0,
+            };
+            rf::encode_rf_frame(&rf_ack)
+                .map_or(HostToRfDecision::Drop, HostToRfDecision::Translated)
         }
         hilink::MsgType::TelemetrySnapshot => {
-            let telemetry =
-                hilink::decode_payload::<hilink::TelemetrySnapshotPayload>(packet).ok()?;
-            rf::encode_rf_frame(&telemetry_to_lora_flight(
+            let Ok(telemetry) = hilink::decode_payload::<hilink::TelemetrySnapshotPayload>(packet)
+            else {
+                return HostToRfDecision::Drop;
+            };
+            cache.note_vehicle_system_state(
+                telemetry.system_state,
+                telemetry_flags_to_fault_summary(telemetry.flags),
+                packet.header.send_time_ms,
+            );
+            cache.store_vehicle_flight_snapshot(telemetry_to_lora_flight(
                 telemetry,
                 packet.header.send_time_ms,
-            ))
-            .ok()
+            ));
+            HostToRfDecision::Cached
+        }
+        hilink::MsgType::SystemState => {
+            let Ok(state) = hilink::decode_payload::<hilink::SystemStatePayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            cache.note_vehicle_system_state(
+                state.system_state,
+                telemetry_flags_to_fault_summary(state.flags),
+                now_ms,
+            );
+            HostToRfDecision::Cached
         }
         hilink::MsgType::Gps => {
-            let gps = hilink::decode_payload::<hilink::GpsPayload>(packet).ok()?;
-            rf::encode_rf_frame(&gps_to_lora_gps(gps, packet.header.send_time_ms)).ok()
+            let Ok(gps) = hilink::decode_payload::<hilink::GpsPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            cache.store_vehicle_gps_snapshot(gps_to_lora_gps(gps, packet.header.send_time_ms));
+            HostToRfDecision::Cached
         }
-        _ => None,
+        _ => HostToRfDecision::Drop,
+    }
+}
+
+fn lora_command_ack(
+    command: hilink::LoRaCommandPayload,
+    status: u8,
+    reason: u8,
+) -> hilink::LoRaCommandAckPayload {
+    hilink::LoRaCommandAckPayload {
+        command_id: command.command_id,
+        command_seq: command.command_seq,
+        status,
+        reason,
+        state: 0,
+        reserved: 0,
+        detail: 0,
     }
 }
 
@@ -190,6 +303,10 @@ fn translate_lora_command_ack_to_normal(
     let correlation = cache.take_command_correlation(ack.command_id, ack.command_seq)?;
 
     if policy::lora_ack_status_is_ack(ack.status) {
+        if correlation.normal_msg_type == hilink::MsgType::Ping as u8 {
+            return encode_normal_frame(&hilink::PongPayload, cache.next_normal_tx_seq(), now_ms);
+        }
+
         let normal_ack = hilink::AckPayload {
             acked_seq: correlation.normal_seq,
             acked_msg_type: correlation.normal_msg_type,
@@ -262,7 +379,7 @@ fn telemetry_to_lora_flight(
         accel_mag_cms2: 0,
         battery_mv: saturating_f32_to_u16(telemetry.battery_voltage_v * 1_000.0),
         pyro_or_actuator_flags: 0,
-        fault_summary: 0,
+        fault_summary: saturating_u32_to_u16(telemetry_flags_to_fault_summary(telemetry.flags)),
     }
 }
 
@@ -306,7 +423,7 @@ fn lora_flight_to_telemetry_snapshot(
         },
         system_state: snapshot.state,
         reserved0: [0; 3],
-        flags: 0,
+        flags: lora_flags_to_telemetry_flags(snapshot.flags),
         position_ned_m: [0.0, 0.0, -(snapshot.altitude_dm as f32) / 10.0],
         velocity_ned_mps: [0.0, 0.0, -(snapshot.vertical_velocity_cms as f32) / 100.0],
         attitude_quat: [1.0, 0.0, 0.0, 0.0],
@@ -359,6 +476,31 @@ fn telemetry_flags_to_lora_flags(flags: u32) -> u16 {
     lora_flags
 }
 
+fn lora_flags_to_telemetry_flags(lora_flags: u16) -> u32 {
+    let mut flags = 0;
+    if (lora_flags & (1 << hilink::lora_flags::ARMED)) != 0 {
+        flags |= hilink::response_flags::ARMED;
+    }
+    if (lora_flags & (1 << hilink::lora_flags::FAILSAFE)) != 0 {
+        flags |= hilink::response_flags::FAILSAFE;
+    }
+    if (lora_flags & (1 << hilink::lora_flags::ESTIMATOR_VALID)) != 0 {
+        flags |= hilink::response_flags::ESTIMATOR_VALID;
+    }
+    flags
+}
+
+fn telemetry_flags_to_fault_summary(flags: u32) -> u32 {
+    let mut faults = 0;
+    if (flags & hilink::response_flags::FAILSAFE) != 0 {
+        faults |= hilink::lora_fault::SAFETY_INHIBIT;
+    }
+    if (flags & hilink::response_flags::ESTIMATOR_VALID) == 0 {
+        faults |= hilink::lora_fault::ESTIMATOR;
+    }
+    faults
+}
+
 fn encode_normal_frame<P: WirePayload>(
     payload: &P,
     seq: u16,
@@ -404,6 +546,10 @@ fn saturating_f32_to_u16(value: f32) -> u16 {
     } else {
         round_f32(value).clamp(0.0, u16::MAX as f32) as u16
     }
+}
+
+fn saturating_u32_to_u16(value: u32) -> u16 {
+    value.min(u16::MAX as u32) as u16
 }
 
 fn round_f32(value: f32) -> f32 {

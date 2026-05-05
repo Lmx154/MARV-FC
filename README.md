@@ -7,13 +7,37 @@ MARV is an avionics system aimed at growing my understanding of avionics system 
 - devices available
 - tasks
 - simulation
+- Cerberus visualization UI: `cerberus/`
 
 ## Docs
 
 - Simulator: `docs/simulator.md`
+- Cerberus UI: `cerberus/README.md`
 - Protocol: `docs/protocol.md`
 - Localization: `docs/localization.md`
 - PCB hardware: `docs/pcbhardware.md`
+
+## Cerberus UI
+
+Cerberus now lives inside this workspace at `cerberus/`. Run these commands from
+the MARV-FC repository root:
+
+```bash
+cargo run -p cerberus
+```
+
+```bash
+cargo build -p cerberus --release
+./target/release/cerberus
+```
+
+Build and run the Gazebo bridge from the repo root:
+
+```bash
+cmake -S cerberus/gazebo_bridge -B cerberus/gazebo_bridge/build
+cmake --build cerberus/gazebo_bridge/build
+./cerberus/gazebo_bridge/build/cerberus_gazebo_bridge
+```
 
 ## SD card config (CONFIG.TXT)
 

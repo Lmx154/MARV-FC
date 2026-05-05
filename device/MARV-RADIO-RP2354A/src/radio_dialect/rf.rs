@@ -2,7 +2,13 @@ use common::protocol::hilink::{self, WirePayload};
 
 use crate::channels::{HILINK_BRIDGE_FRAME_BYTES, HilinkBridgeFrame};
 
+pub const RF_TYPE_LEN: usize = 1;
 pub const RF_CRC_LEN: usize = 2;
+pub const RF_PACKET_OVERHEAD_LEN: usize = RF_TYPE_LEN + RF_CRC_LEN;
+pub const MAX_RF_PAYLOAD_LEN: usize = hilink::LoRaFlightSnapshotPayload::WIRE_LEN;
+pub const MAX_RF_PACKET_LEN: usize = encoded_rf_len(MAX_RF_PAYLOAD_LEN);
+
+const _: () = assert!(MAX_RF_PACKET_LEN <= HILINK_BRIDGE_FRAME_BYTES);
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -91,8 +97,24 @@ impl TryFrom<u8> for RfMsgType {
     }
 }
 
+impl RfMsgType {
+    pub const fn payload_len(self) -> usize {
+        match self {
+            Self::LoRaFlightSnapshot => hilink::LoRaFlightSnapshotPayload::WIRE_LEN,
+            Self::LoRaGpsSnapshot => hilink::LoRaGpsSnapshotPayload::WIRE_LEN,
+            Self::LoRaEvent => hilink::LoRaEventPayload::WIRE_LEN,
+            Self::LoRaFaults => hilink::LoRaFaultsPayload::WIRE_LEN,
+            Self::LoRaLinkStatus => hilink::LoRaLinkStatusPayload::WIRE_LEN,
+            Self::LoRaCommand => hilink::LoRaCommandPayload::WIRE_LEN,
+            Self::LoRaCommandAck => hilink::LoRaCommandAckPayload::WIRE_LEN,
+            Self::LoRaSetProfile => hilink::LoRaSetProfilePayload::WIRE_LEN,
+            Self::LoRaRequestSnapshot => hilink::LoRaRequestSnapshotPayload::WIRE_LEN,
+        }
+    }
+}
+
 pub const fn encoded_rf_len(payload_len: usize) -> usize {
-    1 + payload_len + RF_CRC_LEN
+    RF_PACKET_OVERHEAD_LEN + payload_len
 }
 
 pub fn encode_rf_packet<P: RfPayload>(
@@ -118,7 +140,13 @@ pub fn encode_rf_packet<P: RfPayload>(
 }
 
 pub fn decode_rf_packet(input: &[u8]) -> Result<DecodedRfPacket<'_>, RfDialectError> {
-    if input.len() < 1 + RF_CRC_LEN {
+    if input.len() < RF_PACKET_OVERHEAD_LEN {
+        return Err(RfDialectError::InvalidPayloadLength);
+    }
+
+    let msg_type = RfMsgType::try_from(input[0])?;
+    let expected_len = encoded_rf_len(msg_type.payload_len());
+    if input.len() != expected_len || input.len() > MAX_RF_PACKET_LEN {
         return Err(RfDialectError::InvalidPayloadLength);
     }
 
@@ -130,13 +158,16 @@ pub fn decode_rf_packet(input: &[u8]) -> Result<DecodedRfPacket<'_>, RfDialectEr
     }
 
     Ok(DecodedRfPacket {
-        msg_type: RfMsgType::try_from(input[0])?,
+        msg_type,
         payload: &input[1..packet_len],
     })
 }
 
 pub fn decode_rf_payload<P: RfPayload>(packet: &DecodedRfPacket<'_>) -> hilink::Result<P> {
     if packet.msg_type != P::RF_MSG_TYPE {
+        return Err(hilink::Error::InvalidPayloadLength);
+    }
+    if packet.payload.len() != P::WIRE_LEN {
         return Err(hilink::Error::InvalidPayloadLength);
     }
 
