@@ -1,5 +1,9 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use common::drivers::dshot::{
+    MOTOR_COUNT, command_value_to_dshot, encode_output_words, motor_mask_words,
+    valid_dshot_command, valid_motor_sweep, valid_motor_test,
+};
 use common::protocol::hilink::{
     ActuatorStatusPayload, BenchEnablePayload, DshotCommandPayload, MotorSweepPayload,
     MotorTestPayload, actuator_flags, bench, motor_test_mode,
@@ -26,15 +30,11 @@ use crate::pinmap;
 use crate::protocol;
 use crate::resources::ActuatorPins;
 
-const DSHOT_MAX_COMMAND: u16 = 2047;
 const DSHOT_BIT_RATE_HZ: u32 = 300_000;
 const DSHOT_CYCLES_PER_BIT: u32 = 8;
 const DSHOT_PIO_CLOCK_HZ: u32 = DSHOT_BIT_RATE_HZ * DSHOT_CYCLES_PER_BIT;
 const DSHOT_OUTPUT_PERIOD: Duration = Duration::from_millis(1);
 const DSHOT_PREARM_ZERO_FRAMES: u16 = 500;
-const MOTOR_COUNT: usize = 4;
-const DSHOT_MIN_THROTTLE: u16 = 48;
-const DSHOT_MAX_SPECIAL_COMMAND: u8 = 47;
 
 #[derive(Clone, Copy)]
 enum BenchCommand {
@@ -178,87 +178,6 @@ pub fn submit_dshot_command(payload: DshotCommandPayload) -> bool {
             .is_ok()
 }
 
-fn dshot_frame(command: u16, request_telemetry: bool) -> u16 {
-    let command = command.min(DSHOT_MAX_COMMAND);
-    let payload = (command << 1) | u16::from(request_telemetry);
-    let checksum = (payload ^ (payload >> 4) ^ (payload >> 8)) & 0x0f;
-
-    (payload << 4) | checksum
-}
-
-fn dshot_word(command: u16) -> u32 {
-    u32::from(dshot_frame(command, false))
-}
-
-fn valid_motor_test(payload: MotorTestPayload) -> bool {
-    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
-    let valid_mode = matches!(
-        payload.mode,
-        motor_test_mode::STOP | motor_test_mode::RAW_DSHOT | motor_test_mode::NORMALIZED
-    );
-    let valid_duration = payload.mode == motor_test_mode::STOP
-        || (payload.duration_ms > 0 && payload.duration_ms <= bench::MAX_TEST_DURATION_MS);
-    let valid_value = match payload.mode {
-        motor_test_mode::STOP => true,
-        motor_test_mode::RAW_DSHOT => {
-            payload.value == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&payload.value)
-        }
-        motor_test_mode::NORMALIZED => true,
-        _ => false,
-    };
-
-    valid_mask && valid_mode && valid_duration && valid_value
-}
-
-fn valid_motor_sweep(payload: MotorSweepPayload) -> bool {
-    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
-    let valid_mode = matches!(
-        payload.mode,
-        motor_test_mode::RAW_DSHOT | motor_test_mode::NORMALIZED
-    );
-    let valid_step = payload.step_value > 0;
-    let valid_duration =
-        payload.step_duration_ms > 0 && payload.step_duration_ms <= bench::MAX_TEST_DURATION_MS;
-    let valid_repeat = payload.repeat_count > 0;
-    let valid_values = match payload.mode {
-        motor_test_mode::RAW_DSHOT => {
-            let start = payload.start_value;
-            let end = payload.end_value;
-            (start == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&start))
-                && (end == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&end))
-        }
-        motor_test_mode::NORMALIZED => true,
-        _ => false,
-    };
-
-    valid_mask && valid_mode && valid_step && valid_duration && valid_repeat && valid_values
-}
-
-fn valid_dshot_command(payload: DshotCommandPayload) -> bool {
-    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
-    let valid_command = payload.command <= DSHOT_MAX_SPECIAL_COMMAND;
-    let valid_repeat = payload.repeat_count > 0;
-
-    valid_mask && valid_command && valid_repeat
-}
-
-fn normalized_to_dshot(value: u16) -> u16 {
-    if value == 0 {
-        0
-    } else {
-        let span = u32::from(DSHOT_MAX_COMMAND - DSHOT_MIN_THROTTLE);
-        (u32::from(DSHOT_MIN_THROTTLE) + (u32::from(value) * span / u32::from(u16::MAX))) as u16
-    }
-}
-
-fn command_value_to_dshot(mode: u8, value: u16) -> u16 {
-    match mode {
-        motor_test_mode::RAW_DSHOT => value,
-        motor_test_mode::NORMALIZED => normalized_to_dshot(value),
-        _ => 0,
-    }
-}
-
 fn next_sweep_value(state: &SweepState) -> Option<u16> {
     if state.current_value == state.end_value {
         return None;
@@ -292,25 +211,6 @@ fn advance_sweep_step(state: &mut SweepState) -> bool {
     state.current_value = state.start_value;
     state.step_remaining_ms = state.step_duration_ms;
     true
-}
-
-fn motor_mask_words(mask: u8, dshot: u16) -> [u16; MOTOR_COUNT] {
-    let mut words = [0u16; MOTOR_COUNT];
-    for (index, word) in words.iter_mut().enumerate() {
-        if (mask & (1 << index)) != 0 {
-            *word = dshot;
-        }
-    }
-    words
-}
-
-fn encode_output_words(commands: [u16; MOTOR_COUNT]) -> [u32; MOTOR_COUNT] {
-    [
-        dshot_word(commands[0]),
-        dshot_word(commands[1]),
-        dshot_word(commands[2]),
-        dshot_word(commands[3]),
-    ]
 }
 
 fn store_status(

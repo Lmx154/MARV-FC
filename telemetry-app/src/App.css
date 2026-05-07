@@ -1,6 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&family=Space+Grotesk:wght@600;700&family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&display=swap");
 
 :root {
+  color-scheme: dark;
   color: #e5e2e1;
   background: #141313;
   font-family: Inter, system-ui, sans-serif;
@@ -885,14 +886,14 @@ code,
   border-left-color: var(--secondary, #c8c6c5);
 }
 
-.log-item strong,
-.log-item span {
+.log-item div strong,
+.log-item div span {
   display: block;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
 }
 
-.log-item span {
+.log-item div span {
   color: var(--on-variant);
   margin-top: 4px;
 }

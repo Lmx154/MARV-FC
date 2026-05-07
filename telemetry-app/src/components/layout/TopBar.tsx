@@ -6,6 +6,7 @@ export function TopBar({ state, backendError }: { state: AppState | null; backen
   const uartStable = state?.uart.connected;
   const battery = findValue(state, "System", "BAT_VOLTAGE", "--");
   const linkText = backendError ? "BACKEND OFFLINE" : uartStable ? "UART: OPEN" : "UART: CLOSED";
+  const isArmed = findValue(state, "System", "RESPONSE_FLAGS", "").includes("ARMED");
 
   return (
     <header className="topbar">
@@ -17,6 +18,10 @@ export function TopBar({ state, backendError }: { state: AppState | null; backen
         <div className="system-chip hide-md">
           <span className={`dot ${backendError ? "danger" : "ok"}`} />
           <span>SYSTEM STATE: {backendError ? "FAULT" : "NOMINAL"}</span>
+        </div>
+        <div className="system-chip hide-md">
+          <span className={`dot ${isArmed ? "danger" : "ok"}`} />
+          <span style={{ color: isArmed ? 'var(--error)' : 'inherit' }}>{isArmed ? "ARMED" : "DISARMED"}</span>
         </div>
       </div>
       <div className="topbar-right">
