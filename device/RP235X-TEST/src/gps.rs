@@ -7,17 +7,16 @@ use embassy_futures::select::{Either, select};
 use embassy_rp::Peri;
 use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Input, Pin, Pull};
-use embassy_rp::peripherals::{PIO1, UART0};
+use embassy_rp::peripherals::PIO1;
 use embassy_rp::pio::{InterruptHandler as PioInterruptHandler, Pio};
 use embassy_rp::pio_programs::uart::PioUartTx;
-use embassy_rp::uart::{Config as UartConfig, InterruptHandler as UartInterruptHandler, UartRx};
 use embassy_time::{Duration, Instant, Ticker, Timer, with_timeout};
 use rp235x_base::pio_uart::new_duplex_pio_uart;
 
-use crate::buses::{GpsPioUartBus, RadioLinkUart};
+use crate::buses::GpsPioUartBus;
 use crate::channels::GPS_CHANNEL;
 use crate::pinmap;
-use crate::resources::{GpsPioUartPins, RadioLinkPins};
+use crate::resources::GpsPioUartPins;
 
 const GPS_NAV_RATE_HZ: u8 = 5;
 const GPS_BOOT_DELAY: Duration = Duration::from_millis(750);
@@ -31,29 +30,12 @@ const GPS_GPIO_EDGE_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const GPS_GPIO_EDGE_PROBE_SLICE: Duration = Duration::from_millis(10);
 const GPS_GPIO_EDGE_PROBE_SLICES: usize = 200;
 const GPS_GPIO_EDGE_PROBE_CAP: u32 = 64;
-const GPS_PIO_TX_UART0_SNIFFER: bool = true;
 
 bind_interrupts!(struct GpsIrqs {
     PIO1_IRQ_0 => PioInterruptHandler<PIO1>;
-    UART0_IRQ => UartInterruptHandler<UART0>;
 });
 
-pub fn spawn(
-    spawner: &Spawner,
-    bus: GpsPioUartBus,
-    pins: GpsPioUartPins,
-    sniffer_bus: RadioLinkUart,
-    sniffer_pins: RadioLinkPins,
-) {
-    if GPS_PIO_TX_UART0_SNIFFER {
-        spawner
-            .spawn(gps_pio_tx_sniffer_task(
-                sniffer_bus.uart,
-                sniffer_pins.rx,
-                sniffer_bus.rx_dma,
-            ))
-            .unwrap();
-    }
+pub fn spawn(spawner: &Spawner, bus: GpsPioUartBus, pins: GpsPioUartPins) {
     spawner.spawn(gps_pio_uart_task(bus.pio, pins)).unwrap();
 }
 
@@ -203,75 +185,6 @@ async fn gps_pio_uart_task(pio_peripheral: Peri<'static, PIO1>, pins: GpsPioUart
                     .publish_immediate(nav_pvt.gps_fix_sample_stamped(timestamp));
             }
             Some(Event::OtherPacket) | None => {}
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn gps_pio_tx_sniffer_task(
-    uart: Peri<'static, UART0>,
-    rx_pin: Peri<'static, embassy_rp::peripherals::PIN_1>,
-    rx_dma: Peri<'static, embassy_rp::peripherals::DMA_CH5>,
-) -> ! {
-    let mut uart_config = UartConfig::default();
-    uart_config.baudrate = pinmap::GPS_PIO_UART_BAUD;
-
-    let mut rx = UartRx::new(uart, rx_pin, GpsIrqs, rx_dma, uart_config);
-    let mut ticker = Ticker::every(Duration::from_secs(1));
-    let mut buf = [0u8; 1];
-    let mut byte_count = 0u32;
-    let mut error_count = 0u32;
-    let mut previous = 0u8;
-
-    warn!(
-        "gps pio tx sniffer enabled: jumper GP{=u8} -> GP{=u8}, baud={=u32}",
-        pinmap::GPS_PIO_UART_TX,
-        pinmap::GPS_UART0_RX,
-        pinmap::GPS_PIO_UART_BAUD,
-    );
-
-    loop {
-        match select(rx.read(&mut buf), ticker.next()).await {
-            Either::First(Ok(())) => {
-                let byte = buf[0];
-                byte_count = byte_count.wrapping_add(1);
-                if byte_count <= 16 {
-                    info!(
-                        "gps pio tx sniffer byte[{=u32}]=0x{=u8:02x}",
-                        byte_count, byte,
-                    );
-                }
-                if previous == 0xb5 && byte == 0x62 {
-                    info!(
-                        "gps pio tx sniffer ubx sync observed at byte={=u32}",
-                        byte_count,
-                    );
-                }
-                previous = byte;
-            }
-            Either::First(Err(error)) => {
-                error_count = error_count.wrapping_add(1);
-                if error_count <= 8 || error_count.is_power_of_two() {
-                    warn!(
-                        "gps pio tx sniffer rx error count={=u32} kind={:?}",
-                        error_count, error,
-                    );
-                }
-            }
-            Either::Second(()) => {
-                if byte_count == 0 {
-                    warn!(
-                        "gps pio tx sniffer saw no bytes; check jumper GP{=u8}->GP{=u8}",
-                        pinmap::GPS_PIO_UART_TX,
-                        pinmap::GPS_UART0_RX,
-                    );
-                } else {
-                    info!(
-                        "gps pio tx sniffer bytes={=u32} errors={=u32}",
-                        byte_count, error_count,
-                    );
-                }
-            }
         }
     }
 }

@@ -3992,9 +3992,11 @@ dependencies = [
  "embassy-sync 0.7.2",
  "embassy-time",
  "embedded-hal-async",
+ "embedded-io-async 0.6.1",
  "heapless 0.8.0",
  "panic-probe",
  "rp235x-base",
+ "static_cell",
 ]
 
 [[package]]

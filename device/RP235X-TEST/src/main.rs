@@ -7,6 +7,7 @@ mod dshot;
 mod gps;
 mod pinmap;
 mod protocol;
+mod radio_link;
 mod resources;
 mod sensor_spi;
 mod sensors;
@@ -30,13 +31,16 @@ async fn main(spawner: Spawner) {
     info!("rp235x-test firmware booted");
 
     protocol::spawn(&spawner, resources.system.usb);
+    radio_link::spawn(
+        &spawner,
+        resources.buses.radio_link,
+        resources.pins.radio_link,
+    );
     dshot::spawn(&spawner, resources.buses.dshot, resources.pins.actuators);
     gps::spawn(
         &spawner,
         resources.buses.gps_pio_uart,
         resources.pins.gps_pio_uart,
-        resources.buses.radio_link,
-        resources.pins.radio_link,
     );
     sensors::spawn(
         &spawner,

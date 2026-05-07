@@ -1,16 +1,16 @@
 #![allow(dead_code)]
 
-pub const FC_RADIO_TX: u8 = 0;
-pub const FC_RADIO_RX: u8 = 1;
-pub const GPS_UART0_TX: u8 = FC_RADIO_TX;
-pub const GPS_UART0_RX: u8 = FC_RADIO_RX;
+pub const FC_COMPANION_TX: u8 = 0;
+pub const FC_COMPANION_RX: u8 = 1;
+pub const GPS_UART0_TX: u8 = FC_COMPANION_TX;
+pub const GPS_UART0_RX: u8 = FC_COMPANION_RX;
 pub const GPS_UART0_BAUD: u32 = 9_600;
 
 pub const AUX_I2C_SDA: u8 = 2;
 pub const AUX_I2C_SCL: u8 = 3;
 
-pub const FC_SBC_TX: u8 = 4;
-pub const FC_SBC_RX: u8 = 5;
+pub const FC_RADIO_TX: u8 = 4;
+pub const FC_RADIO_RX: u8 = 5;
 
 pub const STATUS_LED_DATA: u8 = 6;
 

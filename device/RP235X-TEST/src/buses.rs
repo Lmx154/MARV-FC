@@ -15,15 +15,15 @@ pub struct StorageSpiBus {
 }
 
 pub struct RadioLinkUart {
-    pub uart: Peri<'static, peripherals::UART0>,
-    pub tx_dma: Peri<'static, peripherals::DMA_CH4>,
-    pub rx_dma: Peri<'static, peripherals::DMA_CH5>,
-}
-
-pub struct CompanionLinkUart {
     pub uart: Peri<'static, peripherals::UART1>,
     pub tx_dma: Peri<'static, peripherals::DMA_CH6>,
     pub rx_dma: Peri<'static, peripherals::DMA_CH7>,
+}
+
+pub struct CompanionLinkUart {
+    pub uart: Peri<'static, peripherals::UART0>,
+    pub tx_dma: Peri<'static, peripherals::DMA_CH4>,
+    pub rx_dma: Peri<'static, peripherals::DMA_CH5>,
 }
 
 pub struct EnvironmentalI2cBus {

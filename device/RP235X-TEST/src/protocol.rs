@@ -108,6 +108,14 @@ pub fn is_armed() -> bool {
     SYSTEM_STATE.load(Ordering::Relaxed) == STATE_ARMED
 }
 
+pub fn system_state_code() -> u8 {
+    SYSTEM_STATE.load(Ordering::Relaxed)
+}
+
+pub fn response_flags() -> u32 {
+    RESPONSE_FLAGS.load(Ordering::Relaxed)
+}
+
 #[embassy_executor::task]
 async fn usb_rx_task(mut receiver: RpUsbReceiver) -> ! {
     let mut packet = [0u8; USB_PACKET_SIZE as usize];
