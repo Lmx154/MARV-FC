@@ -258,14 +258,14 @@ firmware/
 │       ├── scenario.rs
 │       └── main.rs
 │
-├── cerberus/
+├── telemetry-app/
 │   ├── src/
 │   │   ├── backend/
-│   │   ├── bridge/
-│   │   ├── frontend/
-│   │   ├── app.rs
-│   │   └── main.rs
-│   │
+│   │   ├── components/
+│   │   ├── hooks/
+│   │   ├── utils/
+│   │   └── views/
+│   ├── src-tauri/
 │   └── gazebo_bridge/
 │       ├── include/
 │       ├── src/
@@ -295,15 +295,15 @@ Holds embedded runtime assembly and concrete ownership of hardware resources.
 
 Holds simulation-specific platform assembly and interface-compatible virtual backends.
 
-### `cerberus/`
+### `telemetry-app/`
 
 Holds the host-side visualization and HIL control UI.
 
-Cerberus is part of the repo because it consumes the same firmware contracts it visualizes:
+The telemetry app is part of the repo because it consumes the same firmware contracts it visualizes:
 
-* `src/backend/` owns host services and parsers
-* `src/bridge/` maps backend state into UI state
-* `src/frontend/` owns the egui presentation
+* `src-tauri/src/backend/` owns host services and parsers
+* `src-tauri/src/bridge/` maps backend state into UI state
+* `src/` owns the React/Tauri presentation
 * `gazebo_bridge/` owns the C++ Gazebo transport bridge used by the UI backend
 
 ### `docs/`

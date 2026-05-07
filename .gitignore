@@ -1,7 +1,5 @@
 /target
-cerberus/target/
-cerberus/gazebo_bridge/build/
-cerberus/Cargo.lock
+telemetry-app/gazebo_bridge/build/
 
 # Treat `mavlink/` as a source folder for the dialect XML only.
 # Any generated bindings/artifacts should live under `mavlink/` too, but be ignored.

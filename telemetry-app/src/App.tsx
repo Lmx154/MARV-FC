@@ -1,51 +1,44 @@
 import { useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import "./App.css";
 
-const assetPath = (name: string) => `${import.meta.env.BASE_URL}${name}`;
+import "./App.css";
+import { SideNav } from "./components/layout/SideNav";
+import { TopBar } from "./components/layout/TopBar";
+import { useBackendSnapshot } from "./hooks/useBackendSnapshot";
+import type { ViewId } from "./types";
+import { useTelemetryLookup } from "./utils/telemetry";
+import { ActuatorView } from "./views/ActuatorView";
+import { Dashboard } from "./views/Dashboard";
+import { DiagnosticsView } from "./views/DiagnosticsView";
+import { HilView } from "./views/HilView";
+import { MissionView } from "./views/MissionView";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
-
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
-  }
+  const [activeView, setActiveView] = useState<ViewId>("dashboard");
+  const { state, backendError, commandStatus, command, refreshPorts } = useBackendSnapshot();
+  const lookup = useTelemetryLookup(state);
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vitejs.dev" target="_blank">
-          <img src={assetPath("vite.svg")} className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src={assetPath("tauri.svg")} className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://reactjs.org" target="_blank">
-          <img src={assetPath("react.svg")} className="logo react" alt="React logo" />
-        </a>
+    <div className="app-shell">
+      <TopBar state={state} backendError={backendError} />
+      <div className="app-body">
+        <SideNav activeView={activeView} onChange={setActiveView} />
+        <div className="view-root">
+          {activeView === "dashboard" && (
+            <Dashboard
+              state={state}
+              lookup={lookup}
+              command={command}
+              commandStatus={commandStatus}
+              onRefreshPorts={refreshPorts}
+            />
+          )}
+          {activeView === "mission" && <MissionView state={state} command={command} />}
+          {activeView === "hil" && <HilView state={state} command={command} />}
+          {activeView === "actuators" && <ActuatorView state={state} command={command} />}
+          {activeView === "diagnostics" && <DiagnosticsView state={state} command={command} />}
+        </div>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 

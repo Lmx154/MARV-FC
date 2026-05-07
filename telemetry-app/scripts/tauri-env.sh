@@ -40,4 +40,8 @@ if [ -n "${XDG_DATA_DIRS_VSCODE_SNAP_ORIG:-}" ]; then
   export XDG_DATA_DIRS="$XDG_DATA_DIRS_VSCODE_SNAP_ORIG"
 fi
 
+# Some Linux desktops report DRI3/EGL support but fail to present WebKitGTK
+# windows correctly. Force WebKit away from that renderer for dev launches.
+export WEBKIT_DISABLE_DMABUF_RENDERER=1
+
 exec "$@"

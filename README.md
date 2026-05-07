@@ -7,37 +7,33 @@ MARV is an avionics system aimed at growing my understanding of avionics system 
 - devices available
 - tasks
 - simulation
-- Cerberus visualization UI: `cerberus/`
+- Telemetry visualization UI: `telemetry-app/`
 
 ## Docs
 
 - Simulator: `docs/simulator.md`
-- Cerberus UI: `cerberus/README.md`
+- Telemetry app UI: `telemetry-app/README.md`
 - Protocol: `docs/protocol.md`
 - Localization: `docs/localization.md`
 - PCB hardware: `docs/pcbhardware.md`
 
-## Cerberus UI
+## Telemetry App UI
 
-Cerberus now lives inside this workspace at `cerberus/`. Run these commands from
-the MARV-FC repository root:
-
-```bash
-cargo run -p cerberus
-```
+The desktop visualization software now lives at `telemetry-app/` and uses Tauri.
+Run this command from the MARV-FC repository root:
 
 ```bash
-cargo build -p cerberus --release
-./target/release/cerberus
+pnpm --dir telemetry-app dev
 ```
 
-Build and run the Gazebo bridge from the repo root:
+Build the Gazebo bridge from the repo root:
 
 ```bash
-cmake -S cerberus/gazebo_bridge -B cerberus/gazebo_bridge/build
-cmake --build cerberus/gazebo_bridge/build
-./cerberus/gazebo_bridge/build/cerberus_gazebo_bridge
+cmake -S telemetry-app/gazebo_bridge -B telemetry-app/gazebo_bridge/build
+cmake --build telemetry-app/gazebo_bridge/build
 ```
+
+The Tauri UI can launch the built bridge from the Dashboard Gazebo panel.
 
 ## SD card config (CONFIG.TXT)
 

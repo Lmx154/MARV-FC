@@ -4,7 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "scripts/tauri-env.sh sh -c 'tauri dev'",
+    "web:dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "scripts/tauri-env.sh tauri"
