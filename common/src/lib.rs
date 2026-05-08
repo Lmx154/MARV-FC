@@ -3,7 +3,7 @@
 // Minimal host-side defmt logger to satisfy unit test linking.
 #[cfg(test)]
 mod defmt_test_logger {
-    use defmt::{global_logger, Logger};
+    use defmt::{Logger, global_logger};
 
     #[global_logger]
     struct HostLogger;
@@ -51,17 +51,17 @@ mod defmt_test_logger {
     static __DEFMT_MARKER_ERROR_END: u8 = 0;
 }
 
-pub mod params;
-pub mod commands;
+pub mod comms;
+pub mod control;
 pub mod drivers;
-pub mod types;
-pub mod utils;
-pub mod config;
-pub mod coms;
-pub mod tasks;
-pub mod log_config;
-// Higher-level stack modules are disabled during L1 bring-up.
-// Protocol is enabled for control-link framing; others remain off.
-pub mod protocol;
-pub mod telemetry;
+pub mod interfaces;
+pub mod localization;
+pub mod messages;
 pub mod policies;
+pub mod prelude;
+pub mod protocol;
+pub mod services;
+pub mod tasks;
+pub mod utilities;
+
+pub mod utils;

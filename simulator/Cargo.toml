@@ -1,9 +1,0 @@
-[package]
-name = "simulator"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-common = { path = "../common", default-features = false }
-rand = "0.8"
-nalgebra = "0.33"

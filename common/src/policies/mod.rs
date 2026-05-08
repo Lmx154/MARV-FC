@@ -1,7 +1,7 @@
-//! Project-wide policy modules (HAL-agnostic).
+//! Policy state machines and decision rules.
 
-#[cfg(feature = "mavlink")]
-pub mod fc_state;
-
-#[cfg(feature = "mavlink")]
-pub use fc_state::*;
+pub mod arming;
+pub mod failsafe;
+pub mod faults;
+pub mod mission;
+pub mod modes;

@@ -1,0 +1,142 @@
+//! Portable Core 0 sensor logging task body.
+
+use embassy_sync::blocking_mutex::raw::RawMutex;
+use embassy_sync::channel::Receiver;
+use embassy_sync::pubsub::{Subscriber, WaitResult};
+
+use crate::messages::logging::{LogSinkState, LoggedSensor};
+use crate::messages::sensor::{
+    BarometerSampleStamped, GpsFixSampleStamped, ImuSampleStamped, MagnetometerSampleStamped,
+    PressureTransducerSampleStamped, TimeSample,
+};
+use crate::services::logging::{
+    LogChannel, SensorSnapshotLogger, SensorSnapshotLoggerError, TryEnqueueLogError,
+};
+use crate::utilities::time::MeasurementTimestamp;
+use crate::utils::delay::DelayMs;
+
+pub async fn run_core0_sensor_logging_task<
+    M,
+    D,
+    F,
+    const LOG_DEPTH: usize,
+    const IMU_DEPTH: usize,
+    const IMU_SUBS: usize,
+    const IMU_PUBS: usize,
+    const BARO_DEPTH: usize,
+    const BARO_SUBS: usize,
+    const BARO_PUBS: usize,
+    const PRESSURE_DEPTH: usize,
+    const PRESSURE_SUBS: usize,
+    const PRESSURE_PUBS: usize,
+    const MAG_DEPTH: usize,
+    const MAG_SUBS: usize,
+    const MAG_PUBS: usize,
+    const GPS_DEPTH: usize,
+    const GPS_SUBS: usize,
+    const GPS_PUBS: usize,
+    const TIME_DEPTH: usize,
+    const TIME_SUBS: usize,
+    const TIME_PUBS: usize,
+    const STATUS_DEPTH: usize,
+    const SENSOR_FAULT_DEPTH: usize,
+>(
+    logger: &mut SensorSnapshotLogger,
+    log_channel: &'static LogChannel<M, LOG_DEPTH>,
+    imu: Option<&mut Subscriber<'_, M, ImuSampleStamped, IMU_DEPTH, IMU_SUBS, IMU_PUBS>>,
+    aux_imu: Option<&mut Subscriber<'_, M, ImuSampleStamped, IMU_DEPTH, IMU_SUBS, IMU_PUBS>>,
+    barometer: Option<
+        &mut Subscriber<'_, M, BarometerSampleStamped, BARO_DEPTH, BARO_SUBS, BARO_PUBS>,
+    >,
+    pressure_transducer: Option<
+        &mut Subscriber<
+            '_,
+            M,
+            PressureTransducerSampleStamped,
+            PRESSURE_DEPTH,
+            PRESSURE_SUBS,
+            PRESSURE_PUBS,
+        >,
+    >,
+    magnetometer: Option<
+        &mut Subscriber<'_, M, MagnetometerSampleStamped, MAG_DEPTH, MAG_SUBS, MAG_PUBS>,
+    >,
+    gps: Option<&mut Subscriber<'_, M, GpsFixSampleStamped, GPS_DEPTH, GPS_SUBS, GPS_PUBS>>,
+    time: Option<&mut Subscriber<'_, M, TimeSample, TIME_DEPTH, TIME_SUBS, TIME_PUBS>>,
+    sink_states: Option<&Receiver<'_, M, LogSinkState, STATUS_DEPTH>>,
+    sensor_faults: Option<&Receiver<'_, M, LoggedSensor, SENSOR_FAULT_DEPTH>>,
+    delay: &mut D,
+    mut time_source: impl FnMut() -> MeasurementTimestamp,
+    mut on_error: F,
+) -> !
+where
+    M: RawMutex,
+    D: DelayMs,
+    F: FnMut(SensorSnapshotLoggerError),
+{
+    let mut imu = imu;
+    let mut aux_imu = aux_imu;
+    let mut barometer = barometer;
+    let mut pressure_transducer = pressure_transducer;
+    let mut magnetometer = magnetometer;
+    let mut gps = gps;
+    let mut time = time;
+    let mut latest_authoritative_time = None;
+    let mut last_emitted_timestamp = None;
+
+    loop {
+        if let Some(subscriber) = imu.as_deref_mut() {
+            logger.drain_imu(subscriber);
+        }
+        if let Some(subscriber) = aux_imu.as_deref_mut() {
+            logger.drain_aux_imu(subscriber);
+        }
+        if let Some(subscriber) = barometer.as_deref_mut() {
+            logger.drain_barometer(subscriber);
+        }
+        if let Some(subscriber) = pressure_transducer.as_deref_mut() {
+            logger.drain_pressure_transducer(subscriber);
+        }
+        if let Some(subscriber) = magnetometer.as_deref_mut() {
+            logger.drain_magnetometer(subscriber);
+        }
+        if let Some(subscriber) = gps.as_deref_mut() {
+            logger.drain_gps(subscriber);
+        }
+        if let Some(subscriber) = time.as_deref_mut() {
+            while let Some(message) = subscriber.try_next_message() {
+                match message {
+                    WaitResult::Lagged(_) => {}
+                    WaitResult::Message(sample) => {
+                        latest_authoritative_time = Some(sample.timestamp);
+                    }
+                }
+            }
+        }
+        if let Some(receiver) = sink_states {
+            logger.drain_sink_states(receiver);
+        }
+        if let Some(receiver) = sensor_faults {
+            logger.drain_sensor_faults(receiver);
+        }
+
+        let snapshot_time = latest_authoritative_time.unwrap_or_else(|| time_source());
+        if latest_authoritative_time.is_some() && Some(snapshot_time) == last_emitted_timestamp {
+            delay.delay_ms(logger.period_ms()).await;
+            continue;
+        }
+
+        if let Err(error) = logger.emit_snapshot(log_channel, snapshot_time) {
+            if !matches!(
+                error,
+                SensorSnapshotLoggerError::Queue(TryEnqueueLogError::ChannelFull)
+            ) {
+                on_error(error);
+            }
+        } else {
+            last_emitted_timestamp = Some(snapshot_time);
+        }
+
+        delay.delay_ms(logger.period_ms()).await;
+    }
+}

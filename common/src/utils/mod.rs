@@ -1,4 +1,5 @@
+//! Legacy compatibility surface for the old `utils` module.
+
 pub mod delay;
-pub mod i2cscanner;
-pub mod sd;
-// other utilities will go here later
+
+pub use crate::utilities::{buffers, filters, ids, math, time, units};

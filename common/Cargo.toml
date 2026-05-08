@@ -7,8 +7,8 @@ edition = "2024"
 path = "src/lib.rs"
 
 [features]
-default = ["mavlink"]
-mavlink = ["dep:mavio"]
+default = []
+estimation-diagnostics = []
 
 [dependencies]
 embedded-hal = "1.0"
@@ -16,11 +16,17 @@ micromath = "2.1"
 defmt = "1.0.1"
 embedded-hal-async = "1.0"
 bmp5 = { version = "0.2.2", features = ["defmt"] }
-mavio = { version = "0.5", default-features = false, features = ["dlct-common", "dlct-ardupilotmega"], optional = true }
 heapless = { version = "0.8", features = ["defmt-03"] }
-lora-phy = { git = "https://github.com/Lmx154/lora-rs", features = ["defmt-03"] }
+lora-phy = "3.0.1"
+lora-modulation = { version = "0.1.5", features = ["defmt"] }
+portable-atomic = { version = "1.11.1", default-features = false, features = ["critical-section", "fallback"] }
 embassy-sync = "0.7.2"
 embassy-futures = "0.1.2"
+embassy-time = "0.5.0"
+embedded-sdmmc = { version = "0.7.0", default-features = false, features = ["defmt-log"] }
+nalgebra = { version = "0.33", default-features = false, features = ["libm"] }
+num-traits = { version = "0.2", default-features = false, features = ["libm"] }
+ublox = { version = "0.10", default-features = false, features = ["ubx_proto33"] }
 
 [dev-dependencies]
 futures = { version = "0.3", default-features = false, features = ["std", "executor"] }

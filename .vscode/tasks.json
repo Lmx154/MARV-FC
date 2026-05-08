@@ -2,17 +2,13 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "Build firmware (pick crate)",
+			"label": "Build MARV-FC-RL-RP2354B",
 			"type": "shell",
 			"command": "cargo",
-			"args": [
-				"build",
-				"--release",
-				"-p",
-				"${input:firmwareCrate}",
-				"--target",
-				"thumbv8m.main-none-eabihf"
-			],
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-RL-RP2354B"
+			},
 			"group": {
 				"kind": "build",
 				"isDefault": true
@@ -22,18 +18,12 @@
 			]
 		},
 		{
-			"label": "Flash + RTT (pick crate, probe-rs)",
+			"label": "Flash MARV-FC-RL-RP2354B",
 			"type": "shell",
 			"command": "cargo",
-			"args": [
-				"run",
-				"--release",
-				"-p",
-				"${input:firmwareCrate}",
-				"--target",
-				"thumbv8m.main-none-eabihf"
-			],
+			"args": ["run", "--release"],
 			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-RL-RP2354B",
 				"env": {
 					"DEFMT_LOG": "info"
 				}
@@ -43,37 +33,353 @@
 			]
 		},
 		{
-			"label": "RTT attach (pick crate, probe-rs)",
+			"label": "RTT attach MARV-FC-RL-RP2354B",
 			"type": "shell",
 			"command": "probe-rs",
 			"args": [
 				"attach",
-				"--chip",
-				"RP2350",
-				"target/thumbv8m.main-none-eabihf/release/${input:firmwareCrate}"
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-fc-rl-rp2354b"
 			],
 			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-RL-RP2354B",
 				"env": {
 					"DEFMT_LOG": "info"
 				}
 			},
 			"problemMatcher": []
-		}
-	],
-	"inputs": [
+		},
 		{
-			"id": "firmwareCrate",
-			"type": "pickString",
-			"description": "Select firmware crate",
-			"options": [
-				"rp235x",
-				"rocket-fc",
-				"drone-fc",
-				"radio",
-				"gs",
-				"test"
+			"label": "Build MARV-FC-SP-RP2354B",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-SP-RP2354B"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash MARV-FC-SP-RP2354B",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-SP-RP2354B",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach MARV-FC-SP-RP2354B",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-fc-sp-rp2354b"
 			],
-			"default": "rp235x"
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-FC-SP-RP2354B",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Check MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["check", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Build MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach MARV-RADIO-RP2354A",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-radio-rp2354a"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Check MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["check", "--no-default-features", "--features", "ground-station", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Build MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release", "--no-default-features", "--features", "ground-station", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release", "--no-default-features", "--features", "ground-station", "--target", "thumbv8m.main-none-eabihf"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach MARV-GS-RP2354A",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/marv-radio-rp2354a"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/MARV-RADIO-RP2354A",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build PAYLOAD-CONTROLLER-RP2350",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/PAYLOAD-CONTROLLER-RP2350"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash PAYLOAD-CONTROLLER-RP2350",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/PAYLOAD-CONTROLLER-RP2350",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach PAYLOAD-CONTROLLER-RP2350",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/payload-controller-rp2350"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/PAYLOAD-CONTROLLER-RP2350",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build RECOVERY-ALTIMETER-RP2350",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RECOVERY-ALTIMETER-RP2350"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash RECOVERY-ALTIMETER-RP2350",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RECOVERY-ALTIMETER-RP2350",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach RECOVERY-ALTIMETER-RP2350",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/recovery-altimeter-rp2350"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RECOVERY-ALTIMETER-RP2350",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build RP2354B-CROSSCORE-TESTS",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP2354B-CROSSCORE-TESTS"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash RP2354B-CROSSCORE-TESTS",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP2354B-CROSSCORE-TESTS",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach RP2354B-CROSSCORE-TESTS",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/rp2354b-crosscore-tests"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP2354B-CROSSCORE-TESTS",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
+		},
+		{
+			"label": "Build RP235X-TEST",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["build", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP235X-TEST"
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "Flash RP235X-TEST",
+			"type": "shell",
+			"command": "cargo",
+			"args": ["run", "--release"],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP235X-TEST",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "RTT attach RP235X-TEST",
+			"type": "shell",
+			"command": "probe-rs",
+			"args": [
+				"attach",
+				"--chip", "RP235x",
+				"../../target/thumbv8m.main-none-eabihf/release/rp235x-test"
+			],
+			"options": {
+				"cwd": "${workspaceFolder}/device/RP235X-TEST",
+				"env": {
+					"DEFMT_LOG": "info"
+				}
+			},
+			"problemMatcher": []
 		}
 	]
 }

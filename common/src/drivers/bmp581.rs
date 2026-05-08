@@ -3,8 +3,8 @@
 //! Provides a small adapter to return temp/pressure in the same units as
 //! the existing BMP390 path (temperature in celsius * 100, pressure in Pa).
 
-use bmp5::i2c::{Bmp5, Error as Bmp5Error, BMP5_ADDRESS, BMP5_ADDRESS_ALT};
-pub use bmp5::{Config as Bmp581Config, IIRFilter, Oversampling, OutputDataRate};
+use bmp5::i2c::{BMP5_ADDRESS, BMP5_ADDRESS_ALT, Bmp5, Error as Bmp5Error};
+pub use bmp5::{Config as Bmp581Config, IIRFilter, OutputDataRate, Oversampling};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_async::i2c::I2c;
 

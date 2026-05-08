@@ -1,4 +1,6 @@
-pub mod mixer;
-pub mod radio;
-pub mod sensors;
-pub mod coms;
+//! Portable task bodies grouped by timing tier.
+
+pub mod background;
+pub mod fast_loop;
+pub mod medium_loop;
+pub mod slow_loop;

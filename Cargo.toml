@@ -1,20 +1,22 @@
 [workspace]
 members = [
     "common",
-    "device/rp235x",
-    "device/rocket-fc",
-    "device/drone-fc",
-    "device/radio",
-    "device/gs",
-    "device/test",
-    "simulator",
+    "device/MARV-FC-RL-RP2354B",
+    "device/MARV-FC-SP-RP2354B",
+    "device/MARV-RADIO-RP2354A",
+    "device/PAYLOAD-CONTROLLER-RP2350",
+    "device/RECOVERY-ALTIMETER-RP2350",
+    "device/RP235X-BASE",
+    "device/RP2354B-CROSSCORE-TESTS",
+    "device/RP235X-TEST",
+    "telemetry-app/src-tauri",
 ]
 resolver = "3"
 
 # Build only host-friendly members by default. Device targets should be built explicitly.
 default-members = [
     "common",
-    "simulator",
+    "telemetry-app/src-tauri",
 ]
 
 [profile.release]
