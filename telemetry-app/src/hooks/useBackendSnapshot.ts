@@ -51,7 +51,9 @@ export function useBackendSnapshot() {
       setBackendError(null);
       setCommandStatus(`ACK ${name}`);
     } catch (error) {
-      setCommandStatus(`ERR ${String(error)}`);
+      const message = String(error);
+      setBackendError(message);
+      setCommandStatus(`ERR ${message}`);
     }
   };
 
@@ -62,7 +64,9 @@ export function useBackendSnapshot() {
       await refresh();
       setCommandStatus("ACK list_uart_ports");
     } catch (error) {
-      setCommandStatus(`ERR ${String(error)}`);
+      const message = String(error);
+      setBackendError(message);
+      setCommandStatus(`ERR ${message}`);
     }
   }
 

@@ -189,6 +189,7 @@ async fn send_outbound(tx: &mut BufferedUartTx, seq: &mut u16, outbound: RadioOu
                 commanded_dshot: [0; 4],
                 last_command_age_ms: u16::MAX,
                 bench_timeout_ms: 0,
+                mixer_motor_order: hilink::mixer_motor_order::IDENTITY,
                 flags: 0,
             };
             let _ = send_payload(tx, seq, &payload).await;

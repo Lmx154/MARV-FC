@@ -4,8 +4,10 @@ pub mod baro_altitude;
 pub mod gps_position;
 pub mod gps_velocity;
 pub mod gravity;
+pub mod magnetic_field;
 
 pub use baro_altitude::*;
 pub use gps_position::*;
 pub use gps_velocity::*;
 pub use gravity::*;
+pub use magnetic_field::*;

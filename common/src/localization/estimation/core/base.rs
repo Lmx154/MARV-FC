@@ -5,6 +5,7 @@ use super::types::{EstimatorScalar, MatMN, MatN, MatNW, VecN};
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MeasurementLabel {
     GravityAlignment,
+    MagneticField,
     GpsPosition,
     GpsVelocity,
     BarometricAltitude,

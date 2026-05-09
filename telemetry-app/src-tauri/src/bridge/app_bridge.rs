@@ -8,8 +8,8 @@ use crate::backend::{
     encode_hilink_command, hilink_msg_type_label, parse_hilink_frames_for_display,
     BenchEnableCommand, CvWaypointCommand, DshotCommand, GlobalWaypointCommand,
     HilSensorFrameCommand, HilinkActuatorCommand, HilinkCommand, HilinkEvent, HilinkParserService,
-    MotorSweepCommand, MotorTestCommand, TimeService, TofWaypointCommand, UartPortInfo,
-    UartService, DEFAULT_UART_BAUD_RATE,
+    MixerMotorOrderCommand, MotorSweepCommand, MotorTestCommand, TimeService, TofWaypointCommand,
+    UartPortInfo, UartService, DEFAULT_UART_BAUD_RATE,
 };
 
 use super::app_state::{
@@ -28,13 +28,30 @@ const HIL_SOURCE_FRESH_FOR: Duration = Duration::from_secs(2);
 const HIL_RESPONSE_TIMEOUT: Duration = Duration::from_millis(500);
 const RESPONSE_FLAG_ARMED: u32 = 1 << 0;
 const RESPONSE_FLAG_FAILSAFE: u32 = 1 << 1;
+const RESPONSE_FLAG_ESTIMATOR_VALID: u32 = 1 << 2;
 const RESPONSE_FLAG_MOTORS_VALID: u32 = 1 << 3;
+const RESPONSE_FLAG_CONTROL_VALID: u32 = 1 << 4;
+const RESPONSE_FLAG_SENSOR_INPUT_VALID: u32 = 1 << 6;
+const RESPONSE_FLAG_BENCH_OVERRIDE: u32 = 1 << 7;
+const SENSOR_VALID_ACCEL: u32 = 1 << 0;
+const SENSOR_VALID_GYRO: u32 = 1 << 1;
+const SENSOR_VALID_MAG: u32 = 1 << 2;
+const SENSOR_VALID_BARO: u32 = 1 << 3;
+const SENSOR_VALID_GPS: u32 = 1 << 4;
+const MIN_HIL_GPS_FIX_TYPE: u8 = 3;
+const MIN_HIL_GPS_SATS: u8 = 4;
 
 #[derive(Clone, Copy)]
 struct OutstandingHilSource {
     sequence: u64,
     sim_time_us: u64,
     sent_at: Instant,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct HilSourceStamp {
+    sequence: u64,
+    sim_time_us: u64,
 }
 
 pub struct AppBridge {
@@ -55,6 +72,7 @@ pub struct AppBridge {
     last_hil_source_at: Option<Instant>,
     hil_ready: bool,
     outstanding_hil_source: Option<OutstandingHilSource>,
+    last_forwarded_hil_source_stamp: Option<HilSourceStamp>,
     completed_hil_responses: VecDeque<(u64, u64)>,
     hil_protocol_fault_count: u64,
     latest_hil_protocol_fault: Option<String>,
@@ -97,6 +115,7 @@ impl AppBridge {
             last_hil_source_at: None,
             hil_ready: false,
             outstanding_hil_source: None,
+            last_forwarded_hil_source_stamp: None,
             completed_hil_responses: VecDeque::new(),
             hil_protocol_fault_count: 0,
             latest_hil_protocol_fault: None,
@@ -151,6 +170,7 @@ impl AppBridge {
         if result.is_ok() {
             self.hil_ready = false;
             self.outstanding_hil_source = None;
+            self.last_forwarded_hil_source_stamp = None;
             self.completed_hil_responses.clear();
         }
         self.refresh_uart_state();
@@ -161,6 +181,7 @@ impl AppBridge {
         self.uart_service.close();
         self.hil_ready = false;
         self.outstanding_hil_source = None;
+        self.last_forwarded_hil_source_stamp = None;
         self.refresh_uart_state();
     }
 
@@ -180,6 +201,11 @@ impl AppBridge {
     pub fn connect_gazebo_bridge(&mut self, endpoint: &str) -> Result<(), String> {
         self.gazebo_client.set_endpoint(endpoint.to_string());
         let result = self.gazebo_client.connect();
+        if result.is_ok() {
+            self.outstanding_hil_source = None;
+            self.last_forwarded_hil_source_stamp = None;
+            self.completed_hil_responses.clear();
+        }
         self.refresh_gazebo_state();
         result
     }
@@ -271,6 +297,8 @@ impl AppBridge {
 
     pub fn disconnect_gazebo_bridge(&mut self) {
         self.gazebo_client.disconnect();
+        self.outstanding_hil_source = None;
+        self.last_forwarded_hil_source_stamp = None;
         self.refresh_gazebo_state();
     }
 
@@ -410,6 +438,15 @@ impl AppBridge {
         self.send_hilink_command(HilinkCommand::ActuatorStatusRequest)
     }
 
+    pub fn send_hilink_mixer_motor_order(
+        &mut self,
+        output_for_motor: [u8; 4],
+    ) -> Result<(), String> {
+        self.send_hilink_command(HilinkCommand::MixerMotorOrder(MixerMotorOrderCommand {
+            output_for_motor,
+        }))
+    }
+
     pub fn send_hilink_control_waypoint(
         &mut self,
         ref_sim_tick: u64,
@@ -419,6 +456,7 @@ impl AppBridge {
         alt_msl_m: f32,
         yaw_deg: f32,
     ) -> Result<(), String> {
+        self.ensure_waypoint_control_ready()?;
         let (ref_sim_tick, ref_sim_time_us) =
             self.fill_empty_sim_stamp(ref_sim_tick, ref_sim_time_us);
         self.send_hilink_command(HilinkCommand::ControlWaypoint(GlobalWaypointCommand {
@@ -440,6 +478,7 @@ impl AppBridge {
         alt_msl_m: f32,
         yaw_deg: f32,
     ) -> Result<(), String> {
+        self.ensure_waypoint_control_ready()?;
         let (ref_sim_tick, ref_sim_time_us) =
             self.fill_empty_sim_stamp(ref_sim_tick, ref_sim_time_us);
         self.send_hilink_command(HilinkCommand::MissionWaypoint(GlobalWaypointCommand {
@@ -695,6 +734,9 @@ impl AppBridge {
                 motor_cmd,
             ) {
                 Ok(()) => {
+                    if hil_response_allows_motion(response.flags) {
+                        self.latest_hil_protocol_fault = None;
+                    }
                     self.latest_forwarded_actuator = Some(HilForwardedActuatorFrame {
                         sequence: response.sim_tick,
                         sim_time_us: response.sim_time_us,
@@ -732,8 +774,22 @@ impl AppBridge {
             return;
         };
 
+        let frame_stamp = HilSourceStamp {
+            sequence: frame.sequence,
+            sim_time_us: frame.sim_time_us,
+        };
+        if self.source_stream_reset_detected(frame_stamp) {
+            self.reset_hil_lockstep_for_source_reset(frame_stamp);
+        }
+
         if !self.uart_service.is_open() || !self.hil_ready || self.outstanding_hil_source.is_some()
         {
+            self.refresh_gazebo_state();
+            self.refresh_hil_comparison_state();
+            return;
+        }
+
+        if self.duplicate_or_stale_hil_source(frame_stamp) {
             self.refresh_gazebo_state();
             self.refresh_hil_comparison_state();
             return;
@@ -750,6 +806,7 @@ impl AppBridge {
                 sim_time_us: frame.sim_time_us,
                 sent_at: Instant::now(),
             });
+            self.last_forwarded_hil_source_stamp = Some(frame_stamp);
         }
 
         self.refresh_gazebo_state();
@@ -761,9 +818,70 @@ impl AppBridge {
         self.last_hil_source_at = Some(Instant::now());
     }
 
+    fn source_stream_reset_detected(&self, stamp: HilSourceStamp) -> bool {
+        self.last_forwarded_hil_source_stamp.is_some_and(|last| {
+            stamp.sequence < last.sequence || stamp.sim_time_us < last.sim_time_us
+        })
+    }
+
+    fn duplicate_or_stale_hil_source(&self, stamp: HilSourceStamp) -> bool {
+        self.last_forwarded_hil_source_stamp.is_some_and(|last| {
+            stamp.sequence == last.sequence || stamp.sim_time_us <= last.sim_time_us
+        })
+    }
+
+    fn reset_hil_lockstep_for_source_reset(&mut self, stamp: HilSourceStamp) {
+        self.outstanding_hil_source = None;
+        self.last_forwarded_hil_source_stamp = None;
+        self.completed_hil_responses.clear();
+        self.latest_hil_response = None;
+        self.latest_forwarded_actuator = None;
+        self.record_hil_protocol_fault(format!(
+            "resynced HIL source after clock reset to tick {} time {}us",
+            stamp.sequence, stamp.sim_time_us
+        ));
+    }
+
     fn hil_source_active(&self) -> bool {
         self.last_hil_source_at
             .is_some_and(|last_source_at| last_source_at.elapsed() <= HIL_SOURCE_FRESH_FOR)
+    }
+
+    fn ensure_waypoint_control_ready(&self) -> Result<(), String> {
+        if !self.hil_ready {
+            return Err(
+                "MARV HIL link is not ready yet; wait for HilReady before sending waypoints"
+                    .to_string(),
+            );
+        }
+
+        if !self.hil_source_active() {
+            return Err(
+                "HIL sensor source is inactive; start/connect the Gazebo HIL source before sending waypoints"
+                    .to_string(),
+            );
+        }
+
+        let Some(source) = self.latest_hil_source.as_ref() else {
+            return Err("HIL sensor source has not produced a frame yet".to_string());
+        };
+
+        if source.fix_type < MIN_HIL_GPS_FIX_TYPE || source.sats < MIN_HIL_GPS_SATS {
+            return Err(format!(
+                "HIL GPS reference is not valid enough for global waypoints: fix={} sats={}",
+                source.fix_type, source.sats
+            ));
+        }
+
+        if !source.lat_deg.is_finite()
+            || !source.lon_deg.is_finite()
+            || !source.alt_msl_m.is_finite()
+            || !source.vel_ned_mps.iter().all(|value| value.is_finite())
+        {
+            return Err("HIL GPS reference contains non-finite values".to_string());
+        }
+
+        Ok(())
     }
 
     fn refresh_hil_comparison_state(&mut self) {
@@ -811,11 +929,7 @@ impl AppBridge {
         let mut command = HilSensorFrameCommand::default();
         command.sim_tick = frame.sequence;
         command.sim_time_us = frame.sim_time_us;
-        command.valid_flags = if frame.valid_flags != 0 {
-            frame.valid_flags
-        } else {
-            (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) | (1 << 4)
-        };
+        command.valid_flags = sanitized_sensor_valid_flags(&frame);
         command.accel_mps2 = frame.accel_mps2;
         command.gyro_rps = frame.gyro_rps;
         command.mag_ut = frame.mag_ut;
@@ -883,9 +997,45 @@ impl AppBridge {
             return None;
         }
 
+        if command.flags & RESPONSE_FLAG_BENCH_OVERRIDE != 0 {
+            if command.flags & RESPONSE_FLAG_SENSOR_INPUT_VALID == 0 {
+                self.record_hil_protocol_fault(format!(
+                    "forcing zero motors for HIL bench response tick {} because SENSOR_INPUT_VALID is clear",
+                    command.sim_tick
+                ));
+                return Some([0; 4]);
+            }
+
+            return Some(command.motor_cmd);
+        }
+
         if command.flags & RESPONSE_FLAG_FAILSAFE != 0 {
             self.record_hil_protocol_fault(format!(
                 "forcing zero motors for HIL response tick {} because FAILSAFE is set",
+                command.sim_tick
+            ));
+            return Some([0; 4]);
+        }
+
+        if command.flags & RESPONSE_FLAG_SENSOR_INPUT_VALID == 0 {
+            self.record_hil_protocol_fault(format!(
+                "forcing zero motors for HIL response tick {} because SENSOR_INPUT_VALID is clear",
+                command.sim_tick
+            ));
+            return Some([0; 4]);
+        }
+
+        if command.flags & RESPONSE_FLAG_ESTIMATOR_VALID == 0 {
+            self.record_hil_protocol_fault(format!(
+                "forcing zero motors for HIL response tick {} because ESTIMATOR_VALID is clear",
+                command.sim_tick
+            ));
+            return Some([0; 4]);
+        }
+
+        if command.flags & RESPONSE_FLAG_CONTROL_VALID == 0 {
+            self.record_hil_protocol_fault(format!(
+                "forcing zero motors for HIL response tick {} because CONTROL_VALID is clear",
                 command.sim_tick
             ));
             return Some([0; 4]);
@@ -1061,6 +1211,11 @@ impl AppBridge {
                 self.command_state.last_event = Some(format!("HilReady seq {seq}"));
                 self.refresh_hil_comparison_state();
             }
+            HilinkEvent::Heartbeat { seq } => {
+                self.hil_ready = true;
+                self.command_state.last_event = Some(format!("Heartbeat seq {seq}"));
+                self.refresh_hil_comparison_state();
+            }
         }
     }
 
@@ -1109,6 +1264,62 @@ fn parse_endpoint_port(endpoint: &str) -> Option<u16> {
 
 fn sim_time_us_to_send_time_ms(sim_time_us: u64) -> u32 {
     (sim_time_us / 1_000).min(u64::from(u32::MAX)) as u32
+}
+
+fn sanitized_sensor_valid_flags(frame: &GazeboSensorFrame) -> u32 {
+    let mut flags = if frame.valid_flags != 0 {
+        frame.valid_flags
+    } else {
+        SENSOR_VALID_ACCEL
+            | SENSOR_VALID_GYRO
+            | SENSOR_VALID_MAG
+            | SENSOR_VALID_BARO
+            | SENSOR_VALID_GPS
+    };
+
+    if !finite_f32x3(frame.accel_mps2) {
+        flags &= !SENSOR_VALID_ACCEL;
+    }
+    if !finite_f32x3(frame.gyro_rps) {
+        flags &= !SENSOR_VALID_GYRO;
+    }
+    if !finite_f32x3(frame.mag_ut) {
+        flags &= !SENSOR_VALID_MAG;
+    }
+    if !frame.pressure_pa.is_finite()
+        || !frame.baro_altitude_m.is_finite()
+        || !frame.temperature_c.is_finite()
+    {
+        flags &= !SENSOR_VALID_BARO;
+    }
+    if !frame.lat_deg.is_finite()
+        || !frame.lon_deg.is_finite()
+        || !frame.alt_msl_m.is_finite()
+        || !finite_f32x3(frame.vel_ned_mps)
+    {
+        flags &= !SENSOR_VALID_GPS;
+    }
+
+    flags
+}
+
+fn finite_f32x3(values: [f32; 3]) -> bool {
+    values.iter().all(|value| value.is_finite())
+}
+
+fn hil_response_allows_motion(flags: u32) -> bool {
+    if flags & RESPONSE_FLAG_BENCH_OVERRIDE != 0 {
+        return flags & RESPONSE_FLAG_MOTORS_VALID != 0
+            && flags & RESPONSE_FLAG_SENSOR_INPUT_VALID != 0
+            && flags & RESPONSE_FLAG_FAILSAFE == 0;
+    }
+
+    flags & RESPONSE_FLAG_FAILSAFE == 0
+        && flags & RESPONSE_FLAG_ARMED != 0
+        && flags & RESPONSE_FLAG_MOTORS_VALID != 0
+        && flags & RESPONSE_FLAG_ESTIMATOR_VALID != 0
+        && flags & RESPONSE_FLAG_CONTROL_VALID != 0
+        && flags & RESPONSE_FLAG_SENSOR_INPUT_VALID != 0
 }
 
 fn format_serial_monitor_line(
@@ -1175,6 +1386,9 @@ mod tests {
             sim_tick: 42,
             sim_time_us: 840_000,
             flags: RESPONSE_FLAG_ARMED | RESPONSE_FLAG_MOTORS_VALID,
+            position_ned_m: [0.0; 3],
+            velocity_ned_mps: [0.0; 3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
             motor_cmd: [1200, 1201, 1202, 1203],
         });
 
@@ -1214,13 +1428,50 @@ mod tests {
         let command = HilinkActuatorCommand {
             sim_tick: 42,
             sim_time_us: 840_000,
-            flags: RESPONSE_FLAG_ARMED | RESPONSE_FLAG_MOTORS_VALID,
+            flags: RESPONSE_FLAG_ARMED
+                | RESPONSE_FLAG_ESTIMATOR_VALID
+                | RESPONSE_FLAG_MOTORS_VALID
+                | RESPONSE_FLAG_CONTROL_VALID
+                | RESPONSE_FLAG_SENSOR_INPUT_VALID,
+            position_ned_m: [0.0; 3],
+            velocity_ned_mps: [0.0; 3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
             motor_cmd: [1000, 1001, 1002, 1003],
         };
 
         assert_eq!(
             bridge.validated_hil_motor_command(&command),
             Some([1000, 1001, 1002, 1003])
+        );
+        assert_eq!(bridge.hil_protocol_fault_count, 0);
+    }
+
+    #[test]
+    fn hil_response_validator_accepts_bench_override_while_disarmed() {
+        let mut bridge = AppBridge::new();
+        bridge.record_hil_source(test_gazebo_frame(42, 840_000));
+        bridge.outstanding_hil_source = Some(OutstandingHilSource {
+            sequence: 42,
+            sim_time_us: 840_000,
+            sent_at: Instant::now(),
+        });
+
+        let command = HilinkActuatorCommand {
+            sim_tick: 42,
+            sim_time_us: 840_000,
+            flags: RESPONSE_FLAG_MOTORS_VALID
+                | RESPONSE_FLAG_CONTROL_VALID
+                | RESPONSE_FLAG_SENSOR_INPUT_VALID
+                | RESPONSE_FLAG_BENCH_OVERRIDE,
+            position_ned_m: [0.0; 3],
+            velocity_ned_mps: [0.0; 3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
+            motor_cmd: [32_000, 0, 0, 0],
+        };
+
+        assert_eq!(
+            bridge.validated_hil_motor_command(&command),
+            Some([32_000, 0, 0, 0])
         );
         assert_eq!(bridge.hil_protocol_fault_count, 0);
     }
@@ -1239,6 +1490,9 @@ mod tests {
             sim_tick: 43,
             sim_time_us: 860_000,
             flags: RESPONSE_FLAG_ARMED | RESPONSE_FLAG_MOTORS_VALID,
+            position_ned_m: [0.0; 3],
+            velocity_ned_mps: [0.0; 3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
             motor_cmd: [1000; 4],
         };
 
@@ -1264,11 +1518,183 @@ mod tests {
             sim_tick: 42,
             sim_time_us: 840_000,
             flags: RESPONSE_FLAG_MOTORS_VALID,
+            position_ned_m: [0.0; 3],
+            velocity_ned_mps: [0.0; 3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
             motor_cmd: [1000, 1001, 1002, 1003],
         };
 
         assert_eq!(bridge.validated_hil_motor_command(&command), Some([0; 4]));
         assert_eq!(bridge.hil_protocol_fault_count, 1);
+    }
+
+    #[test]
+    fn gazebo_forwarding_waits_for_hil_ready() {
+        let mut bridge = AppBridge::new();
+        bridge
+            .gazebo_client
+            .push_test_sensor_frame(test_gazebo_frame(42, 840_000));
+
+        bridge.forward_gazebo_sensors_to_fc();
+
+        assert!(bridge.latest_hil_source.is_some());
+        assert!(bridge.outstanding_hil_source.is_none());
+        assert_eq!(bridge.hil_protocol_fault_count, 0);
+    }
+
+    #[test]
+    fn heartbeat_recovers_hil_ready_state_when_ready_packet_was_missed() {
+        let mut bridge = AppBridge::new();
+
+        bridge.apply_hilink_event(HilinkEvent::Heartbeat { seq: 10 });
+
+        assert!(bridge.hil_ready);
+        assert_eq!(
+            bridge.command_state.last_event.as_deref(),
+            Some("Heartbeat seq 10")
+        );
+    }
+
+    #[test]
+    fn waypoint_commands_report_inactive_hil_source_before_uart_write() {
+        let mut bridge = AppBridge::new();
+        bridge.hil_ready = true;
+
+        let error = bridge
+            .send_hilink_control_waypoint(0, 0, 26.0, -98.0, 30.0, 0.0)
+            .unwrap_err();
+
+        assert!(error.contains("HIL sensor source is inactive"));
+    }
+
+    #[test]
+    fn waypoint_commands_require_valid_hil_gps_reference() {
+        let mut bridge = AppBridge::new();
+        bridge.hil_ready = true;
+        let mut frame = test_gazebo_frame(42, 840_000);
+        frame.fix_type = 1;
+        frame.sats = 3;
+        bridge.record_hil_source(frame);
+
+        let error = bridge
+            .send_hilink_mission_waypoint(0, 0, 26.0, -98.0, 30.0, 0.0)
+            .unwrap_err();
+
+        assert!(error.contains("HIL GPS reference is not valid enough"));
+    }
+
+    #[test]
+    fn gazebo_forwarding_holds_new_frames_while_response_is_outstanding() {
+        let mut bridge = AppBridge::new();
+        bridge.hil_ready = true;
+        bridge.outstanding_hil_source = Some(OutstandingHilSource {
+            sequence: 42,
+            sim_time_us: 840_000,
+            sent_at: Instant::now(),
+        });
+        bridge
+            .gazebo_client
+            .push_test_sensor_frame(test_gazebo_frame(43, 860_000));
+
+        bridge.forward_gazebo_sensors_to_fc();
+
+        let outstanding = bridge.outstanding_hil_source.unwrap();
+        assert_eq!(outstanding.sequence, 42);
+        assert_eq!(outstanding.sim_time_us, 840_000);
+        assert_eq!(
+            bridge
+                .latest_hil_source
+                .as_ref()
+                .map(|source| source.sequence),
+            Some(43)
+        );
+        assert_eq!(bridge.hil_protocol_fault_count, 0);
+    }
+
+    #[test]
+    fn gazebo_forwarding_skips_duplicate_hil_ticks_after_response() {
+        let mut bridge = AppBridge::new();
+        bridge.hil_ready = true;
+        bridge.last_forwarded_hil_source_stamp = Some(HilSourceStamp {
+            sequence: 42,
+            sim_time_us: 840_000,
+        });
+        bridge
+            .gazebo_client
+            .push_test_sensor_frame(test_gazebo_frame(42, 860_000));
+
+        bridge.forward_gazebo_sensors_to_fc();
+
+        assert!(bridge.outstanding_hil_source.is_none());
+        assert_eq!(
+            bridge
+                .latest_hil_source
+                .as_ref()
+                .map(|source| (source.sequence, source.sim_time_us)),
+            Some((42, 860_000))
+        );
+        assert_eq!(bridge.hil_protocol_fault_count, 0);
+    }
+
+    #[test]
+    fn gazebo_forwarding_resyncs_after_source_clock_reset() {
+        let mut bridge = AppBridge::new();
+        bridge.hil_ready = true;
+        bridge.last_forwarded_hil_source_stamp = Some(HilSourceStamp {
+            sequence: 58_460,
+            sim_time_us: 1_169_200_000,
+        });
+        bridge.latest_hil_response = Some(HilResponseFrame {
+            sim_tick: 58_460,
+            sim_time_us: 1_169_200_000,
+            flags: RESPONSE_FLAG_ARMED | RESPONSE_FLAG_MOTORS_VALID,
+            position_ned_m: [0.0; 3],
+            velocity_ned_mps: [0.0; 3],
+            attitude_quat: [1.0, 0.0, 0.0, 0.0],
+            motor_cmd: [0; 4],
+        });
+        bridge.latest_forwarded_actuator = Some(HilForwardedActuatorFrame {
+            sequence: 58_460,
+            sim_time_us: 1_169_200_000,
+            motor_cmd: [0; 4],
+        });
+        bridge
+            .completed_hil_responses
+            .push_back((58_460, 1_169_200_000));
+        bridge
+            .gazebo_client
+            .push_test_sensor_frame(test_gazebo_frame(4_476, 89_526_000));
+
+        bridge.forward_gazebo_sensors_to_fc();
+
+        assert!(bridge.outstanding_hil_source.is_none());
+        assert_eq!(bridge.last_forwarded_hil_source_stamp, None);
+        assert!(bridge.latest_hil_response.is_none());
+        assert!(bridge.latest_forwarded_actuator.is_none());
+        assert!(bridge.completed_hil_responses.is_empty());
+        assert!(bridge
+            .latest_hil_protocol_fault
+            .as_deref()
+            .is_some_and(|fault| fault.contains("resynced HIL source")));
+    }
+
+    #[test]
+    fn hil_response_timeout_releases_outstanding_source() {
+        let mut bridge = AppBridge::new();
+        bridge.outstanding_hil_source = Some(OutstandingHilSource {
+            sequence: 42,
+            sim_time_us: 840_000,
+            sent_at: Instant::now() - HIL_RESPONSE_TIMEOUT - Duration::from_millis(1),
+        });
+
+        bridge.expire_hil_response_timeout();
+
+        assert!(bridge.outstanding_hil_source.is_none());
+        assert_eq!(bridge.hil_protocol_fault_count, 1);
+        assert!(bridge
+            .latest_hil_protocol_fault
+            .as_deref()
+            .is_some_and(|fault| fault.contains("timed out waiting for HIL response")));
     }
 
     fn test_gazebo_frame(sequence: u64, sim_time_us: u64) -> GazeboSensorFrame {

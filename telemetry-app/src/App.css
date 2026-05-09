@@ -299,11 +299,17 @@ button:disabled {
 }
 
 .dashboard-grid {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   padding: 16px;
-  align-content: start;
+  align-items: flex-start;
+}
+
+.dashboard-grid > * {
+  flex: 1 1 360px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .span-3 {
@@ -311,10 +317,11 @@ button:disabled {
 }
 
 .center-stack {
-  grid-column: span 6;
   display: flex;
   flex-direction: column;
   gap: 16px;
+  flex: 2 1 720px;
+  min-width: 0;
 }
 
 .split-panel {
@@ -335,6 +342,12 @@ button:disabled {
   min-width: 0;
   background: var(--surface-container);
   border: 1px solid var(--outline-variant);
+}
+
+.static-panel {
+  justify-self: start;
+  flex-grow: 0 !important;
+  max-width: 100%;
 }
 
 .panel-header,
@@ -405,7 +418,9 @@ button:disabled {
   color: var(--on-surface);
   text-align: right;
   overflow-wrap: anywhere;
+  word-break: break-word;
   font-weight: 500;
+  max-width: 100%;
 }
 
 .metric.mono strong,
@@ -927,9 +942,16 @@ code,
 }
 
 .hil-grid {
-  display: grid;
-  grid-template-columns: repeat(12, minmax(0, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 16px;
+  align-items: flex-start;
+}
+
+.hil-grid > * {
+  flex: 1 1 360px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .hil-status {
@@ -938,6 +960,7 @@ code,
 
 .hil-bridge-test {
   grid-column: span 9;
+  align-self: start;
 }
 
 .frame-compare {
@@ -1291,14 +1314,10 @@ td.ok {
 }
 
 .control-grid {
-  display: grid;
-  grid-template-columns: 2fr 2fr 1fr 1fr;
+  display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   align-items: end;
-}
-
-.bridge-test-grid {
-  grid-template-columns: minmax(140px, 1fr) 3fr;
 }
 
 .bridge-test-grid input[type="range"] {
@@ -1325,6 +1344,7 @@ select {
   color: var(--on-surface);
   padding: 8px 10px;
   font-family: "JetBrains Mono", monospace;
+  field-sizing: content;
 }
 
 input:focus,
@@ -1358,6 +1378,40 @@ select:disabled {
   color: var(--primary);
   border-color: var(--primary);
   background: var(--surface-highest);
+}
+
+.identify-grid,
+.motor-order-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.identify-grid button {
+  min-height: 40px;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface-low);
+  color: var(--on-surface);
+  font-size: 11px;
+  line-height: 16px;
+  letter-spacing: 0.08em;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.identify-grid button:hover {
+  border-color: var(--primary);
+}
+
+.mixer-reference-table {
+  margin-bottom: 14px;
+}
+
+.mixer-reference-table th,
+.mixer-reference-table td {
+  padding: 8px;
+  font-size: 11px;
 }
 
 .command-row {
@@ -1561,8 +1615,7 @@ select:disabled {
   .split-panel,
   .frame-pair,
   .hil-frame-grid,
-  .mission-grid,
-  .control-grid {
+  .mission-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1610,4 +1663,83 @@ select:disabled {
   .mission-form {
     grid-template-columns: 1fr;
   }
+
+  .identify-grid,
+  .motor-order-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.sensor-injection {
+  grid-column: span 12;
+}
+
+.sensor-inject-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 16px;
+}
+
+.sensor-inject-grid fieldset {
+  margin: 0;
+  padding: 14px;
+  border: 1px solid var(--outline-variant);
+  background: var(--surface);
+}
+
+.sensor-inject-grid legend {
+  padding: 0 6px;
+  color: var(--on-variant);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sensor-inject-grid label {
+  margin-bottom: 8px;
+}
+
+.sensor-inject-grid input {
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.vec3-input {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.vec3-label {
+  color: var(--on-variant);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.vec3-label small {
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--muted);
+}
+
+.vec3-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 4px;
+}
+
+.vec3-fields input {
+  min-height: 34px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.mini-grid.three-col {
+  grid-template-columns: 1fr 1fr 1fr;
 }

@@ -4,6 +4,7 @@ pub mod backend;
 pub mod boot;
 pub mod egress;
 pub mod events;
+pub mod frame_adapter;
 pub mod ingress;
 pub mod model;
 pub mod routing;
@@ -17,6 +18,10 @@ pub use boot::{
 };
 pub use egress::{HilByteWriter, HilEgressProtocol};
 pub use events::{MAV_CMD_MARV_RUNTIME_PHASE_EVENT, runtime_phase_event};
+pub use frame_adapter::{
+    HilCorrelationState, HilSensorFrameAdapter, HilSensorFrameDispatch, HilSensorFrameRejection,
+    HilValidationCounters,
+};
 pub use ingress::{HilByteReader, HilIngressProtocol};
 pub use model::{
     HilActuatorCommand, HilBarometerSample, HilCommandAck, HilCommandAckResult, HilControlAction,

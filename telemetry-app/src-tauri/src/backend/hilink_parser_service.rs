@@ -31,6 +31,7 @@ pub enum HilinkCommand {
     MotorStop,
     DshotCommand(DshotCommand),
     ActuatorStatusRequest,
+    MixerMotorOrder(MixerMotorOrderCommand),
     ControlWaypoint(GlobalWaypointCommand),
     MissionWaypoint(GlobalWaypointCommand),
     CvWaypoint(CvWaypointCommand),
@@ -56,6 +57,7 @@ impl HilinkCommand {
             Self::MotorStop => "MotorStop",
             Self::DshotCommand(_) => "DshotCommand",
             Self::ActuatorStatusRequest => "ActuatorStatusRequest",
+            Self::MixerMotorOrder(_) => "MixerMotorOrder",
             Self::ControlWaypoint(_) => "ControlWaypoint",
             Self::MissionWaypoint(_) => "MissionWaypoint",
             Self::CvWaypoint(_) => "CvWaypoint",
@@ -82,6 +84,7 @@ impl HilinkCommand {
             Self::MotorStop => 64,
             Self::DshotCommand(_) => 65,
             Self::ActuatorStatusRequest => 66,
+            Self::MixerMotorOrder(_) => 68,
         }
     }
 
@@ -98,6 +101,7 @@ impl HilinkCommand {
             | Self::MotorSweep(_)
             | Self::DshotCommand(_)
             | Self::ActuatorStatusRequest
+            | Self::MixerMotorOrder(_)
             | Self::ControlWaypoint(_)
             | Self::MissionWaypoint(_)
             | Self::CvWaypoint(_)
@@ -154,6 +158,7 @@ impl HilinkCommand {
                 payload.push(0);
                 payload
             }
+            Self::MixerMotorOrder(command) => command.output_for_motor.to_vec(),
             Self::ControlWaypoint(command) | Self::MissionWaypoint(command) => {
                 let mut payload = Vec::with_capacity(40);
                 push_stamp(&mut payload, command.ref_sim_tick, command.ref_sim_time_us);
@@ -212,7 +217,7 @@ pub struct BenchEnableCommand {
 
 impl Default for BenchEnableCommand {
     fn default() -> Self {
-        Self { timeout_ms: 30_000 }
+        Self { timeout_ms: 0 }
     }
 }
 
@@ -277,6 +282,19 @@ impl Default for DshotCommand {
             motor_mask: MOTOR_MASK_ALL,
             command: 0,
             repeat_count: 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+pub struct MixerMotorOrderCommand {
+    pub output_for_motor: [u8; 4],
+}
+
+impl Default for MixerMotorOrderCommand {
+    fn default() -> Self {
+        Self {
+            output_for_motor: [1, 2, 3, 4],
         }
     }
 }
@@ -635,8 +653,15 @@ fn format_hilink_message_summary(direction: &str, message: &HilinkMessage) -> St
             payload.command,
             payload.repeat_count
         ),
+        HilinkPayload::MixerMotorOrder(payload) => format!(
+            "m1->out{} m2->out{} m3->out{} m4->out{}",
+            payload.output_for_motor[0],
+            payload.output_for_motor[1],
+            payload.output_for_motor[2],
+            payload.output_for_motor[3]
+        ),
         HilinkPayload::ActuatorStatus(payload) => format!(
-            "armed={} bench={} active={} mode={} dshot=[{}, {}, {}, {}] age={}ms timeout={}ms flags={}",
+            "armed={} bench={} active={} mode={} dshot=[{}, {}, {}, {}] age={}ms timeout={}ms order=[{}, {}, {}, {}] flags={}",
             payload.armed,
             payload.bench_enabled,
             motor_mask_label(payload.active_motor_mask),
@@ -647,6 +672,10 @@ fn format_hilink_message_summary(direction: &str, message: &HilinkMessage) -> St
             payload.commanded_dshot[3],
             payload.last_command_age_ms,
             payload.bench_timeout_ms,
+            payload.mixer_motor_order[0],
+            payload.mixer_motor_order[1],
+            payload.mixer_motor_order[2],
+            payload.mixer_motor_order[3],
             actuator_flags(payload.flags)
         ),
         HilinkPayload::Raw(bytes) => format!("raw_payload={} bytes", bytes.len()),
@@ -771,11 +800,14 @@ impl HilinkParserService {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct HilinkActuatorCommand {
     pub sim_tick: u64,
     pub sim_time_us: u64,
     pub flags: u32,
+    pub position_ned_m: [f32; 3],
+    pub velocity_ned_mps: [f32; 3],
+    pub attitude_quat: [f32; 4],
     pub motor_cmd: [u16; 4],
 }
 
@@ -803,6 +835,9 @@ pub enum HilinkEvent {
         seq: u16,
     },
     HilReady {
+        seq: u16,
+    },
+    Heartbeat {
         seq: u16,
     },
 }
@@ -833,6 +868,9 @@ impl HilinkEvent {
                 seq: message.header.seq,
             }),
             HilinkPayload::TelemetrySnapshot(_) => Some(Self::TelemetrySnapshot {
+                seq: message.header.seq,
+            }),
+            HilinkPayload::Heartbeat(_) => Some(Self::Heartbeat {
                 seq: message.header.seq,
             }),
             HilinkPayload::Empty if message.header.msg_type == MsgType::HilReady => {
@@ -1049,6 +1087,9 @@ impl HilinkTelemetryState {
                         sim_tick: payload.stamp.sim_tick,
                         sim_time_us: payload.stamp.sim_time_us,
                         flags: payload.flags,
+                        position_ned_m: payload.position_ned_m,
+                        velocity_ned_mps: payload.velocity_ned_mps,
+                        attitude_quat: payload.attitude_quat,
                         motor_cmd: payload.motor_cmd,
                     });
                 }
@@ -1200,6 +1241,9 @@ impl HilinkTelemetryState {
                     "count",
                 );
             }
+            HilinkPayload::MixerMotorOrder(payload) => {
+                self.apply_mixer_motor_order(payload.output_for_motor);
+            }
             HilinkPayload::ActuatorStatus(payload) => {
                 self.upsert("Actuators", "BENCH_ARMED", payload.armed, "bool");
                 self.upsert("Actuators", "BENCH_ENABLED", payload.bench_enabled, "bool");
@@ -1235,6 +1279,7 @@ impl HilinkTelemetryState {
                     payload.bench_timeout_ms,
                     "ms",
                 );
+                self.apply_mixer_motor_order(payload.mixer_motor_order);
                 self.upsert(
                     "Actuators",
                     "ACTUATOR_FLAGS",
@@ -1292,6 +1337,26 @@ impl HilinkTelemetryState {
                 format!("MOTOR_CMD_{}", index + 1),
                 value,
                 "normalized",
+            );
+        }
+    }
+
+    fn apply_mixer_motor_order(&mut self, output_for_motor: [u8; 4]) {
+        self.upsert(
+            "Actuators",
+            "MIXER_MOTOR_ORDER",
+            format!(
+                "M1->O{} M2->O{} M3->O{} M4->O{}",
+                output_for_motor[0], output_for_motor[1], output_for_motor[2], output_for_motor[3]
+            ),
+            "",
+        );
+        for (index, output) in output_for_motor.into_iter().enumerate() {
+            self.upsert(
+                "Actuators",
+                format!("MIXER_MOTOR_{}_OUTPUT", index + 1),
+                output,
+                "output",
             );
         }
     }
@@ -1417,6 +1482,7 @@ enum MsgType {
     DshotCommand,
     ActuatorStatusRequest,
     ActuatorStatus,
+    MixerMotorOrder,
 }
 
 impl MsgType {
@@ -1455,6 +1521,7 @@ impl MsgType {
             65 => Ok(Self::DshotCommand),
             66 => Ok(Self::ActuatorStatusRequest),
             67 => Ok(Self::ActuatorStatus),
+            68 => Ok(Self::MixerMotorOrder),
             _ => Err(ParseError::UnknownMsgType),
         }
     }
@@ -1494,6 +1561,7 @@ impl MsgType {
             Self::DshotCommand => "DshotCommand",
             Self::ActuatorStatusRequest => "ActuatorStatusRequest",
             Self::ActuatorStatus => "ActuatorStatus",
+            Self::MixerMotorOrder => "MixerMotorOrder",
         }
     }
 }
@@ -1528,6 +1596,7 @@ enum HilinkPayload {
     MotorTest(MotorTestPayload),
     MotorSweep(MotorSweepPayload),
     DshotCommand(DshotCommandPayload),
+    MixerMotorOrder(MixerMotorOrderPayload),
     ActuatorStatus(ActuatorStatusPayload),
     Raw(Vec<u8>),
 }
@@ -1721,6 +1790,11 @@ struct DshotCommandPayload {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MixerMotorOrderPayload {
+    output_for_motor: [u8; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ActuatorStatusPayload {
     armed: u8,
     bench_enabled: u8,
@@ -1729,6 +1803,7 @@ struct ActuatorStatusPayload {
     commanded_dshot: [u16; 4],
     last_command_age_ms: u16,
     bench_timeout_ms: u16,
+    mixer_motor_order: [u8; 4],
     flags: u32,
 }
 
@@ -1744,6 +1819,7 @@ enum ParseError {
     UnknownMsgType,
     InvalidPayloadLength,
     UnsupportedProtocolVersion,
+    NonZeroReserved,
 }
 
 impl ParseError {
@@ -1759,6 +1835,7 @@ impl ParseError {
             Self::UnknownMsgType => "unknown HILink message type",
             Self::InvalidPayloadLength => "payload length was invalid for message type",
             Self::UnsupportedProtocolVersion => "unsupported HILink protocol version",
+            Self::NonZeroReserved => "reserved HILink header byte was nonzero",
         }
     }
 }
@@ -1784,6 +1861,9 @@ fn decode_message(input: &[u8], direction: FrameDirection) -> Result<HilinkMessa
     let header = decode_header(&raw[..HEADER_LEN])?;
     if header.version != PROTOCOL_VERSION {
         return Err(ParseError::UnsupportedProtocolVersion);
+    }
+    if header.reserved != 0 {
+        return Err(ParseError::NonZeroReserved);
     }
 
     let payload_end = HEADER_LEN + usize::from(header.payload_len);
@@ -2065,8 +2145,14 @@ fn decode_payload(msg_type: MsgType, input: &[u8]) -> Result<HilinkPayload, Pars
             reader.bytes::<1>()?;
             Ok(HilinkPayload::DshotCommand(payload))
         }
+        MsgType::MixerMotorOrder => {
+            expect_len(input, 4)?;
+            Ok(HilinkPayload::MixerMotorOrder(MixerMotorOrderPayload {
+                output_for_motor: reader.bytes::<4>()?,
+            }))
+        }
         MsgType::ActuatorStatus => {
-            expect_len(input, 20)?;
+            expect_len(input, 24)?;
             Ok(HilinkPayload::ActuatorStatus(ActuatorStatusPayload {
                 armed: reader.u8()?,
                 bench_enabled: reader.u8()?,
@@ -2075,6 +2161,7 @@ fn decode_payload(msg_type: MsgType, input: &[u8]) -> Result<HilinkPayload, Pars
                 commanded_dshot: reader.u16x4()?,
                 last_command_age_ms: reader.u16()?,
                 bench_timeout_ms: reader.u16()?,
+                mixer_motor_order: reader.bytes::<4>()?,
                 flags: reader.u32()?,
             }))
         }
@@ -2361,6 +2448,10 @@ fn response_flags(value: u32) -> String {
             (1 << 1, "FAILSAFE"),
             (1 << 2, "ESTIMATOR_VALID"),
             (1 << 3, "MOTORS_VALID"),
+            (1 << 4, "CONTROL_VALID"),
+            (1 << 5, "CONTROL_CLAMPED"),
+            (1 << 6, "SENSOR_INPUT_VALID"),
+            (1 << 7, "BENCH_OVERRIDE"),
         ],
     )
 }
@@ -2542,6 +2633,12 @@ mod tests {
     fn queues_rx_command_response_events() {
         let pong = encode_test_packet(2, 50, 2000, &[]);
         let hil_ready = encode_test_packet(12, 53, 2003, &[]);
+        let mut heartbeat_payload = Vec::new();
+        push_stamp(&mut heartbeat_payload, 100, 200_000);
+        heartbeat_payload.push(2);
+        heartbeat_payload.extend([0, 0, 0]);
+        push_u32(&mut heartbeat_payload, 1);
+        let heartbeat = encode_test_packet(5, 54, 2004, &heartbeat_payload);
 
         let mut ack_payload = Vec::new();
         ack_payload.extend(12u16.to_le_bytes());
@@ -2560,6 +2657,7 @@ mod tests {
         parser.push_rx_bytes(&ack);
         parser.push_rx_bytes(&nack);
         parser.push_rx_bytes(&hil_ready);
+        parser.push_rx_bytes(&heartbeat);
 
         assert_eq!(
             parser.drain_events(),
@@ -2578,6 +2676,7 @@ mod tests {
                     reason: 2,
                 },
                 HilinkEvent::HilReady { seq: 53 },
+                HilinkEvent::Heartbeat { seq: 54 },
             ]
         );
     }
@@ -2633,6 +2732,24 @@ mod tests {
     }
 
     #[test]
+    fn encodes_mixer_motor_order_command() {
+        let command = HilinkCommand::MixerMotorOrder(MixerMotorOrderCommand {
+            output_for_motor: [3, 1, 4, 2],
+        });
+        let encoded = encode_hilink_command(&command, 19, 9_100).unwrap();
+        let message = decode_message(&encoded, FrameDirection::Tx).unwrap();
+
+        assert_eq!(message.header.msg_type, MsgType::MixerMotorOrder);
+        assert_eq!(message.header.flags, HEADER_FLAG_REQUEST_ACK);
+        assert_eq!(message.header.payload_len, 4);
+
+        let HilinkPayload::MixerMotorOrder(payload) = message.payload else {
+            panic!("expected mixer motor order payload");
+        };
+        assert_eq!(payload.output_for_motor, [3, 1, 4, 2]);
+    }
+
+    #[test]
     fn parses_actuator_status_payload() {
         let mut payload = Vec::new();
         payload.push(1);
@@ -2644,6 +2761,7 @@ mod tests {
         }
         payload.extend(300u16.to_le_bytes());
         payload.extend(2_000u16.to_le_bytes());
+        payload.extend([3, 1, 4, 2]);
         payload.extend(((1u32 << 0) | (1u32 << 4)).to_le_bytes());
 
         let encoded = encode_test_packet(67, 5, 100, &payload);
@@ -2654,6 +2772,12 @@ mod tests {
         assert_field(&telemetry, "Actuators", "BENCH_ARMED", "1");
         assert_field(&telemetry, "Actuators", "ACTIVE_MOTOR_MASK", "ALL");
         assert_field(&telemetry, "Actuators", "COMMAND_DSHOT_4", "123");
+        assert_field(
+            &telemetry,
+            "Actuators",
+            "MIXER_MOTOR_ORDER",
+            "M1->O3 M2->O1 M3->O4 M4->O2",
+        );
         assert_field(
             &telemetry,
             "Actuators",
@@ -2687,6 +2811,9 @@ mod tests {
                 sim_tick: 42,
                 sim_time_us: 840_000,
                 flags: (1 << 0) | (1 << 3),
+                position_ned_m: [1.0, 2.0, -3.0],
+                velocity_ned_mps: [0.1, 0.2, 0.3],
+                attitude_quat: [1.0, 0.0, 0.0, 0.0],
                 motor_cmd: [12000, 12001, 12002, 12003],
             }]
         );
