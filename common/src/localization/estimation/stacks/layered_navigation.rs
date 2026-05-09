@@ -6,7 +6,7 @@ use crate::localization::estimation::core::{
 use crate::localization::estimation::math::{identity_quaternion, quaternion_to_rotation_matrix};
 use crate::localization::estimation::measurements::{
     BarometricAltitudeMeasurementModel, GpsPositionMeasurementModel, GpsVelocityMeasurementModel,
-    GravityAlignmentMeasurementModel,
+    GravityAlignmentMeasurementModel, MagneticFieldMeasurementModel,
 };
 use crate::localization::estimation::models::{
     ATTITUDE_STATE_DIM, AttitudeErrorStateProcessModel, AttitudeInput, AttitudeState,
@@ -229,6 +229,22 @@ impl<T: crate::localization::estimation::core::EstimatorScalar> LayeredNavigatio
         )
     }
 
+    pub fn update_magnetic_field(
+        &mut self,
+        magnetic_field_body_ut: Vec3<T>,
+        magnetic_field_inertial_ut: Vec3<T>,
+        measurement_gate: Option<
+            &dyn MeasurementGate<AttitudeState<T>, T, ATTITUDE_STATE_DIM, 3, Vec3<T>>,
+        >,
+    ) -> Result<
+        crate::localization::estimation::core::MeasurementUpdateSummary<T, ATTITUDE_STATE_DIM, 3>,
+        EstimationError,
+    > {
+        let model = MagneticFieldMeasurementModel::new(magnetic_field_inertial_ut);
+        self.attitude
+            .update(&model, &magnetic_field_body_ut, measurement_gate)
+    }
+
     pub fn update_position(
         &mut self,
         position_m: Vec3<T>,
@@ -324,6 +340,13 @@ mod tests {
             .unwrap();
         stack
             .update_gravity_alignment(Vec3::<f64>::new(0.0, 0.0, -9.80665), None)
+            .unwrap();
+        stack
+            .update_magnetic_field(
+                Vec3::<f64>::new(20.0, 0.0, 40.0),
+                Vec3::<f64>::new(20.0, 0.0, 40.0),
+                None,
+            )
             .unwrap();
         stack
             .update_position(Vec3::<f64>::new(1.0, 2.0, 3.0), None)

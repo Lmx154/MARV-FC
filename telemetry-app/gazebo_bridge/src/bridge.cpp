@@ -46,7 +46,7 @@ struct BridgeConfig {
     bool synthetic_sensors = false;
     float nominal_battery_voltage_v = 12.3f;
     double max_rotor_velocity_rad_s = 1000.0;
-    std::array<double, 4> motor_directions{1.0, 1.0, -1.0, -1.0};
+    std::array<double, 4> motor_directions{1.0, 1.0, 1.0, 1.0};
 };
 
 void handle_signal(int) {
@@ -177,7 +177,7 @@ private:
     gz::transport::Node::Publisher publisher_;
     std::string topic_ = "/X3/gazebo/command/motor_speed";
     double max_rotor_velocity_rad_s_ = 1000.0;
-    std::array<double, 4> directions_{1.0, -1.0, 1.0, -1.0};
+    std::array<double, 4> directions_{1.0, 1.0, 1.0, 1.0};
 };
 
 class SensorCollector {

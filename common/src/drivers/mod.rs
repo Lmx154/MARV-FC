@@ -1,5 +1,6 @@
 //! Portable drivers and adapters.
 
+pub mod dshot;
 pub mod gnss;
 pub mod leds;
 pub mod radio;

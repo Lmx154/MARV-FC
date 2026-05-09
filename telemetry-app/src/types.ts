@@ -65,6 +65,9 @@ export type AppState = {
       sim_tick: number;
       sim_time_us: number;
       flags: number;
+      position_ned_m: [number, number, number];
+      velocity_ned_mps: [number, number, number];
+      attitude_quat: [number, number, number, number];
       motor_cmd: [number, number, number, number];
     } | null;
     latest_forwarded_actuator: {

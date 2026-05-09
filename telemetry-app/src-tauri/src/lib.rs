@@ -65,6 +65,7 @@ pub fn run() {
             commands::hilink::run_radio_link_smoke_test,
             commands::hilink::send_hilink_dshot_command,
             commands::hilink::send_hilink_actuator_status_request,
+            commands::hilink::send_hilink_mixer_motor_order,
             commands::hilink::send_hilink_control_waypoint,
             commands::hilink::send_hilink_mission_waypoint,
             commands::hilink::send_hilink_cv_waypoint,

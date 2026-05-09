@@ -40,6 +40,22 @@ export function MissionView({ state, command }: { state: AppState | null; comman
     }),
     [state?.gazebo_bridge.last_sensor_sequence, state?.gazebo_bridge.last_sensor_time_us],
   );
+  const latestSource = state?.hil_comparison.latest_source ?? null;
+  const gpsReferenceReady = Boolean(
+    latestSource &&
+      latestSource.fix_type >= 3 &&
+      latestSource.sats >= 4 &&
+      Number.isFinite(latestSource.lat_deg) &&
+      Number.isFinite(latestSource.lon_deg) &&
+      Number.isFinite(latestSource.alt_msl_m),
+  );
+  const waypointControlReady = Boolean(
+    state?.uart.connected &&
+      state?.hil_comparison.hil_ready &&
+      state?.hil_comparison.source_active &&
+      gpsReferenceReady,
+  );
+  const latestResponseFlags = state?.hil_comparison.latest_response?.flags ?? 0;
 
   const [globalWaypoint, setGlobalWaypoint] = useState({
     latDeg: vehiclePosition.lat,
@@ -98,9 +114,14 @@ export function MissionView({ state, command }: { state: AppState | null; comman
             <Metric label="Alt MSL" value={`${alt} m`} mono />
             <Metric label="Reference Tick" value={String(latestStamp.refSimTick || "--")} mono />
             <Metric label="Reference Time" value={String(latestStamp.refSimTimeUs || "--")} mono />
+            <Metric label="MARV Ready" value={state?.hil_comparison.hil_ready ? "READY" : "WAIT"} mono />
+            <Metric label="HIL Source" value={state?.hil_comparison.source_active ? "LIVE" : "IDLE"} mono />
+            <Metric label="GPS Ref" value={gpsReferenceReady ? `FIX ${latestSource?.fix_type} / ${latestSource?.sats} sats` : "WAIT"} mono />
+            <Metric label="Response Flags" value={formatHilResponseFlags(latestResponseFlags)} mono />
+            <Metric label="Protocol Fault" value={state?.hil_comparison.latest_protocol_fault ?? "none"} mono />
           </section>
 
-          <section className="mission-card">
+          <section className="mission-card static-panel">
             <HeaderLine icon="route" title="Global Waypoint" />
             <div className="control-grid mission-form">
               <NumberInput label="Lat Deg" value={globalWaypoint.latDeg} step={0.000001} onChange={(latDeg) => {
@@ -118,18 +139,18 @@ export function MissionView({ state, command }: { state: AppState | null; comman
               <NumberInput label="Yaw Deg" value={globalWaypoint.yawDeg} onChange={(yawDeg) => setGlobalWaypoint({ ...globalWaypoint, yawDeg })} />
             </div>
             <div className="command-row">
-              <button disabled={!state?.uart.connected} onClick={() => command("send_hilink_control_waypoint", { ...latestStamp, ...globalWaypoint })}>
+              <button disabled={!waypointControlReady} onClick={() => command("send_hilink_control_waypoint", { ...latestStamp, ...globalWaypoint })}>
                 <Icon name="near_me" />
                 Control
               </button>
-              <button className="primary" disabled={!state?.uart.connected} onClick={() => command("send_hilink_mission_waypoint", { ...latestStamp, ...globalWaypoint })}>
+              <button className="primary" disabled={!waypointControlReady} onClick={() => command("send_hilink_mission_waypoint", { ...latestStamp, ...globalWaypoint })}>
                 <Icon name="upload" />
                 Mission
               </button>
             </div>
           </section>
 
-          <section className="mission-card">
+          <section className="mission-card static-panel">
             <HeaderLine icon="center_focus_strong" title="CV Waypoint" />
             <div className="control-grid mission-form">
               <NumberInput label="Body X" value={cvWaypoint.x} onChange={(x) => setCvWaypoint({ ...cvWaypoint, x })} />
@@ -158,7 +179,7 @@ export function MissionView({ state, command }: { state: AppState | null; comman
             </div>
           </section>
 
-          <section className="mission-card">
+          <section className="mission-card static-panel">
             <HeaderLine icon="settings_ethernet" title="ToF Waypoint" />
             <div className="control-grid mission-form">
               <NumberInput label="Distance M" value={tofWaypoint.distanceM} onChange={(distanceM) => setTofWaypoint({ ...tofWaypoint, distanceM })} />
@@ -495,4 +516,18 @@ function roundCoordinate(value: number) {
 
 function formatCoordinate(value: number) {
   return value.toFixed(6);
+}
+
+function formatHilResponseFlags(flags: number) {
+  const labels = [
+    [1 << 0, "ARMED"],
+    [1 << 1, "FAILSAFE"],
+    [1 << 2, "EST"],
+    [1 << 3, "MOTORS"],
+    [1 << 4, "CTRL"],
+    [1 << 5, "CLAMP"],
+    [1 << 6, "SENSOR"],
+  ] as const;
+  const active = labels.filter(([mask]) => (flags & mask) !== 0).map(([, label]) => label);
+  return active.length ? active.join("|") : "none";
 }

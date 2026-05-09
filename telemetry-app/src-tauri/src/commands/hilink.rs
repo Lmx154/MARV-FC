@@ -132,6 +132,16 @@ pub fn send_hilink_actuator_status_request(
 }
 
 #[tauri::command]
+pub fn send_hilink_mixer_motor_order(
+    backend: State<'_, TelemetryBackend>,
+    output_for_motor: [u8; 4],
+) -> CommandResult<AppState> {
+    mutate_and_snapshot(backend, |bridge| {
+        bridge.send_hilink_mixer_motor_order(output_for_motor)
+    })
+}
+
+#[tauri::command]
 pub fn send_hilink_control_waypoint(
     backend: State<'_, TelemetryBackend>,
     ref_sim_tick: u64,

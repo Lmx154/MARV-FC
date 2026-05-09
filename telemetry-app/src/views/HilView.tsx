@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 
 import { Icon } from "../components/ui/Icon";
 import { Metric } from "../components/ui/Metric";
@@ -18,26 +18,50 @@ export function HilView({ state, command }: { state: AppState | null; command: B
   const deltaMs = comparison?.sim_time_delta_us == null ? "--" : `${(comparison.sim_time_delta_us / 1000).toFixed(3)} ms`;
   const telemetry = (group: string, parameter: string, fallback = "--") => findValue(state, group, parameter, fallback);
   const gazeboReady = Boolean(state?.gazebo_bridge.connected);
+  const uartReady = Boolean(state?.uart.connected);
   const [bridgeMotorSpeed, setBridgeMotorSpeed] = useState(0.12);
+  const [pulseDurationMs, setPulseDurationMs] = useState(1000);
   const [bridgeTestRunning, setBridgeTestRunning] = useState(false);
+  const pulseTimeoutRef = useRef<number | null>(null);
+  const [sensorFrame, setSensorFrame] = useState({
+    simTick: 0, simTimeUs: 0, validFlags: 0x1F,
+    accelMps2: [0, 0, -9.81] as [number, number, number],
+    gyroRps: [0, 0, 0] as [number, number, number],
+    magUt: [22, 0, 42] as [number, number, number],
+    pressurePa: 101325, baroAltitudeM: 0, temperatureC: 25,
+    latDeg: 26.310942, lonDeg: -98.174728, altMslM: 28.7,
+    velNedMps: [0, 0, 0] as [number, number, number],
+    sats: 12, fixType: 3,
+    batteryVoltageV: 16.2, rssiDbm: -48, snrDbX100: 1150, lossPctX100: 0,
+  });
+  const [injectionDomain, setInjectionDomain] = useState("stamp");
 
   const sendBridgeMotorSpeed = async (motorSpeed: number) => {
     await command("send_test_actuator_command", { motorSpeed });
   };
 
+  const clearPulseTimeout = () => {
+    if (pulseTimeoutRef.current !== null) {
+      window.clearTimeout(pulseTimeoutRef.current);
+      pulseTimeoutRef.current = null;
+    }
+  };
+
   const runBridgeMotorPulse = async () => {
+    clearPulseTimeout();
     setBridgeTestRunning(true);
     try {
       await sendBridgeMotorSpeed(bridgeMotorSpeed);
-      window.setTimeout(() => {
+      pulseTimeoutRef.current = window.setTimeout(() => {
         sendBridgeMotorSpeed(0).finally(() => setBridgeTestRunning(false));
-      }, 1000);
+      }, pulseDurationMs);
     } catch {
       setBridgeTestRunning(false);
     }
   };
 
   const stopBridgeMotorTest = async () => {
+    clearPulseTimeout();
     setBridgeTestRunning(false);
     await sendBridgeMotorSpeed(0);
   };
@@ -83,10 +107,10 @@ export function HilView({ state, command }: { state: AppState | null; command: B
           <Metric label="Last Error" value={state?.gazebo_bridge.last_error ?? "none"} mono />
         </Panel>
 
-        <Panel title="Gazebo Motor Link Test" icon="electric_bolt" className="hil-bridge-test" accent="BRIDGE ONLY">
+        <Panel title="Gazebo Motor Link Test" icon="electric_bolt" className="hil-bridge-test static-panel" accent="BRIDGE ONLY">
           <div className="control-grid bridge-test-grid">
             <label>
-              <span>Motor Speed</span>
+              <span>Speed (0-0.35)</span>
               <input
                 type="number"
                 min={0}
@@ -97,29 +121,26 @@ export function HilView({ state, command }: { state: AppState | null; command: B
               />
             </label>
             <label>
-              <span>Normalized</span>
+              <span>Duration (ms)</span>
               <input
-                type="range"
-                min={0}
-                max={0.35}
-                step={0.01}
-                value={bridgeMotorSpeed}
-                onChange={(event) => setBridgeMotorSpeed(clamp(Number(event.currentTarget.value), 0, 0.35))}
+                type="number"
+                min={10}
+                max={10000}
+                step={10}
+                value={pulseDurationMs}
+                onChange={(event) => setPulseDurationMs(clamp(Number(event.currentTarget.value), 10, 10000))}
               />
             </label>
           </div>
           <div className="command-row compact">
             <button disabled={!gazeboReady} onClick={stopBridgeMotorTest}>
-              Stop
+              Abort
             </button>
             <button className="primary" disabled={!gazeboReady || bridgeTestRunning} onClick={runBridgeMotorPulse}>
               <Icon name="play_arrow" />
-              Pulse 1s
+              Pulse
             </button>
           </div>
-          <Metric label="Path" value="GUI -> backend -> bridge -> Gazebo Actuators" mono />
-          <Metric label="Bridge TX" value={String(state?.gazebo_bridge.actuator_frames_sent ?? 0)} mono />
-          <Metric label="State" value={gazeboReady ? (bridgeTestRunning ? "pulse active" : "ready") : "bridge disconnected"} mono />
         </Panel>
 
         <Panel title="Simulation Stamp Alignment" icon="compare" className="frame-compare" accent={`Offset ${deltaMs}`}>
@@ -236,7 +257,17 @@ export function HilView({ state, command }: { state: AppState | null; command: B
               <tr>
                 <td>Velocity NED</td>
                 <td>{fmtNum(source?.vel_ned_mps[0])}, {fmtNum(source?.vel_ned_mps[1])}, {fmtNum(source?.vel_ned_mps[2])}</td>
-                <td>{telemetry("Navigation", "GPS_VEL_NED_X")}, {telemetry("Navigation", "GPS_VEL_NED_Y")}, {telemetry("Navigation", "GPS_VEL_NED_Z")}</td>
+                <td>{fmtNum(response?.velocity_ned_mps[0])}, {fmtNum(response?.velocity_ned_mps[1])}, {fmtNum(response?.velocity_ned_mps[2])}</td>
+              </tr>
+              <tr>
+                <td>Position NED</td>
+                <td>--</td>
+                <td>{fmtNum(response?.position_ned_m[0])}, {fmtNum(response?.position_ned_m[1])}, {fmtNum(response?.position_ned_m[2])}</td>
+              </tr>
+              <tr>
+                <td>Attitude q</td>
+                <td>{fmtNum(source?.orientation_quat?.[0])}, {fmtNum(source?.orientation_quat?.[1])}, {fmtNum(source?.orientation_quat?.[2])}, {fmtNum(source?.orientation_quat?.[3])}</td>
+                <td>{fmtNum(response?.attitude_quat[0])}, {fmtNum(response?.attitude_quat[1])}, {fmtNum(response?.attitude_quat[2])}, {fmtNum(response?.attitude_quat[3])}</td>
               </tr>
               <tr>
                 <td>Barometer</td>
@@ -262,6 +293,113 @@ export function HilView({ state, command }: { state: AppState | null; command: B
           <Metric label="Forwarded Seq" value={String(comparison?.latest_forwarded_actuator?.sequence ?? "--")} mono />
           <Metric label="Forwarded Time" value={String(comparison?.latest_forwarded_actuator?.sim_time_us ?? "--")} mono />
         </Panel>
+
+        <Panel title="Manual Sensor Injection" icon="science" className="sensor-injection static-panel" accent="NO GAZEBO">
+          <div className="control-grid" style={{ marginBottom: "16px" }}>
+            <label>
+              <span>Domain</span>
+              <select value={injectionDomain} onChange={(e) => setInjectionDomain(e.currentTarget.value)}>
+                <option value="stamp">Simulation Stamp</option>
+                <option value="imu">IMU</option>
+                <option value="baro">Barometer</option>
+                <option value="gps">GPS</option>
+                <option value="power">Power / Radio</option>
+              </select>
+            </label>
+          </div>
+          <div className="sensor-inject-grid">
+            {injectionDomain === "stamp" && (
+              <fieldset>
+                <legend>Simulation Stamp</legend>
+                <label>
+                  <span>Tick</span>
+                  <input type="number" value={sensorFrame.simTick} onChange={(e) => setSensorFrame({ ...sensorFrame, simTick: Number(e.currentTarget.value) })} />
+                </label>
+                <label>
+                  <span>Time µs</span>
+                  <input type="number" value={sensorFrame.simTimeUs} onChange={(e) => setSensorFrame({ ...sensorFrame, simTimeUs: Number(e.currentTarget.value) })} />
+                </label>
+                <label>
+                  <span>Valid Flags</span>
+                  <input value={`0x${sensorFrame.validFlags.toString(16).toUpperCase()}`} readOnly />
+                </label>
+              </fieldset>
+            )}
+            {injectionDomain === "imu" && (
+              <fieldset>
+                <legend>IMU</legend>
+                <Vec3Input label="Accel" unit="m/s²" value={sensorFrame.accelMps2} onChange={(accelMps2) => setSensorFrame({ ...sensorFrame, accelMps2 })} />
+                <Vec3Input label="Gyro" unit="rad/s" value={sensorFrame.gyroRps} onChange={(gyroRps) => setSensorFrame({ ...sensorFrame, gyroRps })} />
+                <Vec3Input label="Mag" unit="µT" value={sensorFrame.magUt} onChange={(magUt) => setSensorFrame({ ...sensorFrame, magUt })} />
+              </fieldset>
+            )}
+            {injectionDomain === "baro" && (
+              <fieldset>
+                <legend>Barometer</legend>
+                <label><span>Pressure Pa</span><input type="number" value={sensorFrame.pressurePa} onChange={(e) => setSensorFrame({ ...sensorFrame, pressurePa: Number(e.currentTarget.value) })} /></label>
+                <label><span>Baro Alt m</span><input type="number" value={sensorFrame.baroAltitudeM} onChange={(e) => setSensorFrame({ ...sensorFrame, baroAltitudeM: Number(e.currentTarget.value) })} /></label>
+                <label><span>Temp °C</span><input type="number" value={sensorFrame.temperatureC} onChange={(e) => setSensorFrame({ ...sensorFrame, temperatureC: Number(e.currentTarget.value) })} /></label>
+              </fieldset>
+            )}
+            {injectionDomain === "gps" && (
+              <fieldset>
+                <legend>GPS</legend>
+                <label><span>Lat deg</span><input type="number" step={0.000001} value={sensorFrame.latDeg} onChange={(e) => setSensorFrame({ ...sensorFrame, latDeg: Number(e.currentTarget.value) })} /></label>
+                <label><span>Lon deg</span><input type="number" step={0.000001} value={sensorFrame.lonDeg} onChange={(e) => setSensorFrame({ ...sensorFrame, lonDeg: Number(e.currentTarget.value) })} /></label>
+                <label><span>Alt MSL m</span><input type="number" value={sensorFrame.altMslM} onChange={(e) => setSensorFrame({ ...sensorFrame, altMslM: Number(e.currentTarget.value) })} /></label>
+                <Vec3Input label="Vel NED" unit="m/s" value={sensorFrame.velNedMps} onChange={(velNedMps) => setSensorFrame({ ...sensorFrame, velNedMps })} />
+                <label><span>Sats</span><input type="number" value={sensorFrame.sats} onChange={(e) => setSensorFrame({ ...sensorFrame, sats: Number(e.currentTarget.value) })} /></label>
+                <label><span>Fix Type</span><input type="number" value={sensorFrame.fixType} onChange={(e) => setSensorFrame({ ...sensorFrame, fixType: Number(e.currentTarget.value) })} /></label>
+              </fieldset>
+            )}
+            {injectionDomain === "power" && (
+              <fieldset>
+                <legend>Power / Radio</legend>
+                <label><span>Battery V</span><input type="number" step={0.1} value={sensorFrame.batteryVoltageV} onChange={(e) => setSensorFrame({ ...sensorFrame, batteryVoltageV: Number(e.currentTarget.value) })} /></label>
+                <label><span>RSSI dBm</span><input type="number" value={sensorFrame.rssiDbm} onChange={(e) => setSensorFrame({ ...sensorFrame, rssiDbm: Number(e.currentTarget.value) })} /></label>
+                <label><span>SNR ×100</span><input type="number" value={sensorFrame.snrDbX100} onChange={(e) => setSensorFrame({ ...sensorFrame, snrDbX100: Number(e.currentTarget.value) })} /></label>
+                <label><span>Loss ×100</span><input type="number" value={sensorFrame.lossPctX100} onChange={(e) => setSensorFrame({ ...sensorFrame, lossPctX100: Number(e.currentTarget.value) })} /></label>
+              </fieldset>
+            )}
+          </div>
+          <div className="command-row">
+            <button
+              className="primary"
+              disabled={!uartReady}
+              onClick={() => {
+                command("send_hilink_sensor_frame_values", {
+                  simTick: sensorFrame.simTick,
+                  simTimeUs: sensorFrame.simTimeUs,
+                  validFlags: sensorFrame.validFlags,
+                  accelMps2: sensorFrame.accelMps2,
+                  gyroRps: sensorFrame.gyroRps,
+                  magUt: sensorFrame.magUt,
+                  pressurePa: sensorFrame.pressurePa,
+                  baroAltitudeM: sensorFrame.baroAltitudeM,
+                  temperatureC: sensorFrame.temperatureC,
+                  latDeg: sensorFrame.latDeg,
+                  lonDeg: sensorFrame.lonDeg,
+                  altMslM: sensorFrame.altMslM,
+                  velNedMps: sensorFrame.velNedMps,
+                  sats: sensorFrame.sats,
+                  fixType: sensorFrame.fixType,
+                  batteryVoltageV: sensorFrame.batteryVoltageV,
+                  rssiDbm: sensorFrame.rssiDbm,
+                  snrDbX100: sensorFrame.snrDbX100,
+                  lossPctX100: sensorFrame.lossPctX100,
+                });
+                setSensorFrame((prev) => ({
+                  ...prev,
+                  simTick: prev.simTick + 1,
+                  simTimeUs: prev.simTimeUs + 5000,
+                }));
+              }}
+            >
+              <Icon name="send" />
+              Send Sensor Frame
+            </button>
+          </div>
+        </Panel>
       </div>
     </section>
   );
@@ -273,4 +411,33 @@ function clamp(value: number, min: number, max: number) {
   }
 
   return Math.min(max, Math.max(min, value));
+}
+
+function Vec3Input({
+  label,
+  unit,
+  value,
+  onChange,
+}: {
+  label: string;
+  unit: string;
+  value: [number, number, number];
+  onChange: (value: [number, number, number]) => void;
+}) {
+  const update = (axis: 0 | 1 | 2, next: number) => {
+    const copy: [number, number, number] = [...value];
+    copy[axis] = next;
+    onChange(copy);
+  };
+
+  return (
+    <div className="vec3-input">
+      <span className="vec3-label">{label} <small>{unit}</small></span>
+      <div className="vec3-fields">
+        <input type="number" step={0.01} value={value[0]} onChange={(e) => update(0, Number(e.currentTarget.value))} />
+        <input type="number" step={0.01} value={value[1]} onChange={(e) => update(1, Number(e.currentTarget.value))} />
+        <input type="number" step={0.01} value={value[2]} onChange={(e) => update(2, Number(e.currentTarget.value))} />
+      </div>
+    </div>
+  );
 }

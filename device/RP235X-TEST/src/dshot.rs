@@ -1,5 +1,10 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use common::drivers::dshot::{
+    MOTOR_COUNT, command_value_to_dshot, encode_output_words, motor_mask_words,
+    valid_dshot_command, valid_motor_sweep, valid_motor_test,
+};
+use common::messages::control::ActuatorOutputStamped;
 use common::protocol::hilink::{
     ActuatorStatusPayload, BenchEnablePayload, DshotCommandPayload, MotorSweepPayload,
     MotorTestPayload, actuator_flags, bench, motor_test_mode,
@@ -19,22 +24,21 @@ use embassy_rp::pio::{
 use embassy_rp::pio_programs::clock_divider::calculate_pio_clock_divider;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
+use embassy_sync::pubsub::WaitResult;
 use embassy_time::{Duration, Ticker};
 
 use crate::buses::DshotPioBus;
+use crate::channels::{ACTUATOR_OUTPUT_CHANNEL, TestActuatorOutputSubscriber};
+use crate::flight_control;
 use crate::pinmap;
 use crate::protocol;
 use crate::resources::ActuatorPins;
 
-const DSHOT_MAX_COMMAND: u16 = 2047;
 const DSHOT_BIT_RATE_HZ: u32 = 300_000;
 const DSHOT_CYCLES_PER_BIT: u32 = 8;
 const DSHOT_PIO_CLOCK_HZ: u32 = DSHOT_BIT_RATE_HZ * DSHOT_CYCLES_PER_BIT;
 const DSHOT_OUTPUT_PERIOD: Duration = Duration::from_millis(1);
 const DSHOT_PREARM_ZERO_FRAMES: u16 = 500;
-const MOTOR_COUNT: usize = 4;
-const DSHOT_MIN_THROTTLE: u16 = 48;
-const DSHOT_MAX_SPECIAL_COMMAND: u8 = 47;
 
 #[derive(Clone, Copy)]
 enum BenchCommand {
@@ -113,7 +117,12 @@ impl<'d, PIO: Instance> DshotProgram<'d, PIO> {
 pub fn spawn(spawner: &Spawner, bus: DshotPioBus, pins: ActuatorPins) {
     spawner
         .spawn(dshot_motor_test_task(
-            bus.pio, pins.pwm1, pins.pwm2, pins.pwm3, pins.pwm4,
+            bus.pio,
+            pins.pwm1,
+            pins.pwm2,
+            pins.pwm3,
+            pins.pwm4,
+            ACTUATOR_OUTPUT_CHANNEL.subscriber().unwrap(),
         ))
         .unwrap();
 }
@@ -137,13 +146,22 @@ pub fn actuator_status() -> ActuatorStatusPayload {
         ],
         last_command_age_ms: (timers & 0xffff) as u16,
         bench_timeout_ms: ((timers >> 16) & 0xffff) as u16,
+        mixer_motor_order: flight_control::mixer_motor_order_payload(),
         flags: STATUS_FLAGS.load(Ordering::Relaxed),
     }
 }
 
+pub fn hil_motor_override() -> Option<[u16; MOTOR_COUNT]> {
+    let status = actuator_status();
+    if status.flags & actuator_flags::BENCH_MODE_ENABLED == 0 {
+        return None;
+    }
+
+    Some(status.commanded_dshot.map(dshot_to_normalized_u16))
+}
+
 pub fn submit_bench_enable(payload: BenchEnablePayload) -> bool {
     payload.magic == bench::ENABLE_MAGIC
-        && payload.timeout_ms > 0
         && BENCH_COMMANDS
             .try_send(BenchCommand::Enable(payload))
             .is_ok()
@@ -178,85 +196,19 @@ pub fn submit_dshot_command(payload: DshotCommandPayload) -> bool {
             .is_ok()
 }
 
-fn dshot_frame(command: u16, request_telemetry: bool) -> u16 {
-    let command = command.min(DSHOT_MAX_COMMAND);
-    let payload = (command << 1) | u16::from(request_telemetry);
-    let checksum = (payload ^ (payload >> 4) ^ (payload >> 8)) & 0x0f;
+fn dshot_to_normalized_u16(command: u16) -> u16 {
+    use common::drivers::dshot::{DSHOT_MAX_COMMAND, DSHOT_MIN_THROTTLE};
 
-    (payload << 4) | checksum
-}
-
-fn dshot_word(command: u16) -> u32 {
-    u32::from(dshot_frame(command, false))
-}
-
-fn valid_motor_test(payload: MotorTestPayload) -> bool {
-    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
-    let valid_mode = matches!(
-        payload.mode,
-        motor_test_mode::STOP | motor_test_mode::RAW_DSHOT | motor_test_mode::NORMALIZED
-    );
-    let valid_duration = payload.mode == motor_test_mode::STOP
-        || (payload.duration_ms > 0 && payload.duration_ms <= bench::MAX_TEST_DURATION_MS);
-    let valid_value = match payload.mode {
-        motor_test_mode::STOP => true,
-        motor_test_mode::RAW_DSHOT => {
-            payload.value == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&payload.value)
-        }
-        motor_test_mode::NORMALIZED => true,
-        _ => false,
-    };
-
-    valid_mask && valid_mode && valid_duration && valid_value
-}
-
-fn valid_motor_sweep(payload: MotorSweepPayload) -> bool {
-    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
-    let valid_mode = matches!(
-        payload.mode,
-        motor_test_mode::RAW_DSHOT | motor_test_mode::NORMALIZED
-    );
-    let valid_step = payload.step_value > 0;
-    let valid_duration =
-        payload.step_duration_ms > 0 && payload.step_duration_ms <= bench::MAX_TEST_DURATION_MS;
-    let valid_repeat = payload.repeat_count > 0;
-    let valid_values = match payload.mode {
-        motor_test_mode::RAW_DSHOT => {
-            let start = payload.start_value;
-            let end = payload.end_value;
-            (start == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&start))
-                && (end == 0 || (DSHOT_MIN_THROTTLE..=DSHOT_MAX_COMMAND).contains(&end))
-        }
-        motor_test_mode::NORMALIZED => true,
-        _ => false,
-    };
-
-    valid_mask && valid_mode && valid_step && valid_duration && valid_repeat && valid_values
-}
-
-fn valid_dshot_command(payload: DshotCommandPayload) -> bool {
-    let valid_mask = payload.motor_mask != 0 && (payload.motor_mask & !bench::MOTOR_MASK_ALL) == 0;
-    let valid_command = payload.command <= DSHOT_MAX_SPECIAL_COMMAND;
-    let valid_repeat = payload.repeat_count > 0;
-
-    valid_mask && valid_command && valid_repeat
-}
-
-fn normalized_to_dshot(value: u16) -> u16 {
-    if value == 0 {
-        0
-    } else {
-        let span = u32::from(DSHOT_MAX_COMMAND - DSHOT_MIN_THROTTLE);
-        (u32::from(DSHOT_MIN_THROTTLE) + (u32::from(value) * span / u32::from(u16::MAX))) as u16
+    if command < DSHOT_MIN_THROTTLE {
+        return 0;
     }
-}
-
-fn command_value_to_dshot(mode: u8, value: u16) -> u16 {
-    match mode {
-        motor_test_mode::RAW_DSHOT => value,
-        motor_test_mode::NORMALIZED => normalized_to_dshot(value),
-        _ => 0,
+    if command >= DSHOT_MAX_COMMAND {
+        return u16::MAX;
     }
+
+    let span = u32::from(DSHOT_MAX_COMMAND - DSHOT_MIN_THROTTLE);
+    let scaled = u32::from(command - DSHOT_MIN_THROTTLE) * u32::from(u16::MAX) / span;
+    scaled as u16
 }
 
 fn next_sweep_value(state: &SweepState) -> Option<u16> {
@@ -294,25 +246,6 @@ fn advance_sweep_step(state: &mut SweepState) -> bool {
     true
 }
 
-fn motor_mask_words(mask: u8, dshot: u16) -> [u16; MOTOR_COUNT] {
-    let mut words = [0u16; MOTOR_COUNT];
-    for (index, word) in words.iter_mut().enumerate() {
-        if (mask & (1 << index)) != 0 {
-            *word = dshot;
-        }
-    }
-    words
-}
-
-fn encode_output_words(commands: [u16; MOTOR_COUNT]) -> [u32; MOTOR_COUNT] {
-    [
-        dshot_word(commands[0]),
-        dshot_word(commands[1]),
-        dshot_word(commands[2]),
-        dshot_word(commands[3]),
-    ]
-}
-
 fn store_status(
     armed: bool,
     bench_enabled: bool,
@@ -343,6 +276,48 @@ fn store_status(
         Ordering::Relaxed,
     );
     STATUS_FLAGS.store(flags, Ordering::Relaxed);
+}
+
+fn normalized_f32_to_dshot(command: f32) -> u16 {
+    use common::drivers::dshot::{DSHOT_MAX_COMMAND, DSHOT_MIN_THROTTLE};
+
+    if !command.is_finite() || command <= 0.0 {
+        return 0;
+    }
+
+    let command = command.clamp(0.0, 1.0);
+    let span = f32::from(DSHOT_MAX_COMMAND - DSHOT_MIN_THROTTLE);
+    (f32::from(DSHOT_MIN_THROTTLE) + command * span) as u16
+}
+
+fn normalized_actuator_to_dshot(output: ActuatorOutputStamped) -> [u16; MOTOR_COUNT] {
+    [
+        normalized_f32_to_dshot(output.sample.motor_command_normalized[0]),
+        normalized_f32_to_dshot(output.sample.motor_command_normalized[1]),
+        normalized_f32_to_dshot(output.sample.motor_command_normalized[2]),
+        normalized_f32_to_dshot(output.sample.motor_command_normalized[3]),
+    ]
+}
+
+fn motor_mask_from_commands(commands: [u16; MOTOR_COUNT]) -> u8 {
+    let mut mask = 0u8;
+    for (index, command) in commands.iter().enumerate() {
+        if *command != 0 {
+            mask |= 1 << index;
+        }
+    }
+    mask
+}
+
+fn drain_latest_actuator_output(
+    subscriber: &mut TestActuatorOutputSubscriber,
+    latest_output: &mut Option<ActuatorOutputStamped>,
+) {
+    while let Some(message) = subscriber.try_next_message() {
+        if let WaitResult::Message(sample) = message {
+            *latest_output = Some(sample);
+        }
+    }
 }
 
 fn configure_dshot_sm<'d, PIO, PIN, const SM: usize>(
@@ -397,6 +372,7 @@ async fn dshot_motor_test_task(
     motor2_pin: Peri<'static, PIN_38>,
     motor3_pin: Peri<'static, PIN_35>,
     motor4_pin: Peri<'static, PIN_36>,
+    mut actuator_subscriber: TestActuatorOutputSubscriber,
 ) -> ! {
     let mut pio = Pio::new(pio_peripheral, PioIrqs);
     let program = DshotProgram::new(&mut pio.common);
@@ -419,6 +395,7 @@ async fn dshot_motor_test_task(
     let mut dshot_special_remaining_frames = 0u8;
     let mut last_command_age_ms = u16::MAX;
     let mut status_flags = 0u32;
+    let mut latest_control_output = None;
 
     info!(
         "dshot300 output ready: GP{=u8}/GP{=u8}/GP{=u8}/GP{=u8}, idle zero until explicit arm",
@@ -430,6 +407,7 @@ async fn dshot_motor_test_task(
 
     loop {
         let armed = protocol::is_armed();
+        drain_latest_actuator_output(&mut actuator_subscriber, &mut latest_control_output);
 
         if armed && !last_armed {
             prearm_zero_frames = DSHOT_PREARM_ZERO_FRAMES;
@@ -454,8 +432,13 @@ async fn dshot_motor_test_task(
                 BenchCommand::Enable(payload) => {
                     bench_enabled = true;
                     bench_timeout_ms = payload.timeout_ms;
-                    status_flags &= !actuator_flags::COMMAND_TIMEOUT;
-                    info!("dshot bench enabled for {=u16} ms", payload.timeout_ms);
+                    status_flags &= !(actuator_flags::COMMAND_TIMEOUT
+                        | actuator_flags::REJECTED_WHILE_DISARMED);
+                    if payload.timeout_ms == 0 {
+                        info!("dshot bench enabled indefinitely");
+                    } else {
+                        info!("dshot bench enabled for {=u16} ms", payload.timeout_ms);
+                    }
                 }
                 BenchCommand::Disable => {
                     bench_enabled = false;
@@ -479,7 +462,7 @@ async fn dshot_motor_test_task(
                     info!("dshot bench motor stop");
                 }
                 BenchCommand::MotorTest(payload) => {
-                    if armed && bench_enabled && valid_motor_test(payload) {
+                    if bench_enabled && valid_motor_test(payload) {
                         let dshot = command_value_to_dshot(payload.mode, payload.value);
                         commanded_dshot = motor_mask_words(payload.motor_mask, dshot);
                         active_motor_mask = if dshot == 0 { 0 } else { payload.motor_mask };
@@ -505,11 +488,11 @@ async fn dshot_motor_test_task(
                         sweep_state = None;
                         dshot_special_remaining_frames = 0;
                         status_flags |= actuator_flags::REJECTED_WHILE_DISARMED;
-                        warn!("dshot rejected motor test while disarmed or bench-disabled");
+                        warn!("dshot rejected motor test while bench-disabled");
                     }
                 }
                 BenchCommand::MotorSweep(payload) => {
-                    if armed && bench_enabled && valid_motor_sweep(payload) {
+                    if bench_enabled && valid_motor_sweep(payload) {
                         let ascending = payload.start_value <= payload.end_value;
                         let current_dshot =
                             command_value_to_dshot(payload.mode, payload.start_value);
@@ -554,11 +537,11 @@ async fn dshot_motor_test_task(
                         sweep_state = None;
                         dshot_special_remaining_frames = 0;
                         status_flags |= actuator_flags::REJECTED_WHILE_DISARMED;
-                        warn!("dshot rejected motor sweep while disarmed or bench-disabled");
+                        warn!("dshot rejected motor sweep while bench-disabled");
                     }
                 }
                 BenchCommand::DshotCommand(payload) => {
-                    if armed && bench_enabled && valid_dshot_command(payload) {
+                    if bench_enabled && valid_dshot_command(payload) {
                         commanded_dshot =
                             motor_mask_words(payload.motor_mask, u16::from(payload.command));
                         active_motor_mask = payload.motor_mask;
@@ -580,7 +563,7 @@ async fn dshot_motor_test_task(
                         sweep_state = None;
                         dshot_special_remaining_frames = 0;
                         status_flags |= actuator_flags::REJECTED_WHILE_DISARMED;
-                        warn!("dshot rejected special command while disarmed or bench-disabled");
+                        warn!("dshot rejected special command while bench-disabled");
                     }
                 }
             }
@@ -606,7 +589,7 @@ async fn dshot_motor_test_task(
         let mut sweep_completed = false;
         if let Some(sweep) = sweep_state.as_mut() {
             last_command_age_ms = last_command_age_ms.saturating_add(1);
-            if !armed || !bench_enabled {
+            if !bench_enabled {
                 active_motor_mask = 0;
                 command_mode = motor_test_mode::STOP;
                 commanded_dshot = stop_commands;
@@ -664,26 +647,41 @@ async fn dshot_motor_test_task(
             last_command_age_ms = last_command_age_ms.saturating_add(1);
         }
 
-        let output_active =
-            armed && bench_enabled && prearm_zero_frames == 0 && active_motor_mask != 0;
+        let bench_output_active = bench_enabled && active_motor_mask != 0;
+        let normal_commands = latest_control_output
+            .filter(|output| output.sample.valid)
+            .map(normalized_actuator_to_dshot)
+            .unwrap_or(stop_commands);
+        let normal_active_motor_mask = motor_mask_from_commands(normal_commands);
+        let normal_output_active =
+            armed && !bench_enabled && prearm_zero_frames == 0 && normal_active_motor_mask != 0;
         let mut flags = status_flags;
         if bench_enabled {
             flags |= actuator_flags::BENCH_MODE_ENABLED;
         }
-        if output_active {
+        if latest_control_output.is_some_and(|output| output.sample.clamped) {
+            flags |= actuator_flags::CLAMPED;
+        }
+        if bench_output_active || normal_output_active {
             flags |= actuator_flags::OUTPUT_ACTIVE;
         }
 
-        let output_commands = if output_active {
-            commanded_dshot
+        let (output_commands, status_active_motor_mask, status_mode) = if bench_output_active {
+            (commanded_dshot, active_motor_mask, command_mode)
+        } else if normal_output_active {
+            (
+                normal_commands,
+                normal_active_motor_mask,
+                motor_test_mode::NORMALIZED,
+            )
         } else {
             if armed && prearm_zero_frames > 0 {
                 prearm_zero_frames -= 1;
             }
-            stop_commands
+            (stop_commands, 0, motor_test_mode::STOP)
         };
-        let output_words = if output_active {
-            encode_output_words(commanded_dshot)
+        let output_words = if bench_output_active || normal_output_active {
+            encode_output_words(output_commands)
         } else {
             stop_words
         };
@@ -691,8 +689,8 @@ async fn dshot_motor_test_task(
         store_status(
             armed,
             bench_enabled,
-            active_motor_mask,
-            command_mode,
+            status_active_motor_mask,
+            status_mode,
             output_commands,
             last_command_age_ms,
             bench_timeout_ms,

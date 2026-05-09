@@ -11,8 +11,8 @@ actuators.topic=/marv_f450/command/motor_speed
 actuators.max_rotor_velocity_rad_s=1000.0
 actuators.motor_1.direction=1
 actuators.motor_2.direction=1
-actuators.motor_3.direction=-1
-actuators.motor_4.direction=-1
+actuators.motor_3.direction=1
+actuators.motor_4.direction=1
 
 nominal_battery_voltage_v=12.3
 synthetic_sensors=false

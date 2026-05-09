@@ -35,6 +35,11 @@ export function Dashboard({
             <Metric label="Lat" value={`${field("Navigation", "GPS_LAT")} deg`} large />
             <Metric label="Lon" value={`${field("Navigation", "GPS_LON")} deg`} large />
             <Metric label="Alt" value={`${field("Navigation", "GPS_ALT_MSL")} ${fieldUnit("Navigation", "GPS_ALT_MSL") || "m"}`} large />
+            <div className="mini-grid">
+              <StatBox label="Vel N" value={`${field("Navigation", "GPS_VEL_NED_X")} m/s`} />
+              <StatBox label="Vel E" value={`${field("Navigation", "GPS_VEL_NED_Y")} m/s`} />
+              <StatBox label="Vel D" value={`${field("Navigation", "GPS_VEL_NED_Z")} m/s`} />
+            </div>
             <small className="muted">{gpsFix}</small>
           </Panel>
           <Panel title="Attitude" icon="flight">
@@ -50,16 +55,31 @@ export function Dashboard({
             <Metric label="Accel Y" value={`${field("Sensors", "IMU_ACCEL_Y")} ${fieldUnit("Sensors", "IMU_ACCEL_Y")}`} mono />
             <Metric label="Accel Z" value={`${field("Sensors", "IMU_ACCEL_Z")} ${fieldUnit("Sensors", "IMU_ACCEL_Z")}`} mono />
           </Panel>
+          <Panel title="Radio Link" icon="cell_tower">
+            <Metric label="RSSI" value={`${field("System", "RADIO_RSSI")} ${fieldUnit("System", "RADIO_RSSI") || "dBm"}`} mono />
+            <Metric label="SNR" value={`${field("System", "RADIO_SNR")} ${fieldUnit("System", "RADIO_SNR") || "dB"}`} mono />
+            <Metric label="Packet Loss" value={`${field("System", "RADIO_LOSS")} ${fieldUnit("System", "RADIO_LOSS") || "%"}`} mono />
+          </Panel>
+        </div>
+        <div className="split-panel">
           <Panel title="Protocol Freshness" icon="sync">
             <Metric label="Last Message" value={protocol} mono />
             <Metric label="RX Frames" value={String(state?.hilink.rx_frames ?? 0)} mono />
             <Metric label="TX Frames" value={String(state?.hilink.tx_frames ?? 0)} mono />
             <Metric label="Parse Errors" value={String(state?.hilink.parse_errors ?? 0)} mono />
           </Panel>
+          <Panel title="Estimator Biases" icon="tune">
+            <Metric label="Gyro X" value={`${field("System", "GYRO_BIAS_X")} rad/s`} mono />
+            <Metric label="Gyro Y" value={`${field("System", "GYRO_BIAS_Y")} rad/s`} mono />
+            <Metric label="Gyro Z" value={`${field("System", "GYRO_BIAS_Z")} rad/s`} mono />
+            <Metric label="Accel X" value={`${field("System", "ACCEL_BIAS_X")} m/s²`} mono />
+            <Metric label="Accel Y" value={`${field("System", "ACCEL_BIAS_Y")} m/s²`} mono />
+            <Metric label="Accel Z" value={`${field("System", "ACCEL_BIAS_Z")} m/s²`} mono />
+          </Panel>
         </div>
       </section>
 
-      <Panel title="Routine Commands" icon="radio_button_checked" className="span-3 danger-title">
+      <Panel title="Routine Commands" icon="radio_button_checked" className="span-3 danger-title static-panel">
         <div className="command-stack">
           <button className="command-button" disabled={!state?.uart.connected} onClick={() => command("send_hilink_ping")}>
             <span>Ping</span>
@@ -76,6 +96,10 @@ export function Dashboard({
           <button className="command-button primary" disabled={!state?.uart.connected} onClick={() => command("send_hilink_rtl")}>
             <span>RTL</span>
             <Icon name="flight_land" fill />
+          </button>
+          <button className="command-button" disabled={!state?.uart.connected} onClick={() => command("run_radio_link_smoke_test")}>
+            <span>Radio Test</span>
+            <Icon name="cell_tower" />
           </button>
         </div>
         <div className="panel-footer">
@@ -115,7 +139,7 @@ function ConnectionPanel({
   }, [state?.gazebo_bridge.endpoint]);
 
   return (
-    <Panel title="Connections" icon="router" className="span-3">
+    <Panel title="Connections" icon="router" className="span-3 static-panel">
       <div className="connection-stack">
         <section>
           <div className="connection-heading">
@@ -124,7 +148,13 @@ function ConnectionPanel({
           </div>
           <label>
             <span>Port</span>
-            <select value={portName} disabled={state?.uart.connected} onChange={(event) => setPortName(event.currentTarget.value)}>
+            <select
+              value={portName}
+              disabled={state?.uart.connected}
+              onFocus={onRefreshPorts}
+              onClick={onRefreshPorts}
+              onChange={(event) => setPortName(event.currentTarget.value)}
+            >
               {state?.uart.available_ports.length ? (
                 state.uart.available_ports.map((port) => (
                   <option key={port.port_name} value={port.port_name}>
@@ -146,18 +176,18 @@ function ConnectionPanel({
             />
           </label>
           <div className="command-row compact">
-            <button disabled={state?.uart.connected} onClick={onRefreshPorts}>
-              Refresh
-            </button>
-            <button disabled={!state?.uart.connected} onClick={() => command("close_uart")}>
-              Close
-            </button>
             <button
-              className="primary"
-              disabled={state?.uart.connected || !portName}
-              onClick={() => command("open_uart", { portName, baudRate })}
+              className={state?.uart.connected ? "" : "primary"}
+              disabled={!state?.uart.connected && !portName}
+              onClick={() => {
+                if (state?.uart.connected) {
+                  command("close_uart");
+                } else {
+                  command("open_uart", { portName, baudRate });
+                }
+              }}
             >
-              Open
+              {state?.uart.connected ? "Close" : "Open"}
             </button>
           </div>
           <Metric label="Line Coding" value={state?.uart.line_coding ?? "--"} mono />
@@ -175,23 +205,28 @@ function ConnectionPanel({
           </label>
           <div className="command-row compact">
             <button
-              disabled={state?.gazebo_bridge_process.running}
-              onClick={() => command("start_gazebo_bridge_process", { endpoint: gazeboEndpoint })}
+              onClick={() => {
+                if (state?.gazebo_bridge_process.running) {
+                  command("stop_gazebo_bridge_process");
+                } else {
+                  command("start_gazebo_bridge_process", { endpoint: gazeboEndpoint });
+                }
+              }}
             >
-              Run Bridge
-            </button>
-            <button disabled={!state?.gazebo_bridge_process.running} onClick={() => command("stop_gazebo_bridge_process")}>
-              Stop
-            </button>
-            <button disabled={!state?.gazebo_bridge.connected} onClick={() => command("disconnect_gazebo_bridge")}>
-              Disconnect
+              {state?.gazebo_bridge_process.running ? "Stop Bridge" : "Run Bridge"}
             </button>
             <button
-              className="primary"
-              disabled={state?.gazebo_bridge.connected || !gazeboEndpoint}
-              onClick={() => command("connect_gazebo_bridge", { endpoint: gazeboEndpoint })}
+              className={state?.gazebo_bridge.connected ? "" : "primary"}
+              disabled={!state?.gazebo_bridge.connected && !gazeboEndpoint}
+              onClick={() => {
+                if (state?.gazebo_bridge.connected) {
+                  command("disconnect_gazebo_bridge");
+                } else {
+                  command("connect_gazebo_bridge", { endpoint: gazeboEndpoint });
+                }
+              }}
             >
-              Connect
+              {state?.gazebo_bridge.connected ? "Disconnect" : "Connect"}
             </button>
           </div>
           <div className="mini-grid">

@@ -17,6 +17,8 @@ embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime
 embedded-hal-async = "1.0"
 embedded-io-async = "0.6.1"
 heapless = { version = "0.8", features = ["defmt-03"] }
+libm = "0.2"
+nmea = { version = "0.7", default-features = false, features = ["GGA", "GNS", "RMC", "VTG"] }
 static_cell = "2.1.1"
 
 defmt = "1.0.1"

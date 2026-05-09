@@ -3,7 +3,10 @@
 
 mod buses;
 mod channels;
+mod control_config;
 mod dshot;
+mod estimation;
+mod flight_control;
 mod gps;
 mod pinmap;
 mod protocol;
@@ -13,6 +16,7 @@ mod sensor_spi;
 mod sensors;
 mod spi1_sensor_cluster;
 
+use common::services::hil::SensorBackend;
 use defmt::info;
 use embassy_executor::Spawner;
 use embassy_rp::block::ImageDef;
@@ -23,6 +27,8 @@ use {defmt_rtt as _, panic_probe as _};
 #[used]
 static IMAGE_DEF: ImageDef = ImageDef::secure_exe();
 
+const SELECTED_SENSOR_BACKEND: SensorBackend = SensorBackend::Hil;
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let peripherals = embassy_rp::init(Default::default());
@@ -30,25 +36,37 @@ async fn main(spawner: Spawner) {
 
     info!("rp235x-test firmware booted");
 
-    protocol::spawn(&spawner, resources.system.usb);
+    protocol::spawn(&spawner, resources.system.usb, SELECTED_SENSOR_BACKEND);
     radio_link::spawn(
         &spawner,
         resources.buses.radio_link,
         resources.pins.radio_link,
     );
+    estimation::spawn(&spawner);
+    flight_control::spawn(&spawner);
     dshot::spawn(&spawner, resources.buses.dshot, resources.pins.actuators);
-    gps::spawn(
-        &spawner,
-        resources.buses.gps_pio_uart,
-        resources.pins.gps_pio_uart,
-    );
-    sensors::spawn(
-        &spawner,
-        resources.buses.sensors,
-        resources.pins.sensors,
-        resources.buses.environmental,
-        resources.pins.environmental,
-        resources.buses.auxiliary_navigation,
-        resources.pins.auxiliary_navigation,
-    );
+    match SELECTED_SENSOR_BACKEND {
+        SensorBackend::Real => {
+            gps::spawn(
+                &spawner,
+                resources.buses.gps_pio_uart,
+                resources.pins.gps_pio_uart,
+            );
+            sensors::spawn(
+                &spawner,
+                resources.buses.sensors,
+                resources.pins.sensors,
+                resources.buses.environmental,
+                resources.pins.environmental,
+                resources.buses.auxiliary_navigation,
+                resources.pins.auxiliary_navigation,
+            );
+        }
+        SensorBackend::Hil => {
+            info!("rp235x-test HIL acquisition backend enabled");
+        }
+        SensorBackend::Replay => {
+            info!("rp235x-test replay acquisition backend selected without a replay source");
+        }
+    }
 }

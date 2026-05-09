@@ -93,6 +93,9 @@ pub struct HilResponseFrame {
     pub sim_tick: u64,
     pub sim_time_us: u64,
     pub flags: u32,
+    pub position_ned_m: [f32; 3],
+    pub velocity_ned_mps: [f32; 3],
+    pub attitude_quat: [f32; 4],
     pub motor_cmd: [u16; 4],
 }
 
@@ -102,6 +105,9 @@ impl From<HilinkActuatorCommand> for HilResponseFrame {
             sim_tick: command.sim_tick,
             sim_time_us: command.sim_time_us,
             flags: command.flags,
+            position_ned_m: command.position_ned_m,
+            velocity_ned_mps: command.velocity_ned_mps,
+            attitude_quat: command.attitude_quat,
             motor_cmd: command.motor_cmd,
         }
     }

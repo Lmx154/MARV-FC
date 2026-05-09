@@ -128,6 +128,15 @@ impl GazeboBridgeClient {
         self.sensor_frames.drain(..).collect()
     }
 
+    #[cfg(test)]
+    pub(crate) fn push_test_sensor_frame(&mut self, frame: GazeboSensorFrame) {
+        self.stats.sensor_frames_received = self.stats.sensor_frames_received.saturating_add(1);
+        self.stats.last_sensor_sequence = Some(frame.sequence);
+        self.stats.last_sensor_time_us = Some(frame.sim_time_us);
+        self.stats.last_sensor_clock_source = frame.clock_source.clone();
+        self.sensor_frames.push_back(frame);
+    }
+
     pub fn connected_for(&self) -> Option<Duration> {
         self.connected_at.map(|instant| instant.elapsed())
     }
