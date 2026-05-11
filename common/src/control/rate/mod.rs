@@ -105,6 +105,7 @@ fn clamp_unit(value: f32) -> f32 {
 mod tests {
     use super::{BodyRates, RateController, RateControllerConfig};
     use crate::control::attitude::BodyRateSetpoint;
+    use crate::test_helpers::assert_scalar_near;
 
     #[test]
     fn zero_rate_error_preserves_throttle() {
@@ -112,10 +113,10 @@ mod tests {
 
         let command = controller.update(BodyRateSetpoint::ZERO, BodyRates::ZERO, 0.5);
 
-        assert_eq!(command.roll, 0.0);
-        assert_eq!(command.pitch, 0.0);
-        assert_eq!(command.yaw, 0.0);
-        assert_eq!(command.throttle, 0.5);
+        assert_scalar_near(command.roll, 0.0, 0.000_001);
+        assert_scalar_near(command.pitch, 0.0, 0.000_001);
+        assert_scalar_near(command.yaw, 0.0, 0.000_001);
+        assert_scalar_near(command.throttle, 0.5, 0.000_001);
     }
 
     #[test]
@@ -130,9 +131,9 @@ mod tests {
         let command =
             controller.update(BodyRateSetpoint::new(1.0, -1.0, 0.5), BodyRates::ZERO, 0.5);
 
-        assert_eq!(command.roll, 0.1);
-        assert_eq!(command.pitch, -0.1);
-        assert_eq!(command.yaw, 0.05);
+        assert_scalar_near(command.roll, 0.1, 0.000_001);
+        assert_scalar_near(command.pitch, -0.1, 0.000_001);
+        assert_scalar_near(command.yaw, 0.05, 0.000_001);
     }
 
     #[test]
@@ -144,5 +145,46 @@ mod tests {
 
         assert_eq!(command.roll, 0.25);
         assert_eq!(command.throttle, 1.0);
+    }
+
+    #[test]
+    fn rate_error_signs_follow_setpoint_minus_measurement() {
+        let controller = RateController::new(RateControllerConfig {
+            roll_gain: 0.5,
+            pitch_gain: 0.25,
+            yaw_gain: 0.125,
+            max_axis_command: 10.0,
+        });
+
+        let command = controller.update(
+            BodyRateSetpoint::new(1.0, -2.0, 3.0),
+            BodyRates::new(3.0, -1.0, 1.0),
+            0.4,
+        );
+
+        assert_scalar_near(command.roll, -1.0, 0.000_001);
+        assert_scalar_near(command.pitch, -0.25, 0.000_001);
+        assert_scalar_near(command.yaw, 0.25, 0.000_001);
+    }
+
+    #[test]
+    fn rate_controller_saturates_each_axis_symmetrically() {
+        let controller = RateController::new(RateControllerConfig {
+            roll_gain: 1.0,
+            pitch_gain: 1.0,
+            yaw_gain: 1.0,
+            max_axis_command: 0.2,
+        });
+
+        let command = controller.update(
+            BodyRateSetpoint::new(10.0, -10.0, 10.0),
+            BodyRates::ZERO,
+            -1.0,
+        );
+
+        assert_scalar_near(command.roll, 0.2, 0.000_001);
+        assert_scalar_near(command.pitch, -0.2, 0.000_001);
+        assert_scalar_near(command.yaw, 0.2, 0.000_001);
+        assert_scalar_near(command.throttle, 0.0, 0.000_001);
     }
 }

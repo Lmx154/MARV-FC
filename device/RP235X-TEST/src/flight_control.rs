@@ -1,8 +1,8 @@
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use common::control::altitude::AltitudeController;
-use common::control::attitude::AttitudeController;
-use common::control::mixing::{MotorOrder, QuadXMixer};
+use common::control::attitude::{AttitudeController, AttitudeSetpoint, BodyRateSetpoint};
+use common::control::mixing::{MotorOrder, MotorOutputs, QuadXMixer, TorqueCommand};
 use common::control::position::{
     PositionController, PositionControllerInput, PositionControllerSetpoint,
 };
@@ -40,6 +40,17 @@ enum ControlCommand {
         position: GeodeticPosition,
         yaw_rad: f32,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+pub struct ControlStepOutput {
+    pub actuator: ActuatorOutputStamped,
+    pub attitude_setpoint: Option<AttitudeSetpoint>,
+    pub rate_setpoint: Option<BodyRateSetpoint>,
+    pub throttle: Option<f32>,
+    pub torque: Option<TorqueCommand>,
+    pub motor_outputs: Option<MotorOutputs<4>>,
 }
 
 pub fn spawn(spawner: &Spawner) {
@@ -225,12 +236,43 @@ fn actuator_output_for_estimate(
     rate_controller: &RateController,
     mixer: &QuadXMixer,
 ) -> ActuatorOutputStamped {
-    if !protocol::is_armed() {
-        return actuator_output(estimate, [0.0; 4], true, false);
+    control_step(
+        protocol::is_armed(),
+        estimate,
+        latest_imu,
+        setpoint,
+        position_controller,
+        altitude_controller,
+        attitude_controller,
+        rate_controller,
+        mixer,
+    )
+    .actuator
+}
+
+pub fn control_step(
+    armed: bool,
+    estimate: StateEstimateStamped,
+    latest_imu: Option<ImuSampleStamped>,
+    setpoint: PositionControllerSetpoint,
+    position_controller: &PositionController,
+    altitude_controller: &AltitudeController,
+    attitude_controller: &AttitudeController,
+    rate_controller: &RateController,
+    mixer: &QuadXMixer,
+) -> ControlStepOutput {
+    if !armed {
+        return control_step_output(estimate, [0.0; 4], true, false, ControlStepDebug::default());
     }
 
     let Some(imu) = latest_imu else {
-        return actuator_output(estimate, [0.0; 4], false, false);
+        return control_step_output(
+            estimate,
+            [0.0; 4],
+            false,
+            false,
+            ControlStepDebug::default(),
+        );
     };
 
     if !estimate.sample.valid
@@ -239,7 +281,13 @@ fn actuator_output_for_estimate(
         || !finite_f32x4(estimate.sample.attitude_quat)
         || !finite_f32x3(imu.sample.gyro_rad_s)
     {
-        return actuator_output(estimate, [0.0; 4], false, false);
+        return control_step_output(
+            estimate,
+            [0.0; 4],
+            false,
+            false,
+            ControlStepDebug::default(),
+        );
     }
 
     let Some(attitude_setpoint) = position_controller.update(
@@ -249,13 +297,27 @@ fn actuator_output_for_estimate(
             estimate.sample.velocity_ned_mps,
         ),
     ) else {
-        return actuator_output(estimate, [0.0; 4], false, false);
+        return control_step_output(
+            estimate,
+            [0.0; 4],
+            false,
+            false,
+            ControlStepDebug::default(),
+        );
+    };
+    let debug = ControlStepDebug {
+        attitude_setpoint: Some(attitude_setpoint),
+        ..ControlStepDebug::default()
     };
 
     let Some(rate_setpoint) =
         attitude_controller.update(attitude_setpoint, estimate.sample.attitude_quat)
     else {
-        return actuator_output(estimate, [0.0; 4], false, false);
+        return control_step_output(estimate, [0.0; 4], false, false, debug);
+    };
+    let debug = ControlStepDebug {
+        rate_setpoint: Some(rate_setpoint),
+        ..debug
     };
 
     let Some(throttle) = altitude_controller.update(
@@ -263,7 +325,11 @@ fn actuator_output_for_estimate(
         estimate.sample.position_ned_m[2],
         estimate.sample.velocity_ned_mps[2],
     ) else {
-        return actuator_output(estimate, [0.0; 4], false, false);
+        return control_step_output(estimate, [0.0; 4], false, false, debug);
+    };
+    let debug = ControlStepDebug {
+        throttle: Some(throttle),
+        ..debug
     };
 
     let torque = rate_controller.update(
@@ -272,13 +338,45 @@ fn actuator_output_for_estimate(
         throttle,
     );
     let motor_outputs = mixer.mix(torque);
+    let debug = ControlStepDebug {
+        torque: Some(torque),
+        motor_outputs: Some(motor_outputs),
+        ..debug
+    };
 
-    actuator_output(
+    control_step_output(
         estimate,
         motor_outputs.commands,
         true,
         motor_outputs.clamped,
+        debug,
     )
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ControlStepDebug {
+    attitude_setpoint: Option<AttitudeSetpoint>,
+    rate_setpoint: Option<BodyRateSetpoint>,
+    throttle: Option<f32>,
+    torque: Option<TorqueCommand>,
+    motor_outputs: Option<MotorOutputs<4>>,
+}
+
+fn control_step_output(
+    estimate: StateEstimateStamped,
+    motor_command_normalized: [f32; 4],
+    valid: bool,
+    clamped: bool,
+    debug: ControlStepDebug,
+) -> ControlStepOutput {
+    ControlStepOutput {
+        actuator: actuator_output(estimate, motor_command_normalized, valid, clamped),
+        attitude_setpoint: debug.attitude_setpoint,
+        rate_setpoint: debug.rate_setpoint,
+        throttle: debug.throttle,
+        torque: debug.torque,
+        motor_outputs: debug.motor_outputs,
+    }
 }
 
 fn actuator_output(

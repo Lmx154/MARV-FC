@@ -369,6 +369,132 @@ mod tests {
     }
 
     #[test]
+    fn normalized_motor_commands_scale_to_u16_with_truncation() {
+        let response = build_hil_response_frame(
+            stamp(2_000),
+            TEST_STATE_ARMED,
+            true,
+            false,
+            Some(valid_estimate(2_000)),
+            Some(ActuatorOutputStamped {
+                timestamp: timestamp(2_000),
+                sample: ActuatorOutputSample::new([0.0, 0.5, 0.999_99, 1.0], true, false),
+            }),
+        );
+
+        assert_eq!(response.motor_cmd, [0, 32_767, 65_534, u16::MAX]);
+    }
+
+    #[test]
+    fn non_finite_negative_and_zero_motor_commands_encode_as_zero() {
+        let response = build_hil_response_frame(
+            stamp(2_000),
+            TEST_STATE_ARMED,
+            true,
+            false,
+            Some(valid_estimate(2_000)),
+            Some(ActuatorOutputStamped {
+                timestamp: timestamp(2_000),
+                sample: ActuatorOutputSample::new([f32::NAN, -0.1, 0.0, 1.2], true, false),
+            }),
+        );
+
+        assert_eq!(response.motor_cmd, [0, 0, 0, u16::MAX]);
+    }
+
+    #[test]
+    fn stale_estimate_and_actuator_timestamp_truth_table() {
+        let cases = [
+            (
+                "fresh estimate and fresh actuator",
+                Some(valid_estimate(2_000)),
+                Some(valid_actuator(2_000, false)),
+                response_flags::ARMED
+                    | response_flags::ESTIMATOR_VALID
+                    | response_flags::CONTROL_VALID
+                    | response_flags::MOTORS_VALID,
+                [16_383, 32_767, 49_151, u16::MAX],
+            ),
+            (
+                "stale estimate and fresh actuator",
+                Some(valid_estimate(1_999)),
+                Some(valid_actuator(2_000, false)),
+                response_flags::ARMED
+                    | response_flags::CONTROL_VALID
+                    | response_flags::FAILSAFE
+                    | response_flags::MOTORS_VALID,
+                [0; 4],
+            ),
+            (
+                "fresh estimate and stale actuator",
+                Some(valid_estimate(2_000)),
+                Some(valid_actuator(1_999, false)),
+                response_flags::ARMED
+                    | response_flags::ESTIMATOR_VALID
+                    | response_flags::FAILSAFE
+                    | response_flags::MOTORS_VALID,
+                [0; 4],
+            ),
+            (
+                "stale estimate and stale actuator",
+                Some(valid_estimate(1_999)),
+                Some(valid_actuator(1_999, false)),
+                response_flags::ARMED | response_flags::FAILSAFE | response_flags::MOTORS_VALID,
+                [0; 4],
+            ),
+        ];
+
+        for (name, estimate, actuator, expected_flags, expected_motors) in cases {
+            let response = build_hil_response_frame(
+                stamp(2_000),
+                TEST_STATE_ARMED,
+                true,
+                false,
+                estimate,
+                actuator,
+            );
+
+            assert_eq!(response.flags, expected_flags, "{name}");
+            assert_eq!(response.motor_cmd, expected_motors, "{name}");
+        }
+    }
+
+    #[test]
+    fn sensor_input_valid_flag_follows_response_argument() {
+        let without_sensor = build_hil_response_frame(
+            stamp(2_000),
+            TEST_STATE_ARMED,
+            true,
+            false,
+            Some(valid_estimate(2_000)),
+            Some(valid_actuator(2_000, false)),
+        );
+        let with_sensor = build_hil_response_frame(
+            stamp(2_000),
+            TEST_STATE_ARMED,
+            true,
+            true,
+            Some(valid_estimate(2_000)),
+            Some(valid_actuator(2_000, false)),
+        );
+
+        assert_eq!(without_sensor.flags & response_flags::SENSOR_INPUT_VALID, 0);
+        assert_ne!(with_sensor.flags & response_flags::SENSOR_INPUT_VALID, 0);
+    }
+
+    #[test]
+    fn invalid_clamped_actuator_does_not_set_control_clamped() {
+        let health = evaluate_hil_response_health(
+            true,
+            true,
+            Some(ActuatorOutputSample::new([0.0; 4], false, true)),
+        );
+
+        assert_eq!(health.flags & response_flags::CONTROL_CLAMPED, 0);
+        assert_ne!(health.flags & response_flags::FAILSAFE, 0);
+    }
+
+    #[test]
     fn invalid_asserted_sensor_fields_do_not_set_sensor_input_valid() {
         let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
         let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();

@@ -3976,19 +3976,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rp2354b-crosscore-tests"
-version = "0.1.0"
-dependencies = [
- "cortex-m-rt",
- "defmt 1.0.1",
- "defmt-rtt",
- "embassy-executor",
- "embassy-rp",
- "embassy-time",
- "panic-probe",
-]
-
-[[package]]
 name = "rp235x-base"
 version = "0.1.0"
 dependencies = [

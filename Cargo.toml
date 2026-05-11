@@ -7,7 +7,6 @@ members = [
     "device/PAYLOAD-CONTROLLER-RP2350",
     "device/RECOVERY-ALTIMETER-RP2350",
     "device/RP235X-BASE",
-    "device/RP2354B-CROSSCORE-TESTS",
     "device/RP235X-TEST",
     "telemetry-app/src-tauri",
 ]

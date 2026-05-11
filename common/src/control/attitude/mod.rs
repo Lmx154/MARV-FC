@@ -154,6 +154,7 @@ fn clamp_symmetric(value: f32, limit: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{AttitudeController, AttitudeSetpoint};
+    use crate::test_helpers::{assert_quaternion_near, assert_scalar_near};
 
     #[test]
     fn level_attitude_maps_to_zero_rate() {
@@ -163,9 +164,9 @@ mod tests {
             .update(AttitudeSetpoint::LEVEL, [1.0, 0.0, 0.0, 0.0])
             .expect("valid attitude should produce a setpoint");
 
-        assert_eq!(rate.roll_rps, 0.0);
-        assert_eq!(rate.pitch_rps, 0.0);
-        assert_eq!(rate.yaw_rps, 0.0);
+        assert_scalar_near(rate.roll_rps, 0.0, 0.000_001);
+        assert_scalar_near(rate.pitch_rps, 0.0, 0.000_001);
+        assert_scalar_near(rate.yaw_rps, 0.0, 0.000_001);
     }
 
     #[test]
@@ -180,8 +181,8 @@ mod tests {
             .expect("valid attitude should produce a setpoint");
 
         assert!(rate.roll_rps < 0.0);
-        assert_eq!(rate.pitch_rps, 0.0);
-        assert_eq!(rate.yaw_rps, 0.0);
+        assert_scalar_near(rate.pitch_rps, 0.0, 0.000_001);
+        assert_scalar_near(rate.yaw_rps, 0.0, 0.000_001);
     }
 
     #[test]
@@ -200,10 +201,11 @@ mod tests {
         let setpoint = AttitudeSetpoint::from_euler_rad(0.0, 0.0, core::f32::consts::FRAC_PI_2)
             .expect("finite euler angles should produce a setpoint");
 
-        assert!((setpoint.quaternion[0] - 0.707_106_77).abs() < 0.001);
-        assert_eq!(setpoint.quaternion[1], 0.0);
-        assert_eq!(setpoint.quaternion[2], 0.0);
-        assert!((setpoint.quaternion[3] - 0.707_106_77).abs() < 0.001);
+        assert_quaternion_near(
+            setpoint.quaternion,
+            [0.707_106_77, 0.0, 0.0, 0.707_106_77],
+            0.001,
+        );
     }
 
     #[test]
@@ -230,5 +232,46 @@ mod tests {
             .expect("valid attitude should produce a setpoint");
 
         assert_eq!(rate.yaw_rps, 0.25);
+    }
+
+    #[test]
+    fn negated_equivalent_quaternion_does_not_create_large_error() {
+        let controller = AttitudeController::default();
+
+        let rate = controller
+            .update(AttitudeSetpoint::LEVEL, [-1.0, 0.0, 0.0, 0.0])
+            .expect("negated unit quaternion is valid");
+
+        assert_scalar_near(rate.roll_rps, 0.0, 0.000_001);
+        assert_scalar_near(rate.pitch_rps, 0.0, 0.000_001);
+        assert_scalar_near(rate.yaw_rps, 0.0, 0.000_001);
+    }
+
+    #[test]
+    fn attitude_error_uses_target_times_current_inverse_order() {
+        let controller = AttitudeController::new(super::AttitudeControllerConfig {
+            roll_rate_gain: 1.0,
+            pitch_rate_gain: 1.0,
+            yaw_rate_gain: 1.0,
+            max_rate_rps: 10.0,
+            max_yaw_rate_rps: 10.0,
+        });
+        let yaw_30 = AttitudeSetpoint::from_euler_rad(0.0, 0.0, core::f32::consts::PI / 6.0)
+            .expect("finite yaw setpoint");
+
+        let from_level = controller
+            .update(yaw_30, AttitudeSetpoint::LEVEL.quaternion)
+            .expect("valid attitude should produce a setpoint");
+        let back_to_level = controller
+            .update(AttitudeSetpoint::LEVEL, yaw_30.quaternion)
+            .expect("valid attitude should produce a setpoint");
+
+        assert_scalar_near(from_level.roll_rps, 0.0, 0.000_001);
+        assert_scalar_near(from_level.pitch_rps, 0.0, 0.000_001);
+        assert!(from_level.yaw_rps > 0.0);
+        assert_scalar_near(back_to_level.roll_rps, 0.0, 0.000_001);
+        assert_scalar_near(back_to_level.pitch_rps, 0.0, 0.000_001);
+        assert!(back_to_level.yaw_rps < 0.0);
+        assert_scalar_near(from_level.yaw_rps, -back_to_level.yaw_rps, 0.000_001);
     }
 }

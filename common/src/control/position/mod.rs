@@ -151,6 +151,7 @@ mod tests {
         PositionController, PositionControllerConfig, PositionControllerInput,
         PositionControllerSetpoint,
     };
+    use crate::test_helpers::assert_quaternion_near;
 
     #[test]
     fn zero_error_holds_level_attitude() {
@@ -163,10 +164,7 @@ mod tests {
             )
             .expect("finite setpoint and input should produce attitude");
 
-        assert!((attitude.quaternion[0] - 1.0).abs() < 0.000_001);
-        assert_eq!(attitude.quaternion[1], 0.0);
-        assert_eq!(attitude.quaternion[2], 0.0);
-        assert_eq!(attitude.quaternion[3], 0.0);
+        assert_quaternion_near(attitude.quaternion, [1.0, 0.0, 0.0, 0.0], 0.000_001);
     }
 
     #[test]
@@ -184,6 +182,20 @@ mod tests {
     }
 
     #[test]
+    fn south_position_error_commands_nose_up_pitch() {
+        let controller = PositionController::default();
+
+        let attitude = controller
+            .update(
+                PositionControllerSetpoint::new([-10.0, 0.0, 0.0], 0.0),
+                PositionControllerInput::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            )
+            .expect("finite setpoint and input should produce attitude");
+
+        assert!(attitude.quaternion[2] > 0.0);
+    }
+
+    #[test]
     fn east_position_error_commands_right_roll() {
         let controller = PositionController::default();
 
@@ -195,6 +207,34 @@ mod tests {
             .expect("finite setpoint and input should produce attitude");
 
         assert!(attitude.quaternion[1] > 0.0);
+    }
+
+    #[test]
+    fn west_position_error_commands_left_roll() {
+        let controller = PositionController::default();
+
+        let attitude = controller
+            .update(
+                PositionControllerSetpoint::new([0.0, -10.0, 0.0], 0.0),
+                PositionControllerInput::new([0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            )
+            .expect("finite setpoint and input should produce attitude");
+
+        assert!(attitude.quaternion[1] < 0.0);
+    }
+
+    #[test]
+    fn east_velocity_commands_left_roll_to_brake() {
+        let controller = PositionController::default();
+
+        let attitude = controller
+            .update(
+                PositionControllerSetpoint::ORIGIN_HOLD,
+                PositionControllerInput::new([0.0, 0.0, 0.0], [0.0, 2.0, 0.0]),
+            )
+            .expect("finite setpoint and input should produce attitude");
+
+        assert!(attitude.quaternion[1] < 0.0);
     }
 
     #[test]

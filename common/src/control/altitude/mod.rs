@@ -87,6 +87,7 @@ fn clamp_unit(value: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::{AltitudeController, AltitudeControllerConfig};
+    use crate::test_helpers::assert_scalar_near;
 
     #[test]
     fn zero_error_holds_hover_throttle() {
@@ -96,7 +97,7 @@ mod tests {
             .update(0.0, 0.0, 0.0)
             .expect("finite altitude input should produce throttle");
 
-        assert_eq!(throttle, 0.5);
+        assert_scalar_near(throttle, 0.5, 0.000_001);
     }
 
     #[test]
@@ -111,6 +112,17 @@ mod tests {
     }
 
     #[test]
+    fn above_setpoint_commands_less_throttle_in_ned_down_frame() {
+        let controller = AltitudeController::default();
+
+        let throttle = controller
+            .update(0.0, -2.0, 0.0)
+            .expect("finite altitude input should produce throttle");
+
+        assert!(throttle < 0.5);
+    }
+
+    #[test]
     fn vertical_descent_commands_more_throttle() {
         let controller = AltitudeController::default();
 
@@ -119,6 +131,17 @@ mod tests {
             .expect("finite altitude input should produce throttle");
 
         assert!(throttle > 0.5);
+    }
+
+    #[test]
+    fn vertical_climb_commands_less_throttle_in_ned_down_frame() {
+        let controller = AltitudeController::default();
+
+        let throttle = controller
+            .update(0.0, 0.0, -1.0)
+            .expect("finite altitude input should produce throttle");
+
+        assert!(throttle < 0.5);
     }
 
     #[test]
@@ -136,7 +159,7 @@ mod tests {
             .update(-100.0, 100.0, 100.0)
             .expect("finite altitude input should produce throttle");
 
-        assert_eq!(throttle, 0.6);
+        assert_scalar_near(throttle, 0.6, 0.000_001);
     }
 
     #[test]

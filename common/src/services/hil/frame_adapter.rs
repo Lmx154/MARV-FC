@@ -436,6 +436,7 @@ mod tests {
         TimeSampleChannel,
     };
     use crate::services::hil::routing::HilIngressRoutes;
+    use crate::test_helpers::assert_vec3_near;
     use crate::utilities::time::MeasurementTimestamp;
 
     fn frame(tick: u64, time_us: u64) -> HilSensorFrame {
@@ -530,6 +531,83 @@ mod tests {
     }
 
     #[test]
+    fn inactive_adapter_rejects_frame_without_publishing() {
+        let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut time_sub = time.subscriber().unwrap();
+        let mut imu_sub = imu.subscriber().unwrap();
+        let mut adapter = HilSensorFrameAdapter::new();
+
+        let dispatch = adapter.accept_frame(frame(1, 1_000), &routes);
+
+        assert!(!dispatch.accepted);
+        assert_eq!(dispatch.rejection, Some(HilSensorFrameRejection::Inactive));
+        assert!(!dispatch.dispatch.imu_published);
+        assert!(time_sub.try_next_message().is_none());
+        assert!(imu_sub.try_next_message().is_none());
+    }
+
+    #[test]
+    fn adapter_publishes_only_asserted_valid_sensor_groups() {
+        let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let baro = BarometerSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let gps = GpsFixSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let mag = MagnetometerSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let routes = HilIngressRoutes::new(&time, &imu, &baro, &gps, &mag, &());
+        let mut imu_sub = imu.subscriber().unwrap();
+        let mut baro_sub = baro.subscriber().unwrap();
+        let mut gps_sub = gps.subscriber().unwrap();
+        let mut mag_sub = mag.subscriber().unwrap();
+        let mut adapter = HilSensorFrameAdapter::active();
+        let mut partial = frame(1, 1_000);
+        partial.valid_flags = valid::ACCEL | valid::GYRO;
+
+        let dispatch = adapter.accept_frame(partial, &routes);
+
+        assert!(dispatch.accepted);
+        assert!(dispatch.dispatch.imu_published);
+        assert!(!dispatch.dispatch.barometer_published);
+        assert!(!dispatch.dispatch.gps_published);
+        assert!(!dispatch.dispatch.magnetometer_published);
+        match imu_sub.try_next_message().unwrap() {
+            WaitResult::Message(sample) => {
+                assert_vec3_near(sample.sample.accel_mps2, [1.0, 2.0, 3.0], 0.000_001);
+                assert_vec3_near(sample.sample.gyro_rad_s, [0.1, 0.2, 0.3], 0.000_001);
+            }
+            WaitResult::Lagged(skipped) => panic!("unexpected lagged imu sample: {skipped}"),
+        }
+        assert!(baro_sub.try_next_message().is_none());
+        assert!(gps_sub.try_next_message().is_none());
+        assert!(mag_sub.try_next_message().is_none());
+    }
+
+    #[test]
+    fn adapter_ignores_non_finite_unasserted_fields() {
+        let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut adapter = HilSensorFrameAdapter::active();
+        let mut partial = frame(1, 1_000);
+        partial.valid_flags = valid::ACCEL | valid::GYRO;
+        partial.pressure_pa = f32::NAN;
+        partial.baro_altitude_m = f32::NAN;
+        partial.temperature_c = f32::NAN;
+        partial.lat_deg = f64::NAN;
+        partial.lon_deg = f64::NAN;
+        partial.alt_msl_m = f32::NAN;
+        partial.vel_ned_mps = [f32::NAN, 0.0, 0.0];
+        partial.mag_ut = [f32::NAN, 0.0, 0.0];
+
+        let dispatch = adapter.accept_frame(partial, &routes);
+
+        assert!(dispatch.accepted);
+        assert!(dispatch.dispatch.imu_published);
+        assert_eq!(dispatch.counters.invalid_non_finite_sample, 0);
+    }
+
+    #[test]
     fn adapter_rejects_non_finite_asserted_samples_without_forking_channels() {
         let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
         let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
@@ -549,5 +627,60 @@ mod tests {
         assert!(!dispatch.dispatch.imu_published);
         assert_eq!(dispatch.counters.invalid_non_finite_sample, 1);
         assert!(imu_sub.try_next_message().is_none());
+    }
+
+    #[test]
+    fn adapter_tracks_response_sent_missed_and_mismatch_counters() {
+        let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut adapter = HilSensorFrameAdapter::active();
+
+        let first = frame(1, 1_000);
+        assert!(adapter.accept_frame(first, &routes).accepted);
+        adapter.mark_response_sent(first.stamp);
+        assert_eq!(adapter.correlation().current_in_flight_tick, None);
+        assert_eq!(adapter.correlation().counters.response_mismatch, 0);
+        assert_eq!(adapter.correlation().counters.missed_response, 0);
+
+        let second = frame(2, 2_000);
+        assert!(adapter.accept_frame(second, &routes).accepted);
+        adapter.mark_response_sent(SimStamp {
+            sim_tick: 99,
+            sim_time_us: 99_000,
+        });
+        assert_eq!(adapter.correlation().current_in_flight_tick, Some(2));
+        assert_eq!(adapter.correlation().counters.response_mismatch, 1);
+
+        adapter.mark_missed_response();
+        assert_eq!(adapter.correlation().current_in_flight_tick, None);
+        assert_eq!(adapter.correlation().counters.missed_response, 1);
+
+        adapter.mark_missed_response();
+        assert_eq!(adapter.correlation().counters.missed_response, 1);
+    }
+
+    #[test]
+    fn stream_correlation_reset_allows_new_tick_epoch() {
+        let time = TimeSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let imu = ImuSampleChannel::<NoopRawMutex, 4, 1, 1>::new();
+        let routes = HilIngressRoutes::new(&time, &imu, &(), &(), &(), &());
+        let mut adapter = HilSensorFrameAdapter::active();
+
+        assert!(adapter.accept_frame(frame(10, 10_000), &routes).accepted);
+        adapter.reset_stream_correlation();
+
+        let restarted = adapter.accept_frame(frame(1, 1_000), &routes);
+
+        assert!(restarted.accepted);
+        assert_eq!(restarted.rejection, None);
+        assert_eq!(
+            adapter.correlation().latest_accepted_stamp,
+            Some(SimStamp {
+                sim_tick: 1,
+                sim_time_us: 1_000,
+            })
+        );
+        assert_eq!(adapter.correlation().last_processed_tick, Some(1));
     }
 }

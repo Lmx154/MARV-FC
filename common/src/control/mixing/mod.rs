@@ -177,11 +177,12 @@ fn clamp_outputs<const N: usize>(mut commands: [f32; N], limits: MixerLimits) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{MotorOrder, QuadXMixer, TorqueCommand};
+    use super::{MixerLimits, MotorOrder, QuadXMixer, TorqueCommand};
+    use crate::test_helpers::assert_scalar_near;
 
     fn assert_commands_near(actual: [f32; 4], expected: [f32; 4]) {
         for (actual, expected) in actual.into_iter().zip(expected) {
-            assert!((actual - expected).abs() < 0.000_001);
+            assert_scalar_near(actual, expected, 0.000_001);
         }
     }
 
@@ -204,6 +205,22 @@ mod tests {
     }
 
     #[test]
+    fn quad_x_mixer_roll_pitch_yaw_basis_vectors_match_documented_signs() {
+        let mixer = QuadXMixer::default();
+
+        let roll = mixer.mix(TorqueCommand::new(0.1, 0.0, 0.0, 0.5));
+        let pitch = mixer.mix(TorqueCommand::new(0.0, 0.1, 0.0, 0.5));
+        let yaw = mixer.mix(TorqueCommand::new(0.0, 0.0, 0.1, 0.5));
+
+        assert_commands_near(roll.commands, [0.6, 0.4, 0.4, 0.6]);
+        assert_commands_near(pitch.commands, [0.6, 0.6, 0.4, 0.4]);
+        assert_commands_near(yaw.commands, [0.4, 0.6, 0.4, 0.6]);
+        assert!(!roll.clamped);
+        assert!(!pitch.clamped);
+        assert!(!yaw.clamped);
+    }
+
+    #[test]
     fn quad_x_mixer_can_remap_logical_motors_to_outputs() {
         let order = MotorOrder::from_one_based([3, 1, 4, 2]).unwrap();
         let mixer = QuadXMixer::with_motor_order(Default::default(), order);
@@ -214,11 +231,64 @@ mod tests {
     }
 
     #[test]
-    fn motor_order_rejects_invalid_permutations() {
-        assert!(MotorOrder::from_one_based([1, 2, 3, 4]).is_some());
-        assert!(MotorOrder::from_one_based([1, 2, 2, 4]).is_none());
-        assert!(MotorOrder::from_one_based([0, 2, 3, 4]).is_none());
-        assert!(MotorOrder::from_one_based([1, 2, 3, 5]).is_none());
+    fn motor_order_round_trips_every_valid_permutation() {
+        for a in 1..=4 {
+            for b in 1..=4 {
+                for c in 1..=4 {
+                    for d in 1..=4 {
+                        let order = [a, b, c, d];
+                        if !is_valid_one_based_permutation(order) {
+                            continue;
+                        }
+
+                        let motor_order = MotorOrder::from_one_based(order)
+                            .expect("valid permutation should be accepted");
+
+                        assert_eq!(motor_order.one_based(), order);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn motor_order_rejects_every_invalid_zero_to_five_permutation() {
+        let mut valid_count = 0;
+        let mut invalid_count = 0;
+
+        for a in 0..=5 {
+            for b in 0..=5 {
+                for c in 0..=5 {
+                    for d in 0..=5 {
+                        let order = [a, b, c, d];
+                        let result = MotorOrder::from_one_based(order);
+
+                        if is_valid_one_based_permutation(order) {
+                            valid_count += 1;
+                            assert!(result.is_some(), "valid order rejected: {order:?}");
+                        } else {
+                            invalid_count += 1;
+                            assert!(result.is_none(), "invalid order accepted: {order:?}");
+                        }
+                    }
+                }
+            }
+        }
+
+        assert_eq!(valid_count, 24);
+        assert_eq!(invalid_count, 1_272);
+    }
+
+    #[test]
+    fn motor_order_remap_can_be_recovered_with_inverse_order() {
+        let logical = [0.75, 0.65, 0.15, 0.45];
+
+        for order in valid_motor_orders() {
+            let motor_order = MotorOrder::from_one_based(order).unwrap();
+            let inverse = MotorOrder::from_one_based(inverse_order(order)).unwrap();
+
+            assert_commands_near(inverse.apply(motor_order.apply(logical)), logical);
+        }
     }
 
     #[test]
@@ -228,5 +298,71 @@ mod tests {
 
         assert_commands_near(outputs.commands, [1.0, 0.5, 0.0, 0.5]);
         assert!(outputs.clamped);
+    }
+
+    #[test]
+    fn quad_x_mixer_respects_custom_output_limits() {
+        let mixer = QuadXMixer::new(MixerLimits::new(0.2, 0.8));
+        let outputs = mixer.mix(TorqueCommand::new(0.5, 0.0, 0.0, 0.5));
+
+        assert_commands_near(outputs.commands, [0.8, 0.2, 0.2, 0.8]);
+        assert!(outputs.clamped);
+    }
+
+    fn is_valid_one_based_permutation(order: [u8; 4]) -> bool {
+        let mut seen = [false; 4];
+
+        for output in order {
+            if !(1..=4).contains(&output) {
+                return false;
+            }
+
+            let index = usize::from(output - 1);
+            if seen[index] {
+                return false;
+            }
+            seen[index] = true;
+        }
+
+        true
+    }
+
+    fn valid_motor_orders() -> [[u8; 4]; 24] {
+        [
+            [1, 2, 3, 4],
+            [1, 2, 4, 3],
+            [1, 3, 2, 4],
+            [1, 3, 4, 2],
+            [1, 4, 2, 3],
+            [1, 4, 3, 2],
+            [2, 1, 3, 4],
+            [2, 1, 4, 3],
+            [2, 3, 1, 4],
+            [2, 3, 4, 1],
+            [2, 4, 1, 3],
+            [2, 4, 3, 1],
+            [3, 1, 2, 4],
+            [3, 1, 4, 2],
+            [3, 2, 1, 4],
+            [3, 2, 4, 1],
+            [3, 4, 1, 2],
+            [3, 4, 2, 1],
+            [4, 1, 2, 3],
+            [4, 1, 3, 2],
+            [4, 2, 1, 3],
+            [4, 2, 3, 1],
+            [4, 3, 1, 2],
+            [4, 3, 2, 1],
+        ]
+    }
+
+    fn inverse_order(order: [u8; 4]) -> [u8; 4] {
+        let mut inverse = [0; 4];
+
+        for (motor, output) in order.into_iter().enumerate() {
+            inverse[usize::from(output - 1)] = (motor + 1) as u8;
+        }
+
+        inverse
     }
 }

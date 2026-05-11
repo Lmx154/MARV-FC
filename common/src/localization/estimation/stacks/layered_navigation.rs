@@ -326,6 +326,16 @@ fn default_navigation_initial_covariance<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::localization::estimation::core::{MeasurementUpdateStatus, Vec4};
+    use crate::localization::estimation::models::NavigationState;
+    use crate::localization::estimation::policies::{GateContext, GateDecision, GateStatus};
+    use crate::test_helpers::{
+        assert_quaternion_near_f64, assert_quaternion_normalized_f64, assert_scalar_near_f64,
+        assert_vec3_near_f64,
+    };
+
+    const GRAVITY_MPS2: f64 = 9.80665;
+    const TOLERANCE: f64 = 1.0e-9;
 
     #[test]
     fn layered_stack_predict_and_measurement_updates_smoke() {
@@ -353,5 +363,334 @@ mod tests {
             .unwrap();
         stack.update_velocity(Vec3::<f64>::zeros(), None).unwrap();
         stack.update_barometric_altitude(3.0, None).unwrap();
+    }
+
+    #[test]
+    fn default_state_is_finite_and_quaternion_normalized() {
+        let stack = LayeredNavigationStack::<f64>::default();
+        let state = stack.state();
+
+        assert_quaternion_normalized_f64(state.quaternion, TOLERANCE);
+        assert_vec3_finite(state.gyro_bias_rps);
+        assert_vec3_finite(state.position_m);
+        assert_vec3_finite(state.velocity_mps);
+        assert_vec3_finite(state.accel_bias_mps2);
+    }
+
+    #[test]
+    fn predict_stores_dt_and_timestamp() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        stack
+            .predict(Vec3::<f64>::zeros(), Vec3::<f64>::zeros(), 0.02, Some(1.25))
+            .unwrap();
+
+        assert_eq!(stack.last_prediction_dt_s, Some(0.02));
+        assert_eq!(stack.last_timestamp_s, Some(1.25));
+    }
+
+    #[test]
+    fn static_level_predict_loop_remains_bounded() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        for step in 0..200 {
+            stack
+                .predict(
+                    Vec3::<f64>::zeros(),
+                    Vec3::<f64>::zeros(),
+                    0.01,
+                    Some((step + 1) as f64 * 0.01),
+                )
+                .unwrap();
+        }
+
+        let state = stack.state();
+        assert_quaternion_near_f64(state.quaternion, identity_quaternion(), TOLERANCE);
+        assert_vec3_near_f64(vec3_to_array(state.position_m), [0.0, 0.0, 0.0], TOLERANCE);
+        assert_vec3_near_f64(
+            vec3_to_array(state.velocity_mps),
+            [0.0, 0.0, 0.0],
+            TOLERANCE,
+        );
+    }
+
+    #[test]
+    fn constant_yaw_rate_integrates_quaternion() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        stack
+            .predict(
+                Vec3::<f64>::zeros(),
+                Vec3::<f64>::new(0.0, 0.0, core::f64::consts::FRAC_PI_2),
+                1.0,
+                Some(1.0),
+            )
+            .unwrap();
+
+        assert_quaternion_near_f64(
+            stack.state().quaternion,
+            Vec4::<f64>::new(
+                core::f64::consts::FRAC_1_SQRT_2,
+                0.0,
+                0.0,
+                core::f64::consts::FRAC_1_SQRT_2,
+            ),
+            1.0e-9,
+        );
+    }
+
+    #[test]
+    fn gravity_update_keeps_level_state_stable() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        let summary = stack
+            .update_gravity_alignment(Vec3::<f64>::new(0.0, 0.0, -GRAVITY_MPS2), None)
+            .unwrap();
+
+        assert_eq!(summary.status, MeasurementUpdateStatus::Accepted);
+        assert_quaternion_near_f64(stack.state().quaternion, identity_quaternion(), 1.0e-9);
+        assert_quaternion_normalized_f64(stack.state().quaternion, 1.0e-9);
+    }
+
+    #[test]
+    fn magnetic_update_keeps_aligned_field_stable() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        let summary = stack
+            .update_magnetic_field(
+                Vec3::<f64>::new(20.0, 0.0, 40.0),
+                Vec3::<f64>::new(20.0, 0.0, 40.0),
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(summary.status, MeasurementUpdateStatus::Accepted);
+        assert_quaternion_near_f64(stack.state().quaternion, identity_quaternion(), 1.0e-9);
+        assert_quaternion_normalized_f64(stack.state().quaternion, 1.0e-9);
+    }
+
+    #[test]
+    fn gps_position_update_moves_toward_measurement() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        stack
+            .update_position(Vec3::<f64>::new(10.0, -4.0, 2.0), None)
+            .unwrap();
+
+        let position = stack.state().position_m;
+        assert!(position[0] > 0.0 && position[0] < 10.0);
+        assert!(position[1] < 0.0 && position[1] > -4.0);
+        assert!(position[2] > 0.0 && position[2] < 2.0);
+    }
+
+    #[test]
+    fn gps_velocity_update_moves_toward_measurement() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        stack
+            .update_velocity(Vec3::<f64>::new(5.0, -2.0, 1.0), None)
+            .unwrap();
+
+        let velocity = stack.state().velocity_mps;
+        assert!(velocity[0] > 0.0 && velocity[0] < 5.0);
+        assert!(velocity[1] < 0.0 && velocity[1] > -2.0);
+        assert!(velocity[2] > 0.0 && velocity[2] < 1.0);
+    }
+
+    #[test]
+    fn barometric_altitude_update_moves_toward_measurement() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        stack.update_barometric_altitude(12.0, None).unwrap();
+
+        let down = stack.state().position_m[2];
+        assert!(down > 0.0 && down < 12.0);
+    }
+
+    #[test]
+    fn rejected_gps_position_measurement_leaves_state_unchanged() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+        let before = stack.state();
+        let gate = RejectAllGate;
+
+        let summary = stack
+            .update_position(Vec3::<f64>::new(10.0, 0.0, 0.0), Some(&gate))
+            .unwrap();
+        let after = stack.state();
+
+        assert_eq!(summary.status, MeasurementUpdateStatus::Rejected);
+        assert_eq!(summary.gate_reason, Some("forced rejection"));
+        assert!(summary.state_correction.is_none());
+        assert_vec3_near_f64(
+            vec3_to_array(after.position_m),
+            vec3_to_array(before.position_m),
+            TOLERANCE,
+        );
+        assert_vec3_near_f64(
+            vec3_to_array(after.velocity_mps),
+            vec3_to_array(before.velocity_mps),
+            TOLERANCE,
+        );
+        assert_quaternion_near_f64(after.quaternion, before.quaternion, TOLERANCE);
+    }
+
+    #[test]
+    fn deterministic_estimator_replay_from_fixed_sensor_arrays_is_bounded() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+        let replay = [
+            ReplaySample {
+                timestamp_s: 0.01,
+                accel_mps2: [0.0, 0.0, 0.0],
+                gyro_rps: [0.0, 0.0, 0.02],
+                gps_position_m: [0.0, 0.0, 0.0],
+                gps_velocity_mps: [0.0, 0.0, 0.0],
+                baro_down_m: 0.0,
+                mag_body_ut: [20.0, 0.0, 40.0],
+            },
+            ReplaySample {
+                timestamp_s: 0.02,
+                accel_mps2: [0.02, -0.01, 0.0],
+                gyro_rps: [0.0, 0.0, 0.02],
+                gps_position_m: [0.15, -0.04, 0.02],
+                gps_velocity_mps: [0.05, -0.02, 0.0],
+                baro_down_m: 0.02,
+                mag_body_ut: [20.0, -0.004, 40.0],
+            },
+            ReplaySample {
+                timestamp_s: 0.03,
+                accel_mps2: [0.01, -0.02, 0.0],
+                gyro_rps: [0.0, 0.0, 0.02],
+                gps_position_m: [0.28, -0.08, 0.03],
+                gps_velocity_mps: [0.08, -0.02, 0.01],
+                baro_down_m: 0.03,
+                mag_body_ut: [20.0, -0.008, 40.0],
+            },
+            ReplaySample {
+                timestamp_s: 0.04,
+                accel_mps2: [0.0, -0.01, 0.0],
+                gyro_rps: [0.0, 0.0, 0.02],
+                gps_position_m: [0.4, -0.1, 0.04],
+                gps_velocity_mps: [0.1, -0.03, 0.01],
+                baro_down_m: 0.04,
+                mag_body_ut: [20.0, -0.012, 40.0],
+            },
+        ];
+
+        let mut previous_timestamp_s = 0.0;
+        for sample in replay {
+            let dt = sample.timestamp_s - previous_timestamp_s;
+            previous_timestamp_s = sample.timestamp_s;
+
+            stack
+                .predict(
+                    Vec3::<f64>::new(
+                        sample.accel_mps2[0],
+                        sample.accel_mps2[1],
+                        sample.accel_mps2[2],
+                    ),
+                    Vec3::<f64>::new(sample.gyro_rps[0], sample.gyro_rps[1], sample.gyro_rps[2]),
+                    dt,
+                    Some(sample.timestamp_s),
+                )
+                .unwrap();
+            stack
+                .update_gravity_alignment(Vec3::<f64>::new(0.0, 0.0, -GRAVITY_MPS2), None)
+                .unwrap();
+            stack
+                .update_magnetic_field(
+                    Vec3::<f64>::new(
+                        sample.mag_body_ut[0],
+                        sample.mag_body_ut[1],
+                        sample.mag_body_ut[2],
+                    ),
+                    Vec3::<f64>::new(20.0, 0.0, 40.0),
+                    None,
+                )
+                .unwrap();
+            stack
+                .update_position(
+                    Vec3::<f64>::new(
+                        sample.gps_position_m[0],
+                        sample.gps_position_m[1],
+                        sample.gps_position_m[2],
+                    ),
+                    None,
+                )
+                .unwrap();
+            stack
+                .update_velocity(
+                    Vec3::<f64>::new(
+                        sample.gps_velocity_mps[0],
+                        sample.gps_velocity_mps[1],
+                        sample.gps_velocity_mps[2],
+                    ),
+                    None,
+                )
+                .unwrap();
+            stack
+                .update_barometric_altitude(sample.baro_down_m, None)
+                .unwrap();
+        }
+
+        let state = stack.state();
+        assert_quaternion_normalized_f64(state.quaternion, 1.0e-9);
+        assert_vec3_finite(state.position_m);
+        assert_vec3_finite(state.velocity_mps);
+        assert_scalar_near_f64(stack.last_prediction_dt_s.unwrap(), 0.01, 1.0e-12);
+        assert_scalar_near_f64(stack.last_timestamp_s.unwrap(), 0.04, 1.0e-12);
+        assert!(state.position_m[0] > 0.0 && state.position_m[0] < 0.4);
+        assert!(state.position_m[1] < 0.0 && state.position_m[1] > -0.1);
+        assert!(state.position_m[2] > 0.0 && state.position_m[2] < 0.04);
+        assert!(state.velocity_mps[0] > 0.0 && state.velocity_mps[0] < 0.1);
+        assert!(state.velocity_mps[1] < 0.0 && state.velocity_mps[1] > -0.03);
+    }
+
+    struct RejectAllGate;
+
+    #[derive(Clone, Copy)]
+    struct ReplaySample {
+        timestamp_s: f64,
+        accel_mps2: [f64; 3],
+        gyro_rps: [f64; 3],
+        gps_position_m: [f64; 3],
+        gps_velocity_mps: [f64; 3],
+        baro_down_m: f64,
+        mag_body_ut: [f64; 3],
+    }
+
+    impl
+        crate::localization::estimation::policies::MeasurementGate<
+            NavigationState<f64>,
+            f64,
+            NAVIGATION_STATE_DIM,
+            3,
+            Vec3<f64>,
+        > for RejectAllGate
+    {
+        fn evaluate(
+            &self,
+            _context: &GateContext<
+                '_,
+                NavigationState<f64>,
+                f64,
+                NAVIGATION_STATE_DIM,
+                3,
+                Vec3<f64>,
+            >,
+        ) -> GateDecision<f64> {
+            GateDecision {
+                status: GateStatus::Reject,
+                reason: Some("forced rejection"),
+                mahalanobis_distance: None,
+            }
+        }
+    }
+
+    fn assert_vec3_finite(values: Vec3<f64>) {
+        assert!(values.iter().all(|value| value.is_finite()));
+    }
+
+    fn vec3_to_array(values: Vec3<f64>) -> [f64; 3] {
+        [values[0], values[1], values[2]]
     }
 }
