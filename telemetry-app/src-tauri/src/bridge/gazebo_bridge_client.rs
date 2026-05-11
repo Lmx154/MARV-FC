@@ -187,10 +187,7 @@ impl GazeboBridgeClient {
         let sequence = self.next_sequence;
         self.next_sequence = self.next_sequence.saturating_add(1);
 
-        let payload = format!(
-            "ACTUATOR seq={} m0={:.3} m1={:.3} m2={:.3} m3={:.3}\n",
-            sequence, motor_speed, motor_speed, motor_speed, motor_speed
-        );
+        let payload = format_test_actuator_command(sequence, motor_speed);
 
         self.write_raw(payload.as_bytes())?;
         self.stats.actuator_frames_sent = self.stats.actuator_frames_sent.saturating_add(1);
@@ -204,11 +201,7 @@ impl GazeboBridgeClient {
         sim_time_us: u64,
         motor_cmd: [u16; 4],
     ) -> Result<(), String> {
-        let motors = normalized_motor_values(motor_cmd);
-        let payload = format!(
-            "ACTUATOR seq={} sim_time_us={} m0={:.3} m1={:.3} m2={:.3} m3={:.3}\n",
-            sequence, sim_time_us, motors[0], motors[1], motors[2], motors[3]
-        );
+        let payload = format_hil_actuator_command(sequence, sim_time_us, motor_cmd);
 
         self.write_raw(payload.as_bytes())?;
         self.stats.actuator_frames_sent = self.stats.actuator_frames_sent.saturating_add(1);
@@ -247,96 +240,120 @@ impl GazeboBridgeClient {
 
         self.stats.sensor_frames_received = self.stats.sensor_frames_received.saturating_add(1);
 
-        let mut sensor_frame = GazeboSensorFrame {
-            sequence: 0,
-            sim_time_us: 0,
-            clock_source: None,
-            valid_flags: 0,
-            accel_mps2: [0.0, 0.0, -9.81],
-            gyro_rps: [0.0, 0.0, 0.0],
-            orientation_quat: None,
-            mag_ut: [0.0, 0.0, 0.0],
-            pressure_pa: 101_325.0,
-            baro_altitude_m: 0.0,
-            temperature_c: 25.0,
-            lat_deg: 0.0,
-            lon_deg: 0.0,
-            alt_msl_m: 0.0,
-            vel_ned_mps: [0.0, 0.0, 0.0],
-            sats: 0,
-            fix_type: 0,
-            battery_voltage_v: 0.0,
-            rssi_dbm: 0,
-            snr_db_x100: 0,
-            loss_pct_x100: 0,
-        };
-        let mut has_sequence = false;
-        let mut has_sim_time = false;
-
-        for token in line.split_whitespace() {
-            let Some((key, value)) = token.split_once('=') else {
-                continue;
-            };
-
-            match key {
-                "seq" => {
-                    let Ok(sequence) = value.parse::<u64>() else {
-                        continue;
-                    };
-                    self.stats.last_sensor_sequence = Some(sequence);
-                    sensor_frame.sequence = sequence;
-                    has_sequence = true;
-                }
-                "sim_time_us" => {
-                    let Ok(sim_time_us) = value.parse::<u64>() else {
-                        continue;
-                    };
-                    self.stats.last_sensor_time_us = Some(sim_time_us);
-                    sensor_frame.sim_time_us = sim_time_us;
-                    has_sim_time = true;
-                }
-                "clock" => {
-                    let clock_source = value.to_string();
-                    self.stats.last_sensor_clock_source = Some(clock_source.clone());
-                    sensor_frame.clock_source = Some(clock_source);
-                }
-                "valid" | "valid_flags" => parse_u32_into(value, &mut sensor_frame.valid_flags),
-                "ax" => parse_f32_into(value, &mut sensor_frame.accel_mps2[0]),
-                "ay" => parse_f32_into(value, &mut sensor_frame.accel_mps2[1]),
-                "az" => parse_f32_into(value, &mut sensor_frame.accel_mps2[2]),
-                "gx" => parse_f32_into(value, &mut sensor_frame.gyro_rps[0]),
-                "gy" => parse_f32_into(value, &mut sensor_frame.gyro_rps[1]),
-                "gz" => parse_f32_into(value, &mut sensor_frame.gyro_rps[2]),
-                "qw" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 0),
-                "qx" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 1),
-                "qy" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 2),
-                "qz" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 3),
-                "mx" => parse_f32_into(value, &mut sensor_frame.mag_ut[0]),
-                "my" => parse_f32_into(value, &mut sensor_frame.mag_ut[1]),
-                "mz" => parse_f32_into(value, &mut sensor_frame.mag_ut[2]),
-                "pressure_pa" => parse_f32_into(value, &mut sensor_frame.pressure_pa),
-                "baro_alt_m" => parse_f32_into(value, &mut sensor_frame.baro_altitude_m),
-                "temp_c" => parse_f32_into(value, &mut sensor_frame.temperature_c),
-                "lat_deg" => parse_f64_into(value, &mut sensor_frame.lat_deg),
-                "lon_deg" => parse_f64_into(value, &mut sensor_frame.lon_deg),
-                "alt_msl_m" => parse_f32_into(value, &mut sensor_frame.alt_msl_m),
-                "vn" => parse_f32_into(value, &mut sensor_frame.vel_ned_mps[0]),
-                "ve" => parse_f32_into(value, &mut sensor_frame.vel_ned_mps[1]),
-                "vd" => parse_f32_into(value, &mut sensor_frame.vel_ned_mps[2]),
-                "sats" => parse_u8_into(value, &mut sensor_frame.sats),
-                "fix" => parse_u8_into(value, &mut sensor_frame.fix_type),
-                "battery_v" => parse_f32_into(value, &mut sensor_frame.battery_voltage_v),
-                "rssi_dbm" => parse_i16_into(value, &mut sensor_frame.rssi_dbm),
-                "snr_db_x100" => parse_i16_into(value, &mut sensor_frame.snr_db_x100),
-                "loss_pct_x100" => parse_u16_into(value, &mut sensor_frame.loss_pct_x100),
-                _ => {}
-            }
-        }
-
-        if has_sequence && has_sim_time {
+        if let Some(sensor_frame) = parse_gazebo_sensor_line(line) {
+            self.stats.last_sensor_sequence = Some(sensor_frame.sequence);
+            self.stats.last_sensor_time_us = Some(sensor_frame.sim_time_us);
+            self.stats.last_sensor_clock_source = sensor_frame.clock_source.clone();
             self.sensor_frames.push_back(sensor_frame);
         }
     }
+}
+
+pub(crate) fn parse_gazebo_sensor_line(line: &str) -> Option<GazeboSensorFrame> {
+    if !line.starts_with("SENSOR") {
+        return None;
+    }
+
+    let mut sensor_frame = GazeboSensorFrame {
+        sequence: 0,
+        sim_time_us: 0,
+        clock_source: None,
+        valid_flags: 0,
+        accel_mps2: [0.0, 0.0, -9.81],
+        gyro_rps: [0.0, 0.0, 0.0],
+        orientation_quat: None,
+        mag_ut: [0.0, 0.0, 0.0],
+        pressure_pa: 101_325.0,
+        baro_altitude_m: 0.0,
+        temperature_c: 25.0,
+        lat_deg: 0.0,
+        lon_deg: 0.0,
+        alt_msl_m: 0.0,
+        vel_ned_mps: [0.0, 0.0, 0.0],
+        sats: 0,
+        fix_type: 0,
+        battery_voltage_v: 0.0,
+        rssi_dbm: 0,
+        snr_db_x100: 0,
+        loss_pct_x100: 0,
+    };
+    let mut has_sequence = false;
+    let mut has_sim_time = false;
+
+    for token in line.split_whitespace() {
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+
+        match key {
+            "seq" => {
+                let Ok(sequence) = value.parse::<u64>() else {
+                    continue;
+                };
+                sensor_frame.sequence = sequence;
+                has_sequence = true;
+            }
+            "sim_time_us" => {
+                let Ok(sim_time_us) = value.parse::<u64>() else {
+                    continue;
+                };
+                sensor_frame.sim_time_us = sim_time_us;
+                has_sim_time = true;
+            }
+            "clock" => sensor_frame.clock_source = Some(value.to_string()),
+            "valid" | "valid_flags" => parse_u32_into(value, &mut sensor_frame.valid_flags),
+            "ax" => parse_f32_into(value, &mut sensor_frame.accel_mps2[0]),
+            "ay" => parse_f32_into(value, &mut sensor_frame.accel_mps2[1]),
+            "az" => parse_f32_into(value, &mut sensor_frame.accel_mps2[2]),
+            "gx" => parse_f32_into(value, &mut sensor_frame.gyro_rps[0]),
+            "gy" => parse_f32_into(value, &mut sensor_frame.gyro_rps[1]),
+            "gz" => parse_f32_into(value, &mut sensor_frame.gyro_rps[2]),
+            "qw" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 0),
+            "qx" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 1),
+            "qy" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 2),
+            "qz" => parse_quat_component(value, &mut sensor_frame.orientation_quat, 3),
+            "mx" => parse_f32_into(value, &mut sensor_frame.mag_ut[0]),
+            "my" => parse_f32_into(value, &mut sensor_frame.mag_ut[1]),
+            "mz" => parse_f32_into(value, &mut sensor_frame.mag_ut[2]),
+            "pressure_pa" => parse_f32_into(value, &mut sensor_frame.pressure_pa),
+            "baro_alt_m" => parse_f32_into(value, &mut sensor_frame.baro_altitude_m),
+            "temp_c" => parse_f32_into(value, &mut sensor_frame.temperature_c),
+            "lat_deg" => parse_f64_into(value, &mut sensor_frame.lat_deg),
+            "lon_deg" => parse_f64_into(value, &mut sensor_frame.lon_deg),
+            "alt_msl_m" => parse_f32_into(value, &mut sensor_frame.alt_msl_m),
+            "vn" => parse_f32_into(value, &mut sensor_frame.vel_ned_mps[0]),
+            "ve" => parse_f32_into(value, &mut sensor_frame.vel_ned_mps[1]),
+            "vd" => parse_f32_into(value, &mut sensor_frame.vel_ned_mps[2]),
+            "sats" => parse_u8_into(value, &mut sensor_frame.sats),
+            "fix" => parse_u8_into(value, &mut sensor_frame.fix_type),
+            "battery_v" => parse_f32_into(value, &mut sensor_frame.battery_voltage_v),
+            "rssi_dbm" => parse_i16_into(value, &mut sensor_frame.rssi_dbm),
+            "snr_db_x100" => parse_i16_into(value, &mut sensor_frame.snr_db_x100),
+            "loss_pct_x100" => parse_u16_into(value, &mut sensor_frame.loss_pct_x100),
+            _ => {}
+        }
+    }
+
+    (has_sequence && has_sim_time).then_some(sensor_frame)
+}
+
+pub(crate) fn format_hil_actuator_command(
+    sequence: u64,
+    sim_time_us: u64,
+    motor_cmd: [u16; 4],
+) -> String {
+    let motors = normalized_motor_values(motor_cmd);
+    format!(
+        "ACTUATOR seq={} sim_time_us={} m0={:.3} m1={:.3} m2={:.3} m3={:.3}\n",
+        sequence, sim_time_us, motors[0], motors[1], motors[2], motors[3]
+    )
+}
+
+pub(crate) fn format_test_actuator_command(sequence: u64, motor_speed: f32) -> String {
+    format!(
+        "ACTUATOR seq={} m0={:.3} m1={:.3} m2={:.3} m3={:.3}\n",
+        sequence, motor_speed, motor_speed, motor_speed, motor_speed
+    )
 }
 
 fn parse_f32_into(value: &str, target: &mut f32) {
@@ -455,6 +472,46 @@ mod tests {
         assert_eq!(frame.sats, 14);
         assert_eq!(frame.fix_type, 3);
         assert_eq!(frame.battery_voltage_v, 12.3);
+    }
+
+    #[test]
+    fn gazebo_bridge_client_parses_complete_sensor_contract_line() {
+        let frame = parse_gazebo_sensor_line(
+            "SENSOR seq=99 sim_time_us=1234567 clock=gazebo valid_flags=127 ax=1.5 ay=-2.5 az=3.25 gx=0.01 gy=-0.02 gz=0.03 qw=0.707 qx=0.1 qy=-0.2 qz=0.667 mx=20.5 my=-3.5 mz=44.25 pressure_pa=100123.25 baro_alt_m=101.5 temp_c=18.75 lat_deg=26.310942 lon_deg=-98.174728 alt_msl_m=99.5 vn=4.5 ve=-5.5 vd=6.5 sats=13 fix=3 battery_v=15.2 rssi_dbm=-42 snr_db_x100=725 loss_pct_x100=12",
+        )
+        .expect("complete sensor line should parse");
+
+        assert_eq!(frame.sequence, 99);
+        assert_eq!(frame.sim_time_us, 1_234_567);
+        assert_eq!(frame.clock_source.as_deref(), Some("gazebo"));
+        assert_eq!(frame.valid_flags, 127);
+        assert_eq!(frame.accel_mps2, [1.5, -2.5, 3.25]);
+        assert_eq!(frame.gyro_rps, [0.01, -0.02, 0.03]);
+        assert_eq!(frame.orientation_quat, Some([0.707, 0.1, -0.2, 0.667]));
+        assert_eq!(frame.mag_ut, [20.5, -3.5, 44.25]);
+        assert_eq!(frame.pressure_pa, 100_123.25);
+        assert_eq!(frame.baro_altitude_m, 101.5);
+        assert_eq!(frame.temperature_c, 18.75);
+        assert_eq!(frame.lat_deg, 26.310942);
+        assert_eq!(frame.lon_deg, -98.174728);
+        assert_eq!(frame.alt_msl_m, 99.5);
+        assert_eq!(frame.vel_ned_mps, [4.5, -5.5, 6.5]);
+        assert_eq!(frame.sats, 13);
+        assert_eq!(frame.fix_type, 3);
+        assert_eq!(frame.battery_voltage_v, 15.2);
+        assert_eq!(frame.rssi_dbm, -42);
+        assert_eq!(frame.snr_db_x100, 725);
+        assert_eq!(frame.loss_pct_x100, 12);
+    }
+
+    #[test]
+    fn gazebo_bridge_client_formats_hil_actuator_command_for_bridge_protocol() {
+        let line = format_hil_actuator_command(42, 840_000, [0, 32_768, 65_535, 16_384]);
+
+        assert_eq!(
+            line,
+            "ACTUATOR seq=42 sim_time_us=840000 m0=0.000 m1=0.500 m2=1.000 m3=0.250\n"
+        );
     }
 
     #[test]

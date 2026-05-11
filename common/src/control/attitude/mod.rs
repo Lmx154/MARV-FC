@@ -186,6 +186,22 @@ mod tests {
     }
 
     #[test]
+    fn pitch_error_commands_opposing_pitch_rate() {
+        let controller = AttitudeController::default();
+
+        let rate = controller
+            .update(
+                AttitudeSetpoint::LEVEL,
+                [0.996_194_7, 0.0, 0.087_155_7, 0.0],
+            )
+            .expect("valid attitude should produce a setpoint");
+
+        assert_scalar_near(rate.roll_rps, 0.0, 0.000_001);
+        assert!(rate.pitch_rps < 0.0);
+        assert_scalar_near(rate.yaw_rps, 0.0, 0.000_001);
+    }
+
+    #[test]
     fn invalid_quaternion_is_rejected() {
         let controller = AttitudeController::default();
 

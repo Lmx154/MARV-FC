@@ -46,6 +46,7 @@ struct BridgeConfig {
     bool synthetic_sensors = false;
     float nominal_battery_voltage_v = 12.3f;
     double max_rotor_velocity_rad_s = 1000.0;
+    std::string motor_direction_mode = "gazebo_model";
     std::array<double, 4> motor_directions{1.0, 1.0, 1.0, 1.0};
 };
 
@@ -103,6 +104,8 @@ void load_config_file(const std::string& path, BridgeConfig& config) {
             config.actuator_topic = value;
         } else if (key == "actuators.max_rotor_velocity_rad_s" || key == "max_rotor_velocity_rad_s") {
             config.max_rotor_velocity_rad_s = std::stod(value);
+        } else if (key == "actuators.motor_direction_mode" || key == "motor_direction_mode") {
+            config.motor_direction_mode = value;
         } else if (key == "synthetic_sensors") {
             config.synthetic_sensors = parse_bool(value);
         } else if (key == "nominal_battery_voltage_v") {

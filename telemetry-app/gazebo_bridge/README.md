@@ -24,12 +24,17 @@ cmake --build telemetry-app/gazebo_bridge/build
 
 The checked-in `config/bridge_config` is loaded automatically by the Tauri app launcher and matches the MARV `marv_field` world:
 
-- clock: `/clock`
+- clock: `/world/marv_field/clock`
 - IMU: `/world/marv_field/model/marv_f450/link/base_link/sensor/imu_sensor/imu`
 - GPS/NavSat: `/world/marv_field/model/marv_f450/link/base_link/sensor/navsat_sensor/navsat`
 - barometer: `/world/marv_field/model/marv_f450/link/base_link/sensor/air_pressure_sensor/air_pressure`
 - magnetometer: `/world/marv_field/model/marv_f450/link/base_link/sensor/magnetometer_sensor/magnetometer`
 - actuator command: `/marv_f450/command/motor_speed`
+
+The checked-in config uses `actuators.motor_direction_mode=gazebo_model` with
+positive bridge motor directions. That means the bridge scales normalized motor
+commands to rotor speed magnitudes and delegates spin-direction/yaw sign to the
+Gazebo model's motor configuration.
 
 If your shell is inside `telemetry-app/`, use:
 

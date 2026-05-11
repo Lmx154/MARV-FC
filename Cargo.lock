@@ -947,6 +947,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "deterministic-harness"
+version = "0.1.0"
+dependencies = [
+ "common",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

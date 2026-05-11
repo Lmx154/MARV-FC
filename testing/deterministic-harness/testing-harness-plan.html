@@ -1,0 +1,1273 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MARV Deterministic Test Harness Implementation Plan</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #5b6578;
+      --line: #d9deea;
+      --blue: #315eea;
+      --blue-2: #dfe8ff;
+      --green: #198754;
+      --green-2: #dff3e8;
+      --amber: #b56b00;
+      --amber-2: #fff1d6;
+      --red: #b42318;
+      --red-2: #ffe4e2;
+      --purple: #6f42c1;
+      --purple-2: #ede3ff;
+      --code-bg: #111827;
+      --code-ink: #e5e7eb;
+      --shadow: 0 14px 38px rgba(23, 32, 51, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: radial-gradient(circle at top left, #eaf0ff 0, transparent 36rem), var(--bg);
+      line-height: 1.55;
+    }
+
+    .page {
+      width: min(1220px, calc(100vw - 40px));
+      margin: 0 auto;
+      padding: 28px 0 70px;
+    }
+
+    header.hero {
+      background: linear-gradient(135deg, #172033 0%, #253a7d 62%, #315eea 100%);
+      color: #fff;
+      border-radius: 28px;
+      padding: 42px;
+      box-shadow: var(--shadow);
+      position: relative;
+      overflow: hidden;
+    }
+    header.hero::after {
+      content: "";
+      position: absolute;
+      right: -70px;
+      top: -90px;
+      width: 280px;
+      height: 280px;
+      border-radius: 50%;
+      background: rgba(255,255,255,.12);
+    }
+    header.hero h1 {
+      max-width: 900px;
+      font-size: clamp(2rem, 4vw, 3.8rem);
+      line-height: 1.05;
+      margin: 0 0 16px;
+      letter-spacing: -0.04em;
+    }
+    header.hero p {
+      max-width: 860px;
+      margin: 0;
+      color: rgba(255,255,255,.86);
+      font-size: 1.08rem;
+    }
+
+    .badges { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 26px; }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid rgba(255,255,255,.2);
+      background: rgba(255,255,255,.12);
+      color: #fff;
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-weight: 700;
+      font-size: .88rem;
+    }
+
+    nav.toc {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin: 22px 0;
+    }
+    nav.toc a {
+      text-decoration: none;
+      color: var(--ink);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 14px 16px;
+      box-shadow: 0 8px 20px rgba(23, 32, 51, 0.05);
+      font-weight: 800;
+    }
+    nav.toc a span { display: block; color: var(--muted); font-size: .82rem; font-weight: 600; }
+
+    section { margin: 26px 0; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 24px;
+      box-shadow: 0 8px 24px rgba(23, 32, 51, .045);
+    }
+    .card h2, .card h3 { margin-top: 0; }
+    h2 {
+      font-size: clamp(1.5rem, 2.4vw, 2.2rem);
+      line-height: 1.15;
+      letter-spacing: -0.03em;
+      margin: 0 0 14px;
+    }
+    h3 { font-size: 1.28rem; margin: 22px 0 10px; }
+    h4 { font-size: 1rem; margin: 18px 0 8px; }
+    p.lead { color: var(--muted); font-size: 1.06rem; margin-top: 0; }
+
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .mini-card {
+      border: 1px solid var(--line);
+      border-radius: 16px;
+      padding: 16px;
+      background: #fff;
+    }
+    .mini-card h3, .mini-card h4 { margin-top: 0; }
+    .mini-card p { color: var(--muted); margin-bottom: 0; }
+    .callout {
+      border-left: 5px solid var(--blue);
+      background: var(--blue-2);
+      border-radius: 14px;
+      padding: 16px 18px;
+      margin: 16px 0;
+    }
+    .callout strong { color: #162e80; }
+    .callout.warn { border-color: var(--amber); background: var(--amber-2); }
+    .callout.good { border-color: var(--green); background: var(--green-2); }
+    .callout.danger { border-color: var(--red); background: var(--red-2); }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0 8px;
+      overflow: hidden;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+    thead th {
+      text-align: left;
+      background: #eef2ff;
+      color: #1e2c60;
+      font-size: .86rem;
+      text-transform: uppercase;
+      letter-spacing: .04em;
+    }
+    th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tbody tr:last-child td { border-bottom: none; }
+    td small { color: var(--muted); }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-weight: 800;
+      font-size: .78rem;
+      white-space: nowrap;
+    }
+    .pill.blue { background: var(--blue-2); color: var(--blue); }
+    .pill.green { background: var(--green-2); color: var(--green); }
+    .pill.amber { background: var(--amber-2); color: var(--amber); }
+    .pill.red { background: var(--red-2); color: var(--red); }
+    .pill.purple { background: var(--purple-2); color: var(--purple); }
+
+    pre {
+      background: var(--code-bg);
+      color: var(--code-ink);
+      padding: 16px;
+      border-radius: 16px;
+      overflow-x: auto;
+      font-size: .9rem;
+      line-height: 1.45;
+      border: 1px solid #273244;
+    }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; }
+    :not(pre) > code {
+      background: #edf0f7;
+      color: #202a44;
+      border-radius: 7px;
+      padding: 2px 6px;
+    }
+
+    .diagram {
+      background: #fbfcff;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      margin: 16px 0;
+      overflow-x: auto;
+    }
+    .diagram svg { max-width: 100%; height: auto; display: block; min-width: 850px; }
+    .node { fill: #fff; stroke: #cad3e8; stroke-width: 1.5; }
+    .node-blue { fill: #eaf0ff; stroke: #315eea; }
+    .node-green { fill: #e8f7ee; stroke: #198754; }
+    .node-amber { fill: #fff2d8; stroke: #b56b00; }
+    .node-purple { fill: #f0e6ff; stroke: #6f42c1; }
+    .node-red { fill: #ffe8e6; stroke: #b42318; }
+    .svg-label { font: 700 14px Inter, system-ui, sans-serif; fill: #172033; }
+    .svg-sub { font: 12px Inter, system-ui, sans-serif; fill: #5b6578; }
+    .arrow { stroke: #65708a; stroke-width: 2; fill: none; marker-end: url(#arrow); }
+    .arrow-blue { stroke: #315eea; }
+    .arrow-green { stroke: #198754; }
+
+    .phase {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 18px;
+      margin: 18px 0;
+      background: linear-gradient(180deg, #fff, #fcfdff);
+    }
+    .phase-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 12px;
+      margin-bottom: 14px;
+    }
+    .phase-header h3 { margin: 0; }
+    .phase-meta { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .checklist {
+      columns: 2;
+      column-gap: 28px;
+      padding-left: 1.2rem;
+    }
+    .checklist li { break-inside: avoid; margin-bottom: 8px; }
+
+    .timeline {
+      position: relative;
+      margin-left: 12px;
+      padding-left: 22px;
+      border-left: 3px solid #dce3f7;
+    }
+    .timeline-item { margin: 0 0 18px; position: relative; }
+    .timeline-item::before {
+      content: "";
+      position: absolute;
+      left: -32px;
+      top: 5px;
+      width: 15px;
+      height: 15px;
+      background: var(--blue);
+      border-radius: 50%;
+      box-shadow: 0 0 0 5px #eaf0ff;
+    }
+    .timeline-item h4 { margin: 0 0 4px; }
+    .timeline-item p { margin: 0; color: var(--muted); }
+
+    footer {
+      color: var(--muted);
+      font-size: .9rem;
+      margin-top: 32px;
+      text-align: center;
+    }
+
+    @media (max-width: 920px) {
+      nav.toc, .grid-2, .grid-3 { grid-template-columns: 1fr; }
+      header.hero { padding: 30px; }
+      .checklist { columns: 1; }
+      .phase-header { flex-direction: column; }
+      .phase-meta { justify-content: flex-start; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .page { width: 100%; padding: 0; }
+      header.hero, .card, .phase { box-shadow: none; }
+      nav.toc { display: none; }
+      .diagram { break-inside: avoid; }
+      .phase { break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <h1>MARV Deterministic Test Harness Implementation Plan</h1>
+      <p>
+        An incremental, testable path to validate MARV’s estimator, controller, mixer, actuator path, and Gazebo/HIL integration without debugging the whole flight stack at once.
+      </p>
+      <div class="badges">
+        <span class="badge">✓ Host-first</span>
+        <span class="badge">✓ Lockstep time</span>
+        <span class="badge">✓ Component oracles before closed loop</span>
+        <span class="badge">✓ Gazebo only after deterministic tests pass</span>
+        <span class="badge">Generated May 11, 2026</span>
+      </div>
+    </header>
+
+    <nav class="toc" aria-label="Plan table of contents">
+      <a href="#objective">Objective <span>What we are building</span></a>
+      <a href="#architecture">Architecture <span>Harness, sim, and firmware boundaries</span></a>
+      <a href="#increments">Incremental phases <span>Every phase has tests</span></a>
+      <a href="#matrix">Test matrix <span>What each layer proves</span></a>
+    </nav>
+
+    <section id="objective" class="card">
+      <h2>1. Objective</h2>
+      <p class="lead">
+        Build a deterministic harness that can validate MARV’s flight pipeline in small, observable increments before relying on Gazebo. The goal is not to replace Gazebo; the goal is to make Gazebo failures diagnosable by proving the firmware pipeline in a controlled environment first.
+      </p>
+
+      <div class="grid-3">
+        <div class="mini-card">
+          <h3>Problem being solved</h3>
+          <p>Gazebo takeoff briefly succeeds, then diverges violently. That can be caused by estimator sign, frame convention, mixer order, motor direction, thrust scaling, stale estimates, or timing.</p>
+        </div>
+        <div class="mini-card">
+          <h3>Validation strategy</h3>
+          <p>Validate each component with deterministic inputs, then integrate components one at a time until closed-loop behavior is proven.</p>
+        </div>
+        <div class="mini-card">
+          <h3>Reference pattern</h3>
+          <p>Use the Holsatus model: host-side simulated hardware, lockstep time, simulated sensors/motors, and an integration test that asserts flight behavior rather than only checking for panics.</p>
+        </div>
+      </div>
+
+      <div class="callout good">
+        <strong>Core principle:</strong> every increment must produce a binary answer: pass/fail, with logs that identify whether the failure is in sensor ingestion, estimator, controller, mixer, actuator scaling, or external Gazebo integration.
+      </div>
+
+      <h3>Non-goals for the first version</h3>
+      <table>
+        <thead><tr><th>Non-goal</th><th>Reason</th><th>When to add later</th></tr></thead>
+        <tbody>
+          <tr><td>Photorealistic or full Gazebo physics</td><td>Too many variables while debugging firmware logic.</td><td>After deterministic closed-loop tests pass.</td></tr>
+          <tr><td>Perfect aerodynamic model</td><td>The first failures are likely frame/sign/order/timing problems, not high-fidelity aero.</td><td>After hover and setpoint-hold are stable.</td></tr>
+          <tr><td>Random noise by default</td><td>Randomness makes regressions harder to reproduce.</td><td>Add seeded noise as explicit test cases.</td></tr>
+          <tr><td>Full embedded executor fidelity</td><td>Start by testing pure logic and typed messages.</td><td>Add a std-device style task runner once the pure harness is useful.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="architecture" class="card">
+      <h2>2. Target Architecture</h2>
+      <p class="lead">
+        The harness should start as a host-side crate that drives MARV’s portable logic directly. Later increments can wrap the same harness around HIL messages, a std-device firmware runner, and finally Gazebo.
+      </p>
+
+      <div class="diagram" aria-label="Deterministic harness architecture diagram">
+        <svg viewBox="0 0 1120 520" role="img">
+          <defs>
+            <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+              <path d="M0,0 L0,6 L9,3 z" fill="#65708a" />
+            </marker>
+          </defs>
+
+          <rect class="node node-purple" x="40" y="40" width="210" height="86" rx="14" />
+          <text class="svg-label" x="64" y="76">Test case</text>
+          <text class="svg-sub" x="64" y="100">fixture + setpoint + assertions</text>
+
+          <rect class="node node-blue" x="320" y="40" width="210" height="86" rx="14" />
+          <text class="svg-label" x="344" y="76">Lockstep clock</text>
+          <text class="svg-sub" x="344" y="100">no wall-clock sleeps</text>
+
+          <rect class="node node-green" x="600" y="40" width="230" height="86" rx="14" />
+          <text class="svg-label" x="624" y="76">MARV pipeline</text>
+          <text class="svg-sub" x="624" y="100">estimator → control → mixer</text>
+
+          <rect class="node node-amber" x="900" y="40" width="220" height="86" rx="14" />
+          <text class="svg-label" x="924" y="76">Assertions + logs</text>
+          <text class="svg-sub" x="924" y="100">bounded state, signs, timing</text>
+
+          <rect class="node" x="105" y="220" width="220" height="92" rx="14" />
+          <text class="svg-label" x="130" y="255">Sensor source</text>
+          <text class="svg-sub" x="130" y="279">CSV replay or synthetic truth</text>
+
+          <rect class="node" x="400" y="220" width="220" height="92" rx="14" />
+          <text class="svg-label" x="424" y="255">Plant model</text>
+          <text class="svg-sub" x="424" y="279">static → vertical → 6DOF</text>
+
+          <rect class="node" x="695" y="220" width="220" height="92" rx="14" />
+          <text class="svg-label" x="719" y="255">Actuator sink</text>
+          <text class="svg-sub" x="719" y="279">normalized motors + clamped flag</text>
+
+          <rect class="node node-red" x="260" y="390" width="260" height="76" rx="14" />
+          <text class="svg-label" x="284" y="423">Gazebo bridge adapter</text>
+          <text class="svg-sub" x="284" y="447">optional late-stage integration</text>
+
+          <rect class="node node-red" x="610" y="390" width="260" height="76" rx="14" />
+          <text class="svg-label" x="634" y="423">RP235X-TEST HIL adapter</text>
+          <text class="svg-sub" x="634" y="447">optional firmware/device boundary</text>
+
+          <path class="arrow arrow-blue" d="M250,83 C275,83 295,83 320,83" />
+          <path class="arrow arrow-blue" d="M530,83 C555,83 575,83 600,83" />
+          <path class="arrow arrow-blue" d="M830,83 C855,83 875,83 900,83" />
+          <path class="arrow" d="M425,126 C390,170 320,205 250,220" />
+          <path class="arrow" d="M325,266 C350,266 375,266 400,266" />
+          <path class="arrow" d="M620,266 C645,266 670,266 695,266" />
+          <path class="arrow" d="M805,220 C780,170 735,130 715,126" />
+          <path class="arrow-green" d="M805,312 C780,350 760,370 740,390" />
+          <path class="arrow-green" d="M510,312 C470,350 430,370 390,390" />
+        </svg>
+      </div>
+
+      <h3>Recommended repository shape</h3>
+      <pre><code>testing/
+  deterministic-harness/
+    Cargo.toml
+    src/
+      lib.rs                 # public test harness API
+      clock.rs               # deterministic lockstep clock
+      cases.rs               # TestCase, assertions, tolerances
+      fixtures.rs            # CSV/JSON fixture loader
+      sensors.rs             # SensorFrame builder + validation
+      plant/
+        mod.rs               # Plant trait
+        static_pad.rs        # no-motion plant for first tests
+        vertical.rs          # 1D altitude plant
+        quad6dof.rs          # later minimal 6DOF plant
+      marv_adapter/
+        mod.rs               # adapter to common estimator/control/mixer APIs
+        pure.rs              # direct pure-function stepping
+        hil.rs               # HIL semantic message stepping, later
+      logs.rs                # per-step trace output
+    tests/
+      p00_clock.rs
+      p01_mixer_contract.rs
+      p02_estimator_replay.rs
+      p03_control_pipeline.rs
+      p04_closed_loop_truth.rs
+      p05_closed_loop_estimator.rs
+      p06_gazebo_contract.rs  # ignored/feature-gated at first
+    fixtures/
+      static_on_pad_10s.csv
+      vertical_ascent_5s.csv
+      gps_dropout_5s.csv
+      baro_spike_5s.csv
+      imu_nan_rejection.csv</code></pre>
+
+      <h3>API sketch</h3>
+      <pre><code>pub struct StepInput {
+    pub tick: u64,
+    pub dt_s: f32,
+    pub setpoint: Setpoint,
+}
+
+pub struct StepTrace {
+    pub tick: u64,
+    pub truth: TruthState,
+    pub sensors: SensorFrame,
+    pub estimate: EstimateSnapshot,
+    pub control: ControlSnapshot,
+    pub motors: [f32; 4],
+    pub clamped: bool,
+    pub flags: HarnessFlags,
+}
+
+pub trait Plant {
+    fn reset(&mut self, initial: TruthState);
+    fn sensors(&mut self, truth: &TruthState, tick: u64) -> SensorFrame;
+    fn apply_motors(&mut self, motors: [f32; 4], dt_s: f32) -> TruthState;
+}
+
+pub trait MarvStep {
+    fn step(&mut self, input: SensorFrame, setpoint: Setpoint, dt_s: f32) -> StepTrace;
+}</code></pre>
+
+      <div class="callout warn">
+        <strong>Important design constraint:</strong> no test should depend on wall-clock time, thread sleeps, network sockets, or Gazebo until the final optional phases. A failed test must be replayable with the same seed and the same fixture.
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>3. What to copy from Holsatus, adapted for MARV</h2>
+      <table>
+        <thead><tr><th>Holsatus pattern</th><th>MARV equivalent</th><th>Implementation requirement</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><strong>Sim handle</strong> exposes vehicle state, motor commands, motor directions, reset/upright, and step.</td>
+            <td><code>Plant</code> + <code>SimHandle</code> in <code>testing/deterministic-harness</code>.</td>
+            <td>Make the sim state inspectable after every tick. Assertions should never need to infer state from logs only.</td>
+          </tr>
+          <tr>
+            <td><strong>Simulated devices</strong> implement the same hardware-facing interfaces as real IMU, motors, Vicon, flash.</td>
+            <td>Start with direct MARV data types; later implement HIL semantic routes and actuator sinks.</td>
+            <td>Begin with low-friction pure stepping. Add firmware/task fidelity only after the pure pipeline is validated.</td>
+          </tr>
+          <tr>
+            <td><strong>Lockstep executor</strong> advances simulated time deliberately instead of sleeping.</td>
+            <td><code>LockstepClock</code> with <code>advance(dt)</code>; all samples derive timestamps from it.</td>
+            <td>Reject duplicate and non-monotonic ticks in tests. Log the exact tick that caused failure.</td>
+          </tr>
+          <tr>
+            <td><strong>Integration flight assertion</strong> arms, sends setpoints, waits in sim time, and asserts estimated position is near target.</td>
+            <td>Closed-loop cases: static hold, roll disturbance recovery, vertical setpoint, position setpoint.</td>
+            <td>Every closed-loop test must assert both bounded truth state and bounded estimate state.</td>
+          </tr>
+          <tr>
+            <td><strong>CI integration</strong> runs common tests, embedded builds, and simulated integration flights.</td>
+            <td>Add <code>cargo test -p common</code>, harness tests, then ignored/feature-gated Gazebo tests.</td>
+            <td>Do not add flaky Gazebo to normal CI. Keep deterministic harness in the fast required gate.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section id="increments" class="card">
+      <h2>4. Incremental implementation phases</h2>
+      <p class="lead">
+        Each phase is independently mergeable. Do not move to the next phase until the acceptance tests for the current phase are passing and the evidence artifacts are understandable.
+      </p>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 0 — Freeze the contracts and commands</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: docs + test commands</span>
+            <span class="pill green">Exit: host tests runnable</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added the <code>testing/deterministic-harness</code> crate, wired it into the workspace default host members, created its README, documented host/embedded workspace boundaries, and froze the frame, quaternion, mixer, motor-order, and output conventions the harness assumes.
+        </div>
+        <div class="grid-2">
+          <div>
+            <h4>Implementation requirements</h4>
+            <ul>
+              <li><strong>Done:</strong> documented the exact host commands for <code>common</code>, Tauri backend, and the new harness crate in <code>testing/deterministic-harness/README.md</code>.</li>
+              <li><strong>Done:</strong> confirmed <code>common</code>, <code>telemetry-app/src-tauri</code>, and <code>testing/deterministic-harness</code> are host-friendly; all <code>device/*</code> workspace members are embedded-only.</li>
+              <li><strong>Done:</strong> documented estimator/control conventions: local NED, body rates, quaternion order, body-to-inertial rotation, controller signs, mixer equations, motor order, normalized outputs, and the unresolved motor spin-direction requirement for Phase 5.</li>
+              <li><strong>Done:</strong> created <code>testing/deterministic-harness/README.md</code> with goals, non-goals, commands, workspace compatibility, and frozen conventions.</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Tests and acceptance criteria</h4>
+            <ul>
+              <li><strong>Passed:</strong> <code>cargo test -p common --no-run</code>.</li>
+              <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml --no-run</code>.</li>
+              <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>.</li>
+              <li><strong>Passed:</strong> <code>cargo test -p telemetry-app --no-run</code>.</li>
+              <li><strong>Done:</strong> the README names every convention the harness assumes.</li>
+              <li><strong>Done:</strong> no Gazebo dependency added.</li>
+            </ul>
+          </div>
+        </div>
+        <pre><code># Phase 0 command gate
+cargo test -p common --no-run
+cargo test -p telemetry-app --no-run
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml --no-run
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code></pre>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 1 — Component contract tests before any plant model</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: mixer/control/estimator contracts</span>
+            <span class="pill green">Exit: oracles pass</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added <code>common/tests/control_pipeline.rs</code> as a host-side oracle suite for mixer, attitude/rate, altitude/position, and static estimator contracts. Added the missing pitch attitude sign unit test. Verified the existing asserted non-finite HIL sensor rejection test still passes.
+        </div>
+        <p>
+          This phase proves that MARV’s pure logic responds correctly to known inputs before we integrate sensors, physics, or Gazebo.
+        </p>
+        <table>
+          <thead><tr><th>Contract</th><th>Test cases</th><th>Failure points isolated</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>Mixer equations</td>
+              <td>Throttle pass-through; roll/pitch/yaw basis vectors; clamping; all valid motor-order permutations; invalid permutation rejection.</td>
+              <td>Mixer math, motor order remap, saturation flags.</td>
+            </tr>
+            <tr>
+              <td>Rate and attitude control signs</td>
+              <td>Positive roll/pitch/yaw error commands opposing torque; zero error produces near-zero torque.</td>
+              <td>Gyro sign, quaternion error order, controller sign convention.</td>
+            </tr>
+            <tr>
+              <td>Altitude and position control signs</td>
+              <td>NED-down below setpoint increases throttle; above setpoint decreases throttle; north/east errors produce expected pitch/roll signs.</td>
+              <td>NED/ENU confusion, altitude sign inversion.</td>
+            </tr>
+            <tr>
+              <td>Estimator static sanity</td>
+              <td>Static IMU keeps finite normalized quaternion; first sample invalid until <code>dt</code>; non-finite asserted sensor rejected.</td>
+              <td>Estimator initialization, finite checks, gating.</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 1 command gate
+cargo test -p common quad_x_mixer
+cargo test -p common attitude
+cargo test -p common altitude
+cargo test -p common estimation
+cargo test -p common --test control_pipeline
+cargo test -p common adapter_rejects_non_finite_asserted_samples</code></pre>
+        <h4>Phase 1 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test -p common quad_x_mixer</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test -p common attitude</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test -p common altitude</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test -p common estimation</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test -p common --test control_pipeline</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test -p common adapter_rejects_non_finite_asserted_samples</code>.</li>
+        </ul>
+        <div class="callout good">
+          <strong>Mergeable evidence:</strong> failing logs should report the exact contract violated, for example: <code>expected positive roll error to command negative roll damping torque</code>.
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 2 — Harness skeleton and lockstep clock</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: deterministic runner</span>
+            <span class="pill green">Exit: time cannot drift</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added the harness <code>clock</code>, <code>cases</code>, and <code>fixtures</code> modules; exposed <code>LockstepClock</code>, <code>TestCase</code>, <code>StepTrace</code>, <code>HarnessReport</code>, assertion helpers, and the deterministic CSV <code>Fixture</code> loader. The loader validates <code>timestamp_us</code> as the first column, rejects empty fixtures, non-finite values, and non-monotonic timestamps, and performs no writes.
+        </div>
+        <div class="diagram" aria-label="Lockstep sequence diagram">
+          <svg viewBox="0 0 1120 430" role="img">
+            <defs>
+              <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+                <path d="M0,0 L0,6 L9,3 z" fill="#65708a" />
+              </marker>
+            </defs>
+            <line x1="135" y1="80" x2="135" y2="370" stroke="#d0d8ec" stroke-width="2" />
+            <line x1="390" y1="80" x2="390" y2="370" stroke="#d0d8ec" stroke-width="2" />
+            <line x1="645" y1="80" x2="645" y2="370" stroke="#d0d8ec" stroke-width="2" />
+            <line x1="900" y1="80" x2="900" y2="370" stroke="#d0d8ec" stroke-width="2" />
+
+            <rect class="node node-purple" x="40" y="30" width="190" height="54" rx="12" />
+            <text class="svg-label" x="75" y="63">Test Runner</text>
+            <rect class="node node-blue" x="295" y="30" width="190" height="54" rx="12" />
+            <text class="svg-label" x="335" y="63">Clock</text>
+            <rect class="node node-green" x="550" y="30" width="190" height="54" rx="12" />
+            <text class="svg-label" x="580" y="63">MARV Step</text>
+            <rect class="node node-amber" x="805" y="30" width="190" height="54" rx="12" />
+            <text class="svg-label" x="845" y="63">Plant</text>
+
+            <path d="M135,120 L390,120" class="arrow" marker-end="url(#arrow2)" />
+            <text class="svg-sub" x="185" y="112">advance(dt)</text>
+            <path d="M390,160 L645,160" class="arrow" marker-end="url(#arrow2)" />
+            <text class="svg-sub" x="450" y="152">timestamped sensors</text>
+            <path d="M645,205 L900,205" class="arrow" marker-end="url(#arrow2)" />
+            <text class="svg-sub" x="710" y="197">motor outputs</text>
+            <path d="M900,250 L135,250" class="arrow" marker-end="url(#arrow2)" />
+            <text class="svg-sub" x="440" y="242">truth state + trace</text>
+            <path d="M135,315 L900,315" class="arrow arrow-blue" marker-end="url(#arrow2)" />
+            <text class="svg-sub" x="430" y="307">assert invariants after every tick</text>
+          </svg>
+        </div>
+        <div class="grid-2">
+          <div>
+            <h4>Implementation requirements</h4>
+            <ul>
+              <li><strong>Done:</strong> added <code>LockstepClock</code> with explicit <code>tick</code>, <code>sim_time_us</code>, and <code>dt_s</code>.</li>
+              <li><strong>Done:</strong> added <code>TestCase</code>, <code>StepTrace</code>, <code>HarnessReport</code>, and assertion utilities.</li>
+              <li><strong>Done:</strong> added deterministic fixture loading with no filesystem writes except caller-requested reads from fixture paths.</li>
+              <li><strong>Done:</strong> <code>TestCase</code> exposes <code>random_seed</code> for later seeded-random cases.</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Tests and acceptance criteria</h4>
+            <ul>
+              <li><strong>Passed:</strong> <code>p00_clock_advances_only_when_step_called</code>.</li>
+              <li><strong>Passed:</strong> <code>p00_clock_rejects_zero_or_negative_dt</code>.</li>
+              <li><strong>Passed:</strong> <code>fixture_loader_rejects_non_monotonic_timestamps</code>.</li>
+              <li><strong>Passed:</strong> <code>report_contains_failure_tick_and_last_trace</code>.</li>
+            </ul>
+          </div>
+        </div>
+        <pre><code># Suggested Phase 2 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p00_clock
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml fixture
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml report_contains_failure_tick_and_last_trace
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code></pre>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 3 — Estimator replay without a control loop</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: sensor frames → estimator</span>
+            <span class="pill green">Exit: bounded estimates</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added deterministic sensor-frame replay into <code>common</code>'s <code>LayeredNavigationStack</code> through the harness <code>estimator_replay</code> module. Added the Phase 3 fixture set, optional sensor-group handling via valid flags, explicit first-sample/no-<code>dt</code> behavior, and a bounded baro-spike rejection counter.
+        </div>
+        <p>
+          This phase validates estimator behavior against short deterministic fixtures. It intentionally does not use the controller or plant. The estimator should be boring on static data.
+        </p>
+        <table>
+          <thead><tr><th>Fixture</th><th>Purpose</th><th>Required assertions</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>static_on_pad_10s.csv</code></td>
+              <td>Validate static IMU/GPS/baro/mag handling.</td>
+              <td><strong>Passed:</strong> quaternion finite and normalized; position/velocity bounded; no estimate explosion; first sample reports no valid estimate until a positive <code>dt</code> exists.</td>
+            </tr>
+            <tr>
+              <td><code>vertical_ascent_5s.csv</code></td>
+              <td>Validate baro/GPS vertical update direction.</td>
+              <td><strong>Passed:</strong> down-position moves negative for ascent under the local NED convention; velocity remains finite.</td>
+            </tr>
+            <tr>
+              <td><code>gps_dropout_5s.csv</code></td>
+              <td>Validate partial sensor frames.</td>
+              <td><strong>Passed:</strong> estimator remains valid through dropout and GPS update count only increments on asserted GPS frames.</td>
+            </tr>
+            <tr>
+              <td><code>baro_spike_5s.csv</code></td>
+              <td>Validate gating/outlier handling.</td>
+              <td><strong>Passed:</strong> configured baro step gate rejects the spike, increments the rejection counter, and keeps the estimate bounded.</td>
+            </tr>
+            <tr>
+              <td><code>imu_nan_rejection.csv</code></td>
+              <td>Validate non-finite asserted fields.</td>
+              <td><strong>Passed:</strong> fixture loader rejects asserted non-finite IMU fields before estimator replay.</td>
+            </tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 3 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p02_estimator_replay
+cargo test -p common --test estimation_replay
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code></pre>
+        <h4>Phase 3 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p02_estimator_replay</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test -p common --test estimation_replay</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 4 — Control pipeline with a truth estimate</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: control → mixer only</span>
+            <span class="pill green">Exit: correct signs and limits</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added a harness-only <code>ControlPipeline</code> adapter that feeds a truth <code>EstimateSnapshot</code> through <code>common</code>'s position, altitude, attitude, rate, and quad-X mixer controllers. The adapter bypasses estimator replay and plant physics while recording all required trace fields.
+        </div>
+        <p>
+          Bypass the estimator with a perfect truth estimate. This proves the controller and mixer before estimator errors can mask control bugs.
+        </p>
+        <div class="grid-2">
+          <div>
+            <h4>Tests</h4>
+            <ul>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_disarmed_outputs_zero_motors</code>.</li>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_level_hold_zero_rate_near_hover</code>.</li>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_positive_roll_disturbance_commands_opposing_torque</code>.</li>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_positive_pitch_disturbance_commands_opposing_torque</code>.</li>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_positive_yaw_rate_commands_opposing_yaw</code>.</li>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_altitude_error_ned_down_sign_is_correct</code>.</li>
+              <li><strong>Passed:</strong> <code>p03_control_pipeline_saturation_sets_clamped_flag</code>.</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Required trace fields</h4>
+            <ul>
+              <li><strong>Done:</strong> input estimate: position, velocity, quaternion, valid flag.</li>
+              <li><strong>Done:</strong> IMU gyro and accelerometer used by control.</li>
+              <li><strong>Done:</strong> attitude setpoint.</li>
+              <li><strong>Done:</strong> rate setpoint.</li>
+              <li><strong>Done:</strong> throttle and torque command.</li>
+              <li><strong>Done:</strong> mixer motor outputs and clamped flag.</li>
+            </ul>
+          </div>
+        </div>
+        <div class="callout">
+          <strong>Why this matters:</strong> if this phase fails, the Gazebo issue is not a physics problem. It is a sign convention, controller, setpoint, or mixer problem inside MARV.
+        </div>
+        <pre><code># Suggested Phase 4 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p03_control_pipeline
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code></pre>
+        <h4>Phase 4 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p03_control_pipeline</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 5 — Open-loop plant and motor-order truth table</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: motors → simulated body response</span>
+            <span class="pill green">Exit: axis responses match expectations</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added explicit <code>MotorGeometry</code>, <code>MotorSpec</code>, <code>SpinDirection</code>, and a minimal <code>OpenLoopPlant</code>. The plant reports total thrust, NED-down vertical acceleration, roll/pitch/yaw angular acceleration, and integrated rates for open-loop response checks.
+        </div>
+        <p>
+          Add a minimal plant and actuator sink before closed-loop control. The first plant can be extremely simple: it only needs to reveal whether each motor and torque basis produces the expected roll/pitch/yaw direction.
+        </p>
+        <table>
+          <thead><tr><th>Open-loop command</th><th>Expected response</th><th>Bug isolated if wrong</th></tr></thead>
+          <tbody>
+            <tr><td>All motors equal, low throttle</td><td><strong>Passed:</strong> no roll/pitch/yaw torque; NED-down vertical acceleration is positive below hover.</td><td>Plant force summation, motor normalization.</td></tr>
+            <tr><td>All motors equal, hover throttle</td><td><strong>Passed:</strong> vertical acceleration near zero.</td><td>Thrust scaling, mass, hover estimate.</td></tr>
+            <tr><td>Roll basis from mixer</td><td><strong>Passed:</strong> body roll acceleration in documented positive direction.</td><td>Motor order, body frame sign.</td></tr>
+            <tr><td>Pitch basis from mixer</td><td><strong>Passed:</strong> body pitch acceleration in documented positive direction.</td><td>Motor order, front/back indexing.</td></tr>
+            <tr><td>Yaw basis from mixer</td><td><strong>Passed:</strong> body yaw acceleration in documented positive direction.</td><td>Motor spin direction, reaction torque sign.</td></tr>
+          </tbody>
+        </table>
+        <h4>Implementation requirement</h4>
+        <p>
+          <strong>Done:</strong> added a <code>MotorGeometry</code> config that explicitly names motor position, motor output index, spin direction, thrust coefficient, reaction torque coefficient, and hover throttle. Motor directions are part of the data model and are validated by tests.
+        </p>
+        <pre><code># Suggested Phase 5 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p04_motor_truth_table
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p04_open_loop_plant
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code></pre>
+        <h4>Phase 5 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p04_motor_truth_table</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p04_open_loop_plant</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 6 — Closed-loop with truth estimator</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: control + mixer + plant</span>
+            <span class="pill green">Exit: stable bounded flight in sim</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added <code>ClosedLoopRunner</code>, <code>TruthPlant</code>, <code>ClosedLoopTruthState</code>, and <code>ClosedLoopTrace</code>. The runner feeds truth-derived estimates into the pure control pipeline, applies motor outputs to the plant, and records bounded truth/control traces without estimator, sensors, or Gazebo.
+        </div>
+        <p>
+          The estimator is still bypassed. The plant provides perfect truth state to the control pipeline. This isolates controller/mixer/plant integration before estimator latency, sensor noise, or frame conversion can interfere.
+        </p>
+        <div class="grid-2">
+          <div>
+            <h4>Closed-loop cases</h4>
+            <ul>
+              <li><strong>Passed:</strong> <code>p05_closed_loop_truth_static_level_hold_2s</code>: level start, level setpoint, no divergence.</li>
+              <li><strong>Passed:</strong> <code>p05_closed_loop_truth_roll_disturbance_recovers</code>: initial roll +10° moves closer to level.</li>
+              <li><strong>Passed:</strong> <code>p05_closed_loop_truth_vertical_setpoint_truth_estimator_moves_toward_target</code>: command +1 m altitude change, bounded response.</li>
+              <li><strong>Passed:</strong> <code>p05_closed_loop_truth_motor_output_never_nan</code>: every tick motors are finite and within limits.</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Acceptance thresholds</h4>
+            <ul>
+              <li><strong>Passed:</strong> no NaN/Inf in truth, estimate, torque, or motor outputs.</li>
+              <li><strong>Passed:</strong> attitude remains within a configured safety envelope.</li>
+              <li><strong>Passed:</strong> static hold motor clamping is absent; transient cases remain finite and normalized.</li>
+              <li><strong>Passed:</strong> final state is closer to setpoint than initial state for disturbance tests.</li>
+            </ul>
+          </div>
+        </div>
+        <pre><code># Suggested Phase 6 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p05_closed_loop_truth
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code></pre>
+        <h4>Phase 6 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p05_closed_loop_truth</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 7 — Closed-loop with estimator in the loop</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: sensors + estimator + control + plant</span>
+            <span class="pill green">Exit: estimator/control integration proven</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added <code>ClosedLoopEstimatorRunner</code>, <code>ClosedLoopEstimatorConfig</code>, <code>SimulatedSensorConfig</code>, <code>ClosedLoopEstimatorTrace</code>, and <code>ClosedLoopEstimatorReport</code>. The runner derives deterministic sensor frames from the plant truth state, steps the real estimator, feeds estimator output into the pure control pipeline, applies motor outputs to the plant, and exposes a stable truth-vs-estimate trace CSV.
+        </div>
+        <p>
+          Feed simulated sensors into the estimator and use the estimator output for control. This is the first true end-to-end deterministic flight test.
+        </p>
+        <table>
+          <thead><tr><th>Case</th><th>Required assertions</th><th>Evidence to save</th></tr></thead>
+          <tbody>
+            <tr>
+              <td><code>static_hold_estimator_in_loop</code></td>
+              <td>Estimate valid after warmup; attitude finite; motors near hover; no divergent drift.</td>
+              <td>Trace CSV with truth vs estimate every tick.</td>
+            </tr>
+            <tr>
+              <td><code>vertical_setpoint_estimator_in_loop</code></td>
+              <td>True and estimated altitude move toward setpoint; bounded overshoot.</td>
+              <td>Altitude plot data and final error summary.</td>
+            </tr>
+            <tr>
+              <td><code>gps_dropout_does_not_explode</code></td>
+              <td>Estimator remains bounded while GPS absent; reacquires when GPS valid.</td>
+              <td>Sensor validity timeline and rejection counters.</td>
+            </tr>
+            <tr>
+              <td><code>baro_spike_rejected_or_bounded</code></td>
+              <td>Control does not command an unsafe throttle spike from one bad baro sample.</td>
+              <td>Spike tick, estimate delta, motor command delta.</td>
+            </tr>
+          </tbody>
+        </table>
+        <ul>
+          <li><strong>Passed:</strong> <code>p06_closed_loop_estimator_static_hold_estimator_in_loop</code>: estimate valid after warmup, bounded truth/estimate drift, and final motors near hover.</li>
+          <li><strong>Passed:</strong> <code>p06_closed_loop_estimator_vertical_setpoint_estimator_in_loop</code>: true and estimated altitude move toward the NED-up setpoint with bounded overshoot.</li>
+          <li><strong>Passed:</strong> <code>p06_closed_loop_estimator_gps_dropout_does_not_explode</code>: estimator stays bounded while GPS is absent and resumes GPS updates after the dropout window.</li>
+          <li><strong>Passed:</strong> <code>p06_closed_loop_estimator_baro_spike_rejected_or_bounded</code>: configured baro spike is rejected and motor average does not jump unsafely.</li>
+        </ul>
+        <pre><code># Suggested Phase 7 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p06_closed_loop_estimator</code></pre>
+        <h4>Phase 7 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p06_closed_loop_estimator</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 8 — HIL semantic adapter</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: MARV HIL messages</span>
+            <span class="pill green">Exit: firmware boundary ready</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added a harness-side <code>HilSemanticAdapter</code>, <code>HilSemanticFrameConfig</code>, <code>HilRouteRecorder</code>, HIL frame conversion helpers, response helpers, and an in-memory <code>HilSemanticArchive</code>. The adapter converts deterministic harness <code>SensorFrame</code> values into MARV <code>HilSensorFrame</code> structs, drives <code>common</code>'s HIL frame adapter, records raw frames and responses, and validates response correlation and failsafe flags without sockets, serial ports, Gazebo, or a new device crate.
+        </div>
+        <p>
+          Convert the same harness cases into MARV HIL semantic frames. This verifies that the message routing and response correlation match the pure pipeline results.
+        </p>
+        <div class="grid-2">
+          <div>
+            <h4>Implementation requirements</h4>
+            <ul>
+              <li>Create adapters from harness <code>SensorFrame</code> to MARV <code>HilSensorFrame</code> or semantic ingress messages.</li>
+              <li>Drive duplicate ticks, stale ticks, partial valid flags, and non-finite values through the same truth-table cases.</li>
+              <li>Assert response flags: sensor valid, estimator valid, control valid, clamped, failsafe.</li>
+              <li>Archive raw HIL frames and decoded traces for failed cases.</li>
+            </ul>
+          </div>
+          <div>
+            <h4>Tests</h4>
+            <ul>
+              <li><strong>Passed:</strong> <code>p07_hil_semantics_duplicate_tick_rejected</code>.</li>
+              <li><strong>Passed:</strong> <code>p07_hil_semantics_out_of_order_time_rejected</code>.</li>
+              <li><strong>Passed:</strong> <code>p07_hil_semantics_partial_valid_flags_publish_only_asserted_groups</code>.</li>
+              <li><strong>Passed:</strong> <code>p07_hil_semantics_non_finite_asserted_group_rejected</code>.</li>
+              <li><strong>Passed:</strong> <code>p07_hil_semantics_response_matches_latest_accepted_stamp</code>.</li>
+              <li><strong>Passed:</strong> <code>p07_hil_semantics_stale_estimate_enters_failsafe_zero_output</code>.</li>
+            </ul>
+          </div>
+        </div>
+        <pre><code># Suggested Phase 8 command gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p07_hil_semantics</code></pre>
+        <h4>Phase 8 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p07_hil_semantics</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 9 — Gazebo bridge contract tests</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done: May 11, 2026</span>
+            <span class="pill blue">Scope: bridge parsing/scaling</span>
+            <span class="pill green">Exit: Gazebo no longer opaque</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added deterministic Gazebo bridge contracts in the harness and pure parser/formatter tests in the Tauri <code>gazebo_bridge_client</code>. The contracts parse newline <code>SENSOR</code> frames into exact MARV <code>HilSensorFrame</code> fields, validate normalized-to-rad/s actuator scaling, lock zero/hover/max motor-speed limits, verify checked-in Gazebo topics, and document that motor spin direction is delegated to the Gazebo model. Live bridge validation also confirmed Gazebo-clocked sensor streaming and actuator publishing through the C++ bridge.
+        </div>
+        <p>
+          Only after the deterministic harness passes should the Gazebo bridge be brought back into the validation loop. Start with bridge contract tests, not a full flight.
+        </p>
+        <table>
+          <thead><tr><th>Contract</th><th>Test</th><th>Why it matters</th></tr></thead>
+          <tbody>
+            <tr><td><code>SENSOR</code> parsing</td><td><strong>Passed:</strong> known newline frame maps to exact MARV sensor frame fields.</td><td>Prevents silent axis or field conversion errors.</td></tr>
+            <tr><td><code>ACTUATOR</code> formatting</td><td><strong>Passed:</strong> known normalized motors become expected Gazebo motor speeds.</td><td>Prevents thrust scaling surprises.</td></tr>
+            <tr><td>Motor speed limits</td><td><strong>Passed:</strong> 0, hover, and max command produce expected rad/s.</td><td>Calibrates hover and saturation.</td></tr>
+            <tr><td>Motor direction config</td><td><strong>Passed:</strong> spin direction is explicitly delegated to the Gazebo model.</td><td>Prevents yaw feedback inversion ambiguity.</td></tr>
+            <tr><td>Topic config</td><td><strong>Passed:</strong> bridge loads configured clock, IMU, GPS, baro, mag, actuator topics.</td><td>Prevents talking to stale or wrong model topics.</td></tr>
+          </tbody>
+        </table>
+        <div class="callout danger">
+          <strong>Safety rule:</strong> Gazebo flight tests should be ignored or feature-gated in CI until they are proven repeatable. The default CI gate should remain deterministic and offline.
+        </div>
+        <pre><code># Suggested Phase 9 command gate
+cargo test -p telemetry-app gazebo_bridge_client
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p08_gazebo_contract
+
+# Optional later, ignored or feature-gated
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml --features gazebo -- --ignored</code></pre>
+        <h4>Phase 9 evidence</h4>
+        <ul>
+          <li><strong>Passed:</strong> <code>cargo test -p telemetry-app gazebo_bridge_client</code>.</li>
+          <li><strong>Passed:</strong> <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p08_gazebo_contract</code>.</li>
+          <li><strong>Passed:</strong> C++ Gazebo bridge built successfully in distrobox with Ubuntu Noble Gazebo dependencies.</li>
+          <li><strong>Passed:</strong> live bridge sensor capture after sim play: 50 frames, sequence/time monotonic, <code>clock=gazebo</code> for all frames, <code>valid=63</code> for full sensor frames and <code>valid=47</code> for GPS-gap frames.</li>
+          <li><strong>Passed:</strong> live actuator command <code>ACTUATOR seq=9201 sim_time_us=329600000 m0=0.125 m1=0.250 m2=0.500 m3=1.000</code> published as Gazebo motor speeds <code>m0=125 m1=250 m2=500 m3=1000</code>.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 10 — CI gates and regression artifacts</h3>
+          <div class="phase-meta">
+            <span class="pill blue">Scope: automation</span>
+            <span class="pill green">Exit: regressions caught early</span>
+          </div>
+        </div>
+        <p>
+          Add only deterministic gates to default CI. Keep hardware and Gazebo tests separate so the main signal remains clean.
+        </p>
+        <pre><code># Required deterministic CI gate
+cargo fmt --all -- --check
+cargo test -p common
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml
+cargo test -p telemetry-app
+pnpm --dir telemetry-app build
+
+# Optional build gate for bridge, no Gazebo required
+cmake -S telemetry-app/gazebo_bridge -B telemetry-app/gazebo_bridge/build
+cmake --build telemetry-app/gazebo_bridge/build</code></pre>
+        <h4>Regression artifacts</h4>
+        <ul>
+          <li>Each failed harness test writes a compact trace file to a temp dir and prints the path.</li>
+          <li>Trace schema is stable: tick, time, truth, sensors, estimate, control, motors, flags.</li>
+          <li>Longer debug traces are opt-in via an environment variable such as <code>MARV_HARNESS_TRACE=1</code>.</li>
+          <li>No generated files are committed except explicit fixtures and golden summaries.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section id="matrix" class="card">
+      <h2>5. Test matrix</h2>
+      <p class="lead">
+        This matrix is the “what does this prove?” map. A Gazebo failure should be traced backward through this matrix until the failing layer is identified.
+      </p>
+      <table>
+        <thead>
+          <tr>
+            <th>Layer</th>
+            <th>Representative tests</th>
+            <th>Pass proves</th>
+            <th>Does not prove</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Pure mixer</td>
+            <td>Mixer equations, clamping, motor-order permutations.</td>
+            <td>Torque command maps to normalized logical/physical motor outputs correctly.</td>
+            <td>Gazebo motor order, motor spin direction, thrust scaling.</td>
+          </tr>
+          <tr>
+            <td>Pure controller</td>
+            <td>Zero error, sign basis, altitude NED signs, saturation flags.</td>
+            <td>Controller signs and limits are internally consistent.</td>
+            <td>Estimator latency or sensor frame signs.</td>
+          </tr>
+          <tr>
+            <td>Estimator replay</td>
+            <td>Static pad, ascent, dropout, spike, NaN rejection.</td>
+            <td>Estimator handles deterministic sensor streams and remains bounded.</td>
+            <td>Closed-loop behavior under motor-induced motion.</td>
+          </tr>
+          <tr>
+            <td>Open-loop plant</td>
+            <td>Motor pulse, roll/pitch/yaw basis response, hover throttle.</td>
+            <td>Actuator geometry and motor-order truth table are correct in the harness.</td>
+            <td>Firmware estimator/control integration.</td>
+          </tr>
+          <tr>
+            <td>Closed-loop truth</td>
+            <td>Level hold, disturbance recovery, vertical setpoint.</td>
+            <td>Control + mixer + plant can stabilize when state is perfect.</td>
+            <td>Estimator correctness.</td>
+          </tr>
+          <tr>
+            <td>Closed-loop estimator</td>
+            <td>Static hold, vertical setpoint, GPS dropout, baro spike.</td>
+            <td>Full deterministic sensor-estimator-control-actuator loop is sane.</td>
+            <td>Gazebo bridge/config correctness.</td>
+          </tr>
+          <tr>
+            <td>HIL semantics</td>
+            <td>Duplicate ticks, stale ticks, response flags, failsafe zero output.</td>
+            <td>MARV’s HIL message/routing layer agrees with the pure harness.</td>
+            <td>Gazebo topic configuration.</td>
+          </tr>
+          <tr>
+            <td>Gazebo contract</td>
+            <td>SENSOR parse, ACTUATOR scaling, topic config, motor directions.</td>
+            <td>External sim bridge is not silently changing the contract.</td>
+            <td>Real hardware behavior.</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>6. Required assertions by phase</h2>
+      <div class="grid-2">
+        <div class="mini-card">
+          <h3>Always-on invariants</h3>
+          <ul>
+            <li>No NaN or Inf in sensors, estimate, controller outputs, motor outputs, or plant state.</li>
+            <li>All accepted ticks are strictly monotonic.</li>
+            <li>All motor outputs are within declared limits.</li>
+            <li>Clamping is explicitly expected or test-failing.</li>
+            <li>Every invalid frame has a documented rejection reason.</li>
+            <li>Every failed test prints the failure tick and last valid trace.</li>
+          </ul>
+        </div>
+        <div class="mini-card">
+          <h3>Closed-loop invariants</h3>
+          <ul>
+            <li>Attitude error decreases after a disturbance.</li>
+            <li>Position or altitude moves toward the setpoint after warmup.</li>
+            <li>Estimator/truth disagreement stays within a configured envelope.</li>
+            <li>Control does not continue with stale or invalid estimate unless explicitly configured to failsafe.</li>
+            <li>Failsafe output is zero or a documented safe value.</li>
+            <li>No sustained saturation during a nominal hover case.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>7. Minimum first milestone</h2>
+      <p class="lead">
+        The first useful milestone should be small enough to complete quickly but meaningful enough to catch the likely Gazebo divergence class.
+      </p>
+      <div class="callout good">
+        <strong>Milestone 1 definition:</strong> a new harness crate can run a static pad estimator replay, a control sign test with truth state, and a mixer/motor-order truth table without Gazebo or hardware.
+      </div>
+      <table>
+        <thead><tr><th>Deliverable</th><th>Files</th><th>Passing command</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Harness crate skeleton</td>
+            <td><code>testing/deterministic-harness/Cargo.toml</code>, <code>src/lib.rs</code>, <code>src/clock.rs</code></td>
+            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p00_clock</code></td>
+          </tr>
+          <tr>
+            <td>Mixer contract wrapper</td>
+            <td><code>tests/p01_mixer_contract.rs</code></td>
+            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p01_mixer_contract</code></td>
+          </tr>
+          <tr>
+            <td>Static estimator replay</td>
+            <td><code>fixtures/static_on_pad_10s.csv</code>, <code>tests/p02_estimator_replay.rs</code></td>
+            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p02_estimator_replay</code></td>
+          </tr>
+          <tr>
+            <td>Truth-state control sign tests</td>
+            <td><code>tests/p03_control_pipeline.rs</code></td>
+            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p03_control_pipeline</code></td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2>8. How this helps debug the current Gazebo failure</h2>
+      <div class="timeline">
+        <div class="timeline-item">
+          <h4>If Phase 1 mixer/control signs fail</h4>
+          <p>Fix MARV internal conventions before touching Gazebo. The external simulator is not the primary suspect yet.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If Phase 3 estimator replay fails</h4>
+          <p>Focus on IMU gravity sign, gyro sign, quaternion order, GPS/baro update conventions, and finite-value policy.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If Phase 5 motor truth table fails</h4>
+          <p>Focus on motor order, motor spin direction, yaw reaction torque, and normalized-to-thrust scaling.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If Phase 6 truth closed-loop fails</h4>
+          <p>The estimator is not to blame. Look at controller gains/signs, mixer scaling, hover throttle, and plant conventions.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If Phase 7 estimator closed-loop passes but Gazebo fails</h4>
+          <p>Focus on the bridge and Gazebo model: topic mapping, ENU/NED conversion, motor index order, motor direction, and actuator rad/s scaling.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>9. Implementation checklist</h2>
+      <ol class="checklist">
+        <li>Create the harness crate outside embedded device crates.</li>
+        <li>Add <code>LockstepClock</code> and fixture loader.</li>
+        <li>Add always-on finite and monotonic timestamp assertions.</li>
+        <li>Port existing mixer basis expectations into harness tests.</li>
+        <li>Add control sign tests using truth estimates.</li>
+        <li>Add static estimator replay fixture.</li>
+        <li>Add open-loop motor geometry model.</li>
+        <li>Add motor-order truth table and yaw spin-direction check.</li>
+        <li>Add truth-estimator closed-loop level hold.</li>
+        <li>Add estimator-in-loop static hold.</li>
+        <li>Add HIL semantic adapter after pure loop passes.</li>
+        <li>Add Gazebo bridge contract tests only after HIL semantics pass.</li>
+        <li>Add deterministic harness to CI.</li>
+        <li>Keep Gazebo tests ignored or feature-gated until repeatable.</li>
+      </ol>
+    </section>
+
+    <section class="card">
+      <h2>10. Source basis used for this plan</h2>
+      <p class="lead">
+        This plan is based on the current MARV repository snapshot and the Holsatus repository snapshot supplied in the conversation.
+      </p>
+      <table>
+        <thead><tr><th>Source area</th><th>Used for</th></tr></thead>
+        <tbody>
+          <tr><td>MARV <code>testing.md</code></td><td>Host-first test goals, SITL plan, fixture expectations, and CI direction.</td></tr>
+          <tr><td>MARV <code>testing/hil/*.md</code></td><td>HIL acceptance, estimator replay checklist, control pipeline checklist, response flags, duplicate/stale tick expectations.</td></tr>
+          <tr><td>MARV <code>common/src/control/mixing</code></td><td>Quad-X mixer equations, motor order permutation behavior, clamping expectations.</td></tr>
+          <tr><td>MARV <code>device/RP235X-TEST</code></td><td>HIL backend, estimation/control/DShot task integration, control debug output shape.</td></tr>
+          <tr><td>MARV <code>telemetry-app/gazebo_bridge</code></td><td>Gazebo bridge topics, SENSOR/ACTUATOR text protocol, actuator command publishing.</td></tr>
+          <tr><td>Holsatus <code>holsatus-sim</code></td><td>Sim handle, plant stepping, motor command/direction interface, sensor distortion concept.</td></tr>
+          <tr><td>Holsatus <code>device/std-test-device</code></td><td>Host-side simulated device, lockstep testing style, integration flight test pattern.</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      MARV deterministic test harness plan · Standalone HTML · No external scripts or assets
+    </footer>
+  </div>
+</body>
+</html>

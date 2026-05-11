@@ -8,6 +8,7 @@ members = [
     "device/RECOVERY-ALTIMETER-RP2350",
     "device/RP235X-BASE",
     "device/RP235X-TEST",
+    "testing/deterministic-harness",
     "telemetry-app/src-tauri",
 ]
 resolver = "3"
@@ -15,6 +16,7 @@ resolver = "3"
 # Build only host-friendly members by default. Device targets should be built explicitly.
 default-members = [
     "common",
+    "testing/deterministic-harness",
     "telemetry-app/src-tauri",
 ]
 
