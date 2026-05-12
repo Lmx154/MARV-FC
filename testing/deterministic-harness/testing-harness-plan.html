@@ -1560,6 +1560,12 @@ MARV_GAZEBO_ACRO_SANDBOX=1 cargo test --manifest-path testing/deterministic-harn
         <p>
           Start navigation after the non-navigation control and landing gates are stable. The first navigation tests should be small, observable, and aggressively limited; they should prove that position demand becomes bounded tilt and bounded acceleration, not a silent request for wild attitude.
         </p>
+        <div class="callout ok">
+          <strong>Status:</strong> Phase 18 is intentionally skipped for now. Phase 19 starts with a host <code>p17_navigation_steps</code> gate for small world-frame navigation demands and an ignored <code>p17_gazebo_navigation_validation</code> gate that stages takeoff while holding the fixed local horizontal origin, waits for stable airborne speed, estimator/truth altitude agreement, and yaw alignment, latches an airborne navigation origin, and accepts <code>MARV_GAZEBO_G3_*</code> runtime overrides.
+        </div>
+        <div class="callout warn">
+          <strong>Current live diagnosis:</strong> the north-step gate remains intentionally red on cross-track drift. Truth and estimator report the same lateral motion, yaw stays inside the navigation envelope, and magnetometer-enabled runs do not materially change the failure. Treat the next fix as GNC/plant lateral disturbance rejection, not an estimator-core repair.
+        </div>
         <table>
           <thead><tr><th>G3 case</th><th>Setpoint sequence</th><th>Required assertions</th></tr></thead>
           <tbody>

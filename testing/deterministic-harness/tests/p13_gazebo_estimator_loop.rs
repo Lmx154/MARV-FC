@@ -36,6 +36,10 @@ const DEFAULT_GYRO_DEADBAND_RPS: f32 = 0.02;
 const DEFAULT_MAX_HOVER_MOTOR_SPREAD: f32 = 0.01;
 const DEFAULT_POSITION_GAIN: f32 = 0.12;
 const DEFAULT_POSITION_VELOCITY_GAIN: f32 = 0.80;
+const DEFAULT_POSITION_MAX_HORIZONTAL_VELOCITY_MPS: f32 = 0.5;
+const DEFAULT_POSITION_HORIZONTAL_INTEGRAL_GAIN: f32 = 0.0;
+const DEFAULT_POSITION_HORIZONTAL_INTEGRAL_LEAK: f32 = 0.999;
+const DEFAULT_POSITION_MAX_HORIZONTAL_INTEGRAL_ACCEL_MPS2: f32 = 0.45;
 const DEFAULT_MAX_HORIZONTAL_ACCEL_MPS2: f32 = 3.0;
 const DEFAULT_MAX_TILT_RAD: f32 = 20.0_f32.to_radians();
 const DEFAULT_MAX_YAW_RATE_RPS: f32 = 0.03;
@@ -43,6 +47,24 @@ const DEFAULT_ALTITUDE_GAIN: f32 = 0.16;
 const DEFAULT_VERTICAL_VELOCITY_GAIN: f32 = 0.12;
 const DEFAULT_MAX_THROTTLE_CORRECTION: f32 = 0.35;
 const DEFAULT_USE_MAGNETOMETER: bool = false;
+const DEFAULT_MIN_NAVIGATION_PROGRESS_M: f32 = 0.35;
+const DEFAULT_MAX_NAVIGATION_FINAL_ERROR_M: f32 = 0.85;
+const DEFAULT_MAX_NAVIGATION_CROSS_TRACK_M: f32 = 0.45;
+const DEFAULT_MAX_NAVIGATION_OVERSHOOT_M: f32 = 0.75;
+const DEFAULT_MAX_NAVIGATION_HORIZONTAL_SPEED_MPS: f32 = 1.25;
+const DEFAULT_NAVIGATION_TAKEOFF_DOWN_M: f32 = -2.0;
+const DEFAULT_MIN_NAVIGATION_AIRBORNE_M: f32 = 0.5;
+const DEFAULT_NAVIGATION_LEG_FRAMES: usize = 800;
+const DEFAULT_NAVIGATION_SETPOINT_SLEW_M_PER_FRAME: f32 = 1.0;
+const DEFAULT_MIN_NAVIGATION_SETTLE_FRAMES: usize = 20;
+const DEFAULT_MAX_NAVIGATION_START_VERTICAL_SPEED_MPS: f32 = 0.25;
+const DEFAULT_MAX_NAVIGATION_START_HORIZONTAL_SPEED_MPS: f32 = 0.15;
+const DEFAULT_MAX_NAVIGATION_START_ESTIMATE_TRUTH_DOWN_ERROR_M: f32 = 0.35;
+const DEFAULT_MAX_NAVIGATION_START_YAW_ERROR_RAD: f32 = 5.0_f32.to_radians();
+const DEFAULT_G3_ALTITUDE_GAIN: f32 = 0.24;
+const DEFAULT_G3_VERTICAL_VELOCITY_GAIN: f32 = 0.24;
+const DEFAULT_G3_MAX_THROTTLE_CORRECTION: f32 = 0.45;
+const DEFAULT_G3_MAX_YAW_RATE_RPS: f32 = 0.25;
 
 #[test]
 #[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_BRIDGE_ADDR if not 127.0.0.1:9000"]
@@ -459,6 +481,79 @@ fn p15_gazebo_takeoff_hover_land() {
     );
 }
 
+#[test]
+#[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_G3_AUTO_RESET=1 for reset/play"]
+fn p17_gazebo_navigation_validation() {
+    let mut settings = RuntimeSettings::from_env();
+    apply_g3_navigation_env(&mut settings);
+    settings.frames = settings.frames.max(2_400);
+    let airframe = airframe_config();
+
+    let north = run_airborne_navigation_scenario(
+        "p17_navigation_north_step",
+        [1.0, 0.0],
+        0.0,
+        &settings,
+        &airframe,
+    );
+    assert_navigation_mission("p17 north step", north, [1.0, 0.0], &settings);
+
+    let east = run_airborne_navigation_scenario(
+        "p17_navigation_east_step",
+        [0.0, 1.0],
+        0.0,
+        &settings,
+        &airframe,
+    );
+    assert_navigation_mission("p17 east step", east, [0.0, 1.0], &settings);
+
+    let diagonal = run_airborne_navigation_scenario(
+        "p17_navigation_diagonal_step",
+        [1.0, 1.0],
+        0.0,
+        &settings,
+        &airframe,
+    );
+    assert_navigation_mission("p17 diagonal step", diagonal, [1.0, 1.0], &settings);
+
+    let yawed = run_airborne_navigation_scenario(
+        "p17_navigation_yawed_north_step",
+        [1.0, 0.0],
+        45.0_f32.to_radians(),
+        &settings,
+        &airframe,
+    );
+    assert_navigation_mission("p17 yawed north step", yawed, [1.0, 0.0], &settings);
+    assert!(
+        yawed.max_abs_setpoint_yaw_rad >= 30.0_f32.to_radians(),
+        "P17 yawed navigation did not apply a meaningful yaw setpoint: summary={yawed:?}"
+    );
+
+    let square = run_airborne_navigation_schedule(
+        "p17_navigation_small_waypoint_square",
+        |nav_frame, nav_frames| {
+            let leg = nav_frame / (nav_frames / 4).max(1);
+            match leg {
+                0 => ([1.0, 0.0], 0.0),
+                1 => ([1.0, 1.0], 0.0),
+                2 => ([0.0, 1.0], 0.0),
+                _ => ([0.0, 0.0], 0.0),
+            }
+        },
+        &settings,
+        &airframe,
+    );
+    assert_navigation_mission("p17 waypoint square", square, [0.0, 0.0], &settings);
+    assert!(
+        square.max_setpoint_horizontal_m >= 2.0_f32.sqrt(),
+        "P17 waypoint square did not apply the diagonal leg: summary={square:?}"
+    );
+    assert!(
+        square.final_truth_target_error_m <= settings.max_navigation_final_error_m(),
+        "P17 waypoint square did not return near airborne origin: summary={square:?}"
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WarmupSummary {
     converted_frames: usize,
@@ -533,6 +628,55 @@ struct TakeoffHoverLandSummary {
     final_control_valid: bool,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct NavigationMissionSummary {
+    converted_frames: usize,
+    control_frames: usize,
+    nav_start_frame: usize,
+    nav_frames: usize,
+    nav_origin_truth_position_ned_m: [f32; 3],
+    nav_origin_estimate_position_ned_m: [f32; 3],
+    final_gate_truth_position_ned_m: [f32; 3],
+    final_gate_estimate_position_ned_m: [f32; 3],
+    final_gate_truth_velocity_ned_mps: [f32; 3],
+    final_gate_estimate_velocity_ned_mps: [f32; 3],
+    final_gate_truth_horizontal_speed_mps: f32,
+    final_gate_estimate_horizontal_speed_mps: f32,
+    final_truth_delta_ned_m: [f32; 3],
+    final_estimate_delta_ned_m: [f32; 3],
+    max_attitude_rad: f32,
+    max_truth_vertical_speed_mps: f32,
+    max_estimate_vertical_speed_mps: f32,
+    max_truth_horizontal_speed_mps: f32,
+    max_estimate_horizontal_speed_mps: f32,
+    max_truth_cross_track_m: f32,
+    max_estimate_cross_track_m: f32,
+    max_truth_yaw_error_rad: f32,
+    final_truth_yaw_error_rad: f32,
+    max_estimate_yaw_error_rad: f32,
+    final_estimate_yaw_error_rad: f32,
+    max_estimate_truth_horizontal_error_m: f32,
+    final_estimate_truth_horizontal_error_m: f32,
+    final_truth_track_progress_m: f32,
+    final_estimate_track_progress_m: f32,
+    final_truth_cross_track_m: f32,
+    final_estimate_cross_track_m: f32,
+    final_truth_target_error_m: f32,
+    final_estimate_target_error_m: f32,
+    final_truth_overshoot_m: f32,
+    final_estimate_overshoot_m: f32,
+    final_truth_down_error_m: f32,
+    final_estimate_down_error_m: f32,
+    clamp_ratio: f32,
+    max_setpoint_horizontal_m: f32,
+    max_abs_setpoint_yaw_rad: f32,
+    max_attitude_setpoint_tilt_rad: f32,
+    max_yaw_rate_setpoint_rps: f32,
+    max_throttle_correction: f32,
+    max_axis_command: f32,
+    max_motor: f32,
+}
+
 #[derive(Clone, Debug)]
 struct RuntimeSettings {
     endpoint: String,
@@ -561,6 +705,10 @@ struct RuntimeSettings {
     max_hover_motor_spread: f32,
     position_gain: f32,
     position_velocity_gain: f32,
+    position_max_horizontal_velocity_mps: f32,
+    position_horizontal_integral_gain: f32,
+    position_horizontal_integral_leak: f32,
+    position_max_horizontal_integral_accel_mps2: f32,
     max_horizontal_accel_mps2: f32,
     max_tilt_rad: f32,
     max_yaw_rate_rps: f32,
@@ -627,6 +775,22 @@ impl RuntimeSettings {
             position_gain: env_f32("MARV_GAZEBO_G2_POSITION_GAIN").unwrap_or(DEFAULT_POSITION_GAIN),
             position_velocity_gain: env_f32("MARV_GAZEBO_G2_POSITION_VELOCITY_GAIN")
                 .unwrap_or(DEFAULT_POSITION_VELOCITY_GAIN),
+            position_max_horizontal_velocity_mps: env_f32(
+                "MARV_GAZEBO_G2_POSITION_MAX_HORIZONTAL_VELOCITY_MPS",
+            )
+            .unwrap_or(DEFAULT_POSITION_MAX_HORIZONTAL_VELOCITY_MPS),
+            position_horizontal_integral_gain: env_f32(
+                "MARV_GAZEBO_G2_POSITION_HORIZONTAL_INTEGRAL_GAIN",
+            )
+            .unwrap_or(DEFAULT_POSITION_HORIZONTAL_INTEGRAL_GAIN),
+            position_horizontal_integral_leak: env_f32(
+                "MARV_GAZEBO_G2_POSITION_HORIZONTAL_INTEGRAL_LEAK",
+            )
+            .unwrap_or(DEFAULT_POSITION_HORIZONTAL_INTEGRAL_LEAK),
+            position_max_horizontal_integral_accel_mps2: env_f32(
+                "MARV_GAZEBO_G2_POSITION_MAX_HORIZONTAL_INTEGRAL_ACCEL_MPS2",
+            )
+            .unwrap_or(DEFAULT_POSITION_MAX_HORIZONTAL_INTEGRAL_ACCEL_MPS2),
             max_horizontal_accel_mps2: env_f32("MARV_GAZEBO_G2_MAX_HORIZONTAL_ACCEL_MPS2")
                 .unwrap_or(DEFAULT_MAX_HORIZONTAL_ACCEL_MPS2),
             max_tilt_rad: env_f32("MARV_GAZEBO_G2_MAX_TILT_RAD").unwrap_or(DEFAULT_MAX_TILT_RAD),
@@ -641,6 +805,139 @@ impl RuntimeSettings {
                 .unwrap_or(DEFAULT_USE_MAGNETOMETER),
         }
     }
+
+    fn min_navigation_progress_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MIN_NAVIGATION_PROGRESS_M")
+            .unwrap_or(DEFAULT_MIN_NAVIGATION_PROGRESS_M)
+            .max(0.0)
+    }
+
+    fn max_navigation_final_error_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_FINAL_ERROR_M")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_FINAL_ERROR_M)
+            .max(0.0)
+    }
+
+    fn max_navigation_cross_track_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_CROSS_TRACK_M")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_CROSS_TRACK_M)
+            .max(0.0)
+    }
+
+    fn max_navigation_overshoot_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_OVERSHOOT_M")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_OVERSHOOT_M)
+            .max(0.0)
+    }
+
+    fn max_navigation_horizontal_speed_mps(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_HORIZONTAL_SPEED_MPS")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_HORIZONTAL_SPEED_MPS)
+            .max(0.0)
+    }
+
+    fn navigation_takeoff_down_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_NAVIGATION_TAKEOFF_DOWN_M")
+            .unwrap_or(DEFAULT_NAVIGATION_TAKEOFF_DOWN_M)
+            .min(-self.ground_contact_epsilon_m.abs())
+    }
+
+    fn min_navigation_airborne_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MIN_NAVIGATION_AIRBORNE_M")
+            .unwrap_or(DEFAULT_MIN_NAVIGATION_AIRBORNE_M)
+            .max(0.0)
+    }
+
+    fn navigation_leg_frames(&self) -> usize {
+        env_usize("MARV_GAZEBO_G3_NAVIGATION_LEG_FRAMES")
+            .unwrap_or(DEFAULT_NAVIGATION_LEG_FRAMES)
+            .max(1)
+    }
+
+    fn navigation_setpoint_slew_m_per_frame(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_NAVIGATION_SETPOINT_SLEW_M_PER_FRAME")
+            .unwrap_or(DEFAULT_NAVIGATION_SETPOINT_SLEW_M_PER_FRAME)
+            .max(0.0)
+    }
+
+    fn min_navigation_settle_frames(&self) -> usize {
+        env_usize("MARV_GAZEBO_G3_MIN_NAVIGATION_SETTLE_FRAMES")
+            .unwrap_or(DEFAULT_MIN_NAVIGATION_SETTLE_FRAMES)
+            .max(1)
+    }
+
+    fn max_navigation_start_vertical_speed_mps(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_START_VERTICAL_SPEED_MPS")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_START_VERTICAL_SPEED_MPS)
+            .max(0.0)
+    }
+
+    fn max_navigation_start_horizontal_speed_mps(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_START_HORIZONTAL_SPEED_MPS")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_START_HORIZONTAL_SPEED_MPS)
+            .max(0.0)
+    }
+
+    fn max_navigation_start_estimate_truth_down_error_m(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_START_ESTIMATE_TRUTH_DOWN_ERROR_M")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_START_ESTIMATE_TRUTH_DOWN_ERROR_M)
+            .max(0.0)
+    }
+
+    fn max_navigation_start_yaw_error_rad(&self) -> f32 {
+        env_f32("MARV_GAZEBO_G3_MAX_NAVIGATION_START_YAW_ERROR_RAD")
+            .unwrap_or(DEFAULT_MAX_NAVIGATION_START_YAW_ERROR_RAD)
+            .max(0.0)
+    }
+}
+
+fn apply_g3_navigation_env(settings: &mut RuntimeSettings) {
+    settings.auto_reset = env_bool("MARV_GAZEBO_G3_AUTO_RESET").unwrap_or(settings.auto_reset);
+    settings.frames = env_usize("MARV_GAZEBO_G3_FRAMES").unwrap_or(settings.frames);
+    settings.reset_settle_frames =
+        env_usize("MARV_GAZEBO_G3_RESET_SETTLE_FRAMES").unwrap_or(settings.reset_settle_frames);
+    settings.timeout = Duration::from_millis(
+        env_u64("MARV_GAZEBO_G3_TIMEOUT_MS").unwrap_or_else(|| settings.timeout.as_millis() as u64),
+    );
+    settings.max_attitude_rad =
+        env_f32("MARV_GAZEBO_G3_MAX_ATTITUDE_RAD").unwrap_or(settings.max_attitude_rad);
+    settings.max_clamp_ratio =
+        env_f32("MARV_GAZEBO_G3_MAX_CLAMP_RATIO").unwrap_or(settings.max_clamp_ratio);
+    settings.max_disturbance_horizontal_error_m =
+        env_f32("MARV_GAZEBO_G3_MAX_DISTURBANCE_HORIZONTAL_ERROR_M")
+            .unwrap_or(settings.max_disturbance_horizontal_error_m);
+    settings.max_limited_horizontal_error_m =
+        env_f32("MARV_GAZEBO_G3_MAX_LIMITED_HORIZONTAL_ERROR_M")
+            .unwrap_or(settings.max_limited_horizontal_error_m);
+    settings.position_gain =
+        env_f32("MARV_GAZEBO_G3_POSITION_GAIN").unwrap_or(settings.position_gain);
+    settings.position_velocity_gain =
+        env_f32("MARV_GAZEBO_G3_POSITION_VELOCITY_GAIN").unwrap_or(settings.position_velocity_gain);
+    settings.position_max_horizontal_velocity_mps =
+        env_f32("MARV_GAZEBO_G3_POSITION_MAX_HORIZONTAL_VELOCITY_MPS")
+            .unwrap_or(settings.position_max_horizontal_velocity_mps);
+    settings.position_horizontal_integral_gain =
+        env_f32("MARV_GAZEBO_G3_POSITION_HORIZONTAL_INTEGRAL_GAIN")
+            .unwrap_or(settings.position_horizontal_integral_gain);
+    settings.position_horizontal_integral_leak =
+        env_f32("MARV_GAZEBO_G3_POSITION_HORIZONTAL_INTEGRAL_LEAK")
+            .unwrap_or(settings.position_horizontal_integral_leak);
+    settings.position_max_horizontal_integral_accel_mps2 =
+        env_f32("MARV_GAZEBO_G3_POSITION_MAX_HORIZONTAL_INTEGRAL_ACCEL_MPS2")
+            .unwrap_or(settings.position_max_horizontal_integral_accel_mps2);
+    settings.max_horizontal_accel_mps2 = env_f32("MARV_GAZEBO_G3_MAX_HORIZONTAL_ACCEL_MPS2")
+        .unwrap_or(settings.max_horizontal_accel_mps2);
+    settings.max_tilt_rad = env_f32("MARV_GAZEBO_G3_MAX_TILT_RAD").unwrap_or(settings.max_tilt_rad);
+    settings.max_yaw_rate_rps =
+        env_f32("MARV_GAZEBO_G3_MAX_YAW_RATE_RPS").unwrap_or(DEFAULT_G3_MAX_YAW_RATE_RPS);
+    settings.altitude_gain =
+        env_f32("MARV_GAZEBO_G3_ALTITUDE_GAIN").unwrap_or(DEFAULT_G3_ALTITUDE_GAIN);
+    settings.vertical_velocity_gain = env_f32("MARV_GAZEBO_G3_VERTICAL_VELOCITY_GAIN")
+        .unwrap_or(DEFAULT_G3_VERTICAL_VELOCITY_GAIN);
+    settings.max_throttle_correction = env_f32("MARV_GAZEBO_G3_MAX_THROTTLE_CORRECTION")
+        .unwrap_or(DEFAULT_G3_MAX_THROTTLE_CORRECTION);
+    settings.use_magnetometer =
+        env_bool("MARV_GAZEBO_G3_USE_MAGNETOMETER").unwrap_or(settings.use_magnetometer);
 }
 
 fn run_warmup(settings: &RuntimeSettings, airframe: &GazeboAirframeConfig) -> WarmupSummary {
@@ -957,6 +1254,348 @@ fn run_control_schedule(
     summary
 }
 
+fn run_airborne_navigation_scenario(
+    name: &str,
+    target_horizontal_ned_m: [f32; 2],
+    yaw_rad: f32,
+    settings: &RuntimeSettings,
+    airframe: &GazeboAirframeConfig,
+) -> NavigationMissionSummary {
+    run_airborne_navigation_schedule(
+        name,
+        move |_, _| (target_horizontal_ned_m, yaw_rad),
+        settings,
+        airframe,
+    )
+}
+
+fn run_airborne_navigation_schedule(
+    name: &str,
+    mut nav_setpoint_for_frame: impl FnMut(usize, usize) -> ([f32; 2], f32),
+    settings: &RuntimeSettings,
+    airframe: &GazeboAirframeConfig,
+) -> NavigationMissionSummary {
+    let mut client = BridgeProbeClient::connect(&settings.endpoint);
+    let mut sequence = Sequence::default();
+    let pipeline = ControlPipeline::new(PureControlConfig {
+        loop_config: control_config(airframe, settings),
+    });
+
+    if settings.auto_reset {
+        send_reset_and_play(
+            &mut client,
+            &mut sequence,
+            settings,
+            airframe.hover_motors(),
+        );
+    }
+
+    let origin_frame = client.read_required_frame(settings.timeout);
+    assert_g2_sensor_contract(&origin_frame);
+    let origin = GazeboTruthOrigin::from_frame(&origin_frame).expect("finite Gazebo origin");
+    let origin_sensor = origin_frame
+        .to_estimator_sensor_frame(origin)
+        .expect("G3 origin frame should include fresh IMU");
+    let origin_sensor = estimator_sensor_for_settings(origin_sensor, settings);
+    let mut driver = EstimatorReplayDriver::new(gazebo_estimator_config());
+    driver
+        .step(1, &origin_sensor)
+        .expect("G3 estimator prewarm should pass");
+    let mut last_timestamp_us = Some(origin_sensor.timestamp_us);
+
+    let takeoff_down_m = settings.navigation_takeoff_down_m();
+    let nav_frames_required = settings.navigation_leg_frames();
+    let min_settle_frames = settings.min_navigation_settle_frames();
+    let max_setpoint_step_m = settings.navigation_setpoint_slew_m_per_frame();
+    let mut converted_frames = 1usize;
+    let mut control_frames = 0usize;
+    let mut nav_start_frame = None;
+    let mut nav_frames = 0usize;
+    let mut commanded_horizontal_ned_m = [0.0_f32; 2];
+    let mut stable_airborne_frames = 0usize;
+    let mut takeoff_hold_estimate_position_ned_m = None;
+    let mut clamp_count = 0usize;
+    let mut nav_origin_truth_position_ned_m = None;
+    let mut nav_origin_estimate_position_ned_m = None;
+    let mut final_gate_truth_position_ned_m = [0.0_f32; 3];
+    let mut final_gate_estimate_position_ned_m = [0.0_f32; 3];
+    let mut final_gate_truth_velocity_ned_mps = [0.0_f32; 3];
+    let mut final_gate_estimate_velocity_ned_mps = [0.0_f32; 3];
+    let mut final_gate_truth_horizontal_speed_mps = 0.0_f32;
+    let mut final_gate_estimate_horizontal_speed_mps = 0.0_f32;
+    let mut max_attitude_rad = 0.0_f32;
+    let mut max_truth_vertical_speed_mps = 0.0_f32;
+    let mut max_estimate_vertical_speed_mps = 0.0_f32;
+    let mut max_truth_horizontal_speed_mps = 0.0_f32;
+    let mut max_estimate_horizontal_speed_mps = 0.0_f32;
+    let mut max_truth_cross_track_m = 0.0_f32;
+    let mut max_estimate_cross_track_m = 0.0_f32;
+    let mut max_truth_yaw_error_rad = 0.0_f32;
+    let mut final_truth_yaw_error_rad = 0.0_f32;
+    let mut max_estimate_yaw_error_rad = 0.0_f32;
+    let mut final_estimate_yaw_error_rad = 0.0_f32;
+    let mut max_estimate_truth_horizontal_error_m = 0.0_f32;
+    let mut final_estimate_truth_horizontal_error_m = 0.0_f32;
+    let mut final_truth_delta_ned_m = [0.0_f32; 3];
+    let mut final_estimate_delta_ned_m = [0.0_f32; 3];
+    let mut final_truth_track_progress_m = 0.0_f32;
+    let mut final_estimate_track_progress_m = 0.0_f32;
+    let mut final_truth_cross_track_m = 0.0_f32;
+    let mut final_estimate_cross_track_m = 0.0_f32;
+    let mut final_truth_target_error_m = 0.0_f32;
+    let mut final_estimate_target_error_m = 0.0_f32;
+    let mut final_truth_overshoot_m = 0.0_f32;
+    let mut final_estimate_overshoot_m = 0.0_f32;
+    let mut final_truth_down_error_m = 0.0_f32;
+    let mut final_estimate_down_error_m = 0.0_f32;
+    let mut max_setpoint_horizontal_m = 0.0_f32;
+    let mut max_abs_setpoint_yaw_rad = 0.0_f32;
+    let mut max_attitude_setpoint_tilt_rad = 0.0_f32;
+    let mut max_yaw_rate_setpoint_rps = 0.0_f32;
+    let mut max_throttle_correction = 0.0_f32;
+    let mut max_axis_command = 0.0_f32;
+    let mut max_motor = 0.0_f32;
+    let hover_throttle = airframe.hover_motor_command();
+
+    while control_frames < settings.frames && nav_frames < nav_frames_required {
+        let (frame, sensor) =
+            client.read_required_estimator_frame(origin, last_timestamp_us, settings.timeout);
+        let sensor = estimator_sensor_for_settings(sensor, settings);
+        last_timestamp_us = Some(sensor.timestamp_us);
+        converted_frames += 1;
+        let trace = driver
+            .step(converted_frames as u64, &sensor)
+            .expect("G3 estimator step should pass");
+        if !trace.estimate_valid {
+            continue;
+        }
+
+        let estimate = estimate_snapshot(&trace);
+        let takeoff_hold_estimate_position_ned_m =
+            *takeoff_hold_estimate_position_ned_m.get_or_insert(estimate.position_ned_m);
+        let truth = frame
+            .to_truth_estimate(origin)
+            .expect("G3 truth side-channel should convert for evidence");
+        final_gate_truth_position_ned_m = truth.position_ned_m;
+        final_gate_estimate_position_ned_m = estimate.position_ned_m;
+        final_gate_truth_velocity_ned_mps = truth.velocity_ned_mps;
+        final_gate_estimate_velocity_ned_mps = estimate.velocity_ned_mps;
+        final_gate_truth_horizontal_speed_mps =
+            horizontal_norm_m(truth.velocity_ned_mps[0], truth.velocity_ned_mps[1]);
+        final_gate_estimate_horizontal_speed_mps =
+            horizontal_norm_m(estimate.velocity_ned_mps[0], estimate.velocity_ned_mps[1]);
+        let nav_frame = nav_frames;
+        let (requested_horizontal_ned_m, yaw_rad) =
+            nav_setpoint_for_frame(nav_frame, nav_frames_required);
+        if nav_start_frame.is_none() {
+            let yaw_aligned = frame.euler_rad.is_some_and(|euler| {
+                yaw_error_rad(yaw_rad, euler[2]).abs()
+                    <= settings.max_navigation_start_yaw_error_rad()
+            });
+            let stable_airborne = truth.position_ned_m[2] <= -settings.min_navigation_airborne_m()
+                && (estimate.position_ned_m[2] - truth.position_ned_m[2]).abs()
+                    <= settings.max_navigation_start_estimate_truth_down_error_m()
+                && truth.velocity_ned_mps[2].abs()
+                    <= settings.max_navigation_start_vertical_speed_mps()
+                && estimate.velocity_ned_mps[2].abs()
+                    <= settings.max_navigation_start_vertical_speed_mps()
+                && final_gate_truth_horizontal_speed_mps
+                    <= settings.max_navigation_start_horizontal_speed_mps()
+                && final_gate_estimate_horizontal_speed_mps
+                    <= settings.max_navigation_start_horizontal_speed_mps()
+                && yaw_aligned;
+            if stable_airborne {
+                stable_airborne_frames += 1;
+            } else {
+                stable_airborne_frames = 0;
+            }
+            if stable_airborne_frames >= min_settle_frames {
+                nav_start_frame = Some(control_frames);
+                nav_origin_truth_position_ned_m = Some(truth.position_ned_m);
+                nav_origin_estimate_position_ned_m = Some(estimate.position_ned_m);
+            }
+        }
+
+        let in_nav_leg = nav_start_frame.is_some();
+        if in_nav_leg {
+            commanded_horizontal_ned_m = slew_horizontal_target(
+                commanded_horizontal_ned_m,
+                requested_horizontal_ned_m,
+                max_setpoint_step_m,
+            );
+        } else {
+            commanded_horizontal_ned_m = [0.0, 0.0];
+        }
+
+        let nav_truth_origin = nav_origin_truth_position_ned_m.unwrap_or([0.0; 3]);
+        let nav_estimate_origin = nav_origin_estimate_position_ned_m.unwrap_or([0.0; 3]);
+        let absolute_setpoint = if in_nav_leg {
+            [
+                nav_estimate_origin[0] + commanded_horizontal_ned_m[0],
+                nav_estimate_origin[1] + commanded_horizontal_ned_m[1],
+                nav_estimate_origin[2],
+            ]
+        } else {
+            [
+                takeoff_hold_estimate_position_ned_m[0],
+                takeoff_hold_estimate_position_ned_m[1],
+                takeoff_down_m,
+            ]
+        };
+        let setpoint = ControlSetpoint::new(absolute_setpoint, yaw_rad, true);
+        max_setpoint_horizontal_m = max_setpoint_horizontal_m.max(horizontal_norm_m(
+            commanded_horizontal_ned_m[0],
+            commanded_horizontal_ned_m[1],
+        ));
+        max_abs_setpoint_yaw_rad = max_abs_setpoint_yaw_rad.max(yaw_rad.abs());
+
+        let output = pipeline.step(estimate, imu_from_sensor(&sensor), setpoint);
+        assert!(
+            output.control_valid,
+            "invalid G3 control output at sim_time_us={}",
+            frame.sim_time_us
+        );
+        let runtime_motors = airframe.runtime_control_motors(output.torque_command);
+        client.send_actuator(&format_gazebo_actuator_line(
+            sequence.next(),
+            Some(frame.sim_time_us),
+            runtime_motors.commands,
+        ));
+        control_frames += 1;
+
+        if let Some(euler) = frame.euler_rad {
+            max_attitude_rad = max_attitude_rad.max(euler[0].abs()).max(euler[1].abs());
+        }
+        if let Some(attitude_setpoint) = output.attitude_setpoint {
+            max_attitude_setpoint_tilt_rad = max_attitude_setpoint_tilt_rad.max(
+                roll_pitch_tilt_from_quaternion(attitude_setpoint.quaternion),
+            );
+        }
+        if let Some(rate_setpoint) = output.rate_setpoint {
+            max_yaw_rate_setpoint_rps = max_yaw_rate_setpoint_rps.max(rate_setpoint.yaw_rps.abs());
+        }
+        max_throttle_correction =
+            max_throttle_correction.max((output.throttle - hover_throttle).abs());
+        max_axis_command = max_axis_command
+            .max(output.torque_command.roll.abs())
+            .max(output.torque_command.pitch.abs())
+            .max(output.torque_command.yaw.abs());
+        max_motor = max_motor.max(max_motor_command(runtime_motors.commands));
+        if runtime_motors.clamped {
+            clamp_count += 1;
+        }
+
+        max_truth_vertical_speed_mps =
+            max_truth_vertical_speed_mps.max(truth.velocity_ned_mps[2].abs());
+        max_estimate_vertical_speed_mps =
+            max_estimate_vertical_speed_mps.max(estimate.velocity_ned_mps[2].abs());
+
+        if in_nav_leg {
+            nav_frames += 1;
+            final_truth_delta_ned_m = ned_delta(truth.position_ned_m, nav_truth_origin);
+            final_estimate_delta_ned_m = ned_delta(estimate.position_ned_m, nav_estimate_origin);
+            if let Some(euler) = frame.euler_rad {
+                final_truth_yaw_error_rad = yaw_error_rad(yaw_rad, euler[2]).abs();
+                max_truth_yaw_error_rad = max_truth_yaw_error_rad.max(final_truth_yaw_error_rad);
+            }
+            final_estimate_yaw_error_rad =
+                yaw_error_rad(yaw_rad, yaw_from_quaternion(estimate.quaternion)).abs();
+            max_estimate_yaw_error_rad =
+                max_estimate_yaw_error_rad.max(final_estimate_yaw_error_rad);
+            final_estimate_truth_horizontal_error_m = horizontal_norm_m(
+                truth.position_ned_m[0] - estimate.position_ned_m[0],
+                truth.position_ned_m[1] - estimate.position_ned_m[1],
+            );
+            max_estimate_truth_horizontal_error_m =
+                max_estimate_truth_horizontal_error_m.max(final_estimate_truth_horizontal_error_m);
+            let truth_track = track_error(final_truth_delta_ned_m, requested_horizontal_ned_m);
+            let estimate_track =
+                track_error(final_estimate_delta_ned_m, requested_horizontal_ned_m);
+            final_truth_track_progress_m = truth_track.progress_m;
+            final_estimate_track_progress_m = estimate_track.progress_m;
+            final_truth_cross_track_m = truth_track.cross_track_m;
+            final_estimate_cross_track_m = estimate_track.cross_track_m;
+            final_truth_target_error_m = truth_track.target_error_m;
+            final_estimate_target_error_m = estimate_track.target_error_m;
+            final_truth_overshoot_m = truth_track.overshoot_m;
+            final_estimate_overshoot_m = estimate_track.overshoot_m;
+            final_truth_down_error_m = truth.position_ned_m[2] - nav_truth_origin[2];
+            final_estimate_down_error_m = estimate.position_ned_m[2] - nav_estimate_origin[2];
+            max_truth_cross_track_m = max_truth_cross_track_m.max(truth_track.cross_track_m);
+            max_estimate_cross_track_m =
+                max_estimate_cross_track_m.max(estimate_track.cross_track_m);
+            max_truth_horizontal_speed_mps = max_truth_horizontal_speed_mps.max(horizontal_norm_m(
+                truth.velocity_ned_mps[0],
+                truth.velocity_ned_mps[1],
+            ));
+            max_estimate_horizontal_speed_mps = max_estimate_horizontal_speed_mps.max(
+                horizontal_norm_m(estimate.velocity_ned_mps[0], estimate.velocity_ned_mps[1]),
+            );
+        }
+    }
+
+    client.send_actuator(&format_gazebo_actuator_line(
+        sequence.next(),
+        None,
+        [0.0; 4],
+    ));
+
+    let summary = NavigationMissionSummary {
+        converted_frames,
+        control_frames,
+        nav_start_frame: nav_start_frame.unwrap_or(0),
+        nav_frames,
+        nav_origin_truth_position_ned_m: nav_origin_truth_position_ned_m.unwrap_or([0.0; 3]),
+        nav_origin_estimate_position_ned_m: nav_origin_estimate_position_ned_m.unwrap_or([0.0; 3]),
+        final_gate_truth_position_ned_m,
+        final_gate_estimate_position_ned_m,
+        final_gate_truth_velocity_ned_mps,
+        final_gate_estimate_velocity_ned_mps,
+        final_gate_truth_horizontal_speed_mps,
+        final_gate_estimate_horizontal_speed_mps,
+        final_truth_delta_ned_m,
+        final_estimate_delta_ned_m,
+        max_attitude_rad,
+        max_truth_vertical_speed_mps,
+        max_estimate_vertical_speed_mps,
+        max_truth_horizontal_speed_mps,
+        max_estimate_horizontal_speed_mps,
+        max_truth_cross_track_m,
+        max_estimate_cross_track_m,
+        max_truth_yaw_error_rad,
+        final_truth_yaw_error_rad,
+        max_estimate_yaw_error_rad,
+        final_estimate_yaw_error_rad,
+        max_estimate_truth_horizontal_error_m,
+        final_estimate_truth_horizontal_error_m,
+        final_truth_track_progress_m,
+        final_estimate_track_progress_m,
+        final_truth_cross_track_m,
+        final_estimate_cross_track_m,
+        final_truth_target_error_m,
+        final_estimate_target_error_m,
+        final_truth_overshoot_m,
+        final_estimate_overshoot_m,
+        final_truth_down_error_m,
+        final_estimate_down_error_m,
+        clamp_ratio: clamp_count as f32 / control_frames.max(1) as f32,
+        max_setpoint_horizontal_m,
+        max_abs_setpoint_yaw_rad,
+        max_attitude_setpoint_tilt_rad,
+        max_yaw_rate_setpoint_rps,
+        max_throttle_correction,
+        max_axis_command,
+        max_motor,
+    };
+    eprintln!(
+        "G3 {name}: {summary:?} nav_origin_truth={:?} final_truth_delta={:?} final_estimate_delta={:?}",
+        summary.nav_origin_truth_position_ned_m,
+        summary.final_truth_delta_ned_m,
+        summary.final_estimate_delta_ned_m
+    );
+    summary
+}
+
 fn run_takeoff_hover_land_mission(
     name: &str,
     settings: &RuntimeSettings,
@@ -1222,6 +1861,157 @@ fn assert_g2_runtime_limit_evidence(
     );
 }
 
+fn assert_navigation_mission(
+    label: &str,
+    summary: NavigationMissionSummary,
+    target_horizontal_ned_m: [f32; 2],
+    settings: &RuntimeSettings,
+) {
+    let target_distance_m =
+        horizontal_norm_m(target_horizontal_ned_m[0], target_horizontal_ned_m[1]);
+    assert!(
+        summary.converted_frames >= summary.control_frames,
+        "{label} converted fewer frames than it controlled: summary={summary:?}"
+    );
+    assert!(
+        summary
+            .final_gate_truth_position_ned_m
+            .iter()
+            .chain(summary.final_gate_estimate_position_ned_m.iter())
+            .chain(summary.final_gate_truth_velocity_ned_mps.iter())
+            .chain(summary.final_gate_estimate_velocity_ned_mps.iter())
+            .all(|value| value.is_finite())
+            && summary.final_gate_truth_horizontal_speed_mps.is_finite()
+            && summary.final_gate_estimate_horizontal_speed_mps.is_finite()
+            && summary.final_truth_yaw_error_rad.is_finite()
+            && summary.final_estimate_yaw_error_rad.is_finite()
+            && summary.max_estimate_truth_horizontal_error_m.is_finite()
+            && summary.final_estimate_truth_horizontal_error_m.is_finite(),
+        "{label} final navigation gate evidence was not finite: summary={summary:?}"
+    );
+    assert!(
+        summary.nav_frames > 0 && summary.nav_start_frame < summary.control_frames,
+        "{label} did not collect an airborne navigation leg: summary={summary:?}"
+    );
+    assert!(
+        summary
+            .nav_origin_estimate_position_ned_m
+            .iter()
+            .all(|value| value.is_finite()),
+        "{label} estimate navigation origin was not finite: summary={summary:?}"
+    );
+    assert!(
+        summary.nav_origin_truth_position_ned_m[2] <= -settings.min_navigation_airborne_m(),
+        "{label} did not establish airborne truth origin before navigation: summary={summary:?}"
+    );
+    assert!(
+        summary.nav_origin_estimate_position_ned_m[2] <= -settings.min_navigation_airborne_m(),
+        "{label} did not establish airborne estimate origin before navigation: summary={summary:?}"
+    );
+    assert!(
+        summary.max_attitude_rad <= settings.max_tilt_rad + 5.0_f32.to_radians(),
+        "{label} actual attitude exceeded limited tilt envelope: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_vertical_speed_mps <= settings.max_vertical_speed_mps,
+        "{label} truth vertical speed too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_vertical_speed_mps <= settings.max_vertical_speed_mps,
+        "{label} estimate vertical speed too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_horizontal_speed_mps <= settings.max_navigation_horizontal_speed_mps(),
+        "{label} truth horizontal speed too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_horizontal_speed_mps <= settings.max_navigation_horizontal_speed_mps(),
+        "{label} estimate horizontal speed too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_attitude_setpoint_tilt_rad <= settings.max_tilt_rad + 0.001,
+        "{label} tilt demand was not limited before attitude control: summary={summary:?}"
+    );
+    assert!(
+        summary.max_yaw_rate_setpoint_rps <= settings.max_yaw_rate_rps + 0.001,
+        "{label} yaw-rate demand was not limited before rate control: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_yaw_error_rad <= settings.max_navigation_start_yaw_error_rad(),
+        "{label} truth yaw drifted outside the navigation yaw envelope: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_yaw_error_rad <= settings.max_navigation_start_yaw_error_rad(),
+        "{label} estimator yaw drifted outside the navigation yaw envelope: summary={summary:?}"
+    );
+    assert!(
+        summary.max_throttle_correction <= settings.max_throttle_correction + 0.001,
+        "{label} throttle correction was not limited: summary={summary:?}"
+    );
+    assert!(
+        summary.max_axis_command <= 0.251,
+        "{label} rate-axis command was not limited: summary={summary:?}"
+    );
+    assert!(
+        summary.max_motor <= 1.0,
+        "{label} motor command escaped normalized range: summary={summary:?}"
+    );
+    assert!(
+        summary.clamp_ratio <= settings.max_clamp_ratio,
+        "{label} clamped too often: summary={summary:?}"
+    );
+    if target_distance_m > f32::EPSILON {
+        assert!(
+            summary.final_truth_track_progress_m >= settings.min_navigation_progress_m(),
+            "{label} truth did not progress enough along target track: summary={summary:?}"
+        );
+        assert!(
+            summary.final_estimate_track_progress_m >= settings.min_navigation_progress_m(),
+            "{label} estimate did not progress enough along target track: summary={summary:?}"
+        );
+        assert!(
+            summary.final_truth_overshoot_m <= settings.max_navigation_overshoot_m(),
+            "{label} truth overshot target too far: summary={summary:?}"
+        );
+        assert!(
+            summary.final_estimate_overshoot_m <= settings.max_navigation_overshoot_m(),
+            "{label} estimate overshot target too far: summary={summary:?}"
+        );
+    }
+    assert!(
+        summary.max_truth_cross_track_m <= settings.max_navigation_cross_track_m(),
+        "{label} truth cross-track drift too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_cross_track_m <= settings.max_navigation_cross_track_m(),
+        "{label} estimate cross-track drift too high: summary={summary:?}"
+    );
+    assert!(
+        summary.final_truth_cross_track_m <= settings.max_navigation_cross_track_m(),
+        "{label} truth final cross-track drift too high: summary={summary:?}"
+    );
+    assert!(
+        summary.final_estimate_cross_track_m <= settings.max_navigation_cross_track_m(),
+        "{label} estimate final cross-track drift too high: summary={summary:?}"
+    );
+    assert!(
+        summary.final_truth_target_error_m <= settings.max_navigation_final_error_m(),
+        "{label} truth final target error too high: summary={summary:?}"
+    );
+    assert!(
+        summary.final_estimate_target_error_m <= settings.max_navigation_final_error_m(),
+        "{label} estimate final target error too high: summary={summary:?}"
+    );
+    assert!(
+        summary.final_truth_down_error_m.abs() <= settings.max_final_down_error_m,
+        "{label} truth altitude did not stay near navigation altitude: summary={summary:?}"
+    );
+    assert!(
+        summary.final_estimate_down_error_m.abs() <= settings.max_final_down_error_m,
+        "{label} estimate altitude did not stay near navigation altitude: summary={summary:?}"
+    );
+}
+
 #[derive(Default)]
 struct Sequence {
     next: u64,
@@ -1434,6 +2224,14 @@ fn control_config(
     let mut config = ControlLoopConfig::default();
     config.position.position_gain = settings.position_gain.max(0.0);
     config.position.velocity_gain = settings.position_velocity_gain.max(0.0);
+    config.position.max_horizontal_velocity_mps =
+        settings.position_max_horizontal_velocity_mps.max(0.0);
+    config.position.horizontal_integral_gain = settings.position_horizontal_integral_gain.max(0.0);
+    config.position.horizontal_integral_leak =
+        settings.position_horizontal_integral_leak.clamp(0.0, 1.0);
+    config.position.max_horizontal_integral_accel_mps2 = settings
+        .position_max_horizontal_integral_accel_mps2
+        .max(0.0);
     config.position.max_horizontal_accel_mps2 = settings.max_horizontal_accel_mps2.max(0.0);
     config.position.max_tilt_rad = settings.max_tilt_rad.max(0.0);
     config.attitude.max_yaw_rate_rps = settings.max_yaw_rate_rps.max(0.0);
@@ -1513,6 +2311,67 @@ fn horizontal_norm_m(north_m: f32, east_m: f32) -> f32 {
     (north_m * north_m + east_m * east_m).sqrt()
 }
 
+fn slew_horizontal_target(current: [f32; 2], target: [f32; 2], max_step_m: f32) -> [f32; 2] {
+    if max_step_m <= 0.0 {
+        return current;
+    }
+
+    let delta = [target[0] - current[0], target[1] - current[1]];
+    let distance_m = horizontal_norm_m(delta[0], delta[1]);
+    if distance_m <= max_step_m || distance_m <= f32::EPSILON {
+        return target;
+    }
+
+    let scale = max_step_m / distance_m;
+    [current[0] + delta[0] * scale, current[1] + delta[1] * scale]
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TrackError {
+    progress_m: f32,
+    cross_track_m: f32,
+    target_error_m: f32,
+    overshoot_m: f32,
+}
+
+fn ned_delta(position_ned_m: [f32; 3], origin_ned_m: [f32; 3]) -> [f32; 3] {
+    [
+        position_ned_m[0] - origin_ned_m[0],
+        position_ned_m[1] - origin_ned_m[1],
+        position_ned_m[2] - origin_ned_m[2],
+    ]
+}
+
+fn track_error(delta_ned_m: [f32; 3], target_horizontal_ned_m: [f32; 2]) -> TrackError {
+    let target_distance_m =
+        horizontal_norm_m(target_horizontal_ned_m[0], target_horizontal_ned_m[1]);
+    let target_error_m = horizontal_norm_m(
+        target_horizontal_ned_m[0] - delta_ned_m[0],
+        target_horizontal_ned_m[1] - delta_ned_m[1],
+    );
+    if target_distance_m <= f32::EPSILON {
+        let distance_from_origin_m = horizontal_norm_m(delta_ned_m[0], delta_ned_m[1]);
+        return TrackError {
+            progress_m: 0.0,
+            cross_track_m: distance_from_origin_m,
+            target_error_m: distance_from_origin_m,
+            overshoot_m: distance_from_origin_m,
+        };
+    }
+
+    let unit_north = target_horizontal_ned_m[0] / target_distance_m;
+    let unit_east = target_horizontal_ned_m[1] / target_distance_m;
+    let progress_m = delta_ned_m[0] * unit_north + delta_ned_m[1] * unit_east;
+    let cross_track_m = (delta_ned_m[0] * unit_east - delta_ned_m[1] * unit_north).abs();
+
+    TrackError {
+        progress_m,
+        cross_track_m,
+        target_error_m,
+        overshoot_m: (progress_m - target_distance_m).max(0.0),
+    }
+}
+
 fn roll_pitch_tilt_from_quaternion(quaternion: [f32; 4]) -> f32 {
     let (roll, pitch) = roll_pitch_from_quaternion(quaternion);
     roll.abs().max(pitch.abs())
@@ -1523,6 +2382,11 @@ fn roll_pitch_from_quaternion(quaternion: [f32; 4]) -> (f32, f32) {
     let roll = f32::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
     let pitch = f32::asin((2.0 * (w * y - z * x)).clamp(-1.0, 1.0));
     (roll, pitch)
+}
+
+fn yaw_from_quaternion(quaternion: [f32; 4]) -> f32 {
+    let [w, x, y, z] = quaternion;
+    f32::atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
 }
 
 fn yaw_error_rad(target: f32, actual: f32) -> f32 {

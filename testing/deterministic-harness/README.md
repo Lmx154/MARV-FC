@@ -393,3 +393,52 @@ Phase 17 Gazebo gate:
 ```sh
 MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p15_gazebo_takeoff_hover_land -- --ignored --nocapture
 ```
+
+## Phase 18 Aggressive Attitude Sandbox
+
+Phase 18 is intentionally skipped for now. Aerobatic and upset-recovery cases
+remain simulator-only future work, and they should not block the first G3
+navigation validation path.
+
+## Phase 19 G3 Navigation Validation
+
+Phase 19 adds the first small position-navigation gates after G2.5 and landing.
+The host gate uses the real portable `ControlPipeline` and a conservative
+horizontal kinematic surrogate to prove that north/east/diagonal/yawed position
+setpoints become bounded world-frame acceleration and tilt demands. The ignored
+Gazebo gate now stages takeoff while holding the fixed local horizontal origin,
+waits for stable airborne evidence, latches an airborne navigation origin, then
+measures the navigation leg relative to that origin with `MARV_GAZEBO_G3_*`
+overrides for navigation-specific tuning.
+
+Current live evidence keeps the Gazebo gate intentionally red on the north-step
+cross-track check. Truth and estimator agree on the lateral motion, yaw remains
+inside the navigation envelope, and enabling magnetometer updates does not move
+the failure materially. Treat the remaining issue as GNC/plant lateral
+disturbance rejection rather than an estimator-core defect.
+
+Phase 19 host checks cover:
+
+- `1 m` north and east steps with correct world-frame signs
+- diagonal motion and return-to-origin waypoint-square behavior
+- yawed navigation where world-frame N/E commands remain correct as body yaw
+  changes
+- airborne-origin latching before live navigation starts, including vertical
+  speed, horizontal speed, estimate/truth altitude agreement, and yaw alignment
+- live yaw-error and estimate/truth horizontal disagreement evidence for
+  separating estimator failures from control-loop failures
+- bounded tilt, inferred horizontal acceleration, horizontal speed, cross-track
+  drift, overshoot, altitude error, and mixer clamp ratio
+- invalid or disarmed navigation demands resolving to zero-output failsafe
+
+Phase 19 host gate:
+
+```sh
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p17_navigation_steps
+```
+
+Phase 19 Gazebo gate:
+
+```sh
+MARV_GAZEBO_G3_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p17_gazebo_navigation_validation -- --ignored --nocapture
+```

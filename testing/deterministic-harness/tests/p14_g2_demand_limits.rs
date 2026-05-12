@@ -121,6 +121,10 @@ fn demand_limit_config() -> ControlLoopConfig {
     config.position = PositionControllerConfig {
         position_gain: 8.0,
         velocity_gain: 0.0,
+        max_horizontal_velocity_mps: 100.0,
+        horizontal_integral_gain: 0.0,
+        horizontal_integral_leak: 0.0,
+        max_horizontal_integral_accel_mps2: 0.0,
         max_horizontal_accel_mps2: 0.8,
         max_tilt_rad: 7.0_f32.to_radians(),
     };

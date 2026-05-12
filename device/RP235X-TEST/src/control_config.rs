@@ -14,6 +14,10 @@ pub const HIL_CONTROL_CONFIG: ControlLoopConfig = ControlLoopConfig::new(
     PositionControllerConfig {
         position_gain: 0.12,
         velocity_gain: 0.35,
+        max_horizontal_velocity_mps: 0.5,
+        horizontal_integral_gain: 0.0,
+        horizontal_integral_leak: 0.999,
+        max_horizontal_integral_accel_mps2: 0.45,
         max_horizontal_accel_mps2: 1.5,
         max_tilt_rad: 10.0 * core::f32::consts::PI / 180.0,
     },

@@ -156,7 +156,7 @@ pub struct ControlOutput {
     pub debug: ControlDebug,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FlightControlPipeline {
     position: PositionController,
     altitude: AltitudeController,
@@ -196,6 +196,7 @@ impl FlightControlPipeline {
 
     pub fn step_input(&self, input: ControlInput) -> ControlOutput {
         if !input.setpoint.armed {
+            self.position.reset();
             return ControlOutput::invalid_zero(
                 input.estimate,
                 input.imu.unwrap_or_default(),
@@ -205,6 +206,7 @@ impl FlightControlPipeline {
         }
 
         let Some(imu) = input.imu else {
+            self.position.reset();
             return ControlOutput::invalid_zero(
                 input.estimate,
                 ImuControlInput::default(),
@@ -218,6 +220,7 @@ impl FlightControlPipeline {
             || !imu.finite()
             || !input.setpoint.finite()
         {
+            self.position.reset();
             return ControlOutput::invalid_zero(input.estimate, imu, true, ControlDebug::default());
         }
 
