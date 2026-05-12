@@ -45,11 +45,45 @@ impl Default for MixerLimits {
 pub struct MotorOutputs<const N: usize> {
     pub commands: [f32; N],
     pub clamped: bool,
+    pub limit_flags: MixerLimitFlags,
 }
 
 impl<const N: usize> MotorOutputs<N> {
     pub const fn new(commands: [f32; N], clamped: bool) -> Self {
-        Self { commands, clamped }
+        Self {
+            commands,
+            clamped,
+            limit_flags: MixerLimitFlags::NONE,
+        }
+    }
+
+    pub const fn with_limit_flags(commands: [f32; N], limit_flags: MixerLimitFlags) -> Self {
+        Self {
+            commands,
+            clamped: limit_flags.any(),
+            limit_flags,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MixerLimitFlags {
+    pub roll_pitch: bool,
+    pub yaw: bool,
+    pub throttle_lower: bool,
+    pub throttle_upper: bool,
+}
+
+impl MixerLimitFlags {
+    pub const NONE: Self = Self {
+        roll_pitch: false,
+        yaw: false,
+        throttle_lower: false,
+        throttle_upper: false,
+    };
+
+    pub const fn any(self) -> bool {
+        self.roll_pitch || self.yaw || self.throttle_lower || self.throttle_upper
     }
 }
 
@@ -149,7 +183,7 @@ impl QuadXMixer {
             command.throttle + command.roll - command.pitch + command.yaw,
         ];
 
-        clamp_outputs(self.motor_order.apply(raw), self.limits)
+        clamp_outputs(self.motor_order.apply(raw), self.limits, command)
     }
 }
 
@@ -159,20 +193,29 @@ impl Default for QuadXMixer {
     }
 }
 
-fn clamp_outputs<const N: usize>(mut commands: [f32; N], limits: MixerLimits) -> MotorOutputs<N> {
-    let mut clamped = false;
+fn clamp_outputs<const N: usize>(
+    mut commands: [f32; N],
+    limits: MixerLimits,
+    command: TorqueCommand,
+) -> MotorOutputs<N> {
+    let mut limit_flags = MixerLimitFlags::NONE;
 
     for command in commands.iter_mut() {
         if *command < limits.min {
             *command = limits.min;
-            clamped = true;
+            limit_flags.throttle_lower = true;
         } else if *command > limits.max {
             *command = limits.max;
-            clamped = true;
+            limit_flags.throttle_upper = true;
         }
     }
 
-    MotorOutputs::new(commands, clamped)
+    if limit_flags.any() {
+        limit_flags.roll_pitch = command.roll != 0.0 || command.pitch != 0.0;
+        limit_flags.yaw = command.yaw != 0.0;
+    }
+
+    MotorOutputs::with_limit_flags(commands, limit_flags)
 }
 
 #[cfg(test)]
@@ -298,6 +341,10 @@ mod tests {
 
         assert_commands_near(outputs.commands, [1.0, 0.5, 0.0, 0.5]);
         assert!(outputs.clamped);
+        assert!(outputs.limit_flags.roll_pitch);
+        assert!(!outputs.limit_flags.yaw);
+        assert!(outputs.limit_flags.throttle_lower);
+        assert!(outputs.limit_flags.throttle_upper);
     }
 
     #[test]
@@ -307,6 +354,19 @@ mod tests {
 
         assert_commands_near(outputs.commands, [0.8, 0.2, 0.2, 0.8]);
         assert!(outputs.clamped);
+        assert!(outputs.limit_flags.roll_pitch);
+    }
+
+    #[test]
+    fn quad_x_mixer_reports_yaw_saturation_separately() {
+        let mixer = QuadXMixer::new(MixerLimits::new(0.45, 0.55));
+        let outputs = mixer.mix(TorqueCommand::new(0.0, 0.0, 0.2, 0.5));
+
+        assert!(outputs.clamped);
+        assert!(outputs.limit_flags.yaw);
+        assert!(!outputs.limit_flags.roll_pitch);
+        assert!(outputs.limit_flags.throttle_lower);
+        assert!(outputs.limit_flags.throttle_upper);
     }
 
     fn is_valid_one_based_permutation(order: [u8; 4]) -> bool {

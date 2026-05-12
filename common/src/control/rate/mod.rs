@@ -47,6 +47,29 @@ impl Default for RateControllerConfig {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RateLimitFlags {
+    pub roll: bool,
+    pub pitch: bool,
+    pub yaw: bool,
+    pub throttle_lower: bool,
+    pub throttle_upper: bool,
+}
+
+impl RateLimitFlags {
+    pub const fn any(self) -> bool {
+        self.roll || self.pitch || self.yaw || self.throttle_lower || self.throttle_upper
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct RateControllerOutput {
+    pub command: TorqueCommand,
+    pub body_rate_error_rps: BodyRates,
+    pub raw_command: TorqueCommand,
+    pub limit_flags: RateLimitFlags,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RateController {
     config: RateControllerConfig,
@@ -63,27 +86,51 @@ impl RateController {
         measured: BodyRates,
         throttle: f32,
     ) -> TorqueCommand {
+        self.update_with_debug(setpoint, measured, throttle).command
+    }
+
+    pub fn update_with_debug(
+        &self,
+        setpoint: BodyRateSetpoint,
+        measured: BodyRates,
+        throttle: f32,
+    ) -> RateControllerOutput {
         let measured = BodyRates::new(
             soft_deadband(measured.roll_rps, self.config.measured_rate_deadband_rps),
             soft_deadband(measured.pitch_rps, self.config.measured_rate_deadband_rps),
             soft_deadband(measured.yaw_rps, self.config.measured_rate_deadband_rps),
         );
+        let body_rate_error_rps = BodyRates::new(
+            setpoint.roll_rps - measured.roll_rps,
+            setpoint.pitch_rps - measured.pitch_rps,
+            setpoint.yaw_rps - measured.yaw_rps,
+        );
+        let raw_command = TorqueCommand::new(
+            self.config.roll_gain * body_rate_error_rps.roll_rps,
+            self.config.pitch_gain * body_rate_error_rps.pitch_rps,
+            self.config.yaw_gain * body_rate_error_rps.yaw_rps,
+            throttle,
+        );
+        let (roll, roll_limited) =
+            clamp_symmetric_with_limit(raw_command.roll, self.config.max_axis_command);
+        let (pitch, pitch_limited) =
+            clamp_symmetric_with_limit(raw_command.pitch, self.config.max_axis_command);
+        let (yaw, yaw_limited) =
+            clamp_symmetric_with_limit(raw_command.yaw, self.config.max_axis_command);
+        let (throttle, throttle_lower, throttle_upper) = clamp_unit_with_flags(throttle);
 
-        TorqueCommand::new(
-            clamp_symmetric(
-                self.config.roll_gain * (setpoint.roll_rps - measured.roll_rps),
-                self.config.max_axis_command,
-            ),
-            clamp_symmetric(
-                self.config.pitch_gain * (setpoint.pitch_rps - measured.pitch_rps),
-                self.config.max_axis_command,
-            ),
-            clamp_symmetric(
-                self.config.yaw_gain * (setpoint.yaw_rps - measured.yaw_rps),
-                self.config.max_axis_command,
-            ),
-            clamp_unit(throttle),
-        )
+        RateControllerOutput {
+            command: TorqueCommand::new(roll, pitch, yaw, throttle),
+            body_rate_error_rps,
+            raw_command,
+            limit_flags: RateLimitFlags {
+                roll: roll_limited,
+                pitch: pitch_limited,
+                yaw: yaw_limited,
+                throttle_lower,
+                throttle_upper,
+            },
+        }
     }
 }
 
@@ -93,20 +140,22 @@ impl Default for RateController {
     }
 }
 
-fn clamp_symmetric(value: f32, limit: f32) -> f32 {
+fn clamp_symmetric_with_limit(value: f32, limit: f32) -> (f32, bool) {
     if !value.is_finite() || !limit.is_finite() || limit <= 0.0 {
-        return 0.0;
+        return (0.0, true);
     }
 
-    value.clamp(-limit, limit)
+    let clamped = value.clamp(-limit, limit);
+    (clamped, clamped != value)
 }
 
-fn clamp_unit(value: f32) -> f32 {
+fn clamp_unit_with_flags(value: f32) -> (f32, bool, bool) {
     if !value.is_finite() {
-        return 0.0;
+        return (0.0, true, false);
     }
 
-    value.clamp(0.0, 1.0)
+    let clamped = value.clamp(0.0, 1.0);
+    (clamped, value < 0.0, value > 1.0)
 }
 
 fn soft_deadband(value: f32, deadband: f32) -> f32 {
@@ -210,6 +259,33 @@ mod tests {
         assert_scalar_near(command.pitch, -0.2, 0.000_001);
         assert_scalar_near(command.yaw, 0.2, 0.000_001);
         assert_scalar_near(command.throttle, 0.0, 0.000_001);
+    }
+
+    #[test]
+    fn rate_controller_reports_axis_and_throttle_limits() {
+        let controller = RateController::new(RateControllerConfig {
+            roll_gain: 1.0,
+            pitch_gain: 1.0,
+            yaw_gain: 1.0,
+            max_axis_command: 0.2,
+            measured_rate_deadband_rps: 0.0,
+        });
+
+        let upper = controller.update_with_debug(
+            BodyRateSetpoint::new(10.0, -10.0, 10.0),
+            BodyRates::ZERO,
+            1.2,
+        );
+        let lower = controller.update_with_debug(BodyRateSetpoint::ZERO, BodyRates::ZERO, -0.1);
+
+        assert!(upper.limit_flags.roll);
+        assert!(upper.limit_flags.pitch);
+        assert!(upper.limit_flags.yaw);
+        assert!(upper.limit_flags.throttle_upper);
+        assert!(upper.limit_flags.any());
+        assert!(lower.limit_flags.throttle_lower);
+        assert_scalar_near(upper.raw_command.roll, 10.0, 0.000_001);
+        assert_scalar_near(upper.command.roll, 0.2, 0.000_001);
     }
 
     #[test]

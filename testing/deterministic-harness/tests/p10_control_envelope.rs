@@ -90,24 +90,16 @@ fn p10_control_envelope_yaw_rate_damps_over_5s() {
 
 #[test]
 fn p10_control_envelope_vertical_step_up_and_down_improve_error() {
-    let step_up = ControlSetpoint {
-        position_ned_m: [0.0, 0.0, -1.0],
-        yaw_rad: 0.0,
-        armed: true,
-    };
-    let step_down = ControlSetpoint {
-        position_ned_m: [0.0, 0.0, 1.0],
-        yaw_rad: 0.0,
-        armed: true,
-    };
+    let step_up = ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true);
+    let step_down = ControlSetpoint::local_position_ned([0.0, 0.0, 1.0], 0.0, true);
 
     let up = run_truth_case(ClosedLoopTruthState::LEVEL_ORIGIN, step_up, TICKS_5S);
     let down = run_truth_case(ClosedLoopTruthState::LEVEL_ORIGIN, step_down, TICKS_5S);
 
     assert_truth_envelope(&up);
     assert_truth_envelope(&down);
-    assert_vertical_step_improved(&up, step_up.position_ned_m[2], -1.75..0.0);
-    assert_vertical_step_improved(&down, step_down.position_ned_m[2], 0.0..1.75);
+    assert_vertical_step_improved(&up, step_up.position_ned_m()[2], -1.75..0.0);
+    assert_vertical_step_improved(&down, step_down.position_ned_m()[2], 0.0..1.75);
 }
 
 fn run_truth_case(

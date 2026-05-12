@@ -105,7 +105,8 @@ fn p12_gazebo_control_truth_runtime() {
 fn p12_gazebo_control_truth_vertical_step_runtime() {
     let settings = RuntimeSettings::from_env();
     let airframe = airframe_config();
-    let setpoint = ControlSetpoint::new([0.0, 0.0, settings.vertical_step_down_m], 0.0, true);
+    let setpoint =
+        ControlSetpoint::local_position_ned([0.0, 0.0, settings.vertical_step_down_m], 0.0, true);
     let summary = run_runtime_scenario("vertical_step_up", setpoint, &settings, &airframe);
 
     assert!(
@@ -269,7 +270,7 @@ fn run_runtime_scenario(
         if let Some(euler) = frame.euler_rad {
             max_attitude_rad = max_attitude_rad.max(euler[0].abs()).max(euler[1].abs());
         }
-        final_down_error_m = estimate.position_ned_m[2] - setpoint.position_ned_m[2];
+        final_down_error_m = estimate.position_ned_m[2] - setpoint.position_ned_m()[2];
         initial_down_error_m.get_or_insert(final_down_error_m);
         max_down_error_m = max_down_error_m.max(estimate.position_ned_m[2].abs());
     }

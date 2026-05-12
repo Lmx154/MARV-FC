@@ -44,15 +44,11 @@ fn p05_closed_loop_truth_roll_disturbance_recovers() {
 
 #[test]
 fn p05_closed_loop_truth_vertical_setpoint_truth_estimator_moves_toward_target() {
-    let setpoint = ControlSetpoint {
-        position_ned_m: [0.0, 0.0, -1.0],
-        yaw_rad: 0.0,
-        armed: true,
-    };
+    let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true);
     let traces = run_case(ClosedLoopTruthState::LEVEL_ORIGIN, setpoint, TICKS_3S);
     let final_down = traces.last().expect("trace").truth.position_ned_m[2];
-    let initial_error = (0.0_f32 - setpoint.position_ned_m[2]).abs();
-    let final_error = (final_down - setpoint.position_ned_m[2]).abs();
+    let initial_error = (0.0_f32 - setpoint.position_ned_m()[2]).abs();
+    let final_error = (final_down - setpoint.position_ned_m()[2]).abs();
 
     assert_all_traces_finite_and_normalized(&traces);
     assert!(
@@ -76,11 +72,7 @@ fn p05_closed_loop_truth_motor_output_never_nan() {
         body_rates_rps: [0.1, -0.1, 0.05],
         ..ClosedLoopTruthState::LEVEL_ORIGIN
     };
-    let setpoint = ControlSetpoint {
-        position_ned_m: [0.0, 0.0, -0.5],
-        yaw_rad: 0.0,
-        armed: true,
-    };
+    let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -0.5], 0.0, true);
     let traces = run_case(initial, setpoint, TICKS_3S);
 
     assert_all_traces_finite_and_normalized(&traces);

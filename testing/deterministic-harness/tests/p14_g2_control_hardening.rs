@@ -1,6 +1,10 @@
+use common::control::config::ControlLoopConfig;
+use common::control::mixing::MixerLimits;
+use common::control::rate::RateControllerConfig;
 use deterministic_harness::{
     ClosedLoopConfig, ClosedLoopRunner, ClosedLoopTrace, ClosedLoopTruthState, ControlPipeline,
-    ControlSetpoint, MotorGeometry, TruthPlant,
+    ControlSetpoint, EstimateSnapshot, ImuControlInput, MotorGeometry, PureControlConfig,
+    TruthPlant,
 };
 
 const DT_S: f32 = 0.01;
@@ -27,7 +31,7 @@ struct HardeningSummary {
 #[test]
 fn p14_g2_control_hardening_altitude_ladder_stays_bounded() {
     for target_down_m in [-0.5, -1.0, -2.0, -3.0] {
-        let setpoint = ControlSetpoint::new([0.0, 0.0, target_down_m], 0.0, true);
+        let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, target_down_m], 0.0, true);
         let traces = run_case(ClosedLoopTruthState::LEVEL_ORIGIN, setpoint, TICKS_8S);
         let summary = summarize(&traces, setpoint);
 
@@ -51,7 +55,7 @@ fn p14_g2_control_hardening_yawed_hover_setpoints_stay_level() {
         90.0_f32.to_radians(),
         180.0_f32.to_radians(),
     ] {
-        let setpoint = ControlSetpoint::new([0.0, 0.0, 0.0], yaw_rad, true);
+        let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, 0.0], yaw_rad, true);
         let traces = run_case(ClosedLoopTruthState::LEVEL_ORIGIN, setpoint, TICKS_8S);
         let summary = summarize(&traces, setpoint);
 
@@ -139,7 +143,7 @@ fn p14_g2_control_hardening_parameter_margins_remain_finite() {
         ("battery_derated", scaled_geometry(1.0, 0.90)),
         ("strong_motors", scaled_geometry(1.0, 1.10)),
     ] {
-        let setpoint = ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true);
+        let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true);
         let traces = run_case_with_geometry(
             ClosedLoopTruthState::LEVEL_ORIGIN,
             setpoint,
@@ -154,6 +158,30 @@ fn p14_g2_control_hardening_parameter_margins_remain_finite() {
             "parameter margin did not stay close enough: name={name} summary={summary:?}"
         );
     }
+}
+
+#[test]
+fn p14_g2_control_hardening_reports_yaw_mixer_saturation() {
+    let trace = saturated_pipeline_step([0.0, 0.0, -1.0]);
+
+    assert!(trace.control_valid);
+    assert!(trace.clamped);
+    assert!(trace.debug.mixer_limit_flags.yaw);
+    assert!(!trace.debug.mixer_limit_flags.roll_pitch);
+    assert!(trace.debug.mixer_limit_flags.throttle_lower);
+    assert!(trace.debug.mixer_limit_flags.throttle_upper);
+}
+
+#[test]
+fn p14_g2_control_hardening_reports_roll_pitch_mixer_saturation() {
+    let trace = saturated_pipeline_step([-1.0, -1.0, 0.0]);
+
+    assert!(trace.control_valid);
+    assert!(trace.clamped);
+    assert!(trace.debug.mixer_limit_flags.roll_pitch);
+    assert!(!trace.debug.mixer_limit_flags.yaw);
+    assert!(trace.debug.mixer_limit_flags.throttle_lower);
+    assert!(trace.debug.mixer_limit_flags.throttle_upper);
 }
 
 fn run_case(
@@ -176,6 +204,30 @@ fn run_case_with_geometry(
         ClosedLoopConfig::new(DT_S, ticks),
     );
     runner.run(setpoint)
+}
+
+fn saturated_pipeline_step(gyro_rps: [f32; 3]) -> deterministic_harness::ControlPipelineTrace {
+    let mut config = ControlLoopConfig::default();
+    config.rate = RateControllerConfig {
+        roll_gain: 1.0,
+        pitch_gain: 1.0,
+        yaw_gain: 1.0,
+        max_axis_command: 0.4,
+        measured_rate_deadband_rps: 0.0,
+    };
+    config.mixer_limits = MixerLimits::new(0.45, 0.55);
+    let pipeline = ControlPipeline::new(PureControlConfig {
+        loop_config: config,
+    });
+
+    pipeline.step(
+        EstimateSnapshot::LEVEL_ORIGIN,
+        ImuControlInput {
+            accel_mps2: [0.0, 0.0, 0.0],
+            gyro_rps,
+        },
+        ControlSetpoint::ORIGIN_HOLD_ARMED,
+    )
 }
 
 fn scaled_geometry(mass_scale: f32, thrust_scale: f32) -> MotorGeometry {
@@ -237,10 +289,10 @@ fn summarize(traces: &[ClosedLoopTrace], setpoint: ControlSetpoint) -> Hardening
         max_altitude_abs_m,
         max_vertical_speed_mps,
         clamp_ratio: clamped as f32 / traces.len() as f32,
-        initial_down_error_m: first.truth.position_ned_m[2] - setpoint.position_ned_m[2],
-        final_down_error_m: last.truth.position_ned_m[2] - setpoint.position_ned_m[2],
-        initial_yaw_error_rad: yaw_error_rad(setpoint.yaw_rad, first.truth.euler_rad[2]),
-        final_yaw_error_rad: yaw_error_rad(setpoint.yaw_rad, last.truth.euler_rad[2]),
+        initial_down_error_m: first.truth.position_ned_m[2] - setpoint.position_ned_m()[2],
+        final_down_error_m: last.truth.position_ned_m[2] - setpoint.position_ned_m()[2],
+        initial_yaw_error_rad: yaw_error_rad(setpoint.yaw_rad(), first.truth.euler_rad[2]),
+        final_yaw_error_rad: yaw_error_rad(setpoint.yaw_rad(), last.truth.euler_rad[2]),
         final_state: last.truth,
     }
 }

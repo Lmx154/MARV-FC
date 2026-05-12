@@ -3,8 +3,8 @@ use common::control::config::ControlLoopConfig;
 use common::control::mixing::MixerLimits;
 use common::control::rate::RateControllerConfig;
 use deterministic_harness::{
-    ControlPipeline, ControlPipelineTrace, ControlSetpoint, EstimateSnapshot, ImuControlInput,
-    PureControlConfig,
+    ClampSource, ControlFrame, ControlNavPhase, ControlPipeline, ControlPipelineTrace,
+    ControlSetpoint, EstimateSnapshot, ImuControlInput, LocalTrajectorySetpoint, PureControlConfig,
 };
 
 #[test]
@@ -12,10 +12,7 @@ fn p03_control_pipeline_disarmed_outputs_zero_motors() {
     let trace = ControlPipeline::default().step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint {
-            armed: false,
-            ..ControlSetpoint::ORIGIN_HOLD_ARMED
-        },
+        ControlSetpoint::local_position_ned([0.0, 0.0, 0.0], 0.0, false),
     );
 
     assert!(!trace.armed);
@@ -92,11 +89,7 @@ fn p03_control_pipeline_altitude_error_ned_down_sign_is_correct() {
     let below_setpoint = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint {
-            position_ned_m: [0.0, 0.0, -2.0],
-            yaw_rad: 0.0,
-            armed: true,
-        },
+        ControlSetpoint::local_position_ned([0.0, 0.0, -2.0], 0.0, true),
     );
     let above_setpoint = pipeline.step(
         EstimateSnapshot {
@@ -144,7 +137,78 @@ fn p03_control_pipeline_saturation_sets_clamped_flag() {
 
     assert_valid_trace_has_required_fields(&trace);
     assert!(trace.clamped);
+    assert!(trace.debug.mixer_limit_flags.any());
+    assert!(trace.debug.mixer_limit_flags.roll_pitch);
     assert!(trace.motors.iter().any(|motor| *motor >= 1.0));
+}
+
+#[test]
+fn p03_control_pipeline_reports_rate_axis_limits_before_mixing() {
+    let mut config = ControlLoopConfig::default();
+    config.rate = RateControllerConfig {
+        roll_gain: 1.0,
+        pitch_gain: 1.0,
+        yaw_gain: 1.0,
+        max_axis_command: 0.1,
+        measured_rate_deadband_rps: 0.0,
+    };
+    let pipeline = ControlPipeline::new(PureControlConfig {
+        loop_config: config,
+    });
+    let trace = pipeline.step(
+        EstimateSnapshot::LEVEL_ORIGIN,
+        ImuControlInput {
+            accel_mps2: [0.0, 0.0, 0.0],
+            gyro_rps: [-1.0, 1.0, -1.0],
+        },
+        ControlSetpoint::ORIGIN_HOLD_ARMED,
+    );
+
+    assert_valid_trace_has_required_fields(&trace);
+    assert!(trace.debug.rate_limit_flags.roll);
+    assert!(trace.debug.rate_limit_flags.pitch);
+    assert!(trace.debug.rate_limit_flags.yaw);
+    let rate_output = trace
+        .debug
+        .rate_controller_output
+        .expect("rate output should be present");
+    assert_eq!(rate_output.limit_flags, trace.debug.rate_limit_flags);
+    assert!(rate_output.raw_command.roll > trace.torque_command.roll);
+}
+
+#[test]
+fn p03_control_pipeline_preserves_trajectory_velocity_and_accel_feed_forward() {
+    let trajectory = LocalTrajectorySetpoint {
+        position_ned_m: [0.0, 0.0, 0.0],
+        velocity_ned_mps: [1.0, 0.0, 0.0],
+        acceleration_ned_mps2: [0.2, 0.0, 0.0],
+        yaw_rad: 0.0,
+        yaw_rate_rad_s: 0.0,
+    };
+    let trace = ControlPipeline::default().step(
+        EstimateSnapshot::LEVEL_ORIGIN,
+        ImuControlInput::default(),
+        ControlSetpoint::from_local_trajectory(trajectory, true),
+    );
+
+    assert_valid_trace_has_required_fields(&trace);
+    assert_eq!(trace.debug.velocity_setpoint_ned_mps, Some([0.5, 0.0]));
+    assert_eq!(trace.debug.feed_forward_accel_ned_mps2, Some([0.2, 0.0]));
+    assert_eq!(trace.debug.velocity_error_ned_mps, Some([0.5, 0.0]));
+    let requested_accel = trace
+        .debug
+        .requested_accel_ned_mps2
+        .expect("trajectory trace should include requested acceleration");
+    assert_near(requested_accel[0], 0.375, 0.000_001);
+    assert_near(requested_accel[1], 0.0, 0.000_001);
+    assert!(
+        trace
+            .attitude_setpoint
+            .expect("trajectory trace should have attitude setpoint")
+            .quaternion[2]
+            < 0.0,
+        "positive north feed-forward should command nose-down pitch"
+    );
 }
 
 fn armed_origin_step(estimate: EstimateSnapshot, imu: ImuControlInput) -> ControlPipelineTrace {
@@ -204,6 +268,48 @@ fn assert_valid_trace_has_required_fields(trace: &ControlPipelineTrace) {
     assert!(trace.torque_command.yaw.is_finite());
     assert!(trace.torque_command.throttle.is_finite());
     assert!(trace.motors.iter().all(|motor| motor.is_finite()));
+    assert_eq!(trace.debug.estimator_frame, ControlFrame::EstimatorLocalNed);
+    assert_eq!(trace.debug.setpoint_frame, ControlFrame::EstimatorLocalNed);
+    assert_eq!(trace.debug.nav_phase, ControlNavPhase::DirectSetpoint);
+    assert_eq!(trace.debug.takeoff_origin_ned_m, None);
+    assert_finite_optional_f32x3(trace.debug.control_setpoint_ned_m);
+    assert_finite_optional_f32x3(trace.debug.position_error_ned_m);
+    assert_finite_optional_f32x2(trace.debug.velocity_setpoint_ned_mps);
+    assert_finite_optional_f32x2(trace.debug.velocity_error_ned_mps);
+    assert_finite_optional_f32x2(trace.debug.feed_forward_accel_ned_mps2);
+    assert_finite_optional_f32x2(trace.debug.requested_accel_ned_mps2);
+    assert_finite_optional_f32x2(trace.debug.applied_accel_ned_mps2);
+    assert_finite_optional_f32x2(trace.debug.integral_accel_ned_mps2);
+    assert!(trace.debug.thrust_vector_setpoint.is_some());
+    assert_finite_optional_scalar(trace.debug.requested_collective_throttle);
+    assert_finite_optional_scalar(trace.debug.applied_collective_throttle);
+    assert_finite_optional_scalar(trace.debug.tilt_compensation);
+    assert_finite_optional_scalar(trace.debug.vertical_throttle_margin);
+    assert!(trace.debug.rate_controller_output.is_some());
+    assert_eq!(
+        trace
+            .debug
+            .rate_controller_output
+            .expect("rate output")
+            .limit_flags,
+        trace.debug.rate_limit_flags
+    );
+    assert_eq!(
+        trace
+            .debug
+            .motor_outputs
+            .expect("motor outputs")
+            .limit_flags,
+        trace.debug.mixer_limit_flags
+    );
+    assert_eq!(
+        trace.debug.clamp_source,
+        if trace.clamped {
+            ClampSource::MotorOutputLimit
+        } else {
+            ClampSource::None
+        }
+    );
 }
 
 fn assert_commands_near(actual: [f32; 4], expected: [f32; 4], tolerance: f32) {
@@ -217,4 +323,19 @@ fn assert_near(actual: f32, expected: f32, tolerance: f32) {
         (actual - expected).abs() <= tolerance,
         "expected {actual} to be within {tolerance} of {expected}"
     );
+}
+
+fn assert_finite_optional_f32x2(values: Option<[f32; 2]>) {
+    let values = values.expect("debug field should be present for valid control traces");
+    assert!(values.iter().all(|value| value.is_finite()));
+}
+
+fn assert_finite_optional_f32x3(values: Option<[f32; 3]>) {
+    let values = values.expect("debug field should be present for valid control traces");
+    assert!(values.iter().all(|value| value.is_finite()));
+}
+
+fn assert_finite_optional_scalar(value: Option<f32>) {
+    let value = value.expect("debug field should be present for valid control traces");
+    assert!(value.is_finite());
 }

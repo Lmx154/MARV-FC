@@ -1,15 +1,21 @@
 use deterministic_harness::{
-    ControlPipeline, ControlPipelineTrace, ControlSetpoint, EstimateSnapshot, ImuControlInput,
+    ControlPipeline, ControlPipelineTrace, ControlSetpoint, ControlSetpointSource,
+    EstimateSnapshot, EstimatorLocalState, GuidanceCommand, GuidancePhase, GuidanceStateMachine,
+    ImuControlInput, MissionWaypoint, TrajectoryLimits,
 };
 
 const DT_S: f32 = 0.01;
 const STEP_TICKS: usize = 1_200;
 const LEG_TICKS: usize = 900;
+const GUIDED_LEG_TICKS: usize = 1_800;
 const HOLD_DOWN_M: f32 = -1.0;
 const STANDARD_GRAVITY_MPS2: f32 = 9.806_65;
 const MAX_TILT_RAD: f32 = 10.0_f32.to_radians();
 const MAX_HORIZONTAL_ACCEL_MPS2: f32 = 1.5;
 const MAX_HORIZONTAL_SPEED_MPS: f32 = 1.0;
+const MAX_TRAJECTORY_SPEED_MPS: f32 = 0.45;
+const MAX_TRAJECTORY_ACCEL_MPS2: f32 = 0.75;
+const MAX_TRAJECTORY_JERK_MPS3: f32 = 3.0;
 const MIN_STEP_PROGRESS_M: f32 = 0.45;
 const MAX_CROSS_AXIS_DRIFT_M: f32 = 0.03;
 const MAX_SQUARE_FINAL_ERROR_M: f32 = 0.65;
@@ -44,6 +50,9 @@ impl NavigationState {
 struct NavigationSample {
     tick: u64,
     target_ned_m: [f32; 3],
+    target_velocity_ned_mps: [f32; 3],
+    target_acceleration_ned_mps2: [f32; 3],
+    setpoint_source: ControlSetpointSource,
     state: NavigationState,
     accel_ned_mps2: [f32; 2],
     roll_rad: f32,
@@ -58,6 +67,9 @@ struct NavigationSummary {
     max_tilt_rad: f32,
     max_horizontal_accel_mps2: f32,
     max_horizontal_speed_mps: f32,
+    max_target_velocity_mps: f32,
+    max_target_accel_mps2: f32,
+    max_target_jerk_mps3: f32,
     clamp_ratio: f32,
     final_position_ned_m: [f32; 3],
     final_velocity_ned_mps: [f32; 3],
@@ -66,7 +78,7 @@ struct NavigationSummary {
 #[test]
 fn p17_navigation_steps_move_in_world_frame_axes() {
     let north = run_fixed_step(
-        ControlSetpoint::new([1.0, 0.0, HOLD_DOWN_M], 0.0, true),
+        ControlSetpoint::local_position_ned([1.0, 0.0, HOLD_DOWN_M], 0.0, true),
         0.0,
     );
     let north_summary = summarize(&north);
@@ -85,7 +97,7 @@ fn p17_navigation_steps_move_in_world_frame_axes() {
     );
 
     let east = run_fixed_step(
-        ControlSetpoint::new([0.0, 1.0, HOLD_DOWN_M], 0.0, true),
+        ControlSetpoint::local_position_ned([0.0, 1.0, HOLD_DOWN_M], 0.0, true),
         0.0,
     );
     let east_summary = summarize(&east);
@@ -107,7 +119,7 @@ fn p17_navigation_steps_move_in_world_frame_axes() {
 #[test]
 fn p17_navigation_steps_diagonal_and_return_origin_are_bounded() {
     let diagonal = run_fixed_step(
-        ControlSetpoint::new([1.0, 1.0, HOLD_DOWN_M], 0.0, true),
+        ControlSetpoint::local_position_ned([1.0, 1.0, HOLD_DOWN_M], 0.0, true),
         0.0,
     );
     let diagonal_summary = summarize(&diagonal);
@@ -133,10 +145,40 @@ fn p17_navigation_steps_diagonal_and_return_origin_are_bounded() {
 }
 
 #[test]
+fn p17_guided_waypoint_square_uses_bounded_local_trajectory() {
+    let square = run_guided_square();
+    let square_summary = summarize(&square);
+    assert_navigation_dynamics("guided waypoint square", square_summary);
+    assert!(
+        square_summary.max_target_velocity_mps <= MAX_TRAJECTORY_SPEED_MPS + 0.001,
+        "guided square exceeded trajectory velocity limit: {square_summary:?}"
+    );
+    assert!(
+        square_summary.max_target_accel_mps2 <= MAX_TRAJECTORY_ACCEL_MPS2 + 0.02,
+        "guided square exceeded trajectory acceleration limit: {square_summary:?}"
+    );
+    assert!(
+        square_summary.max_target_jerk_mps3 <= MAX_TRAJECTORY_JERK_MPS3 + 0.20,
+        "guided square exceeded trajectory jerk limit: {square_summary:?}"
+    );
+    assert!(
+        horizontal_error(square_summary.final_position_ned_m, [0.0, 0.0, HOLD_DOWN_M])
+            <= MAX_SQUARE_FINAL_ERROR_M,
+        "guided waypoint square did not return close enough to the mission origin: {square_summary:?}"
+    );
+    assert!(
+        square.iter().all(|sample| {
+            sample.setpoint_source == ControlSetpointSource::EstimatorLocalTrajectory
+        }),
+        "guided square must keep truth evidence out of the control setpoint path"
+    );
+}
+
+#[test]
 fn p17_navigation_steps_yawed_navigation_remains_world_frame_correct() {
     let yaw_rad = 90.0_f32.to_radians();
     let north = run_fixed_step(
-        ControlSetpoint::new([1.0, 0.0, HOLD_DOWN_M], yaw_rad, true),
+        ControlSetpoint::local_position_ned([1.0, 0.0, HOLD_DOWN_M], yaw_rad, true),
         yaw_rad,
     );
     let north_summary = summarize(&north);
@@ -155,7 +197,7 @@ fn p17_navigation_steps_yawed_navigation_remains_world_frame_correct() {
     );
 
     let east = run_fixed_step(
-        ControlSetpoint::new([0.0, 1.0, HOLD_DOWN_M], yaw_rad, true),
+        ControlSetpoint::local_position_ned([0.0, 1.0, HOLD_DOWN_M], yaw_rad, true),
         yaw_rad,
     );
     let east_summary = summarize(&east);
@@ -179,7 +221,7 @@ fn p17_navigation_steps_reject_invalid_or_disarmed_navigation_demands() {
     let invalid = ControlPipeline::default().step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint::new([1.0, f32::NAN, HOLD_DOWN_M], 0.0, true),
+        ControlSetpoint::local_position_ned([1.0, f32::NAN, HOLD_DOWN_M], 0.0, true),
     );
     assert!(invalid.armed);
     assert!(!invalid.control_valid);
@@ -189,7 +231,7 @@ fn p17_navigation_steps_reject_invalid_or_disarmed_navigation_demands() {
     let disarmed = ControlPipeline::default().step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint::new([1.0, 1.0, HOLD_DOWN_M], 0.0, false),
+        ControlSetpoint::local_position_ned([1.0, 1.0, HOLD_DOWN_M], 0.0, false),
     );
     assert!(!disarmed.armed);
     assert!(!disarmed.control_valid);
@@ -197,11 +239,13 @@ fn p17_navigation_steps_reject_invalid_or_disarmed_navigation_demands() {
 }
 
 fn run_fixed_step(setpoint: ControlSetpoint, yaw_rad: f32) -> Vec<NavigationSample> {
-    run_navigation(yaw_rad, STEP_TICKS, |_| setpoint)
+    run_navigation(yaw_rad, STEP_TICKS, move |_, _| {
+        (setpoint, [0.0; 3], [0.0; 3])
+    })
 }
 
 fn run_square() -> Vec<NavigationSample> {
-    run_navigation(0.0, LEG_TICKS * 4, |tick| {
+    run_navigation(0.0, LEG_TICKS * 4, |tick, _| {
         let leg = tick / LEG_TICKS;
         let position = match leg {
             0 => [1.0, 0.0, HOLD_DOWN_M],
@@ -209,22 +253,65 @@ fn run_square() -> Vec<NavigationSample> {
             2 => [0.0, 1.0, HOLD_DOWN_M],
             _ => [0.0, 0.0, HOLD_DOWN_M],
         };
-        ControlSetpoint::new(position, 0.0, true)
+        (
+            ControlSetpoint::local_position_ned(position, 0.0, true),
+            [0.0; 3],
+            [0.0; 3],
+        )
+    })
+}
+
+fn run_guided_square() -> Vec<NavigationSample> {
+    let mut guidance = GuidanceStateMachine::new(TrajectoryLimits {
+        max_velocity_mps: MAX_TRAJECTORY_SPEED_MPS,
+        max_accel_mps2: MAX_TRAJECTORY_ACCEL_MPS2,
+        max_jerk_mps3: MAX_TRAJECTORY_JERK_MPS3,
+        acceptance_radius_m: 0.08,
+        max_yaw_rate_rad_s: 1.0,
+    });
+
+    run_navigation(0.0, GUIDED_LEG_TICKS * 4, |tick, state| {
+        let leg = tick / GUIDED_LEG_TICKS;
+        let position = match leg {
+            0 => [1.0, 0.0, HOLD_DOWN_M],
+            1 => [1.0, 1.0, HOLD_DOWN_M],
+            2 => [0.0, 1.0, HOLD_DOWN_M],
+            _ => [0.0, 0.0, HOLD_DOWN_M],
+        };
+        let output = guidance
+            .update(
+                state.estimator_local(),
+                GuidanceCommand::NavigateLeg(MissionWaypoint::new(position, 0.0)),
+                DT_S,
+            )
+            .expect("guided waypoint square should produce a trajectory setpoint");
+        assert_eq!(output.phase, GuidancePhase::NavigateLeg);
+        let setpoint = ControlSetpoint::from_local_trajectory(output.trajectory, true);
+        assert_eq!(
+            setpoint.source(),
+            ControlSetpointSource::EstimatorLocalTrajectory
+        );
+        (
+            setpoint,
+            output.trajectory.velocity_ned_mps,
+            output.trajectory.acceleration_ned_mps2,
+        )
     })
 }
 
 fn run_navigation(
     yaw_rad: f32,
     ticks: usize,
-    mut setpoint_for_tick: impl FnMut(usize) -> ControlSetpoint,
+    mut setpoint_for_tick: impl FnMut(usize, NavigationState) -> (ControlSetpoint, [f32; 3], [f32; 3]),
 ) -> Vec<NavigationSample> {
     let pipeline = ControlPipeline::default();
     let mut state = NavigationState::new(yaw_rad);
     let mut samples = Vec::with_capacity(ticks);
 
     for index in 0..ticks {
-        let setpoint = setpoint_for_tick(index);
-        state.yaw_rad = setpoint.yaw_rad;
+        let (setpoint, target_velocity_ned_mps, target_acceleration_ned_mps2) =
+            setpoint_for_tick(index, state);
+        state.yaw_rad = setpoint.yaw_rad();
         let control = pipeline.step(state.estimate(), state.imu(), setpoint);
         assert!(
             control.control_valid,
@@ -244,7 +331,10 @@ fn run_navigation(
 
         samples.push(NavigationSample {
             tick: (index + 1) as u64,
-            target_ned_m: setpoint.position_ned_m,
+            target_ned_m: setpoint.position_ned_m(),
+            target_velocity_ned_mps,
+            target_acceleration_ned_mps2,
+            setpoint_source: setpoint.source(),
             state,
             accel_ned_mps2,
             roll_rad,
@@ -262,6 +352,15 @@ impl NavigationState {
             accel_mps2: [0.0, 0.0, 0.0],
             gyro_rps: [0.0, 0.0, 0.0],
         }
+    }
+
+    fn estimator_local(self) -> EstimatorLocalState {
+        EstimatorLocalState::new(
+            self.position_ned_m,
+            self.velocity_ned_mps,
+            self.yaw_rad,
+            true,
+        )
     }
 }
 
@@ -290,6 +389,24 @@ fn summarize(samples: &[NavigationSample]) -> NavigationSummary {
             )
         })
         .fold(0.0, f32::max);
+    let max_target_velocity_mps = samples
+        .iter()
+        .map(|sample| horizontal_norm3(sample.target_velocity_ned_mps))
+        .fold(0.0, f32::max);
+    let max_target_accel_mps2 = samples
+        .iter()
+        .map(|sample| horizontal_norm3(sample.target_acceleration_ned_mps2))
+        .fold(0.0, f32::max);
+    let max_target_jerk_mps3 = samples
+        .windows(2)
+        .map(|pair| {
+            horizontal_norm3([
+                pair[1].target_acceleration_ned_mps2[0] - pair[0].target_acceleration_ned_mps2[0],
+                pair[1].target_acceleration_ned_mps2[1] - pair[0].target_acceleration_ned_mps2[1],
+                pair[1].target_acceleration_ned_mps2[2] - pair[0].target_acceleration_ned_mps2[2],
+            ]) / DT_S
+        })
+        .fold(0.0, f32::max);
 
     NavigationSummary {
         initial_target_error_m: horizontal_error(first.state.position_ned_m, first.target_ned_m),
@@ -297,6 +414,9 @@ fn summarize(samples: &[NavigationSample]) -> NavigationSummary {
         max_tilt_rad,
         max_horizontal_accel_mps2,
         max_horizontal_speed_mps,
+        max_target_velocity_mps,
+        max_target_accel_mps2,
+        max_target_jerk_mps3,
         clamp_ratio: clamped as f32 / samples.len() as f32,
         final_position_ned_m: last.state.position_ned_m,
         final_velocity_ned_mps: last.state.velocity_ned_mps,
@@ -308,6 +428,10 @@ fn assert_navigation_envelope(label: &str, summary: NavigationSummary) {
         summary.final_target_error_m <= summary.initial_target_error_m - MIN_STEP_PROGRESS_M,
         "{label} did not improve enough toward the target: {summary:?}"
     );
+    assert_navigation_dynamics(label, summary);
+}
+
+fn assert_navigation_dynamics(label: &str, summary: NavigationSummary) {
     assert!(
         summary.max_tilt_rad <= MAX_TILT_RAD + 0.001,
         "{label} exceeded tilt limit: {summary:?}"
@@ -358,6 +482,10 @@ fn horizontal_error(position_ned_m: [f32; 3], target_ned_m: [f32; 3]) -> f32 {
 
 fn horizontal_norm(north_m: f32, east_m: f32) -> f32 {
     (north_m * north_m + east_m * east_m).sqrt()
+}
+
+fn horizontal_norm3(values: [f32; 3]) -> f32 {
+    (values[0] * values[0] + values[1] * values[1] + values[2] * values[2]).sqrt()
 }
 
 fn horizontal_accel_from_tilt(roll_rad: f32, pitch_rad: f32, yaw_rad: f32) -> [f32; 2] {

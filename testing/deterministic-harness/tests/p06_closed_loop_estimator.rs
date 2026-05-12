@@ -54,22 +54,18 @@ fn p06_closed_loop_estimator_static_hold_estimator_in_loop() {
 
 #[test]
 fn p06_closed_loop_estimator_vertical_setpoint_estimator_in_loop() {
-    let setpoint = ControlSetpoint {
-        position_ned_m: [0.0, 0.0, -1.0],
-        yaw_rad: 0.0,
-        armed: true,
-    };
+    let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true);
     let report = run_case(
         ClosedLoopTruthState::LEVEL_ORIGIN,
         setpoint,
         ClosedLoopEstimatorConfig::new(ClosedLoopConfig::new(DT_S, TICKS_5S)),
     );
     let final_trace = report.last_trace().expect("last trace");
-    let initial_error = (0.0_f32 - setpoint.position_ned_m[2]).abs();
+    let initial_error = (0.0_f32 - setpoint.position_ned_m()[2]).abs();
     let final_truth_error =
-        (final_trace.truth.position_ned_m[2] - setpoint.position_ned_m[2]).abs();
+        (final_trace.truth.position_ned_m[2] - setpoint.position_ned_m()[2]).abs();
     let final_estimate_error =
-        (final_trace.estimator.position_ned_m[2] as f32 - setpoint.position_ned_m[2]).abs();
+        (final_trace.estimator.position_ned_m[2] as f32 - setpoint.position_ned_m()[2]).abs();
 
     assert_all_traces_finite_and_bounded(&report);
     assert!(

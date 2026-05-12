@@ -39,11 +39,7 @@ fn p10_gain_sweep_static_hold_stays_boring_near_current_gains() {
 
 #[test]
 fn p10_gain_sweep_vertical_step_improves_without_saturation() {
-    let setpoint = ControlSetpoint {
-        position_ned_m: [0.0, 0.0, -1.0],
-        yaw_rad: 0.0,
-        armed: true,
-    };
+    let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true);
 
     for scale in [0.75, 1.0, 1.25] {
         let traces = run_scaled_case(scale, ClosedLoopTruthState::LEVEL_ORIGIN, setpoint);
@@ -120,11 +116,11 @@ fn summarize(scale: f32, traces: &[ClosedLoopTrace], setpoint: ControlSetpoint) 
         .fold(0.0, f32::max);
     let max_altitude_error_m = traces
         .iter()
-        .map(|trace| (trace.truth.position_ned_m[2] - setpoint.position_ned_m[2]).abs())
+        .map(|trace| (trace.truth.position_ned_m[2] - setpoint.position_ned_m()[2]).abs())
         .fold(0.0, f32::max);
     let clamped = traces.iter().filter(|trace| trace.control.clamped).count();
     let final_error_m =
-        (traces.last().unwrap().truth.position_ned_m[2] - setpoint.position_ned_m[2]).abs();
+        (traces.last().unwrap().truth.position_ned_m[2] - setpoint.position_ned_m()[2]).abs();
 
     SweepSummary {
         scale,

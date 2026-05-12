@@ -4,6 +4,7 @@ use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use common::control::config::ControlLoopConfig;
+use common::control::guidance::{TakeoffNavGate, TakeoffNavGateConfig, TakeoffNavGateSample};
 use deterministic_harness::{
     ControlPipeline, ControlSetpoint, EstimateSnapshot, EstimatorReplayConfig,
     EstimatorReplayDriver, EstimatorReplayTrace, GAZEBO_G0_DEFAULT_ENDPOINT, GazeboAirframeConfig,
@@ -141,7 +142,7 @@ fn p13_gazebo_estimator_loop() {
     );
 
     let vertical_setpoint =
-        ControlSetpoint::new([0.0, 0.0, settings.vertical_step_down_m], 0.0, true);
+        ControlSetpoint::local_position_ned([0.0, 0.0, settings.vertical_step_down_m], 0.0, true);
     let vertical =
         run_control_scenario("vertical_step_up", vertical_setpoint, &settings, &airframe);
     assert!(
@@ -203,7 +204,7 @@ fn p14_gazebo_g2_control_hardening() {
     );
 
     for target_down_m in [-0.5, -1.0, -2.0, -3.0] {
-        let setpoint = ControlSetpoint::new([0.0, 0.0, target_down_m], 0.0, true);
+        let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, target_down_m], 0.0, true);
         let summary = run_control_scenario(
             &format!("p14_altitude_ladder_{target_down_m:.1}m"),
             setpoint,
@@ -243,7 +244,7 @@ fn p14_gazebo_g2_control_hardening() {
         90.0_f32.to_radians(),
         180.0_f32.to_radians(),
     ] {
-        let setpoint = ControlSetpoint::new([0.0, 0.0, -2.0], yaw_rad, true);
+        let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -2.0], yaw_rad, true);
         let summary = run_control_scenario(
             &format!("p14_yawed_hover_{:.0}deg", yaw_rad.to_degrees()),
             setpoint,
@@ -274,11 +275,11 @@ fn p14_gazebo_g2_runtime_disturbance_and_demand_limits() {
         "p14_runtime_yaw_disturbance_return",
         |control_frame| {
             if control_frame < settings.frames / 3 {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
             } else if control_frame < (settings.frames * 2) / 3 {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 45.0_f32.to_radians(), true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 45.0_f32.to_radians(), true)
             } else {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
             }
         },
         &settings,
@@ -325,11 +326,15 @@ fn p14_gazebo_g2_runtime_disturbance_and_demand_limits() {
         |control_frame| {
             let pulse_start = settings.frames / 3;
             if control_frame < pulse_start {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
             } else if control_frame < pulse_start + 5 {
-                ControlSetpoint::new([50.0, -50.0, -2.0], 180.0_f32.to_radians(), true)
+                ControlSetpoint::local_position_ned(
+                    [50.0, -50.0, -2.0],
+                    180.0_f32.to_radians(),
+                    true,
+                )
             } else {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
             }
         },
         &settings,
@@ -362,11 +367,11 @@ fn p14_gazebo_g2_runtime_lateral_setpoint_disturbance() {
         "p14_runtime_lateral_setpoint_disturbance",
         |control_frame| {
             if control_frame < settings.frames / 3 {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
             } else if control_frame < (settings.frames * 2) / 3 {
-                ControlSetpoint::new([0.75, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.75, 0.0, -1.0], 0.0, true)
             } else {
-                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+                ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
             }
         },
         &settings,
@@ -1104,10 +1109,10 @@ fn run_control_schedule(
         let estimate = estimate_snapshot(&trace);
         let setpoint = setpoint_for_control_frame(control_frames);
         max_setpoint_horizontal_m = max_setpoint_horizontal_m.max(horizontal_norm_m(
-            setpoint.position_ned_m[0],
-            setpoint.position_ned_m[1],
+            setpoint.position_ned_m()[0],
+            setpoint.position_ned_m()[1],
         ));
-        max_abs_setpoint_yaw_rad = max_abs_setpoint_yaw_rad.max(setpoint.yaw_rad.abs());
+        max_abs_setpoint_yaw_rad = max_abs_setpoint_yaw_rad.max(setpoint.yaw_rad().abs());
         let output = pipeline.step(estimate, imu_from_sensor(&sensor), setpoint);
         assert!(
             output.control_valid,
@@ -1154,7 +1159,7 @@ fn run_control_schedule(
         if let Some(euler) = frame.euler_rad {
             max_attitude_rad = max_attitude_rad.max(euler[0].abs()).max(euler[1].abs());
             final_truth_roll_pitch_rad = [euler[0], euler[1]];
-            final_yaw_error_rad = yaw_error_rad(setpoint.yaw_rad, euler[2]);
+            final_yaw_error_rad = yaw_error_rad(setpoint.yaw_rad(), euler[2]);
             initial_yaw_error_rad.get_or_insert(final_yaw_error_rad);
         }
         let truth = frame
@@ -1172,8 +1177,8 @@ fn run_control_schedule(
             max_truth_origin_horizontal_m.max(final_truth_origin_horizontal_m);
         max_estimate_origin_horizontal_m =
             max_estimate_origin_horizontal_m.max(final_estimate_origin_horizontal_m);
-        final_truth_down_error_m = truth.position_ned_m[2] - setpoint.position_ned_m[2];
-        final_estimate_down_error_m = estimate.position_ned_m[2] - setpoint.position_ned_m[2];
+        final_truth_down_error_m = truth.position_ned_m[2] - setpoint.position_ned_m()[2];
+        final_estimate_down_error_m = estimate.position_ned_m[2] - setpoint.position_ned_m()[2];
         initial_truth_down_error_m.get_or_insert(final_truth_down_error_m);
         initial_estimate_down_error_m.get_or_insert(final_estimate_down_error_m);
         max_truth_down_error_m = max_truth_down_error_m.max(truth.position_ned_m[2].abs());
@@ -1184,11 +1189,11 @@ fn run_control_schedule(
             max_estimate_vertical_speed_mps.max(estimate.velocity_ned_mps[2].abs());
         max_truth_horizontal_error_m = max_truth_horizontal_error_m.max(horizontal_error_m(
             truth.position_ned_m,
-            setpoint.position_ned_m,
+            setpoint.position_ned_m(),
         ));
         max_estimate_horizontal_error_m = max_estimate_horizontal_error_m.max(horizontal_error_m(
             estimate.position_ned_m,
-            setpoint.position_ned_m,
+            setpoint.position_ned_m(),
         ));
     }
 
@@ -1312,8 +1317,17 @@ fn run_airborne_navigation_schedule(
     let mut nav_start_frame = None;
     let mut nav_frames = 0usize;
     let mut commanded_horizontal_ned_m = [0.0_f32; 2];
-    let mut stable_airborne_frames = 0usize;
-    let mut takeoff_hold_estimate_position_ned_m = None;
+    let mut takeoff_nav_gate = TakeoffNavGate::new(TakeoffNavGateConfig {
+        takeoff_down_m,
+        max_takeoff_down_error_m: settings.max_final_down_error_m,
+        max_vertical_speed_mps: settings.max_navigation_start_vertical_speed_mps(),
+        max_horizontal_speed_mps: settings.max_navigation_start_horizontal_speed_mps(),
+        max_estimate_truth_down_error_m: settings
+            .max_navigation_start_estimate_truth_down_error_m(),
+        max_yaw_error_rad: settings.max_navigation_start_yaw_error_rad(),
+        max_clamp_ratio: settings.max_clamp_ratio,
+        min_stable_frames: min_settle_frames,
+    });
     let mut clamp_count = 0usize;
     let mut nav_origin_truth_position_ned_m = None;
     let mut nav_origin_estimate_position_ned_m = None;
@@ -1371,8 +1385,6 @@ fn run_airborne_navigation_schedule(
         }
 
         let estimate = estimate_snapshot(&trace);
-        let takeoff_hold_estimate_position_ned_m =
-            *takeoff_hold_estimate_position_ned_m.get_or_insert(estimate.position_ned_m);
         let truth = frame
             .to_truth_estimate(origin)
             .expect("G3 truth side-channel should convert for evidence");
@@ -1387,29 +1399,30 @@ fn run_airborne_navigation_schedule(
         let nav_frame = nav_frames;
         let (requested_horizontal_ned_m, yaw_rad) =
             nav_setpoint_for_frame(nav_frame, nav_frames_required);
+        let gate_yaw_error_rad = frame
+            .euler_rad
+            .map(|euler| yaw_error_rad(yaw_rad, euler[2]).abs());
+        let clamp_ratio = if control_frames == 0 {
+            0.0
+        } else {
+            clamp_count as f32 / control_frames as f32
+        };
+        let gate_decision = takeoff_nav_gate.update(
+            TakeoffNavGateSample {
+                estimate_position_ned_m: estimate.position_ned_m,
+                estimate_velocity_ned_mps: estimate.velocity_ned_mps,
+                truth_position_ned_m: Some(truth.position_ned_m),
+                truth_velocity_ned_mps: Some(truth.velocity_ned_mps),
+                yaw_error_rad: gate_yaw_error_rad,
+                clamp_ratio,
+                estimate_valid: estimate.valid,
+            },
+            yaw_rad,
+        );
         if nav_start_frame.is_none() {
-            let yaw_aligned = frame.euler_rad.is_some_and(|euler| {
-                yaw_error_rad(yaw_rad, euler[2]).abs()
-                    <= settings.max_navigation_start_yaw_error_rad()
-            });
-            let stable_airborne = truth.position_ned_m[2] <= -settings.min_navigation_airborne_m()
-                && (estimate.position_ned_m[2] - truth.position_ned_m[2]).abs()
-                    <= settings.max_navigation_start_estimate_truth_down_error_m()
-                && truth.velocity_ned_mps[2].abs()
-                    <= settings.max_navigation_start_vertical_speed_mps()
-                && estimate.velocity_ned_mps[2].abs()
-                    <= settings.max_navigation_start_vertical_speed_mps()
-                && final_gate_truth_horizontal_speed_mps
-                    <= settings.max_navigation_start_horizontal_speed_mps()
-                && final_gate_estimate_horizontal_speed_mps
-                    <= settings.max_navigation_start_horizontal_speed_mps()
-                && yaw_aligned;
-            if stable_airborne {
-                stable_airborne_frames += 1;
-            } else {
-                stable_airborne_frames = 0;
-            }
-            if stable_airborne_frames >= min_settle_frames {
+            let airborne = truth.position_ned_m[2] <= -settings.min_navigation_airborne_m()
+                && estimate.position_ned_m[2] <= -settings.min_navigation_airborne_m();
+            if gate_decision.nav_ready && airborne {
                 nav_start_frame = Some(control_frames);
                 nav_origin_truth_position_ned_m = Some(truth.position_ned_m);
                 nav_origin_estimate_position_ned_m = Some(estimate.position_ned_m);
@@ -1436,13 +1449,9 @@ fn run_airborne_navigation_schedule(
                 nav_estimate_origin[2],
             ]
         } else {
-            [
-                takeoff_hold_estimate_position_ned_m[0],
-                takeoff_hold_estimate_position_ned_m[1],
-                takeoff_down_m,
-            ]
+            gate_decision.hold_setpoint.position_ned_m
         };
-        let setpoint = ControlSetpoint::new(absolute_setpoint, yaw_rad, true);
+        let setpoint = ControlSetpoint::local_position_ned(absolute_setpoint, yaw_rad, true);
         max_setpoint_horizontal_m = max_setpoint_horizontal_m.max(horizontal_norm_m(
             commanded_horizontal_ned_m[0],
             commanded_horizontal_ned_m[1],
@@ -1683,18 +1692,18 @@ fn run_takeoff_hover_land_mission(
         }
 
         let setpoint = if contact_now {
-            ControlSetpoint::new([0.0, 0.0, 0.0], 0.0, false)
+            ControlSetpoint::local_position_ned([0.0, 0.0, 0.0], 0.0, false)
         } else if control_frames < takeoff_one_end {
-            ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
         } else if control_frames < takeoff_two_end {
-            ControlSetpoint::new([0.0, 0.0, -2.0], 0.0, true)
+            ControlSetpoint::local_position_ned([0.0, 0.0, -2.0], 0.0, true)
         } else if control_frames < hover_end {
-            ControlSetpoint::new([0.0, 0.0, -2.0], 0.0, true)
+            ControlSetpoint::local_position_ned([0.0, 0.0, -2.0], 0.0, true)
         } else {
-            ControlSetpoint::new([0.0, 0.0, 0.05], 0.0, true)
+            ControlSetpoint::local_position_ned([0.0, 0.0, 0.05], 0.0, true)
         };
         let output = pipeline.step(estimate, imu_from_sensor(&sensor), setpoint);
-        if setpoint.armed {
+        if setpoint.armed() {
             assert!(
                 output.control_valid,
                 "invalid G2 control output at sim_time_us={}",

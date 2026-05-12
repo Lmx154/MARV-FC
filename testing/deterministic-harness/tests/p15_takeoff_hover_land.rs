@@ -168,14 +168,18 @@ fn mission_stage(tick: u64, contact_latched: bool) -> MissionStage {
 
 fn setpoint_for_stage(stage: MissionStage) -> ControlSetpoint {
     match stage {
-        MissionStage::TakeoffOne => ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true),
+        MissionStage::TakeoffOne => {
+            ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true)
+        }
         MissionStage::TakeoffTwo | MissionStage::Hover => {
-            ControlSetpoint::new([0.0, 0.0, -2.0], 0.0, true)
+            ControlSetpoint::local_position_ned([0.0, 0.0, -2.0], 0.0, true)
         }
         MissionStage::Descent => {
-            ControlSetpoint::new([0.0, 0.0, DESCENT_SETPOINT_DOWN_M], 0.0, true)
+            ControlSetpoint::local_position_ned([0.0, 0.0, DESCENT_SETPOINT_DOWN_M], 0.0, true)
         }
-        MissionStage::Spooldown => ControlSetpoint::new([0.0, 0.0, GROUND_DOWN_M], 0.0, false),
+        MissionStage::Spooldown => {
+            ControlSetpoint::local_position_ned([0.0, 0.0, GROUND_DOWN_M], 0.0, false)
+        }
     }
 }
 

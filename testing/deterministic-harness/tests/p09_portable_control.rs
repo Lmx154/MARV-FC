@@ -54,10 +54,7 @@ fn p09_portable_control_disarmed_zero_output_is_not_clamped() {
     let output = ControlPipeline::default().step_input(ControlInput::new(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint {
-            armed: false,
-            ..ControlSetpoint::ORIGIN_HOLD_ARMED
-        },
+        ControlSetpoint::local_position_ned([0.0, 0.0, 0.0], 0.0, false),
     ));
 
     assert!(!output.armed);

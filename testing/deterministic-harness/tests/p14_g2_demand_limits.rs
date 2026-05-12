@@ -4,7 +4,7 @@ use common::control::{
 };
 use deterministic_harness::{
     ControlPipeline, ControlPipelineTrace, ControlSetpoint, EstimateSnapshot, ImuControlInput,
-    PureControlConfig,
+    LocalTrajectorySetpoint, PureControlConfig,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -31,7 +31,11 @@ fn p14_g2_demand_limits_bound_extreme_position_and_altitude_requests() {
     let output = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint::new([1_000.0, -1_000.0, -100.0], 90.0_f32.to_radians(), true),
+        ControlSetpoint::local_position_ned(
+            [1_000.0, -1_000.0, -100.0],
+            90.0_f32.to_radians(),
+            true,
+        ),
     );
     let summary = summarize_demand_limits(output, config);
 
@@ -80,7 +84,7 @@ fn p14_g2_demand_limits_report_mixer_saturation() {
     let output = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint::new([50.0, 50.0, -50.0], 180.0_f32.to_radians(), true),
+        ControlSetpoint::local_position_ned([50.0, 50.0, -50.0], 180.0_f32.to_radians(), true),
     );
     let summary = summarize_demand_limits(output, config);
 
@@ -102,11 +106,68 @@ fn p14_g2_demand_limits_report_mixer_saturation() {
 }
 
 #[test]
+fn p14_g2_demand_limits_tilt_increases_collective_to_preserve_vertical_thrust() {
+    let config = demand_limit_config();
+    let pipeline = ControlPipeline::new(PureControlConfig {
+        loop_config: config,
+    });
+    let output = pipeline.step(
+        EstimateSnapshot::LEVEL_ORIGIN,
+        ImuControlInput::default(),
+        ControlSetpoint::from_local_trajectory(
+            LocalTrajectorySetpoint {
+                position_ned_m: [0.0, 0.0, 0.0],
+                velocity_ned_mps: [0.0, 0.0, 0.0],
+                acceleration_ned_mps2: [config.position.max_horizontal_accel_mps2, 0.0, 0.0],
+                yaw_rad: 0.0,
+                yaw_rate_rad_s: 0.0,
+            },
+            true,
+        ),
+    );
+
+    assert!(
+        output.control_valid,
+        "control should stay valid: {output:?}"
+    );
+    let requested_collective = output
+        .debug
+        .requested_collective_throttle
+        .expect("valid control should report requested collective");
+    let applied_collective = output
+        .debug
+        .applied_collective_throttle
+        .expect("valid control should report applied collective");
+    let tilt_compensation = output
+        .debug
+        .tilt_compensation
+        .expect("valid control should report tilt compensation");
+
+    assert!(
+        tilt_compensation > 1.0,
+        "tilt should require collective compensation: {output:?}"
+    );
+    assert!(
+        requested_collective > config.altitude.hover_throttle,
+        "tilt should increase requested collective above hover: {output:?}"
+    );
+    assert_eq!(applied_collective, output.throttle);
+    assert!(
+        output
+            .debug
+            .vertical_throttle_margin
+            .expect("valid control should report vertical margin")
+            > 0.0,
+        "small tilt demand should retain vertical throttle margin: {output:?}"
+    );
+}
+
+#[test]
 fn p14_g2_demand_limits_failsafe_zero_is_final_safe_state_for_bad_demands() {
     let output = ControlPipeline::default().step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
-        ControlSetpoint::new([0.0, f32::NAN, 0.0], 0.0, true),
+        ControlSetpoint::local_position_ned([0.0, f32::NAN, 0.0], 0.0, true),
     );
 
     assert!(output.armed);

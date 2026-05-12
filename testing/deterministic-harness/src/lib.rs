@@ -30,8 +30,12 @@ pub use closed_loop_estimator::{
     ClosedLoopEstimatorTrace, SimulatedSensorConfig, simulated_sensors,
 };
 pub use control_pipeline::{
-    ControlInput, ControlPipeline, ControlPipelineTrace, ControlSetpoint, EstimateSnapshot,
-    ImuControlInput, PureControlConfig,
+    ClampSource, ControlFrame, ControlInput, ControlNavPhase, ControlPipeline,
+    ControlPipelineTrace, ControlSetpoint, ControlSetpointSource, EstimateSnapshot,
+    EstimatorLocalState, GuidanceCommand, GuidanceOutput, GuidancePhase, GuidanceStateMachine,
+    ImuControlInput, LocalTrajectorySetpoint, MissionWaypoint, MixerLimitFlags, PureControlConfig,
+    RateControllerOutput, RateLimitFlags, ThrustVectorConfig, ThrustVectorController,
+    ThrustVectorSetpoint, TrajectoryGenerator, TrajectoryLimits, TruthEvidence,
 };
 pub use estimator_replay::{
     EstimatorReplayConfig, EstimatorReplayDriver, EstimatorReplayReport, EstimatorReplayTrace,
