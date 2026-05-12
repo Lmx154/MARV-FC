@@ -320,3 +320,76 @@ Phase 9 gate:
 cargo test -p telemetry-app gazebo_bridge_client
 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p08_gazebo_contract
 ```
+
+## Phase 16 G2.5 Control Hardening
+
+Phase 16 starts the post-G2 hardening block with deterministic host gates before
+adding another Gazebo runtime dependency. These tests keep the scope below
+navigation: altitude, yaw, disturbance recovery, parameter margins, demand
+limits, and visible saturation/failsafe behavior. The ignored Gazebo gate uses
+the same G2 estimator-in-loop bridge path and applies an explicit conservative
+G2 yaw-rate cap so large yawed-hover steps do not become hidden saturation.
+The second ignored Gazebo gate adds live runtime evidence for scheduled yaw
+setpoint disturbance recovery and short extreme-demand limiting; the current
+bridge still exposes reset/pause/play rather than direct physical wrench or
+pose injection. A third ignored Gazebo gate now keeps the earlier unsafe
+`0.75 m` live lateral setpoint disturbance in Phase 16 by running a longer
+scheduled lateral pulse and return-to-origin check with a gentler G2 position
+gain.
+
+Phase 16 host checks cover:
+
+- staged altitude ladder setpoints at `-0.5 m`, `-1 m`, `-2 m`, and `-3 m`
+- yawed hover at 45, 90, 180 degrees, plus return-to-zero yaw
+- roll/pitch disturbances at 10, 20, and 30 degrees
+- yaw-rate impulses in both directions
+- mass and motor-thrust margin sweeps
+- bounded tilt, inferred horizontal acceleration, throttle correction, rate
+  command, mixer saturation, and invalid-demand failsafe zero output
+
+Phase 16 host gate:
+
+```sh
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_g2_control_hardening
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_g2_demand_limits
+```
+
+Phase 16 Gazebo gate:
+
+```sh
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_gazebo_g2_control_hardening -- --ignored --nocapture
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_gazebo_g2_runtime_disturbance_and_demand_limits -- --ignored --nocapture
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_gazebo_g2_runtime_lateral_setpoint_disturbance -- --ignored --nocapture
+```
+
+## Phase 17 Takeoff-Hover-Land
+
+Phase 17 adds the first vertical mission-segment gate before navigation. The
+horizontal setpoint remains origin hold while the profile stages takeoff,
+settles into hover, descends toward the pad, detects near-ground/contact using
+truth evidence, and only then disarms to zero motor output.
+With default G2 runtime limits, the live gate passed with bounded attitude,
+vertical speed, horizontal containment, landing impact speed, and post-contact
+zero motor output.
+
+Phase 17 host checks cover:
+
+- staged takeoff through `-1 m` and `-2 m` altitude setpoints
+- hover hold near `-2 m` before descent
+- bounded vertical speed, impact speed, and mixer clamp ratio
+- a host ground-contact clamp so the deterministic plant cannot fall through
+  the pad after landing
+- no zero motor output before contact criteria are met
+- post-contact disarmed zero output with no relaunch
+
+Phase 17 host gate:
+
+```sh
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p15_takeoff_hover_land
+```
+
+Phase 17 Gazebo gate:
+
+```sh
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p15_gazebo_takeoff_hover_land -- --ignored --nocapture
+```

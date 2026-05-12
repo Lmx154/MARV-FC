@@ -301,16 +301,16 @@
     <header class="hero">
       <h1>MARV Deterministic Test Harness Implementation Plan</h1>
       <p>
-        Updated implementation context and next-flight-readiness path for MARV’s deterministic harness, portable control logic, Gazebo bridge, and firmware/HIL adoption.
+        Updated implementation context and next-flight-readiness path for MARV’s deterministic harness, portable control logic, Gazebo bridge, flight-control hardening, navigation validation, and firmware/HIL adoption.
       </p>
       <div class="badges">
         <span class="badge">✓ Host-first</span>
         <span class="badge">✓ Lockstep time</span>
         <span class="badge">✓ Component oracles before closed loop</span>
         <span class="badge">✓ Gazebo only after deterministic tests pass</span>
-        <span class="badge">✓ Phases 0–9 implemented and passing</span>
-        <span class="badge">Next: portable control flight readiness</span>
-        <span class="badge">Updated May 11, 2026</span>
+        <span class="badge">✓ Phases 0–15 baseline proven</span>
+        <span class="badge">Next: G2.5 hardening → landing → G3 navigation</span>
+        <span class="badge">Updated May 12, 2026</span>
       </div>
     </header>
 
@@ -319,7 +319,7 @@
       <a href="#objective">Objective <span>What we are building</span></a>
       <a href="#architecture">Architecture <span>Harness, sim, and firmware boundaries</span></a>
       <a href="#increments">Incremental phases <span>Every phase has tests</span></a>
-      <a href="#next-flight-readiness">Flight readiness <span>Next path to Gazebo hover</span></a>
+      <a href="#next-flight-readiness">Flight readiness <span>G2 baseline → G3 readiness</span></a>
       <a href="#matrix">Test matrix <span>What each layer proves</span></a>
     </nav>
 
@@ -331,7 +331,7 @@
       </p>
 
       <div class="callout good">
-        <strong>Current status:</strong> phases 0–9 and 11–12 are treated as complete and passing; Phase 10 remains intentionally deferred until the harness artifacts are worth freezing in CI. MARV now has an offline deterministic harness, estimator replay fixtures, a canonical common control pipeline, control envelope tests, gain-sweep evidence, open-loop and closed-loop plant tests, estimator-in-loop tests, a HIL semantic adapter, and Gazebo bridge contract checks. Phase 13 now has a manual/ignored Gazebo G0 actuator-only runtime driver, and a live bridge run has confirmed that direct actuator commands reach Gazebo; the bridge API now also accepts <code>SIM_CONTROL</code> reset/pause/play commands so the physical truth table can become resettable instead of manual-reset driven.
+        <strong>Current status:</strong> phases 0–15 are now treated as the current baseline: deterministic host tests, canonical common control, control envelope/gain-sweep tests, G0 actuator truth, G1 estimator-bypass control, and G2 estimator-in-loop hover/vertical-step have all produced useful passing evidence. Phase 10 remains intentionally deferred until the harness artifacts are worth freezing in CI. The next move is not direct hardware and not a full navigation mission. The next move is a G2.5 flight-control hardening block: freeze the current G2 baseline, add tougher non-navigation control cases, add takeoff-hover-land/soft-landing as its own gate, keep aerobatic tests sim-only, then move into G3 navigation validation.
       </div>
 
       <div class="diagram" aria-label="Current implementation and next path diagram">
@@ -384,25 +384,25 @@
           <path d="M615 209 H665" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
 
           <text x="20" y="310" class="svg-label">Next implementation path</text>
-          <rect x="20" y="335" width="180" height="70" rx="14" class="node-blue"></rect>
-          <text x="40" y="363" class="svg-label">Canonical step</text>
-          <text x="40" y="384" class="svg-sub">move portable control to common</text>
+          <rect x="20" y="335" width="180" height="70" rx="14" class="node-green"></rect>
+          <text x="40" y="363" class="svg-label">G2 baseline</text>
+          <text x="40" y="384" class="svg-sub">hover + vertical step</text>
 
           <rect x="230" y="335" width="170" height="70" rx="14" class="node-blue"></rect>
-          <text x="250" y="363" class="svg-label">Envelope tests</text>
-          <text x="250" y="384" class="svg-sub">multi-second + gain sweep</text>
+          <text x="250" y="363" class="svg-label">G2.5 hardening</text>
+          <text x="250" y="384" class="svg-sub">disturbance + limits</text>
 
           <rect x="430" y="335" width="170" height="70" rx="14" class="node-amber"></rect>
-          <text x="450" y="363" class="svg-label">Gazebo G0</text>
-          <text x="450" y="384" class="svg-sub">actuator truth table</text>
+          <text x="450" y="363" class="svg-label">Soft landing</text>
+          <text x="450" y="384" class="svg-sub">descent + spool-down</text>
 
           <rect x="630" y="335" width="170" height="70" rx="14" class="node-amber"></rect>
-          <text x="650" y="363" class="svg-label">Gazebo G1</text>
-          <text x="650" y="384" class="svg-sub">estimator bypass hover</text>
+          <text x="650" y="363" class="svg-label">Acro sandbox</text>
+          <text x="650" y="384" class="svg-sub">sim-only recovery</text>
 
           <rect x="830" y="335" width="170" height="70" rx="14" class="node-amber"></rect>
-          <text x="850" y="363" class="svg-label">Gazebo G2</text>
-          <text x="850" y="384" class="svg-sub">estimator-in-loop hover</text>
+          <text x="850" y="363" class="svg-label">Gazebo G3</text>
+          <text x="850" y="384" class="svg-sub">navigation validation</text>
 
           <path d="M200 370 H230" stroke="#315eea" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
           <path d="M400 370 H430" stroke="#315eea" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
@@ -425,37 +425,37 @@
             <td><code>ControlPipeline</code> in the harness</td>
             <td>Host adapter that feeds truth/estimated state into position, altitude, attitude, rate, and quad-X mixer stages from <code>common</code>.</td>
             <td>Pure control signs, limits, motor outputs, clamp flags, and NED altitude behavior can be tested without estimator or Gazebo noise.</td>
-            <td>Promote the reusable step boundary into <code>common</code> so firmware and harness execute the same code path.</td>
+            <td>Keep the common step as the one source of truth; add demand limiting, yaw/altitude hardening, and mode-gated aggressive setpoints before navigation.</td>
           </tr>
           <tr>
             <td><code>ClosedLoopRunner</code> + <code>TruthPlant</code></td>
             <td>Truth-state closed loop applies motor outputs to a simple NED vertical + attitude-rate plant and records per-tick traces.</td>
             <td>Control + mixer + plant signs are sane when state is perfect.</td>
-            <td>Add longer envelope tests and structured gain sweeps before Gazebo hover attempts.</td>
+            <td>Extend into takeoff-hover-land, descent/contact behavior, disturbance injection, and saturation/demand-limiter tests before navigation.</td>
           </tr>
           <tr>
             <td><code>ClosedLoopEstimatorRunner</code></td>
             <td>Truth-derived simulated sensors feed the real estimator, estimator output feeds control, and motor outputs step the plant.</td>
             <td>The deterministic estimator-control-actuator loop is bounded for controlled scenarios.</td>
-            <td>Extend beyond basic hold/step cases into dropout, spikes, warmup, and disturbance envelopes.</td>
+            <td>Extend beyond hover/vertical step into G2.5 disturbances, yawed holds, dropout during hold, and landing/relaunch prevention.</td>
           </tr>
           <tr>
             <td><code>HilSemanticAdapter</code></td>
             <td>Harness sensor frames become MARV HIL-domain structs; responses are built from estimator/control traces.</td>
             <td>Duplicate ticks, stale time, valid flags, non-finite samples, response correlation, and failsafe zero output are checked offline.</td>
-            <td>Use this boundary to validate firmware integration after the canonical portable control step exists.</td>
+            <td>Use this boundary for firmware parity after G2.5/landing evidence exists; firmware HIL should match host traces before hardware flight.</td>
           </tr>
           <tr>
             <td>Gazebo bridge contracts</td>
             <td>Known text <code>SENSOR</code> frames, <code>ACTUATOR</code> formatting, motor-speed scaling, config topics, and motor-direction delegation are tested without Gazebo runtime.</td>
             <td>The bridge protocol and static config are not opaque anymore.</td>
-            <td>Measure the Gazebo model’s physical response with actuator-only runtime tests.</td>
+            <td>Keep G0/G1/G2 runtime gates as the physical baseline; every new G2.5/G3 test should report truth, estimate, control, motor, and clamp traces.</td>
           </tr>
         </tbody>
       </table>
 
       <div class="callout warn">
-        <strong>Important remaining risk:</strong> the harness proves the internal contracts, but it still does not prove the Gazebo model’s physical motor order, spin-direction reaction torque, hover thrust, ENU/NED conversion, or sensor-frame orientation. Those must be proven with the runtime Gazebo gates below before full autonomous Gazebo hover is meaningful.
+        <strong>Important remaining risk:</strong> the harness now has enough G0/G1/G2 evidence to treat simple hover and vertical steps as a baseline, but it still does not prove landing behavior, recovery after large disturbances, demand limiting under saturation, firmware timing parity, or navigation-shaped missions. Those are the next gates before any hardware flight attempt.
       </div>
     </section>
 
@@ -1447,23 +1447,178 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_estimator_loop -- --ignored --nocapture</code></pre>
       </div>
 
-      <div class="phase">
+
+      <div class="phase" id="phase-16-g2-control-hardening">
         <div class="phase-header">
-          <h3>Phase 16 — Firmware HIL adoption</h3>
+          <h3>Phase 16 — G2 baseline freeze and non-navigation control hardening</h3>
           <div class="phase-meta">
-            <span class="pill blue">Scope: embedded integration</span>
-            <span class="pill green">Exit: firmware uses validated logic</span>
+            <span class="pill green">Host gates added</span>
+            <span class="pill green">Gazebo gate added</span>
+            <span class="pill blue">Scope: basic flight control before navigation</span>
+            <span class="pill green">Exit: hover/vertical/yaw/disturbance cases are boring</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Decision:</strong> do not jump straight from G2 vertical-step success into navigation or hardware. The next logical increment is a G2.5 block that makes basic flight control harder while still avoiding navigation. Navigation can start after these gates pass; aerobatics remain a separate sim-only sandbox and should not be treated as a prerequisite for ordinary position navigation.
+        </div>
+        <p>
+          Promote the current G2 hover, vertical-step, and mag-enabled runs into a named baseline, then deliberately stress altitude, attitude, yaw, and actuator saturation without asking the vehicle to fly a route. These tests should exercise the same full loop as G2: Gazebo sensors → MARV estimator → common control → measured runtime mixer basis → bridge actuators.
+        </p>
+        <div class="callout good">
+          <strong>Evidence added:</strong> deterministic <code>p14_g2_control_hardening</code> and <code>p14_g2_demand_limits</code> gates now cover altitude ladder, yawed hover/return-to-zero, 10°/20°/30° roll/pitch recovery, yaw-rate damping, mass/thrust margin sweeps, bounded demand limits, visible mixer saturation, and invalid-demand failsafe zero output. The ignored live <code>p14_gazebo_g2_control_hardening</code> gate now exercises the G2 estimator-in-loop runtime path across origin hold, altitude ladder, and 45°/90°/180° airborne yawed-hover cases. The ignored live <code>p14_gazebo_g2_runtime_disturbance_and_demand_limits</code> gate adds scheduled yaw setpoint disturbance recovery plus a short extreme-demand case that reports and gates max tilt demand, yaw-rate demand, throttle correction, rate-axis command, motor range, altitude, vertical speed, and horizontal containment. The ignored live <code>p14_gazebo_g2_runtime_lateral_setpoint_disturbance</code> gate closes the earlier unsafe <code>0.75 m</code> lateral setpoint probe with a longer scheduled pulse and return-to-origin check.
+        </div>
+        <div class="callout warn">
+          <strong>Phase 16 finding:</strong> a 180° yawed-hover command was not initially boring in Gazebo; it reduced yaw error but could saturate, lose attitude/altitude, and drift. The G2 runtime profile now exposes <code>MARV_GAZEBO_G2_MAX_YAW_RATE_RPS</code> and defaults it to a conservative <code>0.03</code> rad/s for this gate. The earlier <code>0.75 m</code> live lateral setpoint probe also showed that the G2 lateral position pull was too aggressive for estimator-in-loop runtime evidence, so <code>MARV_GAZEBO_G2_POSITION_GAIN</code> now defaults to <code>0.12</code>. With those caps, the live hardening, disturbance/demand-limit, and lateral setpoint gates passed with bounded attitude, altitude, vertical speed, horizontal containment, and visible demand limits. Direct live attitude/rate disturbance injection remains a bridge capability gap; today the runtime disturbance gates use commanded setpoint disturbances through the live estimator/control/mixer/actuator path.
+        </div>
+        <table>
+          <thead><tr><th>Scenario</th><th>Why it comes before navigation</th><th>Required evidence</th></tr></thead>
+          <tbody>
+            <tr><td>G2 baseline regression</td><td>Locks the known-good hover, vertical step, and mag-heading-only behavior.</td><td>Repeat current G2 gates with fixed tolerances, seed/profile labels, trace summaries, and no hidden relaxed thresholds.</td></tr>
+            <tr><td>Altitude ladder</td><td>Separates vertical control from navigation by commanding staged <code>-0.5 m</code>, <code>-1 m</code>, <code>-2 m</code>, and <code>-3 m</code> setpoints.</td><td>Bounded vertical velocity, bounded overshoot, low clamp ratio, and horizontal drift inside the hover envelope.</td></tr>
+            <tr><td>Yawed hover setpoints</td><td>Navigation will later combine position and yaw; yaw must be safe first.</td><td>45°, 90°, 180°, and return-to-zero heading commands converge without roll/pitch blow-up, motor chatter, or estimator invalidation.</td></tr>
+            <tr><td>Large but recoverable attitude/rate disturbances</td><td>Tests attitude/rate control authority without requiring a waypoint planner.</td><td>Injected roll/pitch disturbances at 10°/20°/30° and yaw-rate impulses recover toward level/commanded yaw within bounded time and clamp ratio.</td></tr>
+            <tr><td>Disturbance and parameter margin</td><td>Real hardware will not exactly match the Gazebo profile.</td><td>Mass, hover-throttle, motor-thrust, wind/gust, and battery-derating sweeps remain finite and either recover or enter documented failsafe.</td></tr>
+            <tr><td>Demand limiting and saturation</td><td>Prevents later position errors from becoming wild tilt or throttle commands.</td><td>Every limit is reported: max tilt, max horizontal acceleration, max throttle correction, clamp ratio, and final safe state.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 16 gates
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_g2_control_hardening
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_g2_demand_limits
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_gazebo_g2_control_hardening -- --ignored --nocapture
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_gazebo_g2_runtime_disturbance_and_demand_limits -- --ignored --nocapture
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p14_gazebo_g2_runtime_lateral_setpoint_disturbance -- --ignored --nocapture</code></pre>
+      </div>
+
+      <div class="phase" id="phase-17-takeoff-hover-land">
+        <div class="phase-header">
+          <h3>Phase 17 — Takeoff-hover-land and soft-landing gate</h3>
+          <div class="phase-meta">
+            <span class="pill amber">Current</span>
+            <span class="pill purple">Scope: vertical mission segment</span>
+            <span class="pill green">Exit: land without bounce or relaunch</span>
           </div>
         </div>
         <p>
-          The embedded step should happen after the portable common control path has passed deterministic and Gazebo runtime gates. At that point firmware work is mostly scheduling, channel, DShot, and HIL transport integration—not rediscovering controller signs or mixer conventions.
+          Soft landing deserves its own gate before navigation because every useful mission eventually has to descend, detect the ground, stop thrust, and stay stopped. This is still non-navigation: the horizontal setpoint remains origin hold while altitude profiles, descent limits, contact behavior, and motor shutdown are validated.
+        </p>
+        <div class="callout good">
+          <strong>Evidence added:</strong> deterministic <code>p15_takeoff_hover_land</code> now covers staged <code>-1 m</code> / <code>-2 m</code> takeoff, hover hold, controlled descent, host ground-contact clamp, no pre-contact idle motors, and post-contact disarmed zero output. The ignored live <code>p15_gazebo_takeoff_hover_land</code> gate passed through the G2 estimator/control/mixer/actuator path, uses Gazebo truth as the near-ground/contact criterion, and requires bounded attitude, vertical speed, horizontal containment, landing impact speed, and post-contact zero motor evidence.
+        </div>
+        <table>
+          <thead><tr><th>Subcase</th><th>Required behavior</th><th>Failure meaning</th></tr></thead>
+          <tbody>
+            <tr><td>Staged takeoff</td><td>Ramp or stage to <code>-1 m</code> / <code>-2 m</code>; avoid launch spikes and sustained saturation.</td><td>Takeoff throttle profile, ground-contact model, or altitude gain issue.</td></tr>
+            <tr><td>Hover hold</td><td>Hold at target altitude with bounded vertical/horizontal error and low motor spread.</td><td>Altitude hold or estimator drift issue.</td></tr>
+            <tr><td>Controlled descent</td><td>Descend with an explicit final down-velocity limit and no hard impact spike.</td><td>Vertical velocity controller, throttle floor, or descent planner issue.</td></tr>
+            <tr><td>Ground contact</td><td>Detect near-ground/contact state using truth in Gazebo and estimator evidence; freeze descent intent after contact.</td><td>Ground state or estimator/altitude disagreement issue.</td></tr>
+            <tr><td>Spool-down/disarm</td><td>Motors ramp to idle/zero only after contact criteria are met; no bounce, no relaunch, no stale high command.</td><td>State machine, arming, failsafe, or actuator holdover issue.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 17 gates
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p15_takeoff_hover_land
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p15_gazebo_takeoff_hover_land -- --ignored --nocapture</code></pre>
+      </div>
+
+      <div class="phase" id="phase-18-aggressive-control-sandbox">
+        <div class="phase-header">
+          <h3>Phase 18 — Aggressive attitude/rate and aerobatic sandbox</h3>
+          <div class="phase-meta">
+            <span class="pill purple">Sim-only</span>
+            <span class="pill blue">Scope: advanced control outside navigation</span>
+            <span class="pill red">Exit: never a hardware gate by itself</span>
+          </div>
+        </div>
+        <div class="callout warn">
+          <strong>Barrel-roll rule:</strong> a barrel roll or flip is useful as a simulator-only stress test only after MARV has an explicit acro/rate-mode command path and a recovery-to-hover criterion. It should not be hidden inside position-hold navigation, and it should not block ordinary G3 navigation unless the standard attitude/rate recovery cases fail.
+        </div>
+        <p>
+          This phase is where “extreme” control tests belong. The purpose is not to prove the vehicle should fly aerobatics on hardware; the purpose is to reveal estimator validity loss, motor saturation behavior, quaternion/rate sign mistakes, and recovery-state-machine problems while the test remains fully contained in sim.
+        </p>
+        <table>
+          <thead><tr><th>Sandbox case</th><th>Mode requirement</th><th>Pass condition</th></tr></thead>
+          <tbody>
+            <tr><td>High-angle upset recovery</td><td>Normal stabilized mode</td><td>Recover from 30°–60° initial roll/pitch disturbances to bounded hover without sustained saturation.</td></tr>
+            <tr><td>Yaw-rate stress</td><td>Normal or rate-limited yaw mode</td><td>Commanded yaw rate damps to requested heading/rate; estimator remains valid or fails safe explicitly.</td></tr>
+            <tr><td>Flip/barrel-roll sandbox</td><td>Explicit acro/rate mode only; never position-hold mode</td><td>Truth-bypass first, estimator-in-loop second; complete maneuver, recover to stable hover, and produce trace evidence for saturation, attitude, rate, and estimator validity.</td></tr>
+            <tr><td>Post-upset failsafe</td><td>All modes</td><td>If recovery cannot be completed, the system enters a documented safe state instead of continuing stale or saturated outputs.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 18 gates; ignored/sim-only
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p16_aggressive_attitude_recovery
+MARV_GAZEBO_ACRO_SANDBOX=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p16_gazebo_acro_sandbox -- --ignored --nocapture</code></pre>
+      </div>
+
+      <div class="phase" id="phase-19-g3-navigation-validation">
+        <div class="phase-header">
+          <h3>Phase 19 — Gazebo G3 navigation validation</h3>
+          <div class="phase-meta">
+            <span class="pill amber">After G2.5 + landing</span>
+            <span class="pill purple">Scope: position navigation</span>
+            <span class="pill green">Exit: small missions are bounded</span>
+          </div>
+        </div>
+        <p>
+          Start navigation after the non-navigation control and landing gates are stable. The first navigation tests should be small, observable, and aggressively limited; they should prove that position demand becomes bounded tilt and bounded acceleration, not a silent request for wild attitude.
+        </p>
+        <table>
+          <thead><tr><th>G3 case</th><th>Setpoint sequence</th><th>Required assertions</th></tr></thead>
+          <tbody>
+            <tr><td>North step</td><td><code>[1,0,0]</code></td><td>Moves north, not east/south; bounded tilt, altitude, and clamp ratio.</td></tr>
+            <tr><td>East step</td><td><code>[0,1,0]</code></td><td>Moves east, not north/west; bounded yaw coupling and horizontal speed.</td></tr>
+            <tr><td>Diagonal step</td><td><code>[1,1,0]</code>, then return origin</td><td>Both axes respond with correct signs and no excessive cross-track drift.</td></tr>
+            <tr><td>Small waypoint square</td><td>1 m or 2 m square at fixed altitude</td><td>Each leg improves toward its target; final return-to-origin error is inside gate.</td></tr>
+            <tr><td>Yawed navigation</td><td>Same steps at nonzero yaw setpoints</td><td>Navigation remains NED/world-frame correct while body yaw changes.</td></tr>
+            <tr><td>GPS dropout during hold</td><td>Hold position, temporarily invalidate GPS</td><td>Estimator/control remain finite, hold bounded, or enter documented failsafe; no stale uncontrolled output.</td></tr>
+            <tr><td>Baro/mag disturbance during hold</td><td>Hold with injected sensor disturbance</td><td>Altitude/heading errors are gated; magnetometer remains heading-only and never becomes tilt authority.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 19 gates
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p17_navigation_steps
+MARV_GAZEBO_G3_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p17_gazebo_navigation_validation -- --ignored --nocapture</code></pre>
+      </div>
+
+      <div class="phase" id="phase-20-firmware-hil-parity">
+        <div class="phase-header">
+          <h3>Phase 20 — Firmware HIL parity adoption</h3>
+          <div class="phase-meta">
+            <span class="pill blue">Parallel after G2 baseline</span>
+            <span class="pill purple">Scope: embedded integration</span>
+            <span class="pill green">Exit: firmware matches host behavior</span>
+          </div>
+        </div>
+        <p>
+          Firmware HIL can begin once the G2 baseline is frozen, but it should not be confused with hardware flight readiness. First goal: for the same Gazebo frames, firmware produces the same estimate/control/motor behavior as the host harness within explicit tolerances. If parity fails, the failure is scheduling, channel freshness, HIL routing, DShot output mapping, or watchdog/failsafe interaction—not a reason to retune the controller blindly.
         </p>
         <table>
           <thead><tr><th>Boundary</th><th>Validation</th><th>Failure meaning</th></tr></thead>
           <tbody>
-            <tr><td>Firmware calls common control step</td><td>Same unit/golden tests as harness; embedded check/build passes.</td><td>API or no_std integration issue, not control math.</td></tr>
-            <tr><td>HIL ingress to estimator/control</td><td>Phase 8 HIL semantics plus device-level HIL replay.</td><td>Routing/timestamp/valid-flag problem.</td></tr>
-            <tr><td>DShot/actuator output</td><td>Known motor vectors produce expected DShot channels.</td><td>Output mapping or scheduling problem.</td></tr>
+            <tr><td>Firmware calls common control step</td><td>Same unit/golden tests as harness; embedded check/build passes.</td><td>API or <code>no_std</code> integration issue, not control math.</td></tr>
+            <tr><td>HIL ingress to estimator/control</td><td>Replay the same G2/G2.5/G3 frame logs through <code>RP235X-TEST</code> and compare estimates, control debug, clamp flags, and motor commands.</td><td>Routing/timestamp/valid-flag problem.</td></tr>
+            <tr><td>DShot/actuator output</td><td>Known motor vectors and closed-loop frames produce expected DShot channels and zero-output failsafe on invalid/stale frames.</td><td>Output mapping, timing, or scheduling problem.</td></tr>
+            <tr><td>Watchdog/failsafe interaction</td><td>HIL submode can run without accidental watchdog starvation; invalid sensor/control cases produce documented safe outputs.</td><td>Firmware phase/liveness policy problem.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="phase" id="phase-21-hardware-preflight">
+        <div class="phase-header">
+          <h3>Phase 21 — Hardware preflight gates before real air</h3>
+          <div class="phase-meta">
+            <span class="pill red">Hardware-blocking</span>
+            <span class="pill blue">Scope: bench and tether only</span>
+            <span class="pill green">Exit: controlled first-hop readiness</span>
+          </div>
+        </div>
+        <p>
+          Hardware should remain blocked until G2.5 control hardening, takeoff-hover-land, G3 navigation basics, and firmware HIL parity are passing. The first hardware work should be bench/tether validation, not autonomous flight.
+        </p>
+        <table>
+          <thead><tr><th>Gate</th><th>Required evidence</th><th>Do not proceed if</th></tr></thead>
+          <tbody>
+            <tr><td>Measured airframe profile</td><td>Mass, motor order, spin directions, thrust/hover estimate, sensor orientation, actuator mapping, and battery/current limits recorded.</td><td>Any physical mapping is inferred instead of measured.</td></tr>
+            <tr><td>Bench motor and failsafe tests</td><td>Disarmed zero, armed idle, known motor vectors, kill/disarm, stale-frame failsafe, and logging all behave predictably.</td><td>Any output is stale, unmapped, or cannot be killed.</td></tr>
+            <tr><td>Static/tethered spool checks</td><td>Low-power spool and tethered lift checks match expected signs and do not fight level attitude.</td><td>Roll/pitch/yaw response disagrees with G0/G1/G2 evidence.</td></tr>
+            <tr><td>First-hop profile</td><td>Manual abort path, altitude cap, geofence/tilt cap, logging, and post-flight trace review defined before takeoff.</td><td>No complete abort/logging/review path exists.</td></tr>
           </tbody>
         </table>
       </div>
@@ -1557,6 +1712,30 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
             <td>Full SITL path can hold simple setpoints.</td>
             <td>Real hardware sensor noise, timing, DShot electrical behavior.</td>
           </tr>
+          <tr>
+            <td>G2.5 control hardening</td>
+            <td>Altitude ladder, yawed hover, large recoverable attitude/rate disturbances, demand limiting, gust and parameter sweeps.</td>
+            <td>Basic flight control remains bounded before navigation asks for horizontal motion.</td>
+            <td>Waypoint following or real hardware behavior.</td>
+          </tr>
+          <tr>
+            <td>Takeoff-hover-land</td>
+            <td>Staged takeoff, hover, controlled descent, ground-contact behavior, spool-down/disarm, no bounce/relaunch.</td>
+            <td>The vertical mission segment can end safely in sim.</td>
+            <td>Lateral navigation or hardware ground-effect behavior.</td>
+          </tr>
+          <tr>
+            <td>Aggressive/acrobatic sandbox</td>
+            <td>High-angle upset recovery, yaw-rate stress, optional flip/barrel-roll only in explicit acro/rate mode.</td>
+            <td>Estimator/control/failsafe behavior is observable under extreme simulated conditions.</td>
+            <td>Hardware readiness or ordinary navigation correctness.</td>
+          </tr>
+          <tr>
+            <td>G3 navigation</td>
+            <td>North/east/diagonal steps, small square, yawed setpoints, GPS dropout, baro/mag disturbance while holding.</td>
+            <td>Position demand becomes bounded tilt/acceleration and improves toward small mission targets.</td>
+            <td>Firmware timing parity or real airworthiness.</td>
+          </tr>
         </tbody>
       </table>
     </section>
@@ -1584,6 +1763,9 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
             <li>Control does not continue with stale or invalid estimate unless explicitly configured to failsafe.</li>
             <li>Failsafe output is zero or a documented safe value.</li>
             <li>No sustained saturation during a nominal hover case.</li>
+            <li>Landing profiles enforce final down-velocity, contact, spool-down, and no-relaunch criteria.</li>
+            <li>Aggressive attitude/rate tests start sim-only and must define recovery-to-hover or failsafe success before they are useful.</li>
+            <li>Navigation demand is limited before it becomes excessive tilt, acceleration, throttle correction, or hidden saturation.</li>
           </ul>
         </div>
       </div>
@@ -1592,33 +1774,33 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
     <section class="card">
       <h2>7. Minimum next milestone</h2>
       <p class="lead">
-        The first milestone has effectively been achieved: the harness crate exists, component contracts are in place, estimator replay works, control and plant loops run, HIL semantics are tested, and Gazebo bridge contracts are no longer opaque. The next milestone should be small, concrete, and directly useful for the Gazebo failure.
+        The first milestone has effectively been achieved: the harness crate exists, component contracts are in place, estimator replay works, control and plant loops run, HIL semantics are tested, Gazebo bridge contracts are no longer opaque, and G0/G1/G2 have produced a usable simple-flight baseline. The next milestone should harden basic flight control before asking for navigation-shaped motion.
       </p>
       <div class="callout good">
-        <strong>Next milestone definition:</strong> the exact portable control step that firmware will use is moved into <code>common</code>, exercised by the harness for multi-second truth and estimator-in-loop envelopes, and then used for a Gazebo actuator-only truth table before any full autonomous Gazebo hover attempt.
+        <strong>Next milestone definition:</strong> freeze the current G2 hover/vertical-step baseline, add G2.5 non-navigation hardening, then add takeoff-hover-land as a required soft-landing gate. Only after those pass should G3 navigation become the main focus. The acro/barrel-roll work belongs in a separate sim-only sandbox and should not be used as a hardware-readiness shortcut.
       </div>
       <table>
         <thead><tr><th>Deliverable</th><th>Files or modules</th><th>Passing command / evidence</th></tr></thead>
         <tbody>
           <tr>
-            <td>Canonical common control step</td>
-            <td><code>common/src/control/pipeline.rs</code> or <code>common/src/services/control/mod.rs</code>; adapted harness <code>ControlPipeline</code>; adapted <code>RP235X-TEST/src/flight_control.rs</code></td>
-            <td><code>cargo test -p common control</code> plus existing harness phases still pass.</td>
+            <td>Frozen G2 baseline</td>
+            <td><code>testing/deterministic-harness/tests/p13_gazebo_estimator_loop.rs</code> plus checked-in airframe profile and trace summaries</td>
+            <td>Hover, vertical step, and mag-enabled G2 rerun with fixed tolerances and saved evidence.</td>
           </tr>
           <tr>
-            <td>Multi-second envelope tests</td>
-            <td><code>testing/deterministic-harness/tests/p10_control_envelope.rs</code></td>
-            <td>Static hold, roll/pitch disturbance, yaw-rate damping, vertical up/down, invalid-estimate failsafe.</td>
+            <td>G2.5 control hardening</td>
+            <td>New deterministic and ignored Gazebo tests for altitude ladder, yawed hover, disturbance recovery, demand limiting, and parameter/gust sweeps</td>
+            <td>All cases remain finite, bounded, low-clamp, and either recover or enter documented failsafe.</td>
           </tr>
           <tr>
-            <td>Gain sweep report</td>
-            <td><code>testing/deterministic-harness/tests/p10_gain_sweep.rs</code></td>
-            <td>Each tested gain scale reports max angle, altitude error, clamp percentage, and pass/fail.</td>
+            <td>Takeoff-hover-land</td>
+            <td>New vertical mission runner/state machine evidence and Gazebo runtime gate</td>
+            <td>Staged takeoff, hold, controlled descent, ground contact, spool-down/disarm, final velocity limit, and no bounce/relaunch.</td>
           </tr>
           <tr>
-            <td>Gazebo actuator truth table</td>
-            <td>Bridge runtime plus ignored/manual test or script</td>
-            <td>Measured motor index, roll sign, pitch sign, yaw sign, and hover scaling.</td>
+            <td>G3 navigation readiness</td>
+            <td>Position-step and small-square tests with explicit demand limits</td>
+            <td>Navigation does not begin until tilt/accel/throttle limits are visible in traces and simple non-navigation gates pass.</td>
           </tr>
         </tbody>
       </table>
@@ -1644,11 +1826,23 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
         </div>
         <div class="timeline-item">
           <h4>If G1 passes but G2 estimator-in-loop fails</h4>
-          <p>Focus on Gazebo sensor conversion, estimator warmup, timestamps, gravity sign, gyro sign, baro altitude sign, and valid flags.</p>
+          <p>Focus on Gazebo sensor conversion, estimator warmup, timestamps, gravity sign, gyro sign, baro altitude sign, mag heading-only behavior, and valid flags.</p>
         </div>
         <div class="timeline-item">
-          <h4>If G2 passes but firmware HIL fails</h4>
-          <p>Focus on embedded scheduling, channel freshness, HIL routing, DShot output mapping, and watchdog/failsafe interaction.</p>
+          <h4>If G2 passes but G2.5 control hardening fails</h4>
+          <p>Focus on control limits, hover-throttle margin, yaw coupling, parameter sensitivity, disturbance rejection, and explicit clamp/demand-limiter behavior before navigation.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If G2.5 passes but takeoff-hover-land fails</h4>
+          <p>Focus on altitude profile shaping, descent velocity caps, ground-contact detection, spool-down/disarm state, stale actuator commands, and bounce/relaunch prevention.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If landing passes but G3 navigation fails</h4>
+          <p>Focus on position-controller signs, world/body yaw handling, GPS dropout behavior, horizontal acceleration limits, tilt limits, and waypoint/state-machine sequencing.</p>
+        </div>
+        <div class="timeline-item">
+          <h4>If G3 passes but firmware HIL parity fails</h4>
+          <p>Focus on embedded scheduling, channel freshness, HIL routing, DShot output mapping, watchdog/failsafe interaction, and host-vs-firmware trace differences.</p>
         </div>
       </div>
     </section>
@@ -1667,19 +1861,19 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
             <li><span class="pill green">Done</span> Closed-loop truth and estimator-in-loop runners.</li>
             <li><span class="pill green">Done</span> HIL semantic adapter and failsafe/stale-output assertions.</li>
             <li><span class="pill green">Done</span> Gazebo bridge SENSOR/ACTUATOR/config contracts.</li>
+            <li><span class="pill green">Done</span> G0/G1/G2 runtime baseline evidence for actuator truth, estimator-bypass control, and estimator-in-loop hover/vertical step.</li>
           </ol>
         </div>
         <div class="mini-card">
           <h3>Next flight-readiness work</h3>
           <ol class="checklist">
-            <li><span class="pill green">Done</span> Promote portable control step into <code>common</code>.</li>
-            <li><span class="pill green">Done</span> Make harness and <code>RP235X-TEST</code> call the same common API.</li>
-            <li><span class="pill green">Done</span> Add multi-second control envelope tests.</li>
-            <li><span class="pill green">Done</span> Add structured gain sweep reports.</li>
-            <li><span class="pill amber">Manual</span> Run Gazebo G0 actuator-only runtime truth table.</li>
-            <li><span class="pill amber">Next</span> Add Gazebo truth adapter for estimator-bypass control.</li>
-            <li><span class="pill amber">Next</span> Add Gazebo estimator-in-loop hover and vertical-step tests.</li>
-            <li><span class="pill amber">Next</span> Keep runtime Gazebo and hardware tests ignored/feature-gated until repeatable.</li>
+            <li><span class="pill amber">Next</span> Freeze G2 as the named baseline with fixed gates and trace summaries.</li>
+            <li><span class="pill amber">Next</span> Add G2.5 non-navigation hardening: altitude ladder, yawed hover, disturbance recovery, demand limits, and parameter/gust sweeps.</li>
+            <li><span class="pill amber">Next</span> Add takeoff-hover-land with descent velocity, contact, spool-down/disarm, and no bounce/relaunch gates.</li>
+            <li><span class="pill purple">Sim-only</span> Add aggressive attitude/rate sandbox; keep barrel roll/flip tests explicit, acro-mode-only, and hardware-blocked.</li>
+            <li><span class="pill amber">Next</span> Add G3 navigation after G2.5 and landing gates: N/E steps, diagonals, waypoint square, yawed setpoints, GPS dropout, baro/mag disturbance.</li>
+            <li><span class="pill blue">Parallel</span> Start firmware HIL parity only after G2 baseline is frozen; compare host and firmware traces for the same frames.</li>
+            <li><span class="pill red">Blocked</span> Keep hardware flight blocked until G2.5, landing, G3 basics, and firmware HIL parity pass.</li>
           </ol>
         </div>
       </div>
@@ -1698,7 +1892,7 @@ cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_e
           <tr><td>MARV <code>common/src/control/mixing</code></td><td>Quad-X mixer equations, motor order permutation behavior, clamping expectations.</td></tr>
           <tr><td>MARV <code>device/RP235X-TEST</code></td><td>HIL backend, estimation/control/DShot task integration, control debug output shape.</td></tr>
           <tr><td>MARV <code>telemetry-app/gazebo_bridge</code></td><td>Gazebo bridge topics, SENSOR/ACTUATOR text protocol, actuator command publishing, normalized-to-rad/s scaling, and motor-direction delegation.</td></tr>
-          <tr><td>MARV <code>testing/deterministic-harness</code></td><td>Implemented phase gates, lockstep clock, fixture replay, control pipeline, plant model, closed-loop truth, estimator-in-loop, HIL semantics, and Gazebo bridge contracts.</td></tr>
+          <tr><td>MARV <code>testing/deterministic-harness</code></td><td>Implemented phase gates, lockstep clock, fixture replay, control pipeline, plant model, closed-loop truth, estimator-in-loop, HIL semantics, Gazebo bridge contracts, and the G0/G1/G2 runtime test path used as the baseline for new G2.5/G3 gates.</td></tr>
           <tr><td>MARV <code>testing.md</code> / current progress notes</td><td>Implemented phases 3–9, current command gates, and evidence that the bridge contract tests and live bridge checks passed.</td></tr>
           <tr><td>Holsatus <code>holsatus-sim</code></td><td>Sim handle, plant stepping, motor command/direction interface, sensor distortion concept.</td></tr>
           <tr><td>Holsatus <code>device/std-test-device</code></td><td>Host-side simulated device, lockstep testing style, integration flight test pattern.</td></tr>

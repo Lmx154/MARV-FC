@@ -2,13 +2,6 @@
 
 MARV is an avionics system aimed at growing my understanding of avionics system and is my exploration into the lowest level components of avionics. This repository is the firmware designed to be flashed into the MARV flight controller hardware. 
 
-
-- sensors available
-- devices available
-- tasks
-- simulation
-- Telemetry visualization UI: `telemetry-app/`
-
 ## Docs
 
 - Simulator: `docs/simulator.md`

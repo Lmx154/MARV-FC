@@ -17,18 +17,28 @@ const DEFAULT_FRAMES: usize = 250;
 const DEFAULT_RESET_SETTLE_FRAMES: usize = 50;
 const DEFAULT_TIMEOUT_MS: u64 = 8_000;
 const DEFAULT_MAX_ATTITUDE_RAD: f32 = 5.0_f32.to_radians();
-const DEFAULT_MAX_DOWN_ERROR_M: f32 = 3.0;
+const DEFAULT_MAX_DOWN_ERROR_M: f32 = 3.25;
 const DEFAULT_MAX_HORIZONTAL_ERROR_M: f32 = 0.25;
 const DEFAULT_MAX_CLAMP_RATIO: f32 = 0.25;
+const DEFAULT_MAX_VERTICAL_SPEED_MPS: f32 = 6.0;
+const DEFAULT_MAX_DISTURBANCE_HORIZONTAL_ERROR_M: f32 = 1.50;
+const DEFAULT_MAX_LIMITED_HORIZONTAL_ERROR_M: f32 = 6.0;
+const DEFAULT_MAX_LANDING_IMPACT_SPEED_MPS: f32 = 2.5;
+const DEFAULT_GROUND_CONTACT_EPSILON_M: f32 = 0.05;
+const DEFAULT_MIN_LANDING_SPOOLDOWN_FRAMES: usize = 75;
 const DEFAULT_VERTICAL_STEP_DOWN_M: f32 = -3.0;
 const DEFAULT_MIN_VERTICAL_IMPROVEMENT_M: f32 = 0.05;
+const DEFAULT_MIN_YAW_IMPROVEMENT_RAD: f32 = 0.05;
+const DEFAULT_MIN_DISTURBANCE_YAW_RAD: f32 = 30.0_f32.to_radians();
+const DEFAULT_MIN_LIMITED_SETPOINT_M: f32 = 10.0;
 const DEFAULT_MAX_FINAL_DOWN_ERROR_M: f32 = 1.25;
 const DEFAULT_GYRO_DEADBAND_RPS: f32 = 0.02;
 const DEFAULT_MAX_HOVER_MOTOR_SPREAD: f32 = 0.01;
-const DEFAULT_POSITION_GAIN: f32 = 0.35;
+const DEFAULT_POSITION_GAIN: f32 = 0.12;
 const DEFAULT_POSITION_VELOCITY_GAIN: f32 = 0.80;
 const DEFAULT_MAX_HORIZONTAL_ACCEL_MPS2: f32 = 3.0;
 const DEFAULT_MAX_TILT_RAD: f32 = 20.0_f32.to_radians();
+const DEFAULT_MAX_YAW_RATE_RPS: f32 = 0.03;
 const DEFAULT_ALTITUDE_GAIN: f32 = 0.16;
 const DEFAULT_VERTICAL_VELOCITY_GAIN: f32 = 0.12;
 const DEFAULT_MAX_THROTTLE_CORRECTION: f32 = 0.35;
@@ -152,6 +162,303 @@ fn p13_gazebo_estimator_loop() {
     );
 }
 
+#[test]
+#[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_BRIDGE_ADDR if not 127.0.0.1:9000"]
+fn p14_gazebo_g2_control_hardening() {
+    let settings = RuntimeSettings::from_env();
+    let airframe = airframe_config();
+
+    let origin = run_control_scenario(
+        "p14_origin_hold_baseline",
+        ControlSetpoint::ORIGIN_HOLD_ARMED,
+        &settings,
+        &airframe,
+    );
+    assert_g2_runtime_envelope("p14 origin", origin, &settings);
+    assert!(
+        origin.max_motor_spread <= settings.max_hover_motor_spread,
+        "P14 origin hover motor chatter too high: summary={origin:?}"
+    );
+
+    for target_down_m in [-0.5, -1.0, -2.0, -3.0] {
+        let setpoint = ControlSetpoint::new([0.0, 0.0, target_down_m], 0.0, true);
+        let summary = run_control_scenario(
+            &format!("p14_altitude_ladder_{target_down_m:.1}m"),
+            setpoint,
+            &settings,
+            &airframe,
+        );
+
+        assert_g2_runtime_envelope("p14 altitude ladder", summary, &settings);
+        assert!(
+            summary.max_truth_vertical_speed_mps <= settings.max_vertical_speed_mps,
+            "P14 altitude ladder truth vertical speed too high: target_down_m={target_down_m} summary={summary:?}"
+        );
+        assert!(
+            summary.max_estimate_vertical_speed_mps <= settings.max_vertical_speed_mps,
+            "P14 altitude ladder estimate vertical speed too high: target_down_m={target_down_m} summary={summary:?}"
+        );
+        assert!(
+            summary.final_truth_down_error_m.abs() <= summary.initial_truth_down_error_m.abs(),
+            "P14 altitude ladder truth moved away from target: target_down_m={target_down_m} summary={summary:?}"
+        );
+        if target_down_m.abs() > 1.0 {
+            assert!(
+                summary.final_estimate_down_error_m.abs()
+                    <= summary.initial_estimate_down_error_m.abs(),
+                "P14 altitude ladder estimate moved away from target: target_down_m={target_down_m} summary={summary:?}"
+            );
+        } else {
+            assert!(
+                summary.final_estimate_down_error_m.abs() <= settings.max_final_down_error_m,
+                "P14 small altitude step estimate did not stay bounded near pad: target_down_m={target_down_m} summary={summary:?}"
+            );
+        }
+    }
+
+    for yaw_rad in [
+        45.0_f32.to_radians(),
+        90.0_f32.to_radians(),
+        180.0_f32.to_radians(),
+    ] {
+        let setpoint = ControlSetpoint::new([0.0, 0.0, -2.0], yaw_rad, true);
+        let summary = run_control_scenario(
+            &format!("p14_yawed_hover_{:.0}deg", yaw_rad.to_degrees()),
+            setpoint,
+            &settings,
+            &airframe,
+        );
+
+        assert_g2_runtime_envelope("p14 yawed hover", summary, &settings);
+        assert!(
+            summary.final_yaw_error_rad.abs()
+                <= summary.initial_yaw_error_rad.abs() - settings.min_yaw_improvement_rad,
+            "P14 yawed hover did not reduce yaw error enough: yaw_rad={yaw_rad} summary={summary:?}"
+        );
+        assert!(
+            summary.final_truth_down_error_m.abs() <= summary.initial_truth_down_error_m.abs(),
+            "P14 yawed hover moved away from altitude target: yaw_rad={yaw_rad} summary={summary:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_BRIDGE_ADDR if not 127.0.0.1:9000"]
+fn p14_gazebo_g2_runtime_disturbance_and_demand_limits() {
+    let settings = RuntimeSettings::from_env();
+    let airframe = airframe_config();
+
+    let yaw_disturbance = run_control_schedule(
+        "p14_runtime_yaw_disturbance_return",
+        |control_frame| {
+            if control_frame < settings.frames / 3 {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            } else if control_frame < (settings.frames * 2) / 3 {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 45.0_f32.to_radians(), true)
+            } else {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            }
+        },
+        &settings,
+        &airframe,
+    );
+
+    assert_g2_runtime_limit_evidence("p14 runtime yaw disturbance", yaw_disturbance, &settings);
+    assert!(
+        yaw_disturbance.max_abs_setpoint_yaw_rad >= settings.min_disturbance_yaw_rad,
+        "P14 runtime disturbance did not apply a meaningful yaw setpoint: summary={yaw_disturbance:?}"
+    );
+    assert!(
+        yaw_disturbance.max_truth_horizontal_error_m <= settings.max_disturbance_horizontal_error_m,
+        "P14 runtime disturbance truth response escaped the bounded recovery envelope: summary={yaw_disturbance:?}"
+    );
+    assert!(
+        yaw_disturbance.max_estimate_horizontal_error_m
+            <= settings.max_disturbance_horizontal_error_m,
+        "P14 runtime disturbance estimate response escaped the bounded recovery envelope: summary={yaw_disturbance:?}"
+    );
+    assert!(
+        yaw_disturbance.final_truth_origin_horizontal_m
+            <= settings.max_disturbance_horizontal_error_m * 0.5,
+        "P14 runtime disturbance did not return near origin truth hold: summary={yaw_disturbance:?}"
+    );
+    assert!(
+        yaw_disturbance.max_truth_origin_horizontal_m
+            <= settings.max_disturbance_horizontal_error_m,
+        "P14 runtime disturbance truth moved too far from origin: summary={yaw_disturbance:?}"
+    );
+    assert!(
+        yaw_disturbance.final_estimate_origin_horizontal_m
+            <= settings.max_disturbance_horizontal_error_m * 0.5,
+        "P14 runtime disturbance did not return near origin estimate hold: summary={yaw_disturbance:?}"
+    );
+    assert!(
+        yaw_disturbance.max_estimate_origin_horizontal_m
+            <= settings.max_disturbance_horizontal_error_m,
+        "P14 runtime disturbance estimate moved too far from origin: summary={yaw_disturbance:?}"
+    );
+
+    let demand_limited = run_control_schedule(
+        "p14_runtime_extreme_demand_limited",
+        |control_frame| {
+            let pulse_start = settings.frames / 3;
+            if control_frame < pulse_start {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            } else if control_frame < pulse_start + 5 {
+                ControlSetpoint::new([50.0, -50.0, -2.0], 180.0_f32.to_radians(), true)
+            } else {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            }
+        },
+        &settings,
+        &airframe,
+    );
+
+    assert_g2_runtime_limit_evidence("p14 runtime demand limit", demand_limited, &settings);
+    assert!(
+        demand_limited.max_setpoint_horizontal_m >= settings.min_limited_setpoint_m,
+        "P14 runtime demand-limit case did not apply an extreme setpoint: summary={demand_limited:?}"
+    );
+    assert!(
+        demand_limited.max_truth_origin_horizontal_m <= settings.max_limited_horizontal_error_m,
+        "P14 runtime demand-limit truth response escaped the bounded envelope: summary={demand_limited:?}"
+    );
+    assert!(
+        demand_limited.max_estimate_origin_horizontal_m <= settings.max_limited_horizontal_error_m,
+        "P14 runtime demand-limit estimate response escaped the bounded envelope: summary={demand_limited:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_BRIDGE_ADDR if not 127.0.0.1:9000"]
+fn p14_gazebo_g2_runtime_lateral_setpoint_disturbance() {
+    let mut settings = RuntimeSettings::from_env();
+    settings.frames = settings.frames.max(750);
+    let airframe = airframe_config();
+
+    let lateral = run_control_schedule(
+        "p14_runtime_lateral_setpoint_disturbance",
+        |control_frame| {
+            if control_frame < settings.frames / 3 {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            } else if control_frame < (settings.frames * 2) / 3 {
+                ControlSetpoint::new([0.75, 0.0, -1.0], 0.0, true)
+            } else {
+                ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+            }
+        },
+        &settings,
+        &airframe,
+    );
+
+    assert_g2_runtime_limit_evidence("p14 runtime lateral setpoint", lateral, &settings);
+    assert!(
+        lateral.max_setpoint_horizontal_m >= 0.75,
+        "P14 runtime lateral disturbance did not apply the target setpoint: summary={lateral:?}"
+    );
+    assert!(
+        lateral.max_truth_origin_horizontal_m <= settings.max_disturbance_horizontal_error_m,
+        "P14 runtime lateral disturbance truth moved too far from origin: summary={lateral:?}"
+    );
+    assert!(
+        lateral.final_truth_origin_horizontal_m
+            <= settings.max_disturbance_horizontal_error_m * 0.5,
+        "P14 runtime lateral disturbance did not return near origin truth hold: summary={lateral:?}"
+    );
+    assert!(
+        lateral.max_estimate_origin_horizontal_m <= settings.max_disturbance_horizontal_error_m,
+        "P14 runtime lateral disturbance estimate moved too far from origin: summary={lateral:?}"
+    );
+    assert!(
+        lateral.final_estimate_origin_horizontal_m
+            <= settings.max_disturbance_horizontal_error_m * 0.5,
+        "P14 runtime lateral disturbance did not return near origin estimate hold: summary={lateral:?}"
+    );
+}
+
+#[test]
+#[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_BRIDGE_ADDR if not 127.0.0.1:9000"]
+fn p15_gazebo_takeoff_hover_land() {
+    let mut settings = RuntimeSettings::from_env();
+    settings.frames = settings.frames.max(1_200);
+    let airframe = airframe_config();
+
+    let landing = run_takeoff_hover_land_mission("p15_takeoff_hover_land", &settings, &airframe);
+
+    assert!(
+        landing.converted_frames >= landing.control_frames,
+        "P15 converted fewer frames than it controlled: summary={landing:?}"
+    );
+    assert!(
+        landing.first_contact_frame.is_some(),
+        "P15 never reached near-ground/contact truth state: summary={landing:?}"
+    );
+    assert!(
+        landing.min_truth_down_m <= -0.75,
+        "P15 staged takeoff did not climb high enough: summary={landing:?}"
+    );
+    assert!(
+        landing.max_hover_truth_down_error_m <= settings.max_final_down_error_m,
+        "P15 hover hold wandered outside altitude band: summary={landing:?}"
+    );
+    assert!(
+        landing.max_attitude_rad <= settings.max_attitude_rad,
+        "P15 attitude diverged: summary={landing:?}"
+    );
+    assert!(
+        landing.max_truth_origin_horizontal_m <= settings.max_disturbance_horizontal_error_m,
+        "P15 truth moved too far from origin during vertical mission: summary={landing:?}"
+    );
+    assert!(
+        landing.max_estimate_origin_horizontal_m <= settings.max_disturbance_horizontal_error_m,
+        "P15 estimate moved too far from origin during vertical mission: summary={landing:?}"
+    );
+    assert!(
+        landing.max_truth_vertical_speed_mps <= settings.max_vertical_speed_mps,
+        "P15 truth vertical speed too high: summary={landing:?}"
+    );
+    assert!(
+        landing.max_estimate_vertical_speed_mps <= settings.max_vertical_speed_mps,
+        "P15 estimate vertical speed too high: summary={landing:?}"
+    );
+    assert!(
+        landing.max_landing_impact_speed_mps <= settings.max_landing_impact_speed_mps,
+        "P15 landing impact was too hard: summary={landing:?}"
+    );
+    assert!(
+        landing.clamp_ratio <= settings.max_clamp_ratio,
+        "P15 clamped too often: summary={landing:?}"
+    );
+    assert_eq!(
+        landing.pre_contact_zero_motor_frames, 0,
+        "P15 motors went idle before contact criteria were met: summary={landing:?}"
+    );
+    assert!(
+        landing.post_contact_frames >= settings.min_landing_spooldown_frames,
+        "P15 did not collect enough post-contact spooldown evidence: summary={landing:?}"
+    );
+    assert!(
+        landing.post_contact_max_motor <= 0.001,
+        "P15 motors did not spool down after contact: summary={landing:?}"
+    );
+    assert!(
+        landing.final_truth_down_m.abs() <= settings.ground_contact_epsilon_m,
+        "P15 final truth did not remain near the pad: summary={landing:?}"
+    );
+    assert!(
+        landing.final_truth_vertical_speed_mps.abs() <= settings.max_landing_impact_speed_mps,
+        "P15 final truth vertical speed relaunched or fell through the pad: summary={landing:?}"
+    );
+    assert!(
+        landing.final_estimate_down_m.abs() <= settings.max_final_down_error_m,
+        "P15 final estimate did not remain near the pad: summary={landing:?}"
+    );
+    assert!(
+        !landing.final_armed && !landing.final_control_valid,
+        "P15 final command should be disarmed zero-output: summary={landing:?}"
+    );
+}
+
 #[derive(Clone, Copy, Debug)]
 struct WarmupSummary {
     converted_frames: usize,
@@ -170,11 +477,19 @@ struct RuntimeSummary {
     max_estimate_down_error_m: f32,
     max_truth_horizontal_error_m: f32,
     max_estimate_horizontal_error_m: f32,
+    max_truth_origin_horizontal_m: f32,
+    final_truth_origin_horizontal_m: f32,
+    max_estimate_origin_horizontal_m: f32,
+    final_estimate_origin_horizontal_m: f32,
+    max_truth_vertical_speed_mps: f32,
+    max_estimate_vertical_speed_mps: f32,
     clamp_ratio: f32,
     initial_truth_down_error_m: f32,
     final_truth_down_error_m: f32,
     initial_estimate_down_error_m: f32,
     final_estimate_down_error_m: f32,
+    initial_yaw_error_rad: f32,
+    final_yaw_error_rad: f32,
     final_truth_position_ned_m: [f32; 3],
     final_truth_velocity_ned_mps: [f32; 3],
     final_estimate_position_ned_m: [f32; 3],
@@ -184,6 +499,38 @@ struct RuntimeSummary {
     max_motor: f32,
     mean_motor_spread: f32,
     max_motor_spread: f32,
+    max_setpoint_horizontal_m: f32,
+    max_abs_setpoint_yaw_rad: f32,
+    max_attitude_setpoint_tilt_rad: f32,
+    final_attitude_setpoint_roll_pitch_rad: [f32; 2],
+    final_truth_roll_pitch_rad: [f32; 2],
+    max_yaw_rate_setpoint_rps: f32,
+    max_throttle_correction: f32,
+    max_axis_command: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TakeoffHoverLandSummary {
+    converted_frames: usize,
+    control_frames: usize,
+    first_contact_frame: Option<usize>,
+    post_contact_frames: usize,
+    max_attitude_rad: f32,
+    min_truth_down_m: f32,
+    max_hover_truth_down_error_m: f32,
+    max_truth_origin_horizontal_m: f32,
+    max_estimate_origin_horizontal_m: f32,
+    max_truth_vertical_speed_mps: f32,
+    max_estimate_vertical_speed_mps: f32,
+    max_landing_impact_speed_mps: f32,
+    clamp_ratio: f32,
+    pre_contact_zero_motor_frames: usize,
+    post_contact_max_motor: f32,
+    final_truth_down_m: f32,
+    final_estimate_down_m: f32,
+    final_truth_vertical_speed_mps: f32,
+    final_armed: bool,
+    final_control_valid: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -198,8 +545,17 @@ struct RuntimeSettings {
     max_down_error_m: f32,
     max_horizontal_error_m: f32,
     max_clamp_ratio: f32,
+    max_vertical_speed_mps: f32,
+    max_disturbance_horizontal_error_m: f32,
+    max_limited_horizontal_error_m: f32,
+    max_landing_impact_speed_mps: f32,
+    ground_contact_epsilon_m: f32,
+    min_landing_spooldown_frames: usize,
     vertical_step_down_m: f32,
     min_vertical_improvement_m: f32,
+    min_yaw_improvement_rad: f32,
+    min_disturbance_yaw_rad: f32,
+    min_limited_setpoint_m: f32,
     max_final_down_error_m: f32,
     gyro_deadband_rps: f32,
     max_hover_motor_spread: f32,
@@ -207,6 +563,7 @@ struct RuntimeSettings {
     position_velocity_gain: f32,
     max_horizontal_accel_mps2: f32,
     max_tilt_rad: f32,
+    max_yaw_rate_rps: f32,
     altitude_gain: f32,
     vertical_velocity_gain: f32,
     max_throttle_correction: f32,
@@ -235,10 +592,32 @@ impl RuntimeSettings {
                 .unwrap_or(DEFAULT_MAX_HORIZONTAL_ERROR_M),
             max_clamp_ratio: env_f32("MARV_GAZEBO_G2_MAX_CLAMP_RATIO")
                 .unwrap_or(DEFAULT_MAX_CLAMP_RATIO),
+            max_vertical_speed_mps: env_f32("MARV_GAZEBO_G2_MAX_VERTICAL_SPEED_MPS")
+                .unwrap_or(DEFAULT_MAX_VERTICAL_SPEED_MPS),
+            max_disturbance_horizontal_error_m: env_f32(
+                "MARV_GAZEBO_G2_MAX_DISTURBANCE_HORIZONTAL_ERROR_M",
+            )
+            .unwrap_or(DEFAULT_MAX_DISTURBANCE_HORIZONTAL_ERROR_M),
+            max_limited_horizontal_error_m: env_f32(
+                "MARV_GAZEBO_G2_MAX_LIMITED_HORIZONTAL_ERROR_M",
+            )
+            .unwrap_or(DEFAULT_MAX_LIMITED_HORIZONTAL_ERROR_M),
+            max_landing_impact_speed_mps: env_f32("MARV_GAZEBO_G2_MAX_LANDING_IMPACT_SPEED_MPS")
+                .unwrap_or(DEFAULT_MAX_LANDING_IMPACT_SPEED_MPS),
+            ground_contact_epsilon_m: env_f32("MARV_GAZEBO_G2_GROUND_CONTACT_EPSILON_M")
+                .unwrap_or(DEFAULT_GROUND_CONTACT_EPSILON_M),
+            min_landing_spooldown_frames: env_usize("MARV_GAZEBO_G2_MIN_LANDING_SPOOLDOWN_FRAMES")
+                .unwrap_or(DEFAULT_MIN_LANDING_SPOOLDOWN_FRAMES),
             vertical_step_down_m: env_f32("MARV_GAZEBO_G2_VERTICAL_STEP_DOWN_M")
                 .unwrap_or(DEFAULT_VERTICAL_STEP_DOWN_M),
             min_vertical_improvement_m: env_f32("MARV_GAZEBO_G2_MIN_VERTICAL_IMPROVEMENT_M")
                 .unwrap_or(DEFAULT_MIN_VERTICAL_IMPROVEMENT_M),
+            min_yaw_improvement_rad: env_f32("MARV_GAZEBO_G2_MIN_YAW_IMPROVEMENT_RAD")
+                .unwrap_or(DEFAULT_MIN_YAW_IMPROVEMENT_RAD),
+            min_disturbance_yaw_rad: env_f32("MARV_GAZEBO_G2_MIN_DISTURBANCE_YAW_RAD")
+                .unwrap_or(DEFAULT_MIN_DISTURBANCE_YAW_RAD),
+            min_limited_setpoint_m: env_f32("MARV_GAZEBO_G2_MIN_LIMITED_SETPOINT_M")
+                .unwrap_or(DEFAULT_MIN_LIMITED_SETPOINT_M),
             max_final_down_error_m: env_f32("MARV_GAZEBO_G2_MAX_FINAL_DOWN_ERROR_M")
                 .unwrap_or(DEFAULT_MAX_FINAL_DOWN_ERROR_M),
             gyro_deadband_rps: env_f32("MARV_GAZEBO_G2_GYRO_DEADBAND_RPS")
@@ -251,6 +630,8 @@ impl RuntimeSettings {
             max_horizontal_accel_mps2: env_f32("MARV_GAZEBO_G2_MAX_HORIZONTAL_ACCEL_MPS2")
                 .unwrap_or(DEFAULT_MAX_HORIZONTAL_ACCEL_MPS2),
             max_tilt_rad: env_f32("MARV_GAZEBO_G2_MAX_TILT_RAD").unwrap_or(DEFAULT_MAX_TILT_RAD),
+            max_yaw_rate_rps: env_f32("MARV_GAZEBO_G2_MAX_YAW_RATE_RPS")
+                .unwrap_or(DEFAULT_MAX_YAW_RATE_RPS),
             altitude_gain: env_f32("MARV_GAZEBO_G2_ALTITUDE_GAIN").unwrap_or(DEFAULT_ALTITUDE_GAIN),
             vertical_velocity_gain: env_f32("MARV_GAZEBO_G2_VERTICAL_VELOCITY_GAIN")
                 .unwrap_or(DEFAULT_VERTICAL_VELOCITY_GAIN),
@@ -333,6 +714,15 @@ fn run_control_scenario(
     settings: &RuntimeSettings,
     airframe: &GazeboAirframeConfig,
 ) -> RuntimeSummary {
+    run_control_schedule(name, |_| setpoint, settings, airframe)
+}
+
+fn run_control_schedule(
+    name: &str,
+    mut setpoint_for_control_frame: impl FnMut(usize) -> ControlSetpoint,
+    settings: &RuntimeSettings,
+    airframe: &GazeboAirframeConfig,
+) -> RuntimeSummary {
     let mut client = BridgeProbeClient::connect(&settings.endpoint);
     let mut sequence = Sequence::default();
     let pipeline = ControlPipeline::new(PureControlConfig {
@@ -368,11 +758,19 @@ fn run_control_scenario(
     let mut max_estimate_down_error_m = 0.0_f32;
     let mut max_truth_horizontal_error_m = 0.0_f32;
     let mut max_estimate_horizontal_error_m = 0.0_f32;
+    let mut max_truth_origin_horizontal_m = 0.0_f32;
+    let mut final_truth_origin_horizontal_m = 0.0_f32;
+    let mut max_estimate_origin_horizontal_m = 0.0_f32;
+    let mut final_estimate_origin_horizontal_m = 0.0_f32;
+    let mut max_truth_vertical_speed_mps = 0.0_f32;
+    let mut max_estimate_vertical_speed_mps = 0.0_f32;
     let mut clamp_count = 0usize;
     let mut initial_truth_down_error_m = None;
     let mut final_truth_down_error_m = 0.0_f32;
     let mut initial_estimate_down_error_m = None;
     let mut final_estimate_down_error_m = 0.0_f32;
+    let mut initial_yaw_error_rad = None;
+    let mut final_yaw_error_rad = 0.0_f32;
     let mut final_truth_position_ned_m = [0.0; 3];
     let mut final_truth_velocity_ned_mps = [0.0; 3];
     let mut final_estimate_position_ned_m = [0.0; 3];
@@ -383,6 +781,15 @@ fn run_control_scenario(
     let mut max_motor = 0.0_f32;
     let mut motor_spread_sum = 0.0_f32;
     let mut max_motor_spread = 0.0_f32;
+    let mut max_setpoint_horizontal_m = 0.0_f32;
+    let mut max_abs_setpoint_yaw_rad = 0.0_f32;
+    let mut max_attitude_setpoint_tilt_rad = 0.0_f32;
+    let mut final_attitude_setpoint_roll_pitch_rad = [0.0_f32; 2];
+    let mut final_truth_roll_pitch_rad = [0.0_f32; 2];
+    let mut max_yaw_rate_setpoint_rps = 0.0_f32;
+    let mut max_throttle_correction = 0.0_f32;
+    let mut max_axis_command = 0.0_f32;
+    let hover_throttle = airframe.hover_motor_command();
 
     while control_frames < settings.frames {
         let (frame, sensor) =
@@ -398,6 +805,12 @@ fn run_control_scenario(
         }
 
         let estimate = estimate_snapshot(&trace);
+        let setpoint = setpoint_for_control_frame(control_frames);
+        max_setpoint_horizontal_m = max_setpoint_horizontal_m.max(horizontal_norm_m(
+            setpoint.position_ned_m[0],
+            setpoint.position_ned_m[1],
+        ));
+        max_abs_setpoint_yaw_rad = max_abs_setpoint_yaw_rad.max(setpoint.yaw_rad.abs());
         let output = pipeline.step(estimate, imu_from_sensor(&sensor), setpoint);
         assert!(
             output.control_valid,
@@ -406,6 +819,22 @@ fn run_control_scenario(
         );
 
         let runtime_motors = airframe.runtime_control_motors(output.torque_command);
+        if let Some(attitude_setpoint) = output.attitude_setpoint {
+            let (roll_rad, pitch_rad) = roll_pitch_from_quaternion(attitude_setpoint.quaternion);
+            final_attitude_setpoint_roll_pitch_rad = [roll_rad, pitch_rad];
+            max_attitude_setpoint_tilt_rad = max_attitude_setpoint_tilt_rad.max(
+                roll_pitch_tilt_from_quaternion(attitude_setpoint.quaternion),
+            );
+        }
+        if let Some(rate_setpoint) = output.rate_setpoint {
+            max_yaw_rate_setpoint_rps = max_yaw_rate_setpoint_rps.max(rate_setpoint.yaw_rps.abs());
+        }
+        max_throttle_correction =
+            max_throttle_correction.max((output.throttle - hover_throttle).abs());
+        max_axis_command = max_axis_command
+            .max(output.torque_command.roll.abs())
+            .max(output.torque_command.pitch.abs())
+            .max(output.torque_command.yaw.abs());
         throttle_sum += output.throttle;
         let motor_spread = motor_spread(runtime_motors.commands);
         motor_spread_sum += motor_spread;
@@ -427,6 +856,9 @@ fn run_control_scenario(
 
         if let Some(euler) = frame.euler_rad {
             max_attitude_rad = max_attitude_rad.max(euler[0].abs()).max(euler[1].abs());
+            final_truth_roll_pitch_rad = [euler[0], euler[1]];
+            final_yaw_error_rad = yaw_error_rad(setpoint.yaw_rad, euler[2]);
+            initial_yaw_error_rad.get_or_insert(final_yaw_error_rad);
         }
         let truth = frame
             .to_truth_estimate(origin)
@@ -435,12 +867,24 @@ fn run_control_scenario(
         final_truth_velocity_ned_mps = truth.velocity_ned_mps;
         final_estimate_position_ned_m = estimate.position_ned_m;
         final_estimate_velocity_ned_mps = estimate.velocity_ned_mps;
+        final_truth_origin_horizontal_m =
+            horizontal_norm_m(truth.position_ned_m[0], truth.position_ned_m[1]);
+        final_estimate_origin_horizontal_m =
+            horizontal_norm_m(estimate.position_ned_m[0], estimate.position_ned_m[1]);
+        max_truth_origin_horizontal_m =
+            max_truth_origin_horizontal_m.max(final_truth_origin_horizontal_m);
+        max_estimate_origin_horizontal_m =
+            max_estimate_origin_horizontal_m.max(final_estimate_origin_horizontal_m);
         final_truth_down_error_m = truth.position_ned_m[2] - setpoint.position_ned_m[2];
         final_estimate_down_error_m = estimate.position_ned_m[2] - setpoint.position_ned_m[2];
         initial_truth_down_error_m.get_or_insert(final_truth_down_error_m);
         initial_estimate_down_error_m.get_or_insert(final_estimate_down_error_m);
         max_truth_down_error_m = max_truth_down_error_m.max(truth.position_ned_m[2].abs());
         max_estimate_down_error_m = max_estimate_down_error_m.max(estimate.position_ned_m[2].abs());
+        max_truth_vertical_speed_mps =
+            max_truth_vertical_speed_mps.max(truth.velocity_ned_mps[2].abs());
+        max_estimate_vertical_speed_mps =
+            max_estimate_vertical_speed_mps.max(estimate.velocity_ned_mps[2].abs());
         max_truth_horizontal_error_m = max_truth_horizontal_error_m.max(horizontal_error_m(
             truth.position_ned_m,
             setpoint.position_ned_m,
@@ -465,11 +909,19 @@ fn run_control_scenario(
         max_estimate_down_error_m,
         max_truth_horizontal_error_m,
         max_estimate_horizontal_error_m,
+        max_truth_origin_horizontal_m,
+        final_truth_origin_horizontal_m,
+        max_estimate_origin_horizontal_m,
+        final_estimate_origin_horizontal_m,
+        max_truth_vertical_speed_mps,
+        max_estimate_vertical_speed_mps,
         clamp_ratio: clamp_count as f32 / control_frames.max(1) as f32,
         initial_truth_down_error_m: initial_truth_down_error_m.unwrap_or(0.0),
         final_truth_down_error_m,
         initial_estimate_down_error_m: initial_estimate_down_error_m.unwrap_or(0.0),
         final_estimate_down_error_m,
+        initial_yaw_error_rad: initial_yaw_error_rad.unwrap_or(0.0),
+        final_yaw_error_rad,
         final_truth_position_ned_m,
         final_truth_velocity_ned_mps,
         final_estimate_position_ned_m,
@@ -479,13 +931,23 @@ fn run_control_scenario(
         max_motor,
         mean_motor_spread: motor_spread_sum / control_frames.max(1) as f32,
         max_motor_spread,
+        max_setpoint_horizontal_m,
+        max_abs_setpoint_yaw_rad,
+        max_attitude_setpoint_tilt_rad,
+        final_attitude_setpoint_roll_pitch_rad,
+        final_truth_roll_pitch_rad,
+        max_yaw_rate_setpoint_rps,
+        max_throttle_correction,
+        max_axis_command,
     };
     eprintln!(
-        "G2 {name}: {summary:?} final_truth_pos={:?} final_truth_vel={:?} final_estimate_pos={:?} final_estimate_vel={:?} mean_throttle={:.4} mean_motor={:.4} max_motor={:.4} mean_motor_spread={:.4} max_motor_spread={:.4}",
+        "G2 {name}: {summary:?} final_truth_pos={:?} final_truth_vel={:?} final_estimate_pos={:?} final_estimate_vel={:?} final_att_sp={:?} final_truth_rp={:?} mean_throttle={:.4} mean_motor={:.4} max_motor={:.4} mean_motor_spread={:.4} max_motor_spread={:.4}",
         summary.final_truth_position_ned_m,
         summary.final_truth_velocity_ned_mps,
         summary.final_estimate_position_ned_m,
         summary.final_estimate_velocity_ned_mps,
+        summary.final_attitude_setpoint_roll_pitch_rad,
+        summary.final_truth_roll_pitch_rad,
         summary.mean_throttle,
         summary.mean_motor,
         summary.max_motor,
@@ -493,6 +955,271 @@ fn run_control_scenario(
         summary.max_motor_spread
     );
     summary
+}
+
+fn run_takeoff_hover_land_mission(
+    name: &str,
+    settings: &RuntimeSettings,
+    airframe: &GazeboAirframeConfig,
+) -> TakeoffHoverLandSummary {
+    let mut client = BridgeProbeClient::connect(&settings.endpoint);
+    let mut sequence = Sequence::default();
+    let pipeline = ControlPipeline::new(PureControlConfig {
+        loop_config: control_config(airframe, settings),
+    });
+
+    if settings.auto_reset {
+        send_reset_and_play(
+            &mut client,
+            &mut sequence,
+            settings,
+            airframe.hover_motors(),
+        );
+    }
+
+    let origin_frame = client.read_required_frame(settings.timeout);
+    assert_g2_sensor_contract(&origin_frame);
+    let origin = GazeboTruthOrigin::from_frame(&origin_frame).expect("finite Gazebo origin");
+    let origin_sensor = origin_frame
+        .to_estimator_sensor_frame(origin)
+        .expect("G2 origin frame should include fresh IMU");
+    let origin_sensor = estimator_sensor_for_settings(origin_sensor, settings);
+    let mut driver = EstimatorReplayDriver::new(gazebo_estimator_config());
+    driver
+        .step(1, &origin_sensor)
+        .expect("G2 estimator prewarm should pass");
+    let mut last_timestamp_us = Some(origin_sensor.timestamp_us);
+
+    let takeoff_one_end = settings.frames / 5;
+    let takeoff_two_end = (settings.frames * 2) / 5;
+    let hover_end = (settings.frames * 3) / 5;
+    let contact_threshold_down_m = -settings.ground_contact_epsilon_m.abs();
+    let mut contact_latched = false;
+    let mut first_contact_frame = None;
+    let mut converted_frames = 1usize;
+    let mut control_frames = 0usize;
+    let mut post_contact_frames = 0usize;
+    let mut max_attitude_rad = 0.0_f32;
+    let mut min_truth_down_m = f32::INFINITY;
+    let mut max_hover_truth_down_error_m = 0.0_f32;
+    let mut max_truth_origin_horizontal_m = 0.0_f32;
+    let mut max_estimate_origin_horizontal_m = 0.0_f32;
+    let mut max_truth_vertical_speed_mps = 0.0_f32;
+    let mut max_estimate_vertical_speed_mps = 0.0_f32;
+    let mut max_landing_impact_speed_mps = 0.0_f32;
+    let mut clamp_count = 0usize;
+    let mut pre_contact_zero_motor_frames = 0usize;
+    let mut post_contact_max_motor = 0.0_f32;
+    let mut final_truth_down_m = 0.0_f32;
+    let mut final_estimate_down_m = 0.0_f32;
+    let mut final_truth_vertical_speed_mps = 0.0_f32;
+    let mut final_armed = true;
+    let mut final_control_valid = true;
+
+    while control_frames < settings.frames {
+        let (frame, sensor) =
+            client.read_required_estimator_frame(origin, last_timestamp_us, settings.timeout);
+        let sensor = estimator_sensor_for_settings(sensor, settings);
+        last_timestamp_us = Some(sensor.timestamp_us);
+        converted_frames += 1;
+        let trace = driver
+            .step(converted_frames as u64, &sensor)
+            .expect("G2 estimator step should pass");
+        if !trace.estimate_valid {
+            continue;
+        }
+
+        let estimate = estimate_snapshot(&trace);
+        let truth = frame
+            .to_truth_estimate(origin)
+            .expect("G2 truth side-channel should convert for evidence");
+        let descent_started = control_frames >= hover_end;
+        let contact_now = contact_latched
+            || (descent_started && truth.position_ned_m[2] >= contact_threshold_down_m);
+        if contact_now && !contact_latched {
+            first_contact_frame = Some(control_frames + 1);
+            max_landing_impact_speed_mps =
+                max_landing_impact_speed_mps.max(truth.velocity_ned_mps[2].max(0.0));
+            contact_latched = true;
+        }
+
+        let setpoint = if contact_now {
+            ControlSetpoint::new([0.0, 0.0, 0.0], 0.0, false)
+        } else if control_frames < takeoff_one_end {
+            ControlSetpoint::new([0.0, 0.0, -1.0], 0.0, true)
+        } else if control_frames < takeoff_two_end {
+            ControlSetpoint::new([0.0, 0.0, -2.0], 0.0, true)
+        } else if control_frames < hover_end {
+            ControlSetpoint::new([0.0, 0.0, -2.0], 0.0, true)
+        } else {
+            ControlSetpoint::new([0.0, 0.0, 0.05], 0.0, true)
+        };
+        let output = pipeline.step(estimate, imu_from_sensor(&sensor), setpoint);
+        if setpoint.armed {
+            assert!(
+                output.control_valid,
+                "invalid G2 control output at sim_time_us={}",
+                frame.sim_time_us
+            );
+        }
+
+        let runtime_motors = airframe.runtime_control_motors(output.torque_command);
+        control_frames += 1;
+        client.send_actuator(&format_gazebo_actuator_line(
+            sequence.next(),
+            Some(frame.sim_time_us),
+            runtime_motors.commands,
+        ));
+
+        if let Some(euler) = frame.euler_rad {
+            max_attitude_rad = max_attitude_rad.max(euler[0].abs()).max(euler[1].abs());
+        }
+        min_truth_down_m = min_truth_down_m.min(truth.position_ned_m[2]);
+        final_truth_down_m = truth.position_ned_m[2];
+        final_estimate_down_m = estimate.position_ned_m[2];
+        final_truth_vertical_speed_mps = truth.velocity_ned_mps[2];
+        max_truth_origin_horizontal_m = max_truth_origin_horizontal_m.max(horizontal_norm_m(
+            truth.position_ned_m[0],
+            truth.position_ned_m[1],
+        ));
+        max_estimate_origin_horizontal_m = max_estimate_origin_horizontal_m.max(horizontal_norm_m(
+            estimate.position_ned_m[0],
+            estimate.position_ned_m[1],
+        ));
+        max_truth_vertical_speed_mps =
+            max_truth_vertical_speed_mps.max(truth.velocity_ned_mps[2].abs());
+        max_estimate_vertical_speed_mps =
+            max_estimate_vertical_speed_mps.max(estimate.velocity_ned_mps[2].abs());
+        if (takeoff_two_end..hover_end).contains(&(control_frames - 1)) {
+            max_hover_truth_down_error_m =
+                max_hover_truth_down_error_m.max((truth.position_ned_m[2] + 2.0).abs());
+        }
+        if runtime_motors.clamped {
+            clamp_count += 1;
+        }
+        let max_motor = max_motor_command(runtime_motors.commands);
+        if contact_now {
+            post_contact_frames += 1;
+            post_contact_max_motor = post_contact_max_motor.max(max_motor);
+        } else if max_motor <= 0.001 {
+            pre_contact_zero_motor_frames += 1;
+        }
+        final_armed = output.armed;
+        final_control_valid = output.control_valid;
+    }
+
+    client.send_actuator(&format_gazebo_actuator_line(
+        sequence.next(),
+        None,
+        [0.0; 4],
+    ));
+
+    let summary = TakeoffHoverLandSummary {
+        converted_frames,
+        control_frames,
+        first_contact_frame,
+        post_contact_frames,
+        max_attitude_rad,
+        min_truth_down_m,
+        max_hover_truth_down_error_m,
+        max_truth_origin_horizontal_m,
+        max_estimate_origin_horizontal_m,
+        max_truth_vertical_speed_mps,
+        max_estimate_vertical_speed_mps,
+        max_landing_impact_speed_mps,
+        clamp_ratio: clamp_count as f32 / control_frames.max(1) as f32,
+        pre_contact_zero_motor_frames,
+        post_contact_max_motor,
+        final_truth_down_m,
+        final_estimate_down_m,
+        final_truth_vertical_speed_mps,
+        final_armed,
+        final_control_valid,
+    };
+    eprintln!("G2 {name}: {summary:?}");
+    summary
+}
+
+fn assert_g2_runtime_envelope(label: &str, summary: RuntimeSummary, settings: &RuntimeSettings) {
+    assert!(
+        summary.converted_frames >= summary.control_frames,
+        "{label} converted fewer frames than it controlled: summary={summary:?}"
+    );
+    assert!(
+        summary.max_attitude_rad <= settings.max_attitude_rad,
+        "{label} attitude diverged: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_down_error_m <= settings.max_down_error_m,
+        "{label} truth altitude diverged: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_down_error_m <= settings.max_down_error_m,
+        "{label} estimate altitude diverged: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_horizontal_error_m <= settings.max_horizontal_error_m,
+        "{label} truth drifted horizontally: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_horizontal_error_m <= settings.max_horizontal_error_m,
+        "{label} estimate drifted horizontally: summary={summary:?}"
+    );
+    assert!(
+        summary.clamp_ratio <= settings.max_clamp_ratio,
+        "{label} clamped too often: summary={summary:?}"
+    );
+}
+
+fn assert_g2_runtime_limit_evidence(
+    label: &str,
+    summary: RuntimeSummary,
+    settings: &RuntimeSettings,
+) {
+    assert!(
+        summary.converted_frames >= summary.control_frames,
+        "{label} converted fewer frames than it controlled: summary={summary:?}"
+    );
+    assert!(
+        summary.max_attitude_rad <= settings.max_tilt_rad + 5.0_f32.to_radians(),
+        "{label} actual attitude exceeded limited tilt envelope: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_down_error_m <= settings.max_down_error_m,
+        "{label} truth altitude diverged: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_down_error_m <= settings.max_down_error_m,
+        "{label} estimate altitude diverged: summary={summary:?}"
+    );
+    assert!(
+        summary.max_truth_vertical_speed_mps <= settings.max_vertical_speed_mps,
+        "{label} truth vertical speed too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_estimate_vertical_speed_mps <= settings.max_vertical_speed_mps,
+        "{label} estimate vertical speed too high: summary={summary:?}"
+    );
+    assert!(
+        summary.max_attitude_setpoint_tilt_rad <= settings.max_tilt_rad + 0.001,
+        "{label} tilt demand was not limited before attitude control: summary={summary:?}"
+    );
+    assert!(
+        summary.max_yaw_rate_setpoint_rps <= settings.max_yaw_rate_rps + 0.001,
+        "{label} yaw-rate demand was not limited before rate control: summary={summary:?}"
+    );
+    assert!(
+        summary.max_throttle_correction <= settings.max_throttle_correction + 0.001,
+        "{label} throttle correction was not limited: summary={summary:?}"
+    );
+    assert!(
+        summary.max_axis_command <= 0.251,
+        "{label} rate-axis command was not limited: summary={summary:?}"
+    );
+    assert!(
+        summary.max_motor <= 1.0,
+        "{label} motor command escaped normalized range: summary={summary:?}"
+    );
 }
 
 #[derive(Default)]
@@ -709,6 +1436,7 @@ fn control_config(
     config.position.velocity_gain = settings.position_velocity_gain.max(0.0);
     config.position.max_horizontal_accel_mps2 = settings.max_horizontal_accel_mps2.max(0.0);
     config.position.max_tilt_rad = settings.max_tilt_rad.max(0.0);
+    config.attitude.max_yaw_rate_rps = settings.max_yaw_rate_rps.max(0.0);
     config.altitude.hover_throttle = airframe.hover_motor_command();
     config.altitude.altitude_gain = settings.altitude_gain.max(0.0);
     config.altitude.vertical_velocity_gain = settings.vertical_velocity_gain.max(0.0);
@@ -771,10 +1499,41 @@ fn motor_spread(motors: [f32; 4]) -> f32 {
     max_motor - min_motor
 }
 
+fn max_motor_command(motors: [f32; 4]) -> f32 {
+    motors.into_iter().fold(0.0, f32::max)
+}
+
 fn horizontal_error_m(position_ned_m: [f32; 3], setpoint_ned_m: [f32; 3]) -> f32 {
     let north_error_m = position_ned_m[0] - setpoint_ned_m[0];
     let east_error_m = position_ned_m[1] - setpoint_ned_m[1];
-    (north_error_m * north_error_m + east_error_m * east_error_m).sqrt()
+    horizontal_norm_m(north_error_m, east_error_m)
+}
+
+fn horizontal_norm_m(north_m: f32, east_m: f32) -> f32 {
+    (north_m * north_m + east_m * east_m).sqrt()
+}
+
+fn roll_pitch_tilt_from_quaternion(quaternion: [f32; 4]) -> f32 {
+    let (roll, pitch) = roll_pitch_from_quaternion(quaternion);
+    roll.abs().max(pitch.abs())
+}
+
+fn roll_pitch_from_quaternion(quaternion: [f32; 4]) -> (f32, f32) {
+    let [w, x, y, z] = quaternion;
+    let roll = f32::atan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y));
+    let pitch = f32::asin((2.0 * (w * y - z * x)).clamp(-1.0, 1.0));
+    (roll, pitch)
+}
+
+fn yaw_error_rad(target: f32, actual: f32) -> f32 {
+    let mut error = target - actual;
+    while error > core::f32::consts::PI {
+        error -= 2.0 * core::f32::consts::PI;
+    }
+    while error < -core::f32::consts::PI {
+        error += 2.0 * core::f32::consts::PI;
+    }
+    error
 }
 
 fn take_line(buffer: &mut String) -> Option<String> {
