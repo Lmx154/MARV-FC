@@ -6,5 +6,6 @@ pub mod config;
 pub mod guidance;
 pub mod mixing;
 pub mod outputs;
+pub mod pipeline;
 pub mod position;
 pub mod rate;

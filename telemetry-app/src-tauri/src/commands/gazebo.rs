@@ -45,3 +45,13 @@ pub fn send_test_actuator_command(
         bridge.send_test_actuator_command(motor_speed)
     })
 }
+
+#[tauri::command]
+pub fn send_gazebo_sim_control_command(
+    backend: State<'_, TelemetryBackend>,
+    action: String,
+) -> CommandResult<AppState> {
+    mutate_and_snapshot(backend, |bridge| {
+        bridge.send_gazebo_sim_control_command(&action)
+    })
+}

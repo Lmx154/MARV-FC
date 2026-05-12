@@ -51,6 +51,7 @@ pub fn run() {
             commands::gazebo::connect_gazebo_bridge,
             commands::gazebo::disconnect_gazebo_bridge,
             commands::gazebo::send_test_actuator_command,
+            commands::gazebo::send_gazebo_sim_control_command,
             commands::hilink::send_hilink_ping,
             commands::hilink::send_hilink_arm,
             commands::hilink::send_hilink_disarm,

@@ -6,9 +6,13 @@ topics.imu=/world/marv_field/model/marv_f450/link/base_link/sensor/imu_sensor/im
 topics.magnetometer=/world/marv_field/model/marv_f450/link/base_link/sensor/magnetometer_sensor/magnetometer
 topics.air_pressure=/world/marv_field/model/marv_f450/link/base_link/sensor/air_pressure_sensor/air_pressure
 topics.navsat=/world/marv_field/model/marv_f450/link/base_link/sensor/navsat_sensor/navsat
+topics.pose=/world/marv_field/pose/info
+truth.model_name=marv_f450
+world.control_service=/world/marv_field/control
+world.control_timeout_ms=1000
 
 actuators.topic=/marv_f450/command/motor_speed
-actuators.max_rotor_velocity_rad_s=1000.0
+actuators.max_rotor_velocity_rad_s=1100.0
 actuators.motor_direction_mode=gazebo_model
 actuators.motor_1.direction=1
 actuators.motor_2.direction=1

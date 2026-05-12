@@ -308,6 +308,12 @@ impl AppBridge {
         result
     }
 
+    pub fn send_gazebo_sim_control_command(&mut self, action: &str) -> Result<(), String> {
+        let result = self.gazebo_client.send_sim_control_command(action);
+        self.refresh_gazebo_state();
+        result
+    }
+
     pub fn send_hilink_command(&mut self, command: HilinkCommand) -> Result<(), String> {
         let send_time_ms = self.current_hilink_send_time_ms();
         self.send_hilink_command_at(command, send_time_ms)

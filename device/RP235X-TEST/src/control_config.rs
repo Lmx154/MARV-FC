@@ -37,6 +37,7 @@ pub const HIL_CONTROL_CONFIG: ControlLoopConfig = ControlLoopConfig::new(
         pitch_gain: 0.08,
         yaw_gain: 0.04,
         max_axis_command: 0.25,
+        measured_rate_deadband_rps: 0.0,
     },
     MixerLimits::NORMALIZED,
 );

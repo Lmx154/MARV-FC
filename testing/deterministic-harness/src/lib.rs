@@ -30,15 +30,21 @@ pub use closed_loop_estimator::{
     ClosedLoopEstimatorTrace, SimulatedSensorConfig, simulated_sensors,
 };
 pub use control_pipeline::{
-    ControlPipeline, ControlPipelineTrace, ControlSetpoint, EstimateSnapshot, ImuControlInput,
-    PureControlConfig,
+    ControlInput, ControlPipeline, ControlPipelineTrace, ControlSetpoint, EstimateSnapshot,
+    ImuControlInput, PureControlConfig,
 };
 pub use estimator_replay::{
     EstimatorReplayConfig, EstimatorReplayDriver, EstimatorReplayReport, EstimatorReplayTrace,
     SensorFrame, replay_estimator_frames,
 };
 pub use fixtures::{Fixture, FixtureSample};
-pub use gazebo_contract::{GazeboBridgeConfig, GazeboSensorLine};
+pub use gazebo_contract::{
+    GAZEBO_G0_DEFAULT_ENDPOINT, GazeboActuatorAxis, GazeboActuatorExpectation,
+    GazeboActuatorTruthCase, GazeboAirframeConfig, GazeboAirframeMotorConfig, GazeboBodyFrame,
+    GazeboBridgeConfig, GazeboRotorSpin, GazeboSensorLine, GazeboSimControlAction,
+    GazeboTruthOrigin, format_gazebo_actuator_line, format_gazebo_sim_control_line,
+    gazebo_g0_actuator_truth_cases,
+};
 pub use hil_semantics::{
     HilPublishedGroups, HilRouteRecorder, HilSemanticAdapter, HilSemanticArchive,
     HilSemanticFrameConfig, HilSemanticTrace, hil_response_from_pipeline, hil_valid_flags,

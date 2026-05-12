@@ -17,11 +17,14 @@
 #include <thread>
 
 #include <gz/msgs/actuators.pb.h>
+#include <gz/msgs/boolean.pb.h>
 #include <gz/msgs/fluid_pressure.pb.h>
 #include <gz/msgs/gps.pb.h>
 #include <gz/msgs/imu.pb.h>
 #include <gz/msgs/magnetometer.pb.h>
 #include <gz/msgs/navsat.pb.h>
+#include <gz/msgs/pose_v.pb.h>
+#include <gz/msgs/world_control.pb.h>
 #include <gz/transport.hh>
 
 namespace cerberus_bridge {
@@ -42,7 +45,11 @@ struct BridgeConfig {
     std::string magnetometer_topic = "/world/marv_field/model/marv_f450/link/base_link/sensor/magnetometer_sensor/magnetometer";
     std::string air_pressure_topic = "/world/marv_field/model/marv_f450/link/base_link/sensor/air_pressure_sensor/air_pressure";
     std::string navsat_topic = "/world/marv_field/model/marv_f450/link/base_link/sensor/navsat_sensor/navsat";
+    std::string pose_topic = "/world/marv_field/pose/info";
+    std::string truth_model_name = "marv_f450";
     std::string actuator_topic = "/marv_f450/command/motor_speed";
+    std::string world_control_service = "/world/marv_field/control";
+    unsigned int world_control_timeout_ms = 1000;
     bool synthetic_sensors = false;
     float nominal_battery_voltage_v = 12.3f;
     double max_rotor_velocity_rad_s = 1000.0;
@@ -100,8 +107,16 @@ void load_config_file(const std::string& path, BridgeConfig& config) {
             config.air_pressure_topic = value;
         } else if (key == "topics.navsat" || key == "navsat_topic" || key == "topics.gps") {
             config.navsat_topic = value;
+        } else if (key == "topics.pose" || key == "pose_topic") {
+            config.pose_topic = value;
+        } else if (key == "truth.model_name" || key == "model_name") {
+            config.truth_model_name = value;
         } else if (key == "actuators.topic" || key == "actuator_topic") {
             config.actuator_topic = value;
+        } else if (key == "world.control_service" || key == "topics.world_control" || key == "world_control_service") {
+            config.world_control_service = value;
+        } else if (key == "world.control_timeout_ms" || key == "world_control_timeout_ms") {
+            config.world_control_timeout_ms = static_cast<unsigned int>(std::stoul(value));
         } else if (key == "actuators.max_rotor_velocity_rad_s" || key == "max_rotor_velocity_rad_s") {
             config.max_rotor_velocity_rad_s = std::stod(value);
         } else if (key == "actuators.motor_direction_mode" || key == "motor_direction_mode") {
@@ -129,6 +144,82 @@ std::array<float, 3> flu_to_frd(double x, double y, double z) {
 
 bool finite3(const std::array<float, 3>& values) {
     return std::isfinite(values[0]) && std::isfinite(values[1]) && std::isfinite(values[2]);
+}
+
+constexpr float kPi = 3.14159265358979323846f;
+
+bool finite4(const std::array<float, 4>& values) {
+    return std::isfinite(values[0]) && std::isfinite(values[1]) &&
+           std::isfinite(values[2]) && std::isfinite(values[3]);
+}
+
+std::array<float, 4> normalize_quaternion(std::array<float, 4> q) {
+    const auto norm = std::sqrt(
+        q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]);
+    if (!std::isfinite(norm) || norm <= 1.0e-6f) {
+        return {1.0f, 0.0f, 0.0f, 0.0f};
+    }
+
+    return {q[0] / norm, q[1] / norm, q[2] / norm, q[3] / norm};
+}
+
+std::array<float, 4> flu_quaternion_to_frd(double w, double x, double y, double z) {
+    return normalize_quaternion({
+        static_cast<float>(w),
+        static_cast<float>(x),
+        static_cast<float>(-y),
+        static_cast<float>(-z),
+    });
+}
+
+std::array<float, 4> euler_to_quaternion(float roll, float pitch, float yaw) {
+    const auto half_roll = 0.5f * roll;
+    const auto half_pitch = 0.5f * pitch;
+    const auto half_yaw = 0.5f * yaw;
+    const auto cr = std::cos(half_roll);
+    const auto sr = std::sin(half_roll);
+    const auto cp = std::cos(half_pitch);
+    const auto sp = std::sin(half_pitch);
+    const auto cy = std::cos(half_yaw);
+    const auto sy = std::sin(half_yaw);
+
+    return normalize_quaternion({
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    });
+}
+
+std::array<float, 3> quaternion_to_euler(const std::array<float, 4>& q) {
+    const auto w = q[0];
+    const auto x = q[1];
+    const auto y = q[2];
+    const auto z = q[3];
+
+    const auto sinr_cosp = 2.0f * (w * x + y * z);
+    const auto cosr_cosp = 1.0f - 2.0f * (x * x + y * y);
+    const auto roll = std::atan2(sinr_cosp, cosr_cosp);
+
+    const auto sinp = 2.0f * (w * y - z * x);
+    const auto pitch = std::abs(sinp) >= 1.0f
+        ? std::copysign(kPi / 2.0f, sinp)
+        : std::asin(sinp);
+
+    const auto siny_cosp = 2.0f * (w * z + x * y);
+    const auto cosy_cosp = 1.0f - 2.0f * (y * y + z * z);
+    const auto yaw = std::atan2(siny_cosp, cosy_cosp);
+
+    return {roll, pitch, yaw};
+}
+
+bool pose_name_matches(const std::string& pose_name, const std::string& model_name) {
+    if (pose_name == model_name) {
+        return true;
+    }
+    const auto suffix = std::string("::") + model_name;
+    return pose_name.size() >= suffix.size() &&
+           pose_name.compare(pose_name.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 class GazeboActuatorPublisher {
@@ -183,6 +274,58 @@ private:
     std::array<double, 4> directions_{1.0, 1.0, 1.0, 1.0};
 };
 
+class GazeboWorldController {
+public:
+    bool start(std::string service, unsigned int timeout_ms) {
+        service_ = std::move(service);
+        timeout_ms_ = timeout_ms;
+        std::cout << "[bridge] controlling Gazebo world through " << service_ << std::endl;
+        return true;
+    }
+
+    bool apply(const SimControlCommand& command, std::string& message) {
+        gz::msgs::WorldControl request;
+        switch (command.action) {
+            case SimControlAction::Reset:
+                request.mutable_reset()->set_all(true);
+                break;
+            case SimControlAction::Pause:
+                request.set_pause(true);
+                break;
+            case SimControlAction::Play:
+                request.set_pause(false);
+                break;
+        }
+
+        gz::msgs::Boolean response;
+        bool result = false;
+        const bool executed = node_.Request(service_, request, timeout_ms_, response, result);
+        if (!executed) {
+            message = "request_timeout";
+            return false;
+        }
+        if (!result) {
+            message = "service_rejected";
+            return false;
+        }
+        if (!response.data()) {
+            message = "control_failed";
+            return false;
+        }
+
+        message = "ok";
+        std::cout << "[bridge] applied sim control seq=" << command.sequence
+                  << " action=" << sim_control_action_name(command.action)
+                  << std::endl;
+        return true;
+    }
+
+private:
+    gz::transport::Node node_;
+    std::string service_ = "/world/marv_field/control";
+    unsigned int timeout_ms_ = 1000;
+};
+
 class SensorCollector {
 public:
     explicit SensorCollector(BridgeConfig config)
@@ -201,6 +344,9 @@ public:
         }
         if (!config_.navsat_topic.empty()) {
             any_subscription |= subscribe(config_.navsat_topic, &SensorCollector::on_navsat);
+        }
+        if (!config_.pose_topic.empty()) {
+            any_subscription |= subscribe(config_.pose_topic, &SensorCollector::on_pose);
         }
 
         if (!any_subscription && !config_.synthetic_sensors) {
@@ -234,6 +380,14 @@ public:
         frame.roll = static_cast<float>(0.05 * std::sin(t * 0.2));
         frame.pitch = static_cast<float>(0.05 * std::cos(t * 0.2));
         frame.yaw = static_cast<float>(0.10 * std::sin(t * 0.1));
+        frame.position_north_m = static_cast<float>(18.0 * std::sin(t * 0.04));
+        frame.position_east_m = static_cast<float>(12.0 * std::cos(t * 0.04));
+        frame.position_down_m = static_cast<float>(-2.5 * std::sin(t * 0.03));
+        const auto quat = euler_to_quaternion(frame.roll, frame.pitch, frame.yaw);
+        frame.quat_w = quat[0];
+        frame.quat_x = quat[1];
+        frame.quat_y = quat[2];
+        frame.quat_z = quat[3];
 
         constexpr double base_lat = 26.3109420;
         constexpr double base_lon = -98.1747280;
@@ -241,11 +395,9 @@ public:
         constexpr double meters_to_lat_deg = 1.0 / 111'320.0;
         constexpr double meters_to_lon_deg = 1.0 / (111'320.0 * 0.8964017989909154);
 
-        const auto north_m = 18.0 * std::sin(t * 0.04);
-        const auto east_m = 12.0 * std::cos(t * 0.04);
-        frame.lat_deg = base_lat + north_m * meters_to_lat_deg;
-        frame.lon_deg = base_lon + east_m * meters_to_lon_deg;
-        frame.alt_msl_m = base_alt + static_cast<float>(2.5 * std::sin(t * 0.03));
+        frame.lat_deg = base_lat + frame.position_north_m * meters_to_lat_deg;
+        frame.lon_deg = base_lon + frame.position_east_m * meters_to_lon_deg;
+        frame.alt_msl_m = base_alt - frame.position_down_m;
         frame.vel_north_mps = static_cast<float>(18.0 * 0.04 * std::cos(t * 0.04));
         frame.vel_east_mps = static_cast<float>(-12.0 * 0.04 * std::sin(t * 0.04));
         frame.vel_down_mps = static_cast<float>(-2.5 * 0.03 * std::cos(t * 0.03));
@@ -320,9 +472,22 @@ private:
             }
         }
         if (message.has_orientation()) {
-            latest_.roll = 0.0f;
-            latest_.pitch = 0.0f;
-            latest_.yaw = 0.0f;
+            const auto& orientation = message.orientation();
+            const auto converted = flu_quaternion_to_frd(
+                orientation.w(),
+                orientation.x(),
+                orientation.y(),
+                orientation.z());
+            if (finite4(converted)) {
+                latest_.quat_w = converted[0];
+                latest_.quat_x = converted[1];
+                latest_.quat_y = converted[2];
+                latest_.quat_z = converted[3];
+                const auto euler = quaternion_to_euler(converted);
+                latest_.roll = euler[0];
+                latest_.pitch = euler[1];
+                latest_.yaw = euler[2];
+            }
         }
         mark_fresh(flags);
     }
@@ -385,6 +550,53 @@ private:
         mark_fresh(kValidGps);
     }
 
+    void on_pose(const gz::msgs::Pose_V& message) {
+        for (int index = 0; index < message.pose_size(); ++index) {
+            const auto& pose = message.pose(index);
+            if (!pose_name_matches(pose.name(), config_.truth_model_name)) {
+                continue;
+            }
+            if (!pose.has_position()) {
+                return;
+            }
+
+            const auto& position = pose.position();
+            const std::array<float, 3> position_ned{
+                static_cast<float>(position.x()),
+                static_cast<float>(-position.y()),
+                static_cast<float>(-position.z()),
+            };
+            if (!finite3(position_ned)) {
+                return;
+            }
+
+            std::lock_guard lock(mutex_);
+            latest_.position_north_m = position_ned[0];
+            latest_.position_east_m = position_ned[1];
+            latest_.position_down_m = position_ned[2];
+
+            if (pose.has_orientation()) {
+                const auto& orientation = pose.orientation();
+                const auto converted = flu_quaternion_to_frd(
+                    orientation.w(),
+                    orientation.x(),
+                    orientation.y(),
+                    orientation.z());
+                if (finite4(converted)) {
+                    latest_.quat_w = converted[0];
+                    latest_.quat_x = converted[1];
+                    latest_.quat_y = converted[2];
+                    latest_.quat_z = converted[3];
+                    const auto euler = quaternion_to_euler(converted);
+                    latest_.roll = euler[0];
+                    latest_.pitch = euler[1];
+                    latest_.yaw = euler[2];
+                }
+            }
+            return;
+        }
+    }
+
     static float pressure_to_msl_altitude_m(float pressure_pa) {
         return 44330.0f * (1.0f - std::pow(pressure_pa / 101325.0f, 1.0f / 5.255f));
     }
@@ -435,6 +647,7 @@ public:
             server_.stop();
             return 1;
         }
+        world_controller_.start(config_.world_control_service, config_.world_control_timeout_ms);
 
         std::cout << "[bridge] listening on 127.0.0.1:" << port_ << std::endl;
         std::cout << "[bridge] reading Gazebo sim time from " << config_.clock_topic << std::endl;
@@ -464,6 +677,12 @@ public:
             while (auto line = server_.poll_line()) {
                 if (const auto command = parse_actuator_line(*line)) {
                     actuator_publisher_.apply(*command);
+                } else if (const auto command = parse_sim_control_line(*line)) {
+                    std::string message;
+                    const bool ok = world_controller_.apply(*command, message);
+                    if (server_.has_client()) {
+                        server_.send_line(to_sim_control_ack_line(*command, ok, message));
+                    }
                 } else {
                     std::cout << "[bridge] ignored line: " << *line << std::endl;
                 }
@@ -517,6 +736,7 @@ private:
     gz::transport::NetworkClock clock_;
     TcpServer server_;
     GazeboActuatorPublisher actuator_publisher_;
+    GazeboWorldController world_controller_;
     SensorCollector sensor_collector_;
 };
 

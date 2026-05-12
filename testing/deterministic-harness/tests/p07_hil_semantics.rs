@@ -152,6 +152,7 @@ fn sensor_at(timestamp_us: u64) -> SensorFrame {
         timestamp_us,
         accel_mps2: [0.0, 0.0, 0.0],
         gyro_rps: [0.0, 0.0, 0.0],
+        gravity_body_mps2: None,
         mag_body_ut: Some([20.0, 0.0, 40.0]),
         gps_position_ned_m: Some([0.0, 0.0, 0.0]),
         gps_velocity_ned_mps: Some([0.0, 0.0, 0.0]),

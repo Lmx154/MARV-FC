@@ -32,6 +32,7 @@ pub struct RateControllerConfig {
     pub pitch_gain: f32,
     pub yaw_gain: f32,
     pub max_axis_command: f32,
+    pub measured_rate_deadband_rps: f32,
 }
 
 impl Default for RateControllerConfig {
@@ -41,6 +42,7 @@ impl Default for RateControllerConfig {
             pitch_gain: 0.08,
             yaw_gain: 0.04,
             max_axis_command: 0.25,
+            measured_rate_deadband_rps: 0.0,
         }
     }
 }
@@ -61,6 +63,12 @@ impl RateController {
         measured: BodyRates,
         throttle: f32,
     ) -> TorqueCommand {
+        let measured = BodyRates::new(
+            soft_deadband(measured.roll_rps, self.config.measured_rate_deadband_rps),
+            soft_deadband(measured.pitch_rps, self.config.measured_rate_deadband_rps),
+            soft_deadband(measured.yaw_rps, self.config.measured_rate_deadband_rps),
+        );
+
         TorqueCommand::new(
             clamp_symmetric(
                 self.config.roll_gain * (setpoint.roll_rps - measured.roll_rps),
@@ -101,6 +109,19 @@ fn clamp_unit(value: f32) -> f32 {
     value.clamp(0.0, 1.0)
 }
 
+fn soft_deadband(value: f32, deadband: f32) -> f32 {
+    if !value.is_finite() || !deadband.is_finite() || deadband <= 0.0 {
+        return value;
+    }
+
+    let magnitude = value.abs();
+    if magnitude <= deadband {
+        0.0
+    } else {
+        value.signum() * (magnitude - deadband)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{BodyRates, RateController, RateControllerConfig};
@@ -126,6 +147,7 @@ mod tests {
             pitch_gain: 0.1,
             yaw_gain: 0.1,
             max_axis_command: 0.25,
+            measured_rate_deadband_rps: 0.0,
         });
 
         let command =
@@ -154,6 +176,7 @@ mod tests {
             pitch_gain: 0.25,
             yaw_gain: 0.125,
             max_axis_command: 10.0,
+            measured_rate_deadband_rps: 0.0,
         });
 
         let command = controller.update(
@@ -174,6 +197,7 @@ mod tests {
             pitch_gain: 1.0,
             yaw_gain: 1.0,
             max_axis_command: 0.2,
+            measured_rate_deadband_rps: 0.0,
         });
 
         let command = controller.update(
@@ -186,5 +210,32 @@ mod tests {
         assert_scalar_near(command.pitch, -0.2, 0.000_001);
         assert_scalar_near(command.yaw, 0.2, 0.000_001);
         assert_scalar_near(command.throttle, 0.0, 0.000_001);
+    }
+
+    #[test]
+    fn measured_rate_deadband_softens_small_gyro_motion() {
+        let controller = RateController::new(RateControllerConfig {
+            roll_gain: 1.0,
+            pitch_gain: 1.0,
+            yaw_gain: 1.0,
+            max_axis_command: 1.0,
+            measured_rate_deadband_rps: 0.02,
+        });
+
+        let quiet = controller.update(
+            BodyRateSetpoint::ZERO,
+            BodyRates::new(0.01, -0.02, 0.0),
+            0.5,
+        );
+        let moving = controller.update(
+            BodyRateSetpoint::ZERO,
+            BodyRates::new(0.03, -0.05, 0.0),
+            0.5,
+        );
+
+        assert_scalar_near(quiet.roll, 0.0, 0.000_001);
+        assert_scalar_near(quiet.pitch, 0.0, 0.000_001);
+        assert_scalar_near(moving.roll, -0.01, 0.000_001);
+        assert_scalar_near(moving.pitch, 0.03, 0.000_001);
     }
 }

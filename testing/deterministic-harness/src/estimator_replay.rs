@@ -1,4 +1,7 @@
-use common::localization::estimation::{LayeredNavigationStack, Vec3};
+use common::localization::estimation::{
+    BarometricAltitudeConfig, GpsPositionConfig, GpsVelocityConfig, LayeredNavigationStack,
+    LayeredNavigationStackConfig, Vec3,
+};
 
 use crate::{Fixture, HarnessFailure, HarnessResult};
 
@@ -7,6 +10,7 @@ pub struct SensorFrame {
     pub timestamp_us: u64,
     pub accel_mps2: [f64; 3],
     pub gyro_rps: [f64; 3],
+    pub gravity_body_mps2: Option<[f64; 3]>,
     pub mag_body_ut: Option<[f64; 3]>,
     pub gps_position_ned_m: Option<[f64; 3]>,
     pub gps_velocity_ned_mps: Option<[f64; 3]>,
@@ -29,6 +33,7 @@ impl SensorFrame {
                     ["accel_x", "accel_y", "accel_z"],
                 )?,
                 gyro_rps: columns.vec3(sample, tick, "gyro", ["gyro_x", "gyro_y", "gyro_z"])?,
+                gravity_body_mps2: None,
                 mag_body_ut: columns.optional_vec3(
                     sample,
                     tick,
@@ -62,6 +67,9 @@ impl SensorFrame {
     pub fn validate(&self, tick: u64) -> HarnessResult<()> {
         finite_f64x3(tick, self.timestamp_us, "accel_mps2", self.accel_mps2)?;
         finite_f64x3(tick, self.timestamp_us, "gyro_rps", self.gyro_rps)?;
+        if let Some(value) = self.gravity_body_mps2 {
+            finite_f64x3(tick, self.timestamp_us, "gravity_body_mps2", value)?;
+        }
         if let Some(value) = self.mag_body_ut {
             finite_f64x3(tick, self.timestamp_us, "mag_body_ut", value)?;
         }
@@ -87,6 +95,9 @@ impl SensorFrame {
 pub struct EstimatorReplayConfig {
     pub gravity_body_mps2: [f64; 3],
     pub magnetic_field_inertial_ut: [f64; 3],
+    pub gps_position_std_m: [f64; 3],
+    pub gps_velocity_std_mps: [f64; 3],
+    pub baro_std_m: f64,
     pub max_baro_step_m: Option<f64>,
 }
 
@@ -95,6 +106,9 @@ impl Default for EstimatorReplayConfig {
         Self {
             gravity_body_mps2: [0.0, 0.0, -9.806_65],
             magnetic_field_inertial_ut: [20.0, 0.0, 40.0],
+            gps_position_std_m: [3.0, 3.0, 5.0],
+            gps_velocity_std_mps: [3.0, 3.0, 4.0],
+            baro_std_m: 2.0,
             max_baro_step_m: None,
         }
     }
@@ -140,8 +154,28 @@ pub struct EstimatorReplayDriver {
 
 impl EstimatorReplayDriver {
     pub fn new(config: EstimatorReplayConfig) -> Self {
+        let mut stack_config = LayeredNavigationStackConfig::<f64>::default();
+        stack_config.position_measurement_model.config = GpsPositionConfig {
+            measurement_std_m: Vec3::<f64>::new(
+                config.gps_position_std_m[0],
+                config.gps_position_std_m[1],
+                config.gps_position_std_m[2],
+            ),
+        };
+        stack_config.velocity_measurement_model.config = GpsVelocityConfig {
+            measurement_std_mps: Vec3::<f64>::new(
+                config.gps_velocity_std_mps[0],
+                config.gps_velocity_std_mps[1],
+                config.gps_velocity_std_mps[2],
+            ),
+        };
+        stack_config.barometric_altitude_model.config = BarometricAltitudeConfig {
+            measurement_std_m: config.baro_std_m,
+            axis: 2,
+        };
+
         Self {
-            stack: LayeredNavigationStack::<f64>::default(),
+            stack: LayeredNavigationStack::<f64>::from_config(stack_config),
             config,
             previous_timestamp_us: None,
             last_accepted_baro_down_m: None,
@@ -206,12 +240,15 @@ impl EstimatorReplayDriver {
                         format!("estimator predict failed: {error:?}"),
                     )
                 })?;
+            let gravity_body_mps2 = frame
+                .gravity_body_mps2
+                .unwrap_or(self.config.gravity_body_mps2);
             self.stack
                 .update_gravity_alignment(
                     Vec3::<f64>::new(
-                        self.config.gravity_body_mps2[0],
-                        self.config.gravity_body_mps2[1],
-                        self.config.gravity_body_mps2[2],
+                        gravity_body_mps2[0],
+                        gravity_body_mps2[1],
+                        gravity_body_mps2[2],
                     ),
                     None,
                 )

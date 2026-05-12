@@ -127,6 +127,7 @@ fn p03_control_pipeline_saturation_sets_clamped_flag() {
         pitch_gain: 4.0,
         yaw_gain: 4.0,
         max_axis_command: 2.0,
+        measured_rate_deadband_rps: 0.0,
     };
     config.mixer_limits = MixerLimits::NORMALIZED;
     let pipeline = ControlPipeline::new(PureControlConfig {

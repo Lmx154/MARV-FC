@@ -195,6 +195,17 @@ impl GazeboBridgeClient {
         Ok(())
     }
 
+    pub fn send_sim_control_command(&mut self, action: &str) -> Result<(), String> {
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+
+        let payload = format_sim_control_command(sequence, action)?;
+
+        self.write_raw(payload.as_bytes())?;
+        self.stats.last_error = None;
+        Ok(())
+    }
+
     pub fn send_hil_actuator_command(
         &mut self,
         sequence: u64,
@@ -356,6 +367,17 @@ pub(crate) fn format_test_actuator_command(sequence: u64, motor_speed: f32) -> S
     )
 }
 
+pub(crate) fn format_sim_control_command(sequence: u64, action: &str) -> Result<String, String> {
+    let action = action.trim().to_ascii_lowercase();
+    if !matches!(action.as_str(), "reset" | "pause" | "play") {
+        return Err(format!(
+            "unsupported Gazebo sim control action {action:?}; expected reset, pause, or play"
+        ));
+    }
+
+    Ok(format!("SIM_CONTROL seq={} action={}\n", sequence, action))
+}
+
 fn parse_f32_into(value: &str, target: &mut f32) {
     if let Ok(parsed) = value.parse::<f32>() {
         *target = parsed;
@@ -512,6 +534,14 @@ mod tests {
             line,
             "ACTUATOR seq=42 sim_time_us=840000 m0=0.000 m1=0.500 m2=1.000 m3=0.250\n"
         );
+    }
+
+    #[test]
+    fn gazebo_bridge_client_formats_sim_control_command_for_bridge_protocol() {
+        let line = format_sim_control_command(42, "RESET").expect("reset should format");
+        assert_eq!(line, "SIM_CONTROL seq=42 action=reset\n");
+
+        assert!(format_sim_control_command(43, "launch").is_err());
     }
 
     #[test]

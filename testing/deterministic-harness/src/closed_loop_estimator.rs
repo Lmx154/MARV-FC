@@ -76,6 +76,9 @@ impl ClosedLoopEstimatorConfig {
             estimator: EstimatorReplayConfig {
                 gravity_body_mps2: [0.0, 0.0, -9.806_65],
                 magnetic_field_inertial_ut: [20.0, 0.0, 40.0],
+                gps_position_std_m: [3.0, 3.0, 5.0],
+                gps_velocity_std_mps: [3.0, 3.0, 4.0],
+                baro_std_m: 2.0,
                 max_baro_step_m: None,
             },
             sensors: SimulatedSensorConfig::new(),
@@ -224,6 +227,7 @@ pub fn simulated_sensors(
         timestamp_us,
         accel_mps2: [0.0, 0.0, 0.0],
         gyro_rps: truth.body_rates_rps.map(|value| value as f64),
+        gravity_body_mps2: None,
         mag_body_ut: Some(config.magnetic_field_body_ut),
         gps_position_ned_m: gps_valid.then_some(position),
         gps_velocity_ned_mps: gps_valid.then_some(velocity),

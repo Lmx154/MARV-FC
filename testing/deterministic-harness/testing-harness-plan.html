@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>MARV Deterministic Test Harness Implementation Plan</title>
+  <title>MARV Deterministic Test Harness Implementation Plan — Updated Implementation Context</title>
   <style>
     :root {
       --bg: #f7f8fb;
@@ -91,7 +91,7 @@
 
     nav.toc {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
+      grid-template-columns: repeat(6, minmax(0, 1fr));
       gap: 12px;
       margin: 22px 0;
     }
@@ -301,23 +301,163 @@
     <header class="hero">
       <h1>MARV Deterministic Test Harness Implementation Plan</h1>
       <p>
-        An incremental, testable path to validate MARV’s estimator, controller, mixer, actuator path, and Gazebo/HIL integration without debugging the whole flight stack at once.
+        Updated implementation context and next-flight-readiness path for MARV’s deterministic harness, portable control logic, Gazebo bridge, and firmware/HIL adoption.
       </p>
       <div class="badges">
         <span class="badge">✓ Host-first</span>
         <span class="badge">✓ Lockstep time</span>
         <span class="badge">✓ Component oracles before closed loop</span>
         <span class="badge">✓ Gazebo only after deterministic tests pass</span>
-        <span class="badge">Generated May 11, 2026</span>
+        <span class="badge">✓ Phases 0–9 implemented and passing</span>
+        <span class="badge">Next: portable control flight readiness</span>
+        <span class="badge">Updated May 11, 2026</span>
       </div>
     </header>
 
     <nav class="toc" aria-label="Plan table of contents">
+      <a href="#implementation-context">Status <span>What now exists</span></a>
       <a href="#objective">Objective <span>What we are building</span></a>
       <a href="#architecture">Architecture <span>Harness, sim, and firmware boundaries</span></a>
       <a href="#increments">Incremental phases <span>Every phase has tests</span></a>
+      <a href="#next-flight-readiness">Flight readiness <span>Next path to Gazebo hover</span></a>
       <a href="#matrix">Test matrix <span>What each layer proves</span></a>
     </nav>
+
+
+    <section id="implementation-context" class="card">
+      <h2>Implementation update — current MARV state</h2>
+      <p class="lead">
+        The first harness plan is now implemented through deterministic Gazebo bridge contracts. This update records what the implementation now proves, what it does not prove yet, and how to continue toward a stable Gazebo hover without losing the incremental validation discipline.
+      </p>
+
+      <div class="callout good">
+        <strong>Current status:</strong> phases 0–9 and 11–12 are treated as complete and passing; Phase 10 remains intentionally deferred until the harness artifacts are worth freezing in CI. MARV now has an offline deterministic harness, estimator replay fixtures, a canonical common control pipeline, control envelope tests, gain-sweep evidence, open-loop and closed-loop plant tests, estimator-in-loop tests, a HIL semantic adapter, and Gazebo bridge contract checks. Phase 13 now has a manual/ignored Gazebo G0 actuator-only runtime driver, and a live bridge run has confirmed that direct actuator commands reach Gazebo; the bridge API now also accepts <code>SIM_CONTROL</code> reset/pause/play commands so the physical truth table can become resettable instead of manual-reset driven.
+      </div>
+
+      <div class="diagram" aria-label="Current implementation and next path diagram">
+        <svg viewBox="0 0 1120 470" role="img">
+          <defs>
+            <marker id="arrow-context" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#65708a"></path>
+            </marker>
+          </defs>
+          <text x="20" y="28" class="svg-label">Implemented deterministic stack</text>
+          <rect x="20" y="52" width="160" height="70" rx="14" class="node-green"></rect>
+          <text x="38" y="80" class="svg-label">Contracts</text>
+          <text x="38" y="101" class="svg-sub">mixer · messages · config</text>
+
+          <rect x="210" y="52" width="170" height="70" rx="14" class="node-green"></rect>
+          <text x="230" y="80" class="svg-label">Lockstep harness</text>
+          <text x="230" y="101" class="svg-sub">clock · fixtures · reports</text>
+
+          <rect x="410" y="52" width="180" height="70" rx="14" class="node-green"></rect>
+          <text x="430" y="80" class="svg-label">Estimator replay</text>
+          <text x="430" y="101" class="svg-sub">static · ascent · dropout</text>
+
+          <rect x="620" y="52" width="185" height="70" rx="14" class="node-green"></rect>
+          <text x="640" y="80" class="svg-label">Control pipeline</text>
+          <text x="640" y="101" class="svg-sub">truth input · common stages</text>
+
+          <rect x="835" y="52" width="190" height="70" rx="14" class="node-green"></rect>
+          <text x="855" y="80" class="svg-label">Plant loops</text>
+          <text x="855" y="101" class="svg-sub">truth · estimator-in-loop</text>
+
+          <path d="M180 87 H210" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M380 87 H410" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M590 87 H620" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M805 87 H835" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+
+          <rect x="130" y="170" width="210" height="78" rx="14" class="node-green"></rect>
+          <text x="152" y="202" class="svg-label">HIL semantics</text>
+          <text x="152" y="223" class="svg-sub">duplicate/stale/non-finite</text>
+
+          <rect x="390" y="170" width="225" height="78" rx="14" class="node-green"></rect>
+          <text x="412" y="202" class="svg-label">Gazebo contracts</text>
+          <text x="412" y="223" class="svg-sub">SENSOR parse · ACTUATOR scale</text>
+
+          <rect x="665" y="170" width="230" height="78" rx="14" class="node-amber"></rect>
+          <text x="687" y="202" class="svg-label">Runtime Gazebo gates</text>
+          <text x="687" y="223" class="svg-sub">actuator-only before hover</text>
+
+          <path d="M520 122 C520 150 245 150 245 170" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M340 209 H390" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M615 209 H665" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+
+          <text x="20" y="310" class="svg-label">Next implementation path</text>
+          <rect x="20" y="335" width="180" height="70" rx="14" class="node-blue"></rect>
+          <text x="40" y="363" class="svg-label">Canonical step</text>
+          <text x="40" y="384" class="svg-sub">move portable control to common</text>
+
+          <rect x="230" y="335" width="170" height="70" rx="14" class="node-blue"></rect>
+          <text x="250" y="363" class="svg-label">Envelope tests</text>
+          <text x="250" y="384" class="svg-sub">multi-second + gain sweep</text>
+
+          <rect x="430" y="335" width="170" height="70" rx="14" class="node-amber"></rect>
+          <text x="450" y="363" class="svg-label">Gazebo G0</text>
+          <text x="450" y="384" class="svg-sub">actuator truth table</text>
+
+          <rect x="630" y="335" width="170" height="70" rx="14" class="node-amber"></rect>
+          <text x="650" y="363" class="svg-label">Gazebo G1</text>
+          <text x="650" y="384" class="svg-sub">estimator bypass hover</text>
+
+          <rect x="830" y="335" width="170" height="70" rx="14" class="node-amber"></rect>
+          <text x="850" y="363" class="svg-label">Gazebo G2</text>
+          <text x="850" y="384" class="svg-sub">estimator-in-loop hover</text>
+
+          <path d="M200 370 H230" stroke="#315eea" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M400 370 H430" stroke="#315eea" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M600 370 H630" stroke="#315eea" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+          <path d="M800 370 H830" stroke="#315eea" stroke-width="2" fill="none" marker-end="url(#arrow-context)"></path>
+        </svg>
+      </div>
+
+      <h3>Current implementation map</h3>
+      <table>
+        <thead><tr><th>Implemented area</th><th>What exists now</th><th>What it proves</th><th>Next dependency</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><code>testing/deterministic-harness</code></td>
+            <td>Dedicated host crate linked against <code>common</code>, with lockstep clock, fixtures, reports, plant, control, estimator, HIL semantics, and Gazebo contracts.</td>
+            <td>The validation system is portable, offline, and not dependent on embedded hardware, sockets, or Gazebo for default tests.</td>
+            <td>Keep all new default gates deterministic; make runtime Gazebo tests ignored or feature-gated.</td>
+          </tr>
+          <tr>
+            <td><code>ControlPipeline</code> in the harness</td>
+            <td>Host adapter that feeds truth/estimated state into position, altitude, attitude, rate, and quad-X mixer stages from <code>common</code>.</td>
+            <td>Pure control signs, limits, motor outputs, clamp flags, and NED altitude behavior can be tested without estimator or Gazebo noise.</td>
+            <td>Promote the reusable step boundary into <code>common</code> so firmware and harness execute the same code path.</td>
+          </tr>
+          <tr>
+            <td><code>ClosedLoopRunner</code> + <code>TruthPlant</code></td>
+            <td>Truth-state closed loop applies motor outputs to a simple NED vertical + attitude-rate plant and records per-tick traces.</td>
+            <td>Control + mixer + plant signs are sane when state is perfect.</td>
+            <td>Add longer envelope tests and structured gain sweeps before Gazebo hover attempts.</td>
+          </tr>
+          <tr>
+            <td><code>ClosedLoopEstimatorRunner</code></td>
+            <td>Truth-derived simulated sensors feed the real estimator, estimator output feeds control, and motor outputs step the plant.</td>
+            <td>The deterministic estimator-control-actuator loop is bounded for controlled scenarios.</td>
+            <td>Extend beyond basic hold/step cases into dropout, spikes, warmup, and disturbance envelopes.</td>
+          </tr>
+          <tr>
+            <td><code>HilSemanticAdapter</code></td>
+            <td>Harness sensor frames become MARV HIL-domain structs; responses are built from estimator/control traces.</td>
+            <td>Duplicate ticks, stale time, valid flags, non-finite samples, response correlation, and failsafe zero output are checked offline.</td>
+            <td>Use this boundary to validate firmware integration after the canonical portable control step exists.</td>
+          </tr>
+          <tr>
+            <td>Gazebo bridge contracts</td>
+            <td>Known text <code>SENSOR</code> frames, <code>ACTUATOR</code> formatting, motor-speed scaling, config topics, and motor-direction delegation are tested without Gazebo runtime.</td>
+            <td>The bridge protocol and static config are not opaque anymore.</td>
+            <td>Measure the Gazebo model’s physical response with actuator-only runtime tests.</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout warn">
+        <strong>Important remaining risk:</strong> the harness proves the internal contracts, but it still does not prove the Gazebo model’s physical motor order, spin-direction reaction torque, hover thrust, ENU/NED conversion, or sensor-frame orientation. Those must be proven with the runtime Gazebo gates below before full autonomous Gazebo hover is meaningful.
+      </div>
+    </section>
 
     <section id="objective" class="card">
       <h2>1. Objective</h2>
@@ -1068,6 +1208,266 @@ cmake --build telemetry-app/gazebo_bridge/build</code></pre>
           <li>No generated files are committed except explicit fixtures and golden summaries.</li>
         </ul>
       </div>
+
+      <div class="phase" id="next-flight-readiness">
+        <div class="phase-header">
+          <h3>Phase 11 — Canonical portable control step</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done</span>
+            <span class="pill blue">Scope: code ownership</span>
+            <span class="pill green">Exit: harness and firmware call the same step</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added <code>common::control::pipeline::FlightControlPipeline</code> with <code>ControlInput</code>, <code>ControlSetpoint</code>, <code>ControlOutput</code>, <code>ControlDebug</code>, finite-value validation, disarmed/missing-IMU/invalid-estimate zero-output behavior, clamp reporting, and motor-order support. The deterministic harness now aliases the common API directly, and <code>device/RP235X-TEST/src/flight_control.rs</code> calls the same common step after gathering estimate, IMU, setpoint, arming state, and mixer order.
+        </div>
+        <p>
+          The harness originally had a useful <code>ControlPipeline</code>; Phase 11 promoted that reusable flight-control step into a canonical <code>common</code> API. The harness, <code>RP235X-TEST</code>, and future firmware can now call that exact API instead of maintaining similar-but-not-identical logic.
+        </p>
+        <table>
+          <thead><tr><th>Requirement</th><th>Implementation note</th><th>Testable exit condition</th></tr></thead>
+          <tbody>
+            <tr><td>Single portable step</td><td>Added <code>common::control::pipeline::FlightControlPipeline</code>.</td><td>Harness calls the common API directly; no duplicated wrapper logic remains except fixture conversion.</td></tr>
+            <tr><td>Stable input/output contract</td><td>Defined <code>ControlInput</code>, <code>ControlSetpoint</code>, <code>ControlOutput</code>, and <code>ControlDebug</code> with finite-value and validity expectations.</td><td>Unit tests cover invalid estimate, missing IMU, disarmed output, clamped output, and all motors in <code>[0,1]</code>.</td></tr>
+            <tr><td>Firmware compatibility</td><td>Adapted <code>device/RP235X-TEST/src/flight_control.rs</code> to call the same common step after it gathers latest estimate, IMU, setpoint, arming state, and mixer order.</td><td>Embedded target check passes without changing control semantics.</td></tr>
+            <tr><td>Trace compatibility</td><td>Kept the existing harness trace surface: setpoint, estimate, attitude setpoint, rate setpoint, torque, throttle, motors, clamp, valid.</td><td>Phase 5 and 6 closed-loop tests still pass after the refactor.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Completed Phase 11 gate
+cargo test -p common control
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p03_control_pipeline
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p05_closed_loop_truth
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p06_closed_loop_estimator
+cargo check --manifest-path device/RP235X-TEST/Cargo.toml --target thumbv8m.main-none-eabihf</code></pre>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 12 — Control envelope tests and gain sweep</h3>
+          <div class="phase-meta">
+            <span class="pill green">Done</span>
+            <span class="pill blue">Scope: stability margins</span>
+            <span class="pill green">Exit: simple control is boring before Gazebo</span>
+          </div>
+        </div>
+        <div class="callout good">
+          <strong>Status:</strong> completed. Added portable-control failsafe tests in <code>p09_portable_control.rs</code>, multi-second truth and estimator envelope tests in <code>p10_control_envelope.rs</code>, and conservative gain-sweep tests in <code>p10_gain_sweep.rs</code>. The new gates cover disarmed/missing-IMU/invalid-estimate zero output, static hold, roll and pitch disturbance recovery, yaw-rate damping, vertical up/down steps, clamp ratio, finite-state envelopes, and nearby gain scales.
+        </div>
+        <p>
+          After the canonical step exists, extend the truth-in-loop and estimator-in-loop tests from sign checks into multi-second envelope tests. The goal is not perfect tuning; it is to reject obviously explosive gains and sign mistakes before Gazebo runtime enters the loop. This phase is now covered by deterministic harness tests and should remain offline.
+        </p>
+        <table>
+          <thead><tr><th>Scenario</th><th>Initial condition</th><th>Setpoint</th><th>Required assertions</th></tr></thead>
+          <tbody>
+            <tr><td>Static level hold</td><td>Level origin</td><td><code>[0,0,0]</code>, yaw 0, armed</td><td>Finite traces, no continuous clamp, attitude and altitude bounded for 5–10 s.</td></tr>
+            <tr><td>Roll disturbance recovery</td><td>+10° roll</td><td>Origin hold</td><td>Initial commanded roll torque opposes error; final roll smaller than initial.</td></tr>
+            <tr><td>Pitch disturbance recovery</td><td>+10° pitch</td><td>Origin hold</td><td>Initial commanded pitch torque opposes error; final pitch smaller than initial.</td></tr>
+            <tr><td>Yaw-rate damping</td><td>Positive yaw rate</td><td>Yaw hold</td><td>Yaw torque opposes measured yaw rate; yaw rate decays.</td></tr>
+            <tr><td>Vertical step up</td><td>Origin</td><td><code>[0,0,-1]</code> NED</td><td>Down position moves negative/upward; final error improves; overshoot bounded.</td></tr>
+            <tr><td>Vertical step down</td><td>Origin</td><td><code>[0,0,+1]</code> NED</td><td>Down position moves positive/downward; final error improves; overshoot bounded.</td></tr>
+            <tr><td>Invalid estimate failsafe</td><td>Estimate invalid or stale</td><td>Armed command present</td><td>Valid failsafe response with zero motors, not stale uncontrolled output.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Completed Phase 12 gate
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p09_portable_control
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p10_control_envelope
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p10_gain_sweep</code></pre>
+        <div class="callout">
+          <strong>Gain-sweep rule:</strong> sweep small scale factors around current gains, record max attitude, max altitude error, clamp percentage, and whether final error improves. A sweep failure is useful evidence, not noise; it tells us Gazebo should wait.
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 13 — Gazebo G0 actuator-only truth table</h3>
+          <div class="phase-meta">
+            <span class="pill green">Manual gate passing</span>
+            <span class="pill amber">Runtime / ignored</span>
+            <span class="pill blue">Scope: Gazebo physical contract</span>
+            <span class="pill green">Exit: motor order, signs, and thrust are measured</span>
+          </div>
+        </div>
+        <div class="callout">
+          <strong>Status:</strong> manual gate implemented and passing as of May 12, 2026. The physical oracle is now driven from <code>testing/deterministic-harness/config/airframes/f450_xing2_2809_1045_4s_v0.cfg</code>: mass, gravity, COM, inertia, motor positions, spin directions, provisional thrust model, hover thrust, yaw moment arm, runtime gyro frame, and measured Gazebo runtime motor signs are parsed by <code>GazeboAirframeConfig</code>. The ignored TCP runtime test connects to the Gazebo bridge, sends direct <code>ACTUATOR</code> vectors, samples <code>SENSOR</code> gyro/vertical-velocity responses, and asserts profile-derived motor bump plus roll/pitch/yaw sign expectations. Live hard-gate validation with <code>MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_CASE=all</code> passed after confirming the bridge publishes to the subscribed Gazebo actuator topic and after replacing tiny trim bumps with full-span sign probes.
+        </div>
+        <div class="callout">
+          <strong>Airframe profile rule:</strong> keep airframe physics, measured motor/prop data, and control gains separate. The harness profile is a replaceable physical contract for this Gazebo model and later for the real drone; it is not a hidden controller tuning table. When the real vehicle is measured, add or swap a profile rather than baking those numbers into tests.
+        </div>
+        <table>
+          <thead><tr><th>Live G0 probe</th><th>Observed response</th><th>Interpretation</th></tr></thead>
+          <tbody>
+            <tr><td><code>zero</code></td><td>Passed with <code>MARV_GAZEBO_G0_AUTO_RESET=1</code>; max gyro stayed near <code>0.0028 rad/s</code>.</td><td>Bridge reset/play works and no stale actuator command remains after reset.</td></tr>
+            <tr><td><code>hover</code></td><td>Passed with automatic reset; symmetric motors stayed angularly quiet.</td><td>Symmetric actuator publication is sane for angular-rate checks.</td></tr>
+            <tr><td><code>motor_1_bump</code> through <code>motor_4_bump</code></td><td>Passed with full-span single-output probes from profile hover; representative deltas were about <code>23–58 rad/s</code> on the dominant axes.</td><td>Motor output order and per-motor runtime signs are now measured and locked in the airframe profile.</td></tr>
+            <tr><td><code>roll_positive</code> / <code>roll_negative</code></td><td>Passed: <code>[0,1,1,0]</code> produced strong positive roll and <code>[1,0,0,1]</code> produced strong negative roll.</td><td>The current Gazebo runtime roll basis is explicit; it does not fall out of the original physical handoff signs.</td></tr>
+            <tr><td><code>pitch_positive</code> / <code>pitch_negative</code></td><td>Passed: <code>[1,0,1,0]</code> produced strong positive pitch and <code>[0,1,0,1]</code> produced strong negative pitch.</td><td>Pitch sign is measured at the bridge <code>SENSOR</code> gyro boundary.</td></tr>
+            <tr><td><code>yaw_positive</code> / <code>yaw_negative</code></td><td>Passed: <code>[1,1,0,0]</code> produced positive yaw and <code>[0,0,1,1]</code> produced negative yaw.</td><td>Yaw reaction behavior is now a runtime contract instead of an inferred spin-direction assumption.</td></tr>
+          </tbody>
+        </table>
+        <p>
+          Re-enter Gazebo without estimator or controller first. Send direct motor commands through the existing bridge and measure the physical response. This is the fastest way to expose the class of bugs that produces “flies up for a second, then freaks out.”
+        </p>
+        <table>
+          <thead><tr><th>Command</th><th>Expected response</th><th>Failure points to</th></tr></thead>
+          <tbody>
+            <tr><td><code>[0,0,0,0]</code></td><td>No thrust and no rotation.</td><td>Bridge publishing stale commands or Gazebo model not reset.</td></tr>
+            <tr><td><code>[hover,hover,hover,hover]</code></td><td>Near-zero roll/pitch/yaw torque and bounded vertical acceleration.</td><td>Hover scaling or motor thrust model mismatch.</td></tr>
+            <tr><td>One motor at a time</td><td>Observed torque identifies physical motor index.</td><td>Motor order mismatch between mixer and Gazebo.</td></tr>
+            <tr><td>Roll basis</td><td>Positive and negative roll commands produce opposite roll acceleration.</td><td>Roll sign, motor order, or axis convention mismatch.</td></tr>
+            <tr><td>Pitch basis</td><td>Positive and negative pitch commands produce opposite pitch acceleration.</td><td>Pitch sign, motor order, or axis convention mismatch.</td></tr>
+            <tr><td>Yaw basis</td><td>CW/CCW differential produces expected yaw acceleration.</td><td>Spin-direction or reaction-torque sign mismatch.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 13 gate; ignored or manually run only
+cmake -S telemetry-app/gazebo_bridge -B telemetry-app/gazebo_bridge/build
+cmake --build telemetry-app/gazebo_bridge/build
+./telemetry-app/gazebo_bridge/build/cerberus_gazebo_bridge
+
+# Then run the deterministic protocol/check-table coverage
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table
+
+# Runtime gate: run one selected case per fresh Gazebo reset, or let the bridge reset through SIM_CONTROL.
+# Start with zero/hover, then one motor or axis case at a time.
+MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_CASE=zero cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table_runtime -- --ignored --nocapture
+MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_CASE=hover cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table_runtime -- --ignored --nocapture
+MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_CASE=motor_1_single cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table_runtime -- --ignored --nocapture
+
+# Optional, if the bridge is not on the default 127.0.0.1:9000
+MARV_GAZEBO_BRIDGE_ADDR=127.0.0.1:9000 MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_CASE=zero cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table_runtime -- --ignored --nocapture
+
+# Full observation pass: resets, waits for ACKs, and discards post-reset settle frames between cases.
+MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_CASE=all cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table_runtime -- --ignored --nocapture
+
+# Observation mode records mismatches without failing the command.
+MARV_GAZEBO_G0_AUTO_RESET=1 MARV_GAZEBO_G0_OBSERVE_ONLY=1 MARV_GAZEBO_G0_CASE=all cargo test --manifest-path testing/deterministic-harness/Cargo.toml p11_gazebo_actuator_truth_table_runtime -- --ignored --nocapture</code></pre>
+        <div class="callout warn">
+          <strong>Fresh reset rule:</strong> the runtime driver supports <code>MARV_GAZEBO_G0_CASE</code> values of <code>zero</code>, <code>hover</code>, <code>motor_1_bump</code>, <code>motor_2_bump</code>, <code>motor_3_bump</code>, <code>motor_4_bump</code>, <code>roll_positive</code>, <code>roll_negative</code>, <code>pitch_positive</code>, <code>pitch_negative</code>, <code>yaw_positive</code>, <code>yaw_negative</code>, and <code>all</code>. The old <code>motor_1_single</code> through <code>motor_4_single</code> names remain accepted as aliases for bump probes. Use <code>MARV_GAZEBO_G0_AUTO_RESET=1</code> after rebuilding the bridge with <code>SIM_CONTROL</code> support. The driver sends zero motors, <code>pause</code>, <code>reset</code>, <code>play</code>, waits for bridge ACKs, sends a profile-derived high symmetric settle command, then discards <code>MARV_GAZEBO_G0_RESET_SETTLE_FRAMES</code> frames before measuring. Use <code>MARV_GAZEBO_G0_OBSERVE_ONLY=1</code> when collecting evidence for a known mismatch.
+        </div>
+        <div class="callout danger">
+          <strong>Do not skip this gate:</strong> deterministic bridge contracts prove that text frames and scaling are correct, but they do not prove Gazebo’s physical motor order or yaw reaction torque. G0 is the bridge from protocol correctness to physical correctness.
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 14 — Gazebo G1 control-in-loop with estimator bypass</h3>
+          <div class="phase-meta">
+            <span class="pill amber">Runtime / ignored</span>
+            <span class="pill blue">Scope: portable control + Gazebo plant</span>
+            <span class="pill green">Exit: hover is bounded with truth estimate</span>
+          </div>
+        </div>
+        <p>
+          Once G0 passes, feed Gazebo model truth directly into the portable control step as an <code>EstimateSnapshot</code>. This intentionally bypasses MARV’s estimator so any failure is isolated to control, mixer, bridge, Gazebo physical model, or frame conversion from Gazebo truth into MARV NED/FRD conventions.
+        </p>
+        <p>
+          <strong>Status:</strong> completed and passing as of May 12, 2026. The bridge protocol now carries attitude quaternion fields (<code>qw/qx/qy/qz</code>) and pose truth fields (<code>pn/pe/pd</code>) alongside the existing roll/pitch/yaw debug fields, and the Gazebo SENSOR parser converts those frames into a truth-backed <code>EstimateSnapshot</code> plus IMU input. The G1 harness also has a profile-driven runtime motor mixer that uses the measured G0 motor signs from the airframe profile instead of assuming the canonical logical quad-X mixer basis matches the Gazebo model.
+        </p>
+        <div class="callout">
+          <strong>Phase 14 finding:</strong> the current portable controller signs are internally consistent, but the checked Gazebo runtime basis differs from the canonical mixer basis. Feeding Gazebo with the raw common mixer outputs can command the correct torque mathematically while applying the wrong physical motor pattern in the sim. The G1 runtime test therefore sends <code>TorqueCommand</code> through the measured airframe runtime basis before formatting <code>ACTUATOR</code> frames.
+        </div>
+        <div class="callout">
+          <strong>Live G1 evidence:</strong> <code>MARV_GAZEBO_G1_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p12_gazebo_control_truth -- --ignored --nocapture</code> passed after rebuilding the bridge with pose truth. Origin hold completed with zero clamp, bounded pose, near-hover motors, and zero measured motor spread after adding a small Gazebo G1 gyro deadband. The vertical takeoff step used <code>[0,0,-3]</code> NED because a <code>-1 m</code> command from ground contact only reached about 0.653 normalized motor and did not lift off; the latest takeoff step improved down error from about 3.00 m to 1.68 m with max attitude about 0.0001 rad, zero clamp, and max motor spread about 0.0001.
+        </div>
+        <div class="diagram" aria-label="Gazebo estimator bypass flow">
+          <svg viewBox="0 0 980 190" role="img">
+            <defs>
+              <marker id="arrow-g1" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="#65708a"></path>
+              </marker>
+            </defs>
+            <rect x="20" y="55" width="160" height="70" rx="14" class="node-amber"></rect>
+            <text x="40" y="84" class="svg-label">Gazebo truth</text>
+            <text x="40" y="105" class="svg-sub">pose · velocity · rates</text>
+            <rect x="220" y="55" width="170" height="70" rx="14" class="node-blue"></rect>
+            <text x="240" y="84" class="svg-label">Truth adapter</text>
+            <text x="240" y="105" class="svg-sub">Gazebo → MARV NED</text>
+            <rect x="430" y="55" width="190" height="70" rx="14" class="node-blue"></rect>
+            <text x="450" y="84" class="svg-label">Portable control</text>
+            <text x="450" y="105" class="svg-sub">same common step</text>
+            <rect x="660" y="55" width="160" height="70" rx="14" class="node-amber"></rect>
+            <text x="680" y="84" class="svg-label">ACTUATOR</text>
+            <text x="680" y="105" class="svg-sub">bridge motor speeds</text>
+            <rect x="860" y="55" width="100" height="70" rx="14" class="node-amber"></rect>
+            <text x="882" y="84" class="svg-label">Gazebo</text>
+            <text x="882" y="105" class="svg-sub">plant</text>
+            <path d="M180 90 H220" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-g1)"></path>
+            <path d="M390 90 H430" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-g1)"></path>
+            <path d="M620 90 H660" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-g1)"></path>
+            <path d="M820 90 H860" stroke="#65708a" stroke-width="2" fill="none" marker-end="url(#arrow-g1)"></path>
+          </svg>
+        </div>
+        <table>
+          <thead><tr><th>Requirement</th><th>Reason</th><th>Pass condition</th></tr></thead>
+          <tbody>
+            <tr><td>Add/enable a Gazebo truth source</td><td>The current bridge sensors are enough for estimator-in-loop, but estimator bypass needs model pose/velocity/rates.</td><td><strong>Passed:</strong> SENSOR lines now parse attitude quaternion, Euler debug, model pose <code>pn/pe/pd</code>, velocity, and IMU fields into truth-control inputs.</td></tr>
+            <tr><td>Close controller signs against Gazebo runtime basis</td><td>G0 measured motor signs do not match the canonical logical mixer basis.</td><td><strong>Passed offline:</strong> roll/pitch/yaw disturbance commands route through the measured runtime motor basis with the opposing physical sign.</td></tr>
+            <tr><td>Hold origin with truth state</td><td>Isolates controller + mixer + actuator bridge + Gazebo model from estimator behavior.</td><td><strong>Passed live:</strong> 250-frame G1 origin hold completed with zero clamp, bounded pose/attitude, and max motor spread at 0.0.</td></tr>
+            <tr><td>Vertical takeoff step</td><td>Verifies NED-down convention against Gazebo response after leaving ground contact.</td><td><strong>Passed live:</strong> <code>[0,0,-3]</code> moved upward, final error improved, attitude stayed bounded, and clamp ratio stayed below the gate.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 14 gate; ignored or feature-gated
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p08_gazebo_contract_truth_adapter
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p12_gazebo_control_truth_runtime_mixer_closes_roll_pitch_yaw_signs
+MARV_GAZEBO_G1_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p12_gazebo_control_truth -- --ignored --nocapture</code></pre>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 15 — Gazebo G2 estimator-in-loop hover and vertical step</h3>
+          <div class="phase-meta">
+            <span class="pill amber">Runtime / ignored</span>
+            <span class="pill purple">Scope: full Gazebo SITL</span>
+            <span class="pill green">Exit: estimator + control can hold a simple setpoint</span>
+          </div>
+        </div>
+        <p>
+          Only after actuator-only and estimator-bypass Gazebo tests pass should the real Gazebo sensor stream feed the MARV estimator and control step. Start with hover/origin hold, then a vertical takeoff step. Position missions and aggressive motion should wait.
+        </p>
+        <p>
+          <strong>Status:</strong> corrected G2 estimator attitude drift and tightened the live gate as of May 12, 2026. The Gazebo contract now includes a sensor-to-estimator adapter that honors HIL valid groups, derives attitude-based gravity for estimator alignment, removes gravity from the linear navigation accel path, and keeps pose-origin-relative NED available for Gazebo position measurements. The live G2 path now defaults to gravity/gyro/GPS/baro for attitude/position and leaves the magnetometer disabled unless <code>MARV_GAZEBO_G2_USE_MAGNETOMETER=1</code> is set; the Gazebo mag frame still needs its own frame/calibration gate before it should steer hover attitude.
+        </p>
+        <div class="callout">
+          <strong>Phase 15 setup:</strong> G2 keeps truth available as an evidence side-channel while the controller uses the estimator output. Control input now flows through Gazebo sensor groups → <code>EstimatorReplayDriver</code> → <code>EstimateSnapshot</code> → portable control, with the measured Gazebo runtime motor basis still applied before <code>ACTUATOR</code> frames.
+        </div>
+        <div class="callout">
+          <strong>Live G2 evidence:</strong> <code>MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_estimator_warmup -- --ignored --nocapture</code> passed with 250 converted frames, estimator valid from tick 2, finite attitude, and bounded pad estimate. <code>MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_estimator_loop -- --ignored --nocapture</code> now includes tightened horizontal, attitude, hover-spread, and final vertical settle gates and passed: origin hold stayed at 0.0 m truth horizontal error and about 0.00002 m estimate horizontal error; the default <code>[0,0,-3]</code> vertical step stayed inside the 0.25 m horizontal envelope with max truth horizontal error about 0.012 m, max estimate horizontal error about 0.014 m, max attitude about 0.0031 rad, zero clamp, and final truth/estimate down errors below 1.0 m. Earlier meter-scale drift reproduced when the Gazebo magnetometer update was enabled, confirming the prior failure was estimator attitude contamination rather than horizontal position gain alone.
+        </div>
+        <table>
+          <thead><tr><th>Scenario</th><th>Enabled components</th><th>Required evidence</th></tr></thead>
+          <tbody>
+            <tr><td>Estimator warmup on pad</td><td>Gazebo sensors → MARV estimator; motors zero</td><td><strong>Passed live:</strong> estimate becomes valid at tick 2, remains finite, and stays bounded on pad.</td></tr>
+            <tr><td>Origin hover</td><td>Gazebo sensors → estimator → common control → bridge</td><td><strong>Passed live:</strong> bounded truth/estimate altitude, near-zero horizontal drift, bounded attitude, finite motors, low motor spread, and zero clamp.</td></tr>
+            <tr><td>Vertical takeoff step</td><td>Same full loop</td><td><strong>Passed live:</strong> <code>[0,0,-3]</code> moved truth and estimate NED-negative/upward with bounded horizontal drift, bounded attitude, and zero clamp. As in G1, <code>-1 m</code> did not lift off from ground contact.</td></tr>
+            <tr><td>GPS-gap hold</td><td>Full loop with temporary GPS invalidity</td><td>Estimator and control remain finite or enter documented failsafe; no uncontrolled stale output.</td></tr>
+          </tbody>
+        </table>
+        <pre><code># Suggested Phase 15 gate; ignored or feature-gated
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_estimator_warmup -- --ignored --nocapture
+cargo test --manifest-path testing/deterministic-harness/Cargo.toml p13_gazebo_estimator_loop -- --ignored --nocapture</code></pre>
+      </div>
+
+      <div class="phase">
+        <div class="phase-header">
+          <h3>Phase 16 — Firmware HIL adoption</h3>
+          <div class="phase-meta">
+            <span class="pill blue">Scope: embedded integration</span>
+            <span class="pill green">Exit: firmware uses validated logic</span>
+          </div>
+        </div>
+        <p>
+          The embedded step should happen after the portable common control path has passed deterministic and Gazebo runtime gates. At that point firmware work is mostly scheduling, channel, DShot, and HIL transport integration—not rediscovering controller signs or mixer conventions.
+        </p>
+        <table>
+          <thead><tr><th>Boundary</th><th>Validation</th><th>Failure meaning</th></tr></thead>
+          <tbody>
+            <tr><td>Firmware calls common control step</td><td>Same unit/golden tests as harness; embedded check/build passes.</td><td>API or no_std integration issue, not control math.</td></tr>
+            <tr><td>HIL ingress to estimator/control</td><td>Phase 8 HIL semantics plus device-level HIL replay.</td><td>Routing/timestamp/valid-flag problem.</td></tr>
+            <tr><td>DShot/actuator output</td><td>Known motor vectors produce expected DShot channels.</td><td>Output mapping or scheduling problem.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
     </section>
 
     <section id="matrix" class="card">
@@ -1131,7 +1531,31 @@ cmake --build telemetry-app/gazebo_bridge/build</code></pre>
             <td>Gazebo contract</td>
             <td>SENSOR parse, ACTUATOR scaling, topic config, motor directions.</td>
             <td>External sim bridge is not silently changing the contract.</td>
-            <td>Real hardware behavior.</td>
+            <td>Gazebo runtime physical response and real hardware behavior.</td>
+          </tr>
+          <tr>
+            <td>Canonical common control</td>
+            <td>Harness and <code>RP235X-TEST</code> call the same portable step.</td>
+            <td>Offline tests validate the logic that firmware will use.</td>
+            <td>Gazebo physical model correctness.</td>
+          </tr>
+          <tr>
+            <td>Gazebo actuator truth table</td>
+            <td>Direct motor pulses, hover vector, roll/pitch/yaw basis vectors.</td>
+            <td>Gazebo motor order, spin direction, yaw reaction torque, and thrust scaling are physically measured.</td>
+            <td>Estimator correctness or autonomous hover.</td>
+          </tr>
+          <tr>
+            <td>Gazebo estimator bypass</td>
+            <td>Gazebo truth pose converted to MARV estimate, then portable control drives bridge actuators.</td>
+            <td>Control + mixer + actuator bridge can stabilize Gazebo when state is perfect.</td>
+            <td>Gazebo sensor conversion or estimator behavior.</td>
+          </tr>
+          <tr>
+            <td>Gazebo estimator-in-loop</td>
+            <td>Gazebo sensors feed MARV estimator; estimator feeds portable control; bridge drives motors.</td>
+            <td>Full SITL path can hold simple setpoints.</td>
+            <td>Real hardware sensor noise, timing, DShot electrical behavior.</td>
           </tr>
         </tbody>
       </table>
@@ -1166,35 +1590,35 @@ cmake --build telemetry-app/gazebo_bridge/build</code></pre>
     </section>
 
     <section class="card">
-      <h2>7. Minimum first milestone</h2>
+      <h2>7. Minimum next milestone</h2>
       <p class="lead">
-        The first useful milestone should be small enough to complete quickly but meaningful enough to catch the likely Gazebo divergence class.
+        The first milestone has effectively been achieved: the harness crate exists, component contracts are in place, estimator replay works, control and plant loops run, HIL semantics are tested, and Gazebo bridge contracts are no longer opaque. The next milestone should be small, concrete, and directly useful for the Gazebo failure.
       </p>
       <div class="callout good">
-        <strong>Milestone 1 definition:</strong> a new harness crate can run a static pad estimator replay, a control sign test with truth state, and a mixer/motor-order truth table without Gazebo or hardware.
+        <strong>Next milestone definition:</strong> the exact portable control step that firmware will use is moved into <code>common</code>, exercised by the harness for multi-second truth and estimator-in-loop envelopes, and then used for a Gazebo actuator-only truth table before any full autonomous Gazebo hover attempt.
       </div>
       <table>
-        <thead><tr><th>Deliverable</th><th>Files</th><th>Passing command</th></tr></thead>
+        <thead><tr><th>Deliverable</th><th>Files or modules</th><th>Passing command / evidence</th></tr></thead>
         <tbody>
           <tr>
-            <td>Harness crate skeleton</td>
-            <td><code>testing/deterministic-harness/Cargo.toml</code>, <code>src/lib.rs</code>, <code>src/clock.rs</code></td>
-            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p00_clock</code></td>
+            <td>Canonical common control step</td>
+            <td><code>common/src/control/pipeline.rs</code> or <code>common/src/services/control/mod.rs</code>; adapted harness <code>ControlPipeline</code>; adapted <code>RP235X-TEST/src/flight_control.rs</code></td>
+            <td><code>cargo test -p common control</code> plus existing harness phases still pass.</td>
           </tr>
           <tr>
-            <td>Mixer contract wrapper</td>
-            <td><code>tests/p01_mixer_contract.rs</code></td>
-            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p01_mixer_contract</code></td>
+            <td>Multi-second envelope tests</td>
+            <td><code>testing/deterministic-harness/tests/p10_control_envelope.rs</code></td>
+            <td>Static hold, roll/pitch disturbance, yaw-rate damping, vertical up/down, invalid-estimate failsafe.</td>
           </tr>
           <tr>
-            <td>Static estimator replay</td>
-            <td><code>fixtures/static_on_pad_10s.csv</code>, <code>tests/p02_estimator_replay.rs</code></td>
-            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p02_estimator_replay</code></td>
+            <td>Gain sweep report</td>
+            <td><code>testing/deterministic-harness/tests/p10_gain_sweep.rs</code></td>
+            <td>Each tested gain scale reports max angle, altitude error, clamp percentage, and pass/fail.</td>
           </tr>
           <tr>
-            <td>Truth-state control sign tests</td>
-            <td><code>tests/p03_control_pipeline.rs</code></td>
-            <td><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml p03_control_pipeline</code></td>
+            <td>Gazebo actuator truth table</td>
+            <td>Bridge runtime plus ignored/manual test or script</td>
+            <td>Measured motor index, roll sign, pitch sign, yaw sign, and hover scaling.</td>
           </tr>
         </tbody>
       </table>
@@ -1202,48 +1626,63 @@ cmake --build telemetry-app/gazebo_bridge/build</code></pre>
 
     <section class="card">
       <h2>8. How this helps debug the current Gazebo failure</h2>
+      <p class="lead">
+        The harness has changed the question from “why does Gazebo go crazy?” to “which validated boundary stops matching reality?” Use this failure split in order.
+      </p>
       <div class="timeline">
         <div class="timeline-item">
-          <h4>If Phase 1 mixer/control signs fail</h4>
-          <p>Fix MARV internal conventions before touching Gazebo. The external simulator is not the primary suspect yet.</p>
+          <h4>If Phase 12 control envelope fails</h4>
+          <p>Stay offline. Fix controller signs, gains, hover throttle, clamping, or plant assumptions before touching Gazebo.</p>
         </div>
         <div class="timeline-item">
-          <h4>If Phase 3 estimator replay fails</h4>
-          <p>Focus on IMU gravity sign, gyro sign, quaternion order, GPS/baro update conventions, and finite-value policy.</p>
+          <h4>If Phase 12 passes but Gazebo G0 actuator-only fails</h4>
+          <p>Focus on Gazebo motor index order, motor spin directions, yaw reaction torque, rotor speed scaling, and model reset behavior.</p>
         </div>
         <div class="timeline-item">
-          <h4>If Phase 5 motor truth table fails</h4>
-          <p>Focus on motor order, motor spin direction, yaw reaction torque, and normalized-to-thrust scaling.</p>
+          <h4>If G0 passes but Gazebo G1 estimator-bypass hover fails</h4>
+          <p>Focus on the Gazebo truth adapter and frame conversion: ENU/NED, FLU/FRD, quaternion order, angular-rate sign, and setpoint convention.</p>
         </div>
         <div class="timeline-item">
-          <h4>If Phase 6 truth closed-loop fails</h4>
-          <p>The estimator is not to blame. Look at controller gains/signs, mixer scaling, hover throttle, and plant conventions.</p>
+          <h4>If G1 passes but G2 estimator-in-loop fails</h4>
+          <p>Focus on Gazebo sensor conversion, estimator warmup, timestamps, gravity sign, gyro sign, baro altitude sign, and valid flags.</p>
         </div>
         <div class="timeline-item">
-          <h4>If Phase 7 estimator closed-loop passes but Gazebo fails</h4>
-          <p>Focus on the bridge and Gazebo model: topic mapping, ENU/NED conversion, motor index order, motor direction, and actuator rad/s scaling.</p>
+          <h4>If G2 passes but firmware HIL fails</h4>
+          <p>Focus on embedded scheduling, channel freshness, HIL routing, DShot output mapping, and watchdog/failsafe interaction.</p>
         </div>
       </div>
     </section>
 
     <section class="card">
       <h2>9. Implementation checklist</h2>
-      <ol class="checklist">
-        <li>Create the harness crate outside embedded device crates.</li>
-        <li>Add <code>LockstepClock</code> and fixture loader.</li>
-        <li>Add always-on finite and monotonic timestamp assertions.</li>
-        <li>Port existing mixer basis expectations into harness tests.</li>
-        <li>Add control sign tests using truth estimates.</li>
-        <li>Add static estimator replay fixture.</li>
-        <li>Add open-loop motor geometry model.</li>
-        <li>Add motor-order truth table and yaw spin-direction check.</li>
-        <li>Add truth-estimator closed-loop level hold.</li>
-        <li>Add estimator-in-loop static hold.</li>
-        <li>Add HIL semantic adapter after pure loop passes.</li>
-        <li>Add Gazebo bridge contract tests only after HIL semantics pass.</li>
-        <li>Add deterministic harness to CI.</li>
-        <li>Keep Gazebo tests ignored or feature-gated until repeatable.</li>
-      </ol>
+      <div class="grid-2">
+        <div class="mini-card">
+          <h3>Completed foundation</h3>
+          <ol class="checklist">
+            <li><span class="pill green">Done</span> Harness crate outside embedded device crates.</li>
+            <li><span class="pill green">Done</span> Lockstep clock, fixture loader, reports, finite/monotonic assertions.</li>
+            <li><span class="pill green">Done</span> Mixer basis and control sign tests.</li>
+            <li><span class="pill green">Done</span> Static/ascent/dropout/spike estimator replay fixtures.</li>
+            <li><span class="pill green">Done</span> Open-loop motor geometry and truth table.</li>
+            <li><span class="pill green">Done</span> Closed-loop truth and estimator-in-loop runners.</li>
+            <li><span class="pill green">Done</span> HIL semantic adapter and failsafe/stale-output assertions.</li>
+            <li><span class="pill green">Done</span> Gazebo bridge SENSOR/ACTUATOR/config contracts.</li>
+          </ol>
+        </div>
+        <div class="mini-card">
+          <h3>Next flight-readiness work</h3>
+          <ol class="checklist">
+            <li><span class="pill green">Done</span> Promote portable control step into <code>common</code>.</li>
+            <li><span class="pill green">Done</span> Make harness and <code>RP235X-TEST</code> call the same common API.</li>
+            <li><span class="pill green">Done</span> Add multi-second control envelope tests.</li>
+            <li><span class="pill green">Done</span> Add structured gain sweep reports.</li>
+            <li><span class="pill amber">Manual</span> Run Gazebo G0 actuator-only runtime truth table.</li>
+            <li><span class="pill amber">Next</span> Add Gazebo truth adapter for estimator-bypass control.</li>
+            <li><span class="pill amber">Next</span> Add Gazebo estimator-in-loop hover and vertical-step tests.</li>
+            <li><span class="pill amber">Next</span> Keep runtime Gazebo and hardware tests ignored/feature-gated until repeatable.</li>
+          </ol>
+        </div>
+      </div>
     </section>
 
     <section class="card">
@@ -1258,7 +1697,9 @@ cmake --build telemetry-app/gazebo_bridge/build</code></pre>
           <tr><td>MARV <code>testing/hil/*.md</code></td><td>HIL acceptance, estimator replay checklist, control pipeline checklist, response flags, duplicate/stale tick expectations.</td></tr>
           <tr><td>MARV <code>common/src/control/mixing</code></td><td>Quad-X mixer equations, motor order permutation behavior, clamping expectations.</td></tr>
           <tr><td>MARV <code>device/RP235X-TEST</code></td><td>HIL backend, estimation/control/DShot task integration, control debug output shape.</td></tr>
-          <tr><td>MARV <code>telemetry-app/gazebo_bridge</code></td><td>Gazebo bridge topics, SENSOR/ACTUATOR text protocol, actuator command publishing.</td></tr>
+          <tr><td>MARV <code>telemetry-app/gazebo_bridge</code></td><td>Gazebo bridge topics, SENSOR/ACTUATOR text protocol, actuator command publishing, normalized-to-rad/s scaling, and motor-direction delegation.</td></tr>
+          <tr><td>MARV <code>testing/deterministic-harness</code></td><td>Implemented phase gates, lockstep clock, fixture replay, control pipeline, plant model, closed-loop truth, estimator-in-loop, HIL semantics, and Gazebo bridge contracts.</td></tr>
+          <tr><td>MARV <code>testing.md</code> / current progress notes</td><td>Implemented phases 3–9, current command gates, and evidence that the bridge contract tests and live bridge checks passed.</td></tr>
           <tr><td>Holsatus <code>holsatus-sim</code></td><td>Sim handle, plant stepping, motor command/direction interface, sensor distortion concept.</td></tr>
           <tr><td>Holsatus <code>device/std-test-device</code></td><td>Host-side simulated device, lockstep testing style, integration flight test pattern.</td></tr>
         </tbody>
@@ -1266,7 +1707,7 @@ cmake --build telemetry-app/gazebo_bridge/build</code></pre>
     </section>
 
     <footer>
-      MARV deterministic test harness plan · Standalone HTML · No external scripts or assets
+      MARV deterministic test harness plan · Updated implementation context · Standalone HTML · No external scripts or assets
     </footer>
   </div>
 </body>

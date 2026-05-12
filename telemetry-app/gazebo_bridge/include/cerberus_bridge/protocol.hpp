@@ -21,9 +21,16 @@ struct SensorFrame {
     float gyro_x = 0.0f;
     float gyro_y = 0.0f;
     float gyro_z = 0.0f;
+    float quat_w = 1.0f;
+    float quat_x = 0.0f;
+    float quat_y = 0.0f;
+    float quat_z = 0.0f;
     float roll = 0.0f;
     float pitch = 0.0f;
     float yaw = 0.0f;
+    float position_north_m = 0.0f;
+    float position_east_m = 0.0f;
+    float position_down_m = 0.0f;
     float mag_x = 0.0f;
     float mag_y = 0.0f;
     float mag_z = 0.0f;
@@ -51,8 +58,32 @@ struct ActuatorCommand {
     std::array<float, 4> motors{};
 };
 
+enum class SimControlAction {
+    Reset,
+    Pause,
+    Play,
+};
+
+struct SimControlCommand {
+    std::uint64_t sequence = 0;
+    SimControlAction action = SimControlAction::Reset;
+};
+
 inline bool starts_with(std::string_view value, std::string_view prefix) {
     return value.substr(0, prefix.size()) == prefix;
+}
+
+inline std::string_view sim_control_action_name(SimControlAction action) {
+    switch (action) {
+        case SimControlAction::Reset:
+            return "reset";
+        case SimControlAction::Pause:
+            return "pause";
+        case SimControlAction::Play:
+            return "play";
+    }
+
+    return "unknown";
 }
 
 inline std::string to_sensor_line(const SensorFrame& frame) {
@@ -69,9 +100,16 @@ inline std::string to_sensor_line(const SensorFrame& frame) {
         << " gx=" << frame.gyro_x
         << " gy=" << frame.gyro_y
         << " gz=" << frame.gyro_z
+        << " qw=" << frame.quat_w
+        << " qx=" << frame.quat_x
+        << " qy=" << frame.quat_y
+        << " qz=" << frame.quat_z
         << " roll=" << frame.roll
         << " pitch=" << frame.pitch
         << " yaw=" << frame.yaw
+        << " pn=" << frame.position_north_m
+        << " pe=" << frame.position_east_m
+        << " pd=" << frame.position_down_m
         << " mx=" << frame.mag_x
         << " my=" << frame.mag_y
         << " mz=" << frame.mag_z
@@ -137,6 +175,76 @@ inline std::optional<ActuatorCommand> parse_actuator_line(std::string_view line)
     }
 
     return command;
+}
+
+inline std::optional<SimControlAction> parse_sim_control_action(std::string_view value) {
+    if (value == "reset") {
+        return SimControlAction::Reset;
+    }
+    if (value == "pause") {
+        return SimControlAction::Pause;
+    }
+    if (value == "play") {
+        return SimControlAction::Play;
+    }
+
+    return std::nullopt;
+}
+
+inline std::optional<SimControlCommand> parse_sim_control_line(std::string_view line) {
+    if (line != "SIM_CONTROL" && !starts_with(line, "SIM_CONTROL ")) {
+        return std::nullopt;
+    }
+
+    SimControlCommand command{};
+    bool has_sequence = false;
+    bool has_action = false;
+
+    std::istringstream input{std::string(line)};
+    std::string token;
+    while (input >> token) {
+        const auto equals = token.find('=');
+        if (equals == std::string::npos) {
+            continue;
+        }
+
+        const auto key = token.substr(0, equals);
+        const auto value = token.substr(equals + 1);
+
+        if (key == "seq") {
+            command.sequence = static_cast<std::uint64_t>(std::stoull(value));
+            has_sequence = true;
+            continue;
+        }
+
+        if (key == "action") {
+            const auto action = parse_sim_control_action(value);
+            if (!action) {
+                return std::nullopt;
+            }
+            command.action = *action;
+            has_action = true;
+        }
+    }
+
+    if (!has_sequence || !has_action) {
+        return std::nullopt;
+    }
+
+    return command;
+}
+
+inline std::string to_sim_control_ack_line(
+    const SimControlCommand& command,
+    bool ok,
+    std::string_view message) {
+    std::ostringstream out;
+    out << "SIM_CONTROL_ACK"
+        << " seq=" << command.sequence
+        << " action=" << sim_control_action_name(command.action)
+        << " ok=" << (ok ? 1 : 0)
+        << " message=" << message;
+    return out.str();
 }
 
 } // namespace cerberus_bridge
