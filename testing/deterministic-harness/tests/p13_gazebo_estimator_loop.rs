@@ -66,6 +66,12 @@ const DEFAULT_G3_ALTITUDE_GAIN: f32 = 0.24;
 const DEFAULT_G3_VERTICAL_VELOCITY_GAIN: f32 = 0.24;
 const DEFAULT_G3_MAX_THROTTLE_CORRECTION: f32 = 0.45;
 const DEFAULT_G3_MAX_YAW_RATE_RPS: f32 = 0.25;
+const DEFAULT_RESET_MAX_POSITION_M: f32 = 0.25;
+const DEFAULT_RESET_MAX_VELOCITY_MPS: f32 = 0.10;
+const DEFAULT_RESET_MAX_GYRO_RPS: f32 = 0.05;
+const DEFAULT_RESET_MAX_ATTITUDE_RAD: f32 = 5.0_f32.to_radians();
+const DEFAULT_RESET_MAX_ESTIMATE_TRUTH_HORIZONTAL_ERROR_M: f32 = 0.35;
+const DEFAULT_RESET_MAX_ESTIMATE_TRUTH_DOWN_ERROR_M: f32 = 0.35;
 
 #[test]
 #[ignore = "requires Gazebo and cerberus_gazebo_bridge running; set MARV_GAZEBO_BRIDGE_ADDR if not 127.0.0.1:9000"]
@@ -569,6 +575,15 @@ struct WarmupSummary {
 }
 
 #[derive(Clone, Copy, Debug)]
+struct ResetCleanlinessSummary {
+    frames: usize,
+    max_position_m: f32,
+    max_velocity_mps: f32,
+    max_gyro_rps: f32,
+    max_attitude_rad: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
 struct RuntimeSummary {
     converted_frames: usize,
     control_frames: usize,
@@ -721,6 +736,12 @@ struct RuntimeSettings {
     vertical_velocity_gain: f32,
     max_throttle_correction: f32,
     use_magnetometer: bool,
+    reset_max_position_m: f32,
+    reset_max_velocity_mps: f32,
+    reset_max_gyro_rps: f32,
+    reset_max_attitude_rad: f32,
+    reset_max_estimate_truth_horizontal_error_m: f32,
+    reset_max_estimate_truth_down_error_m: f32,
 }
 
 impl RuntimeSettings {
@@ -808,6 +829,22 @@ impl RuntimeSettings {
                 .unwrap_or(DEFAULT_MAX_THROTTLE_CORRECTION),
             use_magnetometer: env_bool("MARV_GAZEBO_G2_USE_MAGNETOMETER")
                 .unwrap_or(DEFAULT_USE_MAGNETOMETER),
+            reset_max_position_m: env_f32("MARV_GAZEBO_G2_RESET_MAX_POSITION_M")
+                .unwrap_or(DEFAULT_RESET_MAX_POSITION_M),
+            reset_max_velocity_mps: env_f32("MARV_GAZEBO_G2_RESET_MAX_VELOCITY_MPS")
+                .unwrap_or(DEFAULT_RESET_MAX_VELOCITY_MPS),
+            reset_max_gyro_rps: env_f32("MARV_GAZEBO_G2_RESET_MAX_GYRO_RPS")
+                .unwrap_or(DEFAULT_RESET_MAX_GYRO_RPS),
+            reset_max_attitude_rad: env_f32("MARV_GAZEBO_G2_RESET_MAX_ATTITUDE_RAD")
+                .unwrap_or(DEFAULT_RESET_MAX_ATTITUDE_RAD),
+            reset_max_estimate_truth_horizontal_error_m: env_f32(
+                "MARV_GAZEBO_G2_RESET_MAX_ESTIMATE_TRUTH_HORIZONTAL_ERROR_M",
+            )
+            .unwrap_or(DEFAULT_RESET_MAX_ESTIMATE_TRUTH_HORIZONTAL_ERROR_M),
+            reset_max_estimate_truth_down_error_m: env_f32(
+                "MARV_GAZEBO_G2_RESET_MAX_ESTIMATE_TRUTH_DOWN_ERROR_M",
+            )
+            .unwrap_or(DEFAULT_RESET_MAX_ESTIMATE_TRUTH_DOWN_ERROR_M),
         }
     }
 
@@ -943,6 +980,20 @@ fn apply_g3_navigation_env(settings: &mut RuntimeSettings) {
         .unwrap_or(DEFAULT_G3_MAX_THROTTLE_CORRECTION);
     settings.use_magnetometer =
         env_bool("MARV_GAZEBO_G3_USE_MAGNETOMETER").unwrap_or(settings.use_magnetometer);
+    settings.reset_max_position_m =
+        env_f32("MARV_GAZEBO_G3_RESET_MAX_POSITION_M").unwrap_or(settings.reset_max_position_m);
+    settings.reset_max_velocity_mps =
+        env_f32("MARV_GAZEBO_G3_RESET_MAX_VELOCITY_MPS").unwrap_or(settings.reset_max_velocity_mps);
+    settings.reset_max_gyro_rps =
+        env_f32("MARV_GAZEBO_G3_RESET_MAX_GYRO_RPS").unwrap_or(settings.reset_max_gyro_rps);
+    settings.reset_max_attitude_rad =
+        env_f32("MARV_GAZEBO_G3_RESET_MAX_ATTITUDE_RAD").unwrap_or(settings.reset_max_attitude_rad);
+    settings.reset_max_estimate_truth_horizontal_error_m =
+        env_f32("MARV_GAZEBO_G3_RESET_MAX_ESTIMATE_TRUTH_HORIZONTAL_ERROR_M")
+            .unwrap_or(settings.reset_max_estimate_truth_horizontal_error_m);
+    settings.reset_max_estimate_truth_down_error_m =
+        env_f32("MARV_GAZEBO_G3_RESET_MAX_ESTIMATE_TRUTH_DOWN_ERROR_M")
+            .unwrap_or(settings.reset_max_estimate_truth_down_error_m);
 }
 
 fn run_warmup(settings: &RuntimeSettings, airframe: &GazeboAirframeConfig) -> WarmupSummary {
@@ -1027,9 +1078,10 @@ fn run_control_schedule(
 ) -> RuntimeSummary {
     let mut client = BridgeProbeClient::connect(&settings.endpoint);
     let mut sequence = Sequence::default();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: control_config(airframe, settings),
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::new(
+        control_config(airframe, settings),
+        airframe.runtime_motor_geometry(),
+    ));
 
     if settings.auto_reset {
         send_reset_and_play(
@@ -1106,6 +1158,15 @@ fn run_control_schedule(
             continue;
         }
 
+        if control_frames == 0 {
+            assert_estimator_truth_reset_agreement(
+                "G2 control start",
+                &frame,
+                &trace,
+                origin,
+                settings,
+            );
+        }
         let estimate = estimate_snapshot(&trace);
         let setpoint = setpoint_for_control_frame(control_frames);
         max_setpoint_horizontal_m = max_setpoint_horizontal_m.max(horizontal_norm_m(
@@ -1282,9 +1343,10 @@ fn run_airborne_navigation_schedule(
 ) -> NavigationMissionSummary {
     let mut client = BridgeProbeClient::connect(&settings.endpoint);
     let mut sequence = Sequence::default();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: control_config(airframe, settings),
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::new(
+        control_config(airframe, settings),
+        airframe.runtime_motor_geometry(),
+    ));
 
     if settings.auto_reset {
         send_reset_and_play(
@@ -1384,6 +1446,15 @@ fn run_airborne_navigation_schedule(
             continue;
         }
 
+        if control_frames == 0 {
+            assert_estimator_truth_reset_agreement(
+                "G3 navigation start",
+                &frame,
+                &trace,
+                origin,
+                settings,
+            );
+        }
         let estimate = estimate_snapshot(&trace);
         let truth = frame
             .to_truth_estimate(origin)
@@ -1612,9 +1683,10 @@ fn run_takeoff_hover_land_mission(
 ) -> TakeoffHoverLandSummary {
     let mut client = BridgeProbeClient::connect(&settings.endpoint);
     let mut sequence = Sequence::default();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: control_config(airframe, settings),
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::new(
+        control_config(airframe, settings),
+        airframe.runtime_motor_geometry(),
+    ));
 
     if settings.auto_reset {
         send_reset_and_play(
@@ -1677,6 +1749,15 @@ fn run_takeoff_hover_land_mission(
             continue;
         }
 
+        if control_frames == 0 {
+            assert_estimator_truth_reset_agreement(
+                "G2 takeoff start",
+                &frame,
+                &trace,
+                origin,
+                settings,
+            );
+        }
         let estimate = estimate_snapshot(&trace);
         let truth = frame
             .to_truth_estimate(origin)
@@ -2102,10 +2183,10 @@ impl BridgeProbeClient {
         panic!("expected fresh Gazebo estimator SENSOR frame within {timeout:?}");
     }
 
-    fn collect_frames(&mut self, count: usize, timeout: Duration) {
-        for _ in 0..count {
-            let _ = self.read_required_frame(timeout);
-        }
+    fn collect_frames(&mut self, count: usize, timeout: Duration) -> Vec<GazeboSensorLine> {
+        (0..count)
+            .map(|_| self.read_required_frame(timeout))
+            .collect()
     }
 
     fn read_frame(&mut self) -> Option<GazeboSensorLine> {
@@ -2172,7 +2253,7 @@ fn send_reset_and_play(
     client: &mut BridgeProbeClient,
     sequence: &mut Sequence,
     settings: &RuntimeSettings,
-    settle_motors: [f32; 4],
+    _settle_motors: [f32; 4],
 ) {
     client.send_actuator(&format_gazebo_actuator_line(
         sequence.next(),
@@ -2196,9 +2277,88 @@ fn send_reset_and_play(
     client.send_actuator(&format_gazebo_actuator_line(
         sequence.next(),
         None,
-        settle_motors,
+        [0.0, 0.0, 0.0, 0.0],
     ));
-    client.collect_frames(settings.reset_settle_frames, settings.timeout);
+    let frames = client.collect_frames(settings.reset_settle_frames, settings.timeout);
+    let cleanliness = summarize_reset_cleanliness(&frames);
+    assert!(
+        cleanliness.frames == settings.reset_settle_frames
+            && cleanliness.max_position_m <= settings.reset_max_position_m
+            && cleanliness.max_velocity_mps <= settings.reset_max_velocity_mps
+            && cleanliness.max_gyro_rps <= settings.reset_max_gyro_rps
+            && cleanliness.max_attitude_rad <= settings.reset_max_attitude_rad,
+        "G2/G3 reset cleanliness failed before estimator/control start: summary={cleanliness:?}"
+    );
+    eprintln!("G2/G3 reset cleanliness: {cleanliness:?}");
+}
+
+fn summarize_reset_cleanliness(frames: &[GazeboSensorLine]) -> ResetCleanlinessSummary {
+    assert!(!frames.is_empty(), "reset cleanliness needs settle frames");
+    let mut summary = ResetCleanlinessSummary {
+        frames: frames.len(),
+        max_position_m: 0.0,
+        max_velocity_mps: 0.0,
+        max_gyro_rps: 0.0,
+        max_attitude_rad: 0.0,
+    };
+
+    for frame in frames {
+        assert_g2_sensor_contract(frame);
+        let position = frame
+            .position_ned_m
+            .expect("reset cleanliness requires Gazebo pose pn/pe/pd fields");
+        summary.max_position_m = summary.max_position_m.max(norm3(position));
+        summary.max_velocity_mps = summary.max_velocity_mps.max(norm3(frame.vel_ned_mps));
+        summary.max_gyro_rps = summary.max_gyro_rps.max(norm3(frame.gyro_rps));
+        summary.max_attitude_rad = summary
+            .max_attitude_rad
+            .max(frame_attitude_error_rad(frame).unwrap_or(0.0));
+    }
+
+    summary
+}
+
+fn assert_estimator_truth_reset_agreement(
+    label: &str,
+    frame: &GazeboSensorLine,
+    trace: &EstimatorReplayTrace,
+    origin: GazeboTruthOrigin,
+    settings: &RuntimeSettings,
+) {
+    let truth = frame
+        .to_truth_estimate(origin)
+        .expect("reset agreement requires Gazebo truth pose fields");
+    let horizontal_error_m = horizontal_norm_m(
+        trace.position_ned_m[0] as f32 - truth.position_ned_m[0],
+        trace.position_ned_m[1] as f32 - truth.position_ned_m[1],
+    );
+    let down_error_m = (trace.position_ned_m[2] as f32 - truth.position_ned_m[2]).abs();
+
+    assert!(
+        horizontal_error_m <= settings.reset_max_estimate_truth_horizontal_error_m
+            && down_error_m <= settings.reset_max_estimate_truth_down_error_m,
+        "{label} estimator/truth reset agreement failed: horizontal_error_m={horizontal_error_m:.3} down_error_m={down_error_m:.3} truth={:?} estimate={:?}",
+        truth.position_ned_m,
+        trace.position_ned_m
+    );
+}
+
+fn norm3(values: [f32; 3]) -> f32 {
+    (values[0] * values[0] + values[1] * values[1] + values[2] * values[2]).sqrt()
+}
+
+fn frame_attitude_error_rad(frame: &GazeboSensorLine) -> Option<f32> {
+    if let Some([roll, pitch, yaw]) = frame.euler_rad {
+        return Some(norm3([roll, pitch, yaw]));
+    }
+
+    let [w, x, y, z] = frame.attitude_quaternion()?;
+    let norm = (w * w + x * x + y * y + z * z).sqrt();
+    if norm <= f32::EPSILON {
+        return None;
+    }
+    let w = (w / norm).clamp(-1.0, 1.0);
+    Some(2.0 * w.acos())
 }
 
 fn assert_g2_sensor_contract(frame: &GazeboSensorLine) {

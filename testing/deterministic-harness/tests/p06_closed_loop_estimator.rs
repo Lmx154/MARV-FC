@@ -1,7 +1,8 @@
 use deterministic_harness::{
     ClosedLoopConfig, ClosedLoopEstimatorConfig, ClosedLoopEstimatorReport,
     ClosedLoopEstimatorRunner, ClosedLoopEstimatorTrace, ClosedLoopTruthState, ControlPipeline,
-    ControlSetpoint, EstimatorReplayConfig, SimulatedSensorConfig, TruthPlant,
+    ControlSetpoint, EstimatorReplayConfig, EstimatorResetInjection, SimulatedSensorConfig,
+    TruthPlant,
 };
 
 const DT_S: f32 = 0.01;
@@ -166,6 +167,100 @@ fn p06_closed_loop_estimator_baro_spike_rejected_or_bounded() {
     );
 }
 
+#[test]
+fn p06_estimator_xy_reset_while_holding_does_not_command_jump() {
+    let reset_tick = 160;
+    let config = ClosedLoopEstimatorConfig {
+        sensors: SimulatedSensorConfig::new().with_estimator_reset(
+            reset_tick,
+            EstimatorResetInjection {
+                position_delta_ned_m: [0.75, -0.5, 0.0],
+                ..EstimatorResetInjection::NONE
+            },
+        ),
+        ..ClosedLoopEstimatorConfig::new(ClosedLoopConfig::new(DT_S, TICKS_3S))
+    };
+    let report = run_case(
+        ClosedLoopTruthState::LEVEL_ORIGIN,
+        ControlSetpoint::ORIGIN_HOLD_ARMED,
+        config,
+    );
+
+    assert_all_traces_finite_and_bounded(&report);
+    assert_reset_tick_is_absorbed(&report, reset_tick);
+    let reset = trace_at(&report, reset_tick);
+    assert_eq!(reset.estimator.reset_delta.xy_reset_counter, 1);
+}
+
+#[test]
+fn p06_estimator_z_reset_during_takeoff_does_not_command_throttle_jump() {
+    let reset_tick = 180;
+    let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -1.0], 0.0, true);
+    let config = ClosedLoopEstimatorConfig {
+        sensors: SimulatedSensorConfig::new().with_estimator_reset(
+            reset_tick,
+            EstimatorResetInjection {
+                position_delta_ned_m: [0.0, 0.0, -0.35],
+                ..EstimatorResetInjection::NONE
+            },
+        ),
+        ..ClosedLoopEstimatorConfig::new(ClosedLoopConfig::new(DT_S, TICKS_5S))
+    };
+    let report = run_case(ClosedLoopTruthState::LEVEL_ORIGIN, setpoint, config);
+
+    assert_all_traces_finite_and_bounded(&report);
+    assert_reset_tick_is_absorbed(&report, reset_tick);
+    let reset = trace_at(&report, reset_tick);
+    assert_eq!(reset.estimator.reset_delta.z_reset_counter, 1);
+}
+
+#[test]
+fn p06_estimator_velocity_reset_while_holding_does_not_command_jump() {
+    let reset_tick = 170;
+    let config = ClosedLoopEstimatorConfig {
+        sensors: SimulatedSensorConfig::new().with_estimator_reset(
+            reset_tick,
+            EstimatorResetInjection {
+                velocity_delta_ned_mps: [0.2, -0.15, 0.1],
+                ..EstimatorResetInjection::NONE
+            },
+        ),
+        ..ClosedLoopEstimatorConfig::new(ClosedLoopConfig::new(DT_S, TICKS_3S))
+    };
+    let report = run_case(
+        ClosedLoopTruthState::LEVEL_ORIGIN,
+        ControlSetpoint::ORIGIN_HOLD_ARMED,
+        config,
+    );
+
+    assert_all_traces_finite_and_bounded(&report);
+    assert_reset_tick_is_absorbed(&report, reset_tick);
+    let reset = trace_at(&report, reset_tick);
+    assert_eq!(reset.estimator.reset_delta.velocity_reset_counter, 1);
+}
+
+#[test]
+fn p06_estimator_heading_reset_during_yawed_hold_does_not_command_yaw_jump() {
+    let reset_tick = 180;
+    let setpoint = ControlSetpoint::local_position_ned([0.0, 0.0, -0.5], 0.6, true);
+    let config = ClosedLoopEstimatorConfig {
+        sensors: SimulatedSensorConfig::new().with_estimator_reset(
+            reset_tick,
+            EstimatorResetInjection {
+                heading_delta_rad: 0.35,
+                ..EstimatorResetInjection::NONE
+            },
+        ),
+        ..ClosedLoopEstimatorConfig::new(ClosedLoopConfig::new(DT_S, TICKS_5S))
+    };
+    let report = run_case(ClosedLoopTruthState::LEVEL_ORIGIN, setpoint, config);
+
+    assert_all_traces_finite_and_bounded(&report);
+    assert_reset_tick_is_absorbed(&report, reset_tick);
+    let reset = trace_at(&report, reset_tick);
+    assert_eq!(reset.estimator.reset_delta.heading_reset_counter, 1);
+}
+
 fn run_case(
     initial: ClosedLoopTruthState,
     setpoint: ControlSetpoint,
@@ -249,6 +344,47 @@ fn trace_at(report: &ClosedLoopEstimatorReport, tick: u64) -> &ClosedLoopEstimat
 
 fn motor_average(trace: &ClosedLoopEstimatorTrace) -> f32 {
     trace.control.motors.iter().sum::<f32>() / trace.control.motors.len() as f32
+}
+
+fn assert_reset_tick_is_absorbed(report: &ClosedLoopEstimatorReport, reset_tick: u64) {
+    let before = trace_at(report, reset_tick - 1);
+    let reset = trace_at(report, reset_tick);
+    let after = trace_at(report, reset_tick + 1);
+
+    assert!(
+        reset.estimator.reset_delta.has_reset(),
+        "expected reset delta at tick {reset_tick}"
+    );
+    assert_motor_jump_lt(before, reset, 0.18);
+    assert_motor_jump_lt(reset, after, 0.18);
+    assert!(
+        reset.control.control_valid,
+        "control should remain valid at reset tick"
+    );
+}
+
+fn assert_motor_jump_lt(
+    before: &ClosedLoopEstimatorTrace,
+    after: &ClosedLoopEstimatorTrace,
+    limit: f32,
+) {
+    for (index, (a, b)) in before
+        .control
+        .motors
+        .iter()
+        .zip(after.control.motors)
+        .enumerate()
+    {
+        assert!(
+            (a - b).abs() < limit,
+            "motor {} jump too large between ticks {} and {}: before={:?} after={:?}",
+            index + 1,
+            before.tick,
+            after.tick,
+            before.control.motors,
+            after.control.motors
+        );
+    }
 }
 
 fn assert_abs_lt(value: f64, limit: f64) {

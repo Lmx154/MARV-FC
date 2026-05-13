@@ -120,6 +120,19 @@
       letter-spacing: 0.02em;
       text-transform: uppercase;
     }
+    .status-started {
+      display: inline-block;
+      margin-bottom: 8px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      background: rgba(251, 191, 36, 0.12);
+      border: 1px solid rgba(251, 191, 36, 0.35);
+      color: #fde68a;
+      font-size: 0.8rem;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
     .small { color: var(--muted); font-size: 0.92rem; }
     .pill {
       display: inline-block;
@@ -383,21 +396,21 @@ Actuator outputs</div>
           <td>Replace logical mixer-only behavior with physical control allocation.</td>
           <td>Add <code>MotorGeometry</code> into common: motor position, output index, spin direction, thrust coefficient, reaction torque coefficient, hover command, min/max command. Implement allocation/desaturation with axis-specific limit flags: roll_pitch, yaw, throttle_lower, throttle_upper.</td>
           <td>Reuse mixer truth-table tests, motor-order permutation tests, Gazebo actuator truth tests. Add geometry tests matching the F450 profile and axis-limit tests.</td>
-          <td>Motor mapping, yaw torque, and thrust authority are physically represented. Clamp reports which axis saturated and whether desaturation preserved priority.</td>
+          <td><span class="status-done">Completed 2026-05-12</span><br/>Promoted <code>MotorGeometry</code>, <code>MotorSpec</code>, <code>SpinDirection</code>, and <code>PhysicalControlAllocator</code> into <code>common::control::mixing</code>. The portable pipeline now allocates through selected physical geometry instead of direct mixer equations, while the legacy mixer remains as a compatibility oracle. Added a recorded F450 geometry constructor, per-motor hover/min/max command fields, axis-specific clamp flags, explicit desaturation-priority reporting, harness p04 geometry/desaturation coverage, Gazebo runtime geometry injection from the parsed airframe profile, and RP235X-TEST HIL geometry selection.</td>
         </tr>
         <tr>
           <td><span class="phase-title">8</span></td>
           <td>Add estimator-controller reset synchronization.</td>
           <td>Expose estimator reset counters or reset deltas for XY, Z, velocity, and heading. On reset, adjust active setpoints, trajectory state, integrators, and filters so the controller does not command a jump.</td>
           <td>Add injected reset tests: XY reset while holding, Z reset during takeoff, heading reset during yawed navigation.</td>
-          <td>Estimator reset produces no unbounded position, yaw, throttle, or motor transient.</td>
+          <td><span class="status-done">Completed 2026-05-12</span><br/>Added <code>EstimatorResetDelta</code> with XY, Z, velocity, and heading reset counters plus position/velocity/yaw deltas. The layered navigation stack now tracks and exposes reset deltas, estimator replay carries them through traces, and the closed-loop estimator runner adjusts active setpoints and resets position integrators when a rebase is observed. <code>ControlSetpoint</code>, <code>GuidanceStateMachine</code>, <code>TrajectoryGenerator</code>, and <code>TakeoffNavGate</code> can shift active estimator-local state across resets. Added injected XY hold, Z takeoff, velocity hold, and heading/yawed-hold reset tests that assert no unsafe motor transient.</td>
         </tr>
         <tr>
           <td><span class="phase-title">9</span></td>
           <td>Make Gazebo runs reproducible before tuning.</td>
           <td>Before every ignored Gazebo gate: hard reset, pause, zero commands, settle sensors, assert near-zero velocity/rates, assert estimator/truth agreement window, then start test. Reject runs with contaminated initial state.</td>
           <td>Reuse G2/G3 ignored gates. Add a “reset cleanliness” gate that fails before control starts.</td>
-          <td>Gain sweeps are comparable. Failures are controller failures, not stale sim-state artifacts.</td>
+          <td><span class="status-done">Completed 2026-05-12</span><br/>Added reset-cleanliness checks to the ignored Gazebo G1/G2/G3 runtime gates. Auto-reset now sends zero motor commands through reset settle, collects settle SENSOR frames, and rejects runs with nonzero pose, velocity, body rates, or attitude before control starts. G2/G3 control, takeoff/land, and navigation paths also assert first-valid-estimator agreement with Gazebo truth before issuing the first control command. Thresholds are environment-tunable per G1/G2/G3.</td>
         </tr>
         <tr>
           <td><span class="phase-title">10</span></td>

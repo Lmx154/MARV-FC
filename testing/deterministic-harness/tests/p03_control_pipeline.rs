@@ -123,9 +123,7 @@ fn p03_control_pipeline_saturation_sets_clamped_flag() {
         measured_rate_deadband_rps: 0.0,
     };
     config.mixer_limits = MixerLimits::NORMALIZED;
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: config,
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::with_loop_config(config));
     let trace = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput {
@@ -152,9 +150,7 @@ fn p03_control_pipeline_reports_rate_axis_limits_before_mixing() {
         max_axis_command: 0.1,
         measured_rate_deadband_rps: 0.0,
     };
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: config,
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::with_loop_config(config));
     let trace = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput {

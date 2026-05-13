@@ -1,6 +1,8 @@
 //! Guidance state helpers for estimator-local takeoff and navigation handoff.
 
-use crate::control::pipeline::{EstimatorLocalState, LocalTrajectorySetpoint, MissionWaypoint};
+use crate::control::pipeline::{
+    EstimatorLocalState, EstimatorResetDelta, LocalTrajectorySetpoint, MissionWaypoint,
+};
 
 const DEFAULT_TRAJECTORY_SPEED_MPS: f32 = 0.45;
 const DEFAULT_TRAJECTORY_ACCEL_MPS2: f32 = 0.75;
@@ -113,6 +115,21 @@ impl TrajectoryGenerator {
 
     pub const fn limits(&self) -> TrajectoryLimits {
         self.limits
+    }
+
+    pub fn apply_estimator_reset(&mut self, delta: EstimatorResetDelta) -> bool {
+        if !delta.finite() {
+            self.initialized = false;
+            return false;
+        }
+        if !self.initialized {
+            return true;
+        }
+
+        self.position_ned_m = add3(self.position_ned_m, delta.position_delta_ned_m);
+        self.velocity_ned_mps = add3(self.velocity_ned_mps, delta.velocity_delta_ned_mps);
+        self.yaw_rad = wrap_pi(self.yaw_rad + delta.heading_delta_rad);
+        true
     }
 
     pub fn update_toward(
@@ -268,6 +285,10 @@ impl GuidanceStateMachine {
         self.phase = GuidancePhase::Idle;
     }
 
+    pub fn apply_estimator_reset(&mut self, delta: EstimatorResetDelta) -> bool {
+        self.trajectory.apply_estimator_reset(delta)
+    }
+
     pub fn update(
         &mut self,
         state: EstimatorLocalState,
@@ -382,6 +403,17 @@ impl TakeoffNavGate {
         self.latched_takeoff_origin_ned_m = None;
         self.stable_frames = 0;
         self.nav_ready = false;
+    }
+
+    pub fn apply_estimator_reset(&mut self, delta: EstimatorResetDelta) -> bool {
+        if !delta.finite() {
+            self.reset();
+            return false;
+        }
+        if let Some(origin) = self.latched_takeoff_origin_ned_m.as_mut() {
+            *origin = add3(*origin, delta.position_delta_ned_m);
+        }
+        true
     }
 
     pub fn update(&mut self, sample: TakeoffNavGateSample, yaw_rad: f32) -> TakeoffNavDecision {
@@ -539,7 +571,9 @@ mod tests {
         GuidanceCommand, GuidancePhase, GuidanceStateMachine, TakeoffNavGate, TakeoffNavGateConfig,
         TakeoffNavGateSample, TrajectoryGenerator, TrajectoryLimits,
     };
-    use crate::control::pipeline::{ControlSetpoint, EstimatorLocalState, MissionWaypoint};
+    use crate::control::pipeline::{
+        ControlSetpoint, EstimatorLocalState, EstimatorResetDelta, MissionWaypoint,
+    };
 
     #[test]
     fn takeoff_hold_latches_estimator_xy_offset() {
@@ -656,6 +690,81 @@ mod tests {
         assert_eq!(output.phase, GuidancePhase::NavigateLeg);
         let setpoint = ControlSetpoint::from_local_trajectory(output.trajectory, true);
         assert!(setpoint.armed());
+    }
+
+    #[test]
+    fn guidance_trajectory_shifts_with_estimator_reset_delta() {
+        let mut guidance = GuidanceStateMachine::default();
+        let state = EstimatorLocalState::new([10.0, -2.0, -1.0], [0.1, 0.0, 0.0], 0.25, true);
+        let first = guidance
+            .update(
+                state,
+                GuidanceCommand::NavigateLeg(MissionWaypoint::new([12.0, -2.0, -1.0], 0.25)),
+                0.02,
+            )
+            .expect("initial trajectory should be generated");
+
+        let delta = EstimatorResetDelta {
+            xy_reset_counter: 1,
+            z_reset_counter: 1,
+            velocity_reset_counter: 1,
+            heading_reset_counter: 1,
+            position_delta_ned_m: [-3.0, 1.0, 0.5],
+            velocity_delta_ned_mps: [0.2, 0.0, -0.1],
+            heading_delta_rad: 0.4,
+        };
+        assert!(guidance.apply_estimator_reset(delta));
+        let shifted = guidance
+            .update(
+                EstimatorLocalState::new([7.0, -1.0, -0.5], [0.3, 0.0, -0.1], 0.65, true),
+                GuidanceCommand::NavigateLeg(MissionWaypoint::new([9.0, -1.0, -0.5], 0.65)),
+                0.02,
+            )
+            .expect("trajectory should continue after reset");
+
+        assert!(
+            (shifted.trajectory.position_ned_m[0] - first.trajectory.position_ned_m[0] + 3.0).abs()
+                < 0.05
+        );
+        assert!(
+            (shifted.trajectory.position_ned_m[1] - first.trajectory.position_ned_m[1] - 1.0).abs()
+                < 0.05
+        );
+        assert!(
+            (shifted.trajectory.position_ned_m[2] - first.trajectory.position_ned_m[2] - 0.5).abs()
+                < 0.05
+        );
+        assert!((shifted.trajectory.yaw_rad - 0.65).abs() < 0.02);
+    }
+
+    #[test]
+    fn takeoff_gate_shifts_latched_origin_with_estimator_reset_delta() {
+        let mut gate = TakeoffNavGate::new(TakeoffNavGateConfig {
+            takeoff_down_m: -2.0,
+            ..TakeoffNavGateConfig::default()
+        });
+        let _ = gate.update(
+            TakeoffNavGateSample {
+                estimate_position_ned_m: [12.0, -7.0, 0.0],
+                estimate_velocity_ned_mps: [0.0, 0.0, 0.0],
+                truth_position_ned_m: None,
+                truth_velocity_ned_mps: None,
+                yaw_error_rad: Some(0.0),
+                clamp_ratio: 0.0,
+                estimate_valid: true,
+            },
+            0.0,
+        );
+
+        assert!(gate.apply_estimator_reset(EstimatorResetDelta {
+            xy_reset_counter: 1,
+            position_delta_ned_m: [-2.0, 3.0, 0.0],
+            ..EstimatorResetDelta::NONE
+        }));
+        let decision = gate.update(stable_sample_with_velocity([0.0, 0.0, 0.0]), 0.0);
+
+        assert_eq!(decision.latched_takeoff_origin_ned_m, [10.0, -4.0, 0.0]);
+        assert_eq!(decision.hold_setpoint.position_ned_m, [10.0, -4.0, -2.0]);
     }
 
     fn stable_sample_with_velocity(velocity_ned_mps: [f32; 3]) -> TakeoffNavGateSample {

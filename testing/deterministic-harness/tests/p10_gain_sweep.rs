@@ -80,9 +80,7 @@ fn run_scaled_case(
     setpoint: ControlSetpoint,
 ) -> Vec<ClosedLoopTrace> {
     let mut runner = ClosedLoopRunner::new(
-        ControlPipeline::new(PureControlConfig {
-            loop_config: scaled_config(scale),
-        }),
+        ControlPipeline::new(PureControlConfig::with_loop_config(scaled_config(scale))),
         TruthPlant::new(Default::default(), initial),
         ClosedLoopConfig::new(DT_S, TICKS_5S),
     );

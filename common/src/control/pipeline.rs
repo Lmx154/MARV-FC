@@ -9,7 +9,8 @@ use crate::control::altitude::AltitudeController;
 use crate::control::attitude::{AttitudeController, AttitudeSetpoint, BodyRateSetpoint};
 use crate::control::config::ControlLoopConfig;
 use crate::control::mixing::{
-    MixerLimitFlags, MotorOrder, MotorOutputs, QUAD_MOTOR_COUNT, QuadXMixer, TorqueCommand,
+    DesaturationReport, MixerLimitFlags, MotorGeometry, MotorOrder, MotorOutputs,
+    PhysicalControlAllocator, QUAD_MOTOR_COUNT, TorqueCommand,
 };
 use crate::control::position::{
     PositionController, PositionControllerDebug, PositionControllerInput,
@@ -20,13 +21,25 @@ use crate::control::rate::{BodyRates, RateController, RateControllerOutput, Rate
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlightControlConfig {
     pub loop_config: ControlLoopConfig,
+    pub motor_geometry: MotorGeometry,
+}
+
+impl FlightControlConfig {
+    pub const fn new(loop_config: ControlLoopConfig, motor_geometry: MotorGeometry) -> Self {
+        Self {
+            loop_config,
+            motor_geometry,
+        }
+    }
+
+    pub const fn with_loop_config(loop_config: ControlLoopConfig) -> Self {
+        Self::new(loop_config, MotorGeometry::quad_x())
+    }
 }
 
 impl Default for FlightControlConfig {
     fn default() -> Self {
-        Self {
-            loop_config: ControlLoopConfig::default(),
-        }
+        Self::with_loop_config(ControlLoopConfig::default())
     }
 }
 
@@ -103,6 +116,42 @@ impl EstimatorLocalState {
             yaw_rad,
             valid,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct EstimatorResetDelta {
+    pub xy_reset_counter: u32,
+    pub z_reset_counter: u32,
+    pub velocity_reset_counter: u32,
+    pub heading_reset_counter: u32,
+    pub position_delta_ned_m: [f32; 3],
+    pub velocity_delta_ned_mps: [f32; 3],
+    pub heading_delta_rad: f32,
+}
+
+impl EstimatorResetDelta {
+    pub const NONE: Self = Self {
+        xy_reset_counter: 0,
+        z_reset_counter: 0,
+        velocity_reset_counter: 0,
+        heading_reset_counter: 0,
+        position_delta_ned_m: [0.0; 3],
+        velocity_delta_ned_mps: [0.0; 3],
+        heading_delta_rad: 0.0,
+    };
+
+    pub fn finite(self) -> bool {
+        finite_f32x3(self.position_delta_ned_m)
+            && finite_f32x3(self.velocity_delta_ned_mps)
+            && self.heading_delta_rad.is_finite()
+    }
+
+    pub const fn has_reset(self) -> bool {
+        self.xy_reset_counter != 0
+            || self.z_reset_counter != 0
+            || self.velocity_reset_counter != 0
+            || self.heading_reset_counter != 0
     }
 }
 
@@ -261,6 +310,29 @@ impl ControlSetpoint {
             && finite_f32x3(self.acceleration_ned_mps2)
             && self.yaw_rad.is_finite()
     }
+
+    pub fn adjusted_for_estimator_reset(self, delta: EstimatorResetDelta) -> Option<Self> {
+        if !self.finite() || !delta.finite() {
+            return None;
+        }
+
+        Some(Self {
+            position_ned_m: [
+                self.position_ned_m[0] + delta.position_delta_ned_m[0],
+                self.position_ned_m[1] + delta.position_delta_ned_m[1],
+                self.position_ned_m[2] + delta.position_delta_ned_m[2],
+            ],
+            velocity_ned_mps: [
+                self.velocity_ned_mps[0] + delta.velocity_delta_ned_mps[0],
+                self.velocity_ned_mps[1] + delta.velocity_delta_ned_mps[1],
+                self.velocity_ned_mps[2] + delta.velocity_delta_ned_mps[2],
+            ],
+            acceleration_ned_mps2: self.acceleration_ned_mps2,
+            yaw_rad: wrap_pi(self.yaw_rad + delta.heading_delta_rad),
+            armed: self.armed,
+            source: self.source,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -340,6 +412,7 @@ pub struct ControlDebug {
     pub torque_command: Option<TorqueCommand>,
     pub motor_outputs: Option<MotorOutputs<QUAD_MOTOR_COUNT>>,
     pub mixer_limit_flags: MixerLimitFlags,
+    pub desaturation: DesaturationReport,
     pub clamp_source: ClampSource,
 }
 
@@ -365,7 +438,7 @@ pub struct FlightControlPipeline {
     thrust_vector: ThrustVectorController,
     attitude: AttitudeController,
     rate: RateController,
-    mixer: QuadXMixer,
+    allocator: PhysicalControlAllocator,
 }
 
 impl FlightControlPipeline {
@@ -382,16 +455,23 @@ impl FlightControlPipeline {
             }),
             attitude: AttitudeController::new(loop_config.attitude),
             rate: RateController::new(loop_config.rate),
-            mixer: QuadXMixer::new(loop_config.mixer_limits),
+            allocator: PhysicalControlAllocator::new(
+                config.motor_geometry,
+                loop_config.mixer_limits,
+            ),
         }
     }
 
     pub fn set_motor_order(&mut self, motor_order: MotorOrder) {
-        self.mixer.set_motor_order(motor_order);
+        self.allocator.set_motor_order(motor_order);
     }
 
-    pub const fn motor_order(&self) -> MotorOrder {
-        self.mixer.motor_order()
+    pub fn motor_order(&self) -> MotorOrder {
+        self.allocator.motor_order().unwrap_or(MotorOrder::IDENTITY)
+    }
+
+    pub fn reset_position_integrators(&self) {
+        self.position.reset();
     }
 
     pub fn step(
@@ -506,13 +586,14 @@ impl FlightControlPipeline {
             throttle,
         );
         let torque_command = rate_output.command;
-        let motor_outputs = self.mixer.mix(torque_command);
+        let motor_outputs = self.allocator.allocate(torque_command);
         let debug = ControlDebug {
             rate_controller_output: Some(rate_output),
             rate_limit_flags: rate_output.limit_flags,
             torque_command: Some(torque_command),
             motor_outputs: Some(motor_outputs),
             mixer_limit_flags: motor_outputs.limit_flags,
+            desaturation: motor_outputs.desaturation,
             clamp_source: if motor_outputs.clamped {
                 ClampSource::MotorOutputLimit
             } else {
@@ -589,12 +670,23 @@ fn finite_f32x4(values: [f32; 4]) -> bool {
     values.iter().all(|value| value.is_finite())
 }
 
+fn wrap_pi(mut angle: f32) -> f32 {
+    let two_pi = 2.0 * core::f32::consts::PI;
+    while angle > core::f32::consts::PI {
+        angle -= two_pi;
+    }
+    while angle < -core::f32::consts::PI {
+        angle += two_pi;
+    }
+    angle
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ControlInput, ControlSetpoint, ControlSetpointSource, EstimateSnapshot,
-        FlightControlConfig, FlightControlPipeline, ImuControlInput, LocalTrajectorySetpoint,
-        MissionWaypoint, TruthEvidence,
+        EstimatorResetDelta, FlightControlConfig, FlightControlPipeline, ImuControlInput,
+        LocalTrajectorySetpoint, MissionWaypoint, TruthEvidence,
     };
     use crate::control::config::ControlLoopConfig;
     use crate::control::mixing::MixerLimits;
@@ -676,9 +768,7 @@ mod tests {
             measured_rate_deadband_rps: 0.0,
         };
         config.mixer_limits = MixerLimits::NORMALIZED;
-        let pipeline = FlightControlPipeline::new(FlightControlConfig {
-            loop_config: config,
-        });
+        let pipeline = FlightControlPipeline::new(FlightControlConfig::with_loop_config(config));
 
         let output = pipeline.step(
             EstimateSnapshot::LEVEL_ORIGIN,
@@ -745,5 +835,36 @@ mod tests {
             .expect("finite truth evidence should score target error");
 
         assert!((error_m - 5.0).abs() < 0.15, "error_m={error_m}");
+    }
+
+    #[test]
+    fn control_setpoint_adjusts_for_estimator_reset_delta() {
+        let setpoint = ControlSetpoint::from_local_trajectory(
+            LocalTrajectorySetpoint {
+                position_ned_m: [10.0, -2.0, -3.0],
+                velocity_ned_mps: [0.4, -0.2, 0.1],
+                acceleration_ned_mps2: [0.01, 0.02, 0.0],
+                yaw_rad: 3.0,
+                yaw_rate_rad_s: 0.0,
+            },
+            true,
+        );
+        let adjusted = setpoint
+            .adjusted_for_estimator_reset(EstimatorResetDelta {
+                xy_reset_counter: 1,
+                z_reset_counter: 1,
+                velocity_reset_counter: 1,
+                heading_reset_counter: 1,
+                position_delta_ned_m: [-4.0, 1.5, 0.25],
+                velocity_delta_ned_mps: [0.1, 0.2, -0.1],
+                heading_delta_rad: 0.5,
+            })
+            .expect("finite reset delta should adjust setpoint");
+
+        assert_eq!(adjusted.position_ned_m(), [6.0, -0.5, -2.75]);
+        assert_eq!(adjusted.velocity_ned_mps(), [0.5, 0.0, 0.0]);
+        assert_eq!(adjusted.acceleration_ned_mps2(), [0.01, 0.02, 0.0]);
+        assert!(adjusted.yaw_rad() < -2.7);
+        assert!(adjusted.armed());
     }
 }

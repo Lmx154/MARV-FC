@@ -6,7 +6,7 @@
 use common::control::altitude::AltitudeControllerConfig;
 use common::control::attitude::AttitudeControllerConfig;
 use common::control::config::ControlLoopConfig;
-use common::control::mixing::MixerLimits;
+use common::control::mixing::{MixerLimits, MotorGeometry};
 use common::control::position::PositionControllerConfig;
 use common::control::rate::RateControllerConfig;
 
@@ -45,3 +45,5 @@ pub const HIL_CONTROL_CONFIG: ControlLoopConfig = ControlLoopConfig::new(
     },
     MixerLimits::NORMALIZED,
 );
+
+pub const HIL_MOTOR_GEOMETRY: MotorGeometry = MotorGeometry::f450_xing2_2809_1045_4s_v0();

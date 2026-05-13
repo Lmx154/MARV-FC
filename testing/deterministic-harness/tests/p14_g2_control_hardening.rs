@@ -199,7 +199,10 @@ fn run_case_with_geometry(
     geometry: MotorGeometry,
 ) -> Vec<ClosedLoopTrace> {
     let mut runner = ClosedLoopRunner::new(
-        ControlPipeline::default(),
+        ControlPipeline::new(PureControlConfig::new(
+            ControlLoopConfig::default(),
+            geometry,
+        )),
         TruthPlant::new(geometry, initial),
         ClosedLoopConfig::new(DT_S, ticks),
     );
@@ -216,9 +219,7 @@ fn saturated_pipeline_step(gyro_rps: [f32; 3]) -> deterministic_harness::Control
         measured_rate_deadband_rps: 0.0,
     };
     config.mixer_limits = MixerLimits::new(0.45, 0.55);
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: config,
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::with_loop_config(config));
 
     pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,

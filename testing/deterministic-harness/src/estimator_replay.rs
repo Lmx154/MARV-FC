@@ -1,6 +1,6 @@
 use common::localization::estimation::{
-    BarometricAltitudeConfig, GpsPositionConfig, GpsVelocityConfig, LayeredNavigationStack,
-    LayeredNavigationStackConfig, Vec3,
+    BarometricAltitudeConfig, GpsPositionConfig, GpsVelocityConfig, LayeredNavigationResetDelta,
+    LayeredNavigationStack, LayeredNavigationStackConfig, Vec3,
 };
 
 use crate::{Fixture, HarnessFailure, HarnessResult};
@@ -15,6 +15,7 @@ pub struct SensorFrame {
     pub gps_position_ned_m: Option<[f64; 3]>,
     pub gps_velocity_ned_mps: Option<[f64; 3]>,
     pub baro_down_m: Option<f64>,
+    pub estimator_reset: Option<EstimatorResetInjection>,
 }
 
 impl SensorFrame {
@@ -56,6 +57,7 @@ impl SensorFrame {
                     ["gps_vn", "gps_ve", "gps_vd"],
                 )?,
                 baro_down_m: columns.optional_scalar(sample, tick, "baro_valid", "baro_down")?,
+                estimator_reset: None,
             };
             frame.validate(tick)?;
             frames.push(frame);
@@ -86,8 +88,41 @@ impl SensorFrame {
                 "baro_down_m contains a non-finite asserted value",
             ));
         }
+        if self.estimator_reset.is_some_and(|reset| !reset.finite()) {
+            return Err(HarnessFailure::new(
+                tick,
+                self.timestamp_us,
+                "estimator_reset contains a non-finite asserted value",
+            ));
+        }
 
         Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EstimatorResetInjection {
+    pub position_delta_ned_m: [f64; 3],
+    pub velocity_delta_ned_mps: [f64; 3],
+    pub heading_delta_rad: f64,
+}
+
+impl EstimatorResetInjection {
+    pub const NONE: Self = Self {
+        position_delta_ned_m: [0.0; 3],
+        velocity_delta_ned_mps: [0.0; 3],
+        heading_delta_rad: 0.0,
+    };
+
+    pub fn finite(self) -> bool {
+        self.position_delta_ned_m
+            .iter()
+            .all(|value| value.is_finite())
+            && self
+                .velocity_delta_ned_mps
+                .iter()
+                .all(|value| value.is_finite())
+            && self.heading_delta_rad.is_finite()
     }
 }
 
@@ -123,6 +158,7 @@ pub struct EstimatorReplayTrace {
     pub quaternion: [f64; 4],
     pub position_ned_m: [f64; 3],
     pub velocity_ned_mps: [f64; 3],
+    pub reset_delta: LayeredNavigationResetDelta<f64>,
     pub gps_used: bool,
     pub baro_used: bool,
     pub baro_rejected: bool,
@@ -340,8 +376,20 @@ impl EstimatorReplayDriver {
             estimate_valid = true;
         }
 
+        if let Some(reset) = frame.estimator_reset {
+            if !reset.finite() {
+                return Err(HarnessFailure::new(
+                    tick,
+                    frame.timestamp_us,
+                    "estimator reset injection contains a non-finite value",
+                ));
+            }
+            self.apply_reset_injection(reset);
+        }
+
         self.previous_timestamp_us = Some(frame.timestamp_us);
         let state = self.stack.state();
+        let reset_delta = self.stack.take_reset_delta();
         Ok(EstimatorReplayTrace {
             tick,
             timestamp_us: frame.timestamp_us,
@@ -363,10 +411,41 @@ impl EstimatorReplayDriver {
                 state.velocity_mps[1],
                 state.velocity_mps[2],
             ],
+            reset_delta,
             gps_used,
             baro_used,
             baro_rejected,
         })
+    }
+
+    fn apply_reset_injection(&mut self, reset: EstimatorResetInjection) {
+        if reset.position_delta_ned_m[0] != 0.0 || reset.position_delta_ned_m[1] != 0.0 {
+            let state = self.stack.state();
+            self.stack.reset_xy_position(
+                state.position_m[0] + reset.position_delta_ned_m[0],
+                state.position_m[1] + reset.position_delta_ned_m[1],
+            );
+        }
+        if reset.position_delta_ned_m[2] != 0.0 {
+            let state = self.stack.state();
+            self.stack
+                .reset_z_position(state.position_m[2] + reset.position_delta_ned_m[2]);
+        }
+        if reset
+            .velocity_delta_ned_mps
+            .iter()
+            .any(|value| *value != 0.0)
+        {
+            let state = self.stack.state();
+            self.stack.reset_velocity(Vec3::<f64>::new(
+                state.velocity_mps[0] + reset.velocity_delta_ned_mps[0],
+                state.velocity_mps[1] + reset.velocity_delta_ned_mps[1],
+                state.velocity_mps[2] + reset.velocity_delta_ned_mps[2],
+            ));
+        }
+        if reset.heading_delta_rad != 0.0 {
+            self.stack.reset_heading_delta(reset.heading_delta_rad);
+        }
     }
 }
 

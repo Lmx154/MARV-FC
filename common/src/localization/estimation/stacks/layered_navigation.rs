@@ -3,7 +3,10 @@
 use crate::localization::estimation::core::{
     CovarianceConvention, EstimationError, GenericEkf, GenericEskf, MatN, Quaternion, Vec3, scalar,
 };
-use crate::localization::estimation::math::{identity_quaternion, quaternion_to_rotation_matrix};
+use crate::localization::estimation::math::{
+    identity_quaternion, normalize_quaternion, quaternion_multiply, quaternion_to_rotation_matrix,
+    rotation_vector_to_quaternion,
+};
 use crate::localization::estimation::measurements::{
     BarometricAltitudeMeasurementModel, GpsPositionMeasurementModel, GpsVelocityMeasurementModel,
     GravityAlignmentMeasurementModel, MagneticFieldMeasurementModel,
@@ -130,6 +133,43 @@ pub struct LayeredNavigationStack<T: crate::localization::estimation::core::Esti
     pub last_timestamp_s: Option<T>,
     pub last_prediction_dt_s: Option<T>,
     pub last_inertial_acceleration_mps2: Vec3<T>,
+    pub reset_delta: LayeredNavigationResetDelta<T>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LayeredNavigationResetDelta<T: crate::localization::estimation::core::EstimatorScalar> {
+    pub xy_reset_counter: u32,
+    pub z_reset_counter: u32,
+    pub velocity_reset_counter: u32,
+    pub heading_reset_counter: u32,
+    pub position_delta_m: [T; 3],
+    pub velocity_delta_mps: [T; 3],
+    pub heading_delta_rad: T,
+}
+
+impl<T: crate::localization::estimation::core::EstimatorScalar> Default
+    for LayeredNavigationResetDelta<T>
+{
+    fn default() -> Self {
+        Self {
+            xy_reset_counter: 0,
+            z_reset_counter: 0,
+            velocity_reset_counter: 0,
+            heading_reset_counter: 0,
+            position_delta_m: [T::zero(); 3],
+            velocity_delta_mps: [T::zero(); 3],
+            heading_delta_rad: T::zero(),
+        }
+    }
+}
+
+impl<T: crate::localization::estimation::core::EstimatorScalar> LayeredNavigationResetDelta<T> {
+    pub fn has_reset(self) -> bool {
+        self.xy_reset_counter != 0
+            || self.z_reset_counter != 0
+            || self.velocity_reset_counter != 0
+            || self.heading_reset_counter != 0
+    }
 }
 
 impl<T: crate::localization::estimation::core::EstimatorScalar> Default
@@ -167,6 +207,7 @@ impl<T: crate::localization::estimation::core::EstimatorScalar> LayeredNavigatio
             last_timestamp_s: None,
             last_prediction_dt_s: None,
             last_inertial_acceleration_mps2: Vec3::<T>::zeros(),
+            reset_delta: LayeredNavigationResetDelta::default(),
         }
     }
 
@@ -185,6 +226,63 @@ impl<T: crate::localization::estimation::core::EstimatorScalar> LayeredNavigatio
             attitude: self.attitude.covariance,
             navigation: self.navigation.covariance,
         }
+    }
+
+    pub fn reset_delta(&self) -> LayeredNavigationResetDelta<T> {
+        self.reset_delta
+    }
+
+    pub fn take_reset_delta(&mut self) -> LayeredNavigationResetDelta<T> {
+        let delta = self.reset_delta;
+        self.reset_delta = LayeredNavigationResetDelta::default();
+        delta
+    }
+
+    pub fn reset_xy_position(&mut self, north_m: T, east_m: T) -> LayeredNavigationResetDelta<T> {
+        let delta = [
+            north_m - self.navigation.state.position_m[0],
+            east_m - self.navigation.state.position_m[1],
+            T::zero(),
+        ];
+        self.navigation.state.position_m[0] = north_m;
+        self.navigation.state.position_m[1] = east_m;
+        self.reset_delta.xy_reset_counter = self.reset_delta.xy_reset_counter.saturating_add(1);
+        self.reset_delta.position_delta_m[0] = self.reset_delta.position_delta_m[0] + delta[0];
+        self.reset_delta.position_delta_m[1] = self.reset_delta.position_delta_m[1] + delta[1];
+        self.reset_delta
+    }
+
+    pub fn reset_z_position(&mut self, down_m: T) -> LayeredNavigationResetDelta<T> {
+        let delta = down_m - self.navigation.state.position_m[2];
+        self.navigation.state.position_m[2] = down_m;
+        self.reset_delta.z_reset_counter = self.reset_delta.z_reset_counter.saturating_add(1);
+        self.reset_delta.position_delta_m[2] = self.reset_delta.position_delta_m[2] + delta;
+        self.reset_delta
+    }
+
+    pub fn reset_velocity(&mut self, velocity_mps: Vec3<T>) -> LayeredNavigationResetDelta<T> {
+        let delta = velocity_mps - self.navigation.state.velocity_mps;
+        self.navigation.state.velocity_mps = velocity_mps;
+        self.reset_delta.velocity_reset_counter =
+            self.reset_delta.velocity_reset_counter.saturating_add(1);
+        for axis in 0..3 {
+            self.reset_delta.velocity_delta_mps[axis] =
+                self.reset_delta.velocity_delta_mps[axis] + delta[axis];
+        }
+        self.reset_delta
+    }
+
+    pub fn reset_heading_delta(&mut self, yaw_delta_rad: T) -> LayeredNavigationResetDelta<T> {
+        let delta_quaternion =
+            rotation_vector_to_quaternion(&Vec3::<T>::new(T::zero(), T::zero(), yaw_delta_rad));
+        self.attitude.state.quaternion = normalize_quaternion(&quaternion_multiply(
+            &delta_quaternion,
+            &self.attitude.state.quaternion,
+        ));
+        self.reset_delta.heading_reset_counter =
+            self.reset_delta.heading_reset_counter.saturating_add(1);
+        self.reset_delta.heading_delta_rad = self.reset_delta.heading_delta_rad + yaw_delta_rad;
+        self.reset_delta
     }
 
     pub fn predict(
@@ -495,6 +593,32 @@ mod tests {
         assert!(velocity[0] > 0.0 && velocity[0] < 5.0);
         assert!(velocity[1] < 0.0 && velocity[1] > -2.0);
         assert!(velocity[2] > 0.0 && velocity[2] < 1.0);
+    }
+
+    #[test]
+    fn reset_delta_tracks_position_velocity_and_heading_rebases() {
+        let mut stack = LayeredNavigationStack::<f64>::default();
+
+        let delta = stack.reset_xy_position(3.0, -2.0);
+        assert_eq!(delta.xy_reset_counter, 1);
+        assert_vec3_near_f64(delta.position_delta_m, [3.0, -2.0, 0.0], TOLERANCE);
+
+        let delta = stack.reset_z_position(-1.5);
+        assert_eq!(delta.z_reset_counter, 1);
+        assert_vec3_near_f64(delta.position_delta_m, [3.0, -2.0, -1.5], TOLERANCE);
+
+        let delta = stack.reset_velocity(Vec3::<f64>::new(0.5, -0.25, 0.1));
+        assert_eq!(delta.velocity_reset_counter, 1);
+        assert_vec3_near_f64(delta.velocity_delta_mps, [0.5, -0.25, 0.1], TOLERANCE);
+
+        let delta = stack.reset_heading_delta(0.25);
+        assert_eq!(delta.heading_reset_counter, 1);
+        assert_scalar_near_f64(delta.heading_delta_rad, 0.25, TOLERANCE);
+        assert!(delta.has_reset());
+
+        let taken = stack.take_reset_delta();
+        assert_eq!(taken, delta);
+        assert!(!stack.reset_delta().has_reset());
     }
 
     #[test]

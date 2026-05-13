@@ -32,14 +32,15 @@ pub use closed_loop_estimator::{
 pub use control_pipeline::{
     ClampSource, ControlFrame, ControlInput, ControlNavPhase, ControlPipeline,
     ControlPipelineTrace, ControlSetpoint, ControlSetpointSource, EstimateSnapshot,
-    EstimatorLocalState, GuidanceCommand, GuidanceOutput, GuidancePhase, GuidanceStateMachine,
-    ImuControlInput, LocalTrajectorySetpoint, MissionWaypoint, MixerLimitFlags, PureControlConfig,
-    RateControllerOutput, RateLimitFlags, ThrustVectorConfig, ThrustVectorController,
-    ThrustVectorSetpoint, TrajectoryGenerator, TrajectoryLimits, TruthEvidence,
+    EstimatorLocalState, EstimatorResetDelta, GuidanceCommand, GuidanceOutput, GuidancePhase,
+    GuidanceStateMachine, ImuControlInput, LocalTrajectorySetpoint, MissionWaypoint,
+    MixerLimitFlags, PureControlConfig, RateControllerOutput, RateLimitFlags, ThrustVectorConfig,
+    ThrustVectorController, ThrustVectorSetpoint, TrajectoryGenerator, TrajectoryLimits,
+    TruthEvidence,
 };
 pub use estimator_replay::{
     EstimatorReplayConfig, EstimatorReplayDriver, EstimatorReplayReport, EstimatorReplayTrace,
-    SensorFrame, replay_estimator_frames,
+    EstimatorResetInjection, SensorFrame, replay_estimator_frames,
 };
 pub use fixtures::{Fixture, FixtureSample};
 pub use gazebo_contract::{

@@ -22,7 +22,7 @@ use crate::channels::{
     ACTUATOR_OUTPUT_CHANNEL, GPS_CHANNEL, IMU_CHANNEL, STATE_ESTIMATE_CHANNEL, TestGpsSubscriber,
     TestImuSubscriber, TestStateEstimateSubscriber,
 };
-use crate::control_config::HIL_CONTROL_CONFIG;
+use crate::control_config::{HIL_CONTROL_CONFIG, HIL_MOTOR_GEOMETRY};
 use crate::protocol;
 
 const CONTROL_COMMAND_DEPTH: usize = 4;
@@ -119,9 +119,8 @@ async fn control_task(
     mut gps_subscriber: TestGpsSubscriber,
 ) -> ! {
     let config = HIL_CONTROL_CONFIG;
-    let mut pipeline = FlightControlPipeline::new(FlightControlConfig {
-        loop_config: config,
-    });
+    let mut pipeline =
+        FlightControlPipeline::new(FlightControlConfig::new(config, HIL_MOTOR_GEOMETRY));
     let mut setpoint = PositionControllerSetpoint::ORIGIN_HOLD;
     let mut pending_waypoint = None;
     let mut local_frame = None;

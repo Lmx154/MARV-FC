@@ -25,9 +25,7 @@ struct DemandLimitSummary {
 #[test]
 fn p14_g2_demand_limits_bound_extreme_position_and_altitude_requests() {
     let config = demand_limit_config();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: config,
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::with_loop_config(config));
     let output = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
@@ -78,9 +76,7 @@ fn p14_g2_demand_limits_report_mixer_saturation() {
         max_axis_command: 0.40,
         ..config.rate
     };
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: config,
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::with_loop_config(config));
     let output = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),
@@ -108,9 +104,7 @@ fn p14_g2_demand_limits_report_mixer_saturation() {
 #[test]
 fn p14_g2_demand_limits_tilt_increases_collective_to_preserve_vertical_thrust() {
     let config = demand_limit_config();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: config,
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::with_loop_config(config));
     let output = pipeline.step(
         EstimateSnapshot::LEVEL_ORIGIN,
         ImuControlInput::default(),

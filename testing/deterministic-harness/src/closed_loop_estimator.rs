@@ -1,7 +1,8 @@
 use crate::{
     ClosedLoopConfig, ClosedLoopTruthState, ControlPipeline, ControlPipelineTrace, ControlSetpoint,
     EstimateSnapshot, EstimatorReplayConfig, EstimatorReplayDriver, EstimatorReplayTrace,
-    HarnessResult, ImuControlInput, SensorFrame, TruthPlant,
+    EstimatorResetDelta, EstimatorResetInjection, HarnessResult, ImuControlInput, SensorFrame,
+    TruthPlant,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -9,6 +10,7 @@ pub struct SimulatedSensorConfig {
     pub magnetic_field_body_ut: [f64; 3],
     pub gps_dropout_ticks: Option<(u64, u64)>,
     pub baro_spike: Option<BaroSpike>,
+    pub estimator_resets: [Option<SimulatedEstimatorReset>; 4],
 }
 
 impl SimulatedSensorConfig {
@@ -17,6 +19,7 @@ impl SimulatedSensorConfig {
             magnetic_field_body_ut: [20.0, 0.0, 40.0],
             gps_dropout_ticks: None,
             baro_spike: None,
+            estimator_resets: [None; 4],
         }
     }
 
@@ -30,6 +33,18 @@ impl SimulatedSensorConfig {
         assert!(tick > 0);
         assert!(added_down_m.is_finite());
         self.baro_spike = Some(BaroSpike { tick, added_down_m });
+        self
+    }
+
+    pub fn with_estimator_reset(mut self, tick: u64, reset: EstimatorResetInjection) -> Self {
+        assert!(tick > 1);
+        assert!(reset.finite());
+        let slot = self
+            .estimator_resets
+            .iter_mut()
+            .find(|slot| slot.is_none())
+            .expect("simulated estimator reset slots exhausted");
+        *slot = Some(SimulatedEstimatorReset { tick, reset });
         self
     }
 
@@ -48,6 +63,14 @@ impl SimulatedSensorConfig {
         }
         down
     }
+
+    fn estimator_reset(self, tick: u64) -> Option<EstimatorResetInjection> {
+        self.estimator_resets
+            .into_iter()
+            .flatten()
+            .find(|reset| reset.tick == tick)
+            .map(|reset| reset.reset)
+    }
 }
 
 impl Default for SimulatedSensorConfig {
@@ -60,6 +83,12 @@ impl Default for SimulatedSensorConfig {
 pub struct BaroSpike {
     pub tick: u64,
     pub added_down_m: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SimulatedEstimatorReset {
+    pub tick: u64,
+    pub reset: EstimatorResetInjection,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -174,7 +203,10 @@ impl ClosedLoopEstimatorRunner {
         }
     }
 
-    pub fn run(&mut self, setpoint: ControlSetpoint) -> HarnessResult<ClosedLoopEstimatorReport> {
+    pub fn run(
+        &mut self,
+        mut setpoint: ControlSetpoint,
+    ) -> HarnessResult<ClosedLoopEstimatorReport> {
         let mut driver = EstimatorReplayDriver::new(self.config.estimator);
         let mut report = ClosedLoopEstimatorReport {
             traces: Vec::with_capacity(self.config.closed_loop.ticks),
@@ -187,6 +219,12 @@ impl ClosedLoopEstimatorRunner {
             let sensors =
                 simulated_sensors(tick, sim_time_us, self.plant.state, self.config.sensors);
             let estimator = driver.step(tick, &sensors)?;
+            if estimator.reset_delta.has_reset() {
+                setpoint = setpoint
+                    .adjusted_for_estimator_reset(estimator_reset_delta(&estimator))
+                    .expect("finite estimator reset should adjust active setpoint");
+                self.pipeline.reset_position_integrators();
+            }
             let control = self.pipeline.step(
                 estimate_snapshot(&estimator),
                 imu_from_sensors(&sensors),
@@ -232,6 +270,22 @@ pub fn simulated_sensors(
         gps_position_ned_m: gps_valid.then_some(position),
         gps_velocity_ned_mps: gps_valid.then_some(velocity),
         baro_down_m: Some(config.baro_down_m(tick, truth.position_ned_m[2])),
+        estimator_reset: config.estimator_reset(tick),
+    }
+}
+
+fn estimator_reset_delta(trace: &EstimatorReplayTrace) -> EstimatorResetDelta {
+    EstimatorResetDelta {
+        xy_reset_counter: trace.reset_delta.xy_reset_counter,
+        z_reset_counter: trace.reset_delta.z_reset_counter,
+        velocity_reset_counter: trace.reset_delta.velocity_reset_counter,
+        heading_reset_counter: trace.reset_delta.heading_reset_counter,
+        position_delta_ned_m: trace.reset_delta.position_delta_m.map(|value| value as f32),
+        velocity_delta_ned_mps: trace
+            .reset_delta
+            .velocity_delta_mps
+            .map(|value| value as f32),
+        heading_delta_rad: trace.reset_delta.heading_delta_rad as f32,
     }
 }
 

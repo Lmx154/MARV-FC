@@ -3,9 +3,9 @@
 pub use common::control::pipeline::{
     ClampSource, ControlDebug, ControlFrame, ControlInput, ControlNavPhase,
     ControlOutput as ControlPipelineTrace, ControlSetpoint, ControlSetpointSource,
-    EstimateSnapshot, EstimatorLocalState, FlightControlConfig as PureControlConfig,
-    FlightControlPipeline as ControlPipeline, ImuControlInput, LocalTrajectorySetpoint,
-    MissionWaypoint, TruthEvidence,
+    EstimateSnapshot, EstimatorLocalState, EstimatorResetDelta,
+    FlightControlConfig as PureControlConfig, FlightControlPipeline as ControlPipeline,
+    ImuControlInput, LocalTrajectorySetpoint, MissionWaypoint, TruthEvidence,
 };
 
 pub use common::control::guidance::{

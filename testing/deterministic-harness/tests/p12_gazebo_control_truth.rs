@@ -23,13 +23,18 @@ const DEFAULT_VERTICAL_STEP_DOWN_M: f32 = -3.0;
 const DEFAULT_MIN_VERTICAL_IMPROVEMENT_M: f32 = 0.05;
 const DEFAULT_GYRO_DEADBAND_RPS: f32 = 0.02;
 const DEFAULT_MAX_HOVER_MOTOR_SPREAD: f32 = 0.08;
+const DEFAULT_RESET_MAX_POSITION_M: f32 = 0.25;
+const DEFAULT_RESET_MAX_VELOCITY_MPS: f32 = 0.10;
+const DEFAULT_RESET_MAX_GYRO_RPS: f32 = 0.05;
+const DEFAULT_RESET_MAX_ATTITUDE_RAD: f32 = 5.0_f32.to_radians();
 
 #[test]
 fn p12_gazebo_control_truth_runtime_mixer_closes_roll_pitch_yaw_signs() {
     let airframe = airframe_config();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: control_config(&airframe, 0.0),
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::new(
+        control_config(&airframe, 0.0),
+        airframe.runtime_motor_geometry(),
+    ));
     let hover = airframe.hover_motor_command();
 
     let roll = pipeline.step(
@@ -156,6 +161,10 @@ struct RuntimeSettings {
     min_vertical_improvement_m: f32,
     gyro_deadband_rps: f32,
     max_hover_motor_spread: f32,
+    reset_max_position_m: f32,
+    reset_max_velocity_mps: f32,
+    reset_max_gyro_rps: f32,
+    reset_max_attitude_rad: f32,
 }
 
 impl RuntimeSettings {
@@ -184,8 +193,25 @@ impl RuntimeSettings {
                 .unwrap_or(DEFAULT_GYRO_DEADBAND_RPS),
             max_hover_motor_spread: env_f32("MARV_GAZEBO_G1_MAX_HOVER_MOTOR_SPREAD")
                 .unwrap_or(DEFAULT_MAX_HOVER_MOTOR_SPREAD),
+            reset_max_position_m: env_f32("MARV_GAZEBO_G1_RESET_MAX_POSITION_M")
+                .unwrap_or(DEFAULT_RESET_MAX_POSITION_M),
+            reset_max_velocity_mps: env_f32("MARV_GAZEBO_G1_RESET_MAX_VELOCITY_MPS")
+                .unwrap_or(DEFAULT_RESET_MAX_VELOCITY_MPS),
+            reset_max_gyro_rps: env_f32("MARV_GAZEBO_G1_RESET_MAX_GYRO_RPS")
+                .unwrap_or(DEFAULT_RESET_MAX_GYRO_RPS),
+            reset_max_attitude_rad: env_f32("MARV_GAZEBO_G1_RESET_MAX_ATTITUDE_RAD")
+                .unwrap_or(DEFAULT_RESET_MAX_ATTITUDE_RAD),
         }
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ResetCleanlinessSummary {
+    frames: usize,
+    max_position_m: f32,
+    max_velocity_mps: f32,
+    max_gyro_rps: f32,
+    max_attitude_rad: f32,
 }
 
 fn run_runtime_scenario(
@@ -196,9 +222,10 @@ fn run_runtime_scenario(
 ) -> RuntimeSummary {
     let mut client = BridgeProbeClient::connect(&settings.endpoint);
     let mut sequence = Sequence::default();
-    let pipeline = ControlPipeline::new(PureControlConfig {
-        loop_config: control_config(airframe, settings.gyro_deadband_rps),
-    });
+    let pipeline = ControlPipeline::new(PureControlConfig::new(
+        control_config(airframe, settings.gyro_deadband_rps),
+        airframe.runtime_motor_geometry(),
+    ));
 
     if settings.auto_reset {
         send_reset_and_play(
@@ -362,10 +389,10 @@ impl BridgeProbeClient {
         panic!("expected Gazebo SENSOR frame within {timeout:?}");
     }
 
-    fn collect_frames(&mut self, count: usize, timeout: Duration) {
-        for _ in 0..count {
-            let _ = self.read_required_frame(timeout);
-        }
+    fn collect_frames(&mut self, count: usize, timeout: Duration) -> Vec<GazeboSensorLine> {
+        (0..count)
+            .map(|_| self.read_required_frame(timeout))
+            .collect()
     }
 
     fn read_frame(&mut self) -> Option<GazeboSensorLine> {
@@ -432,7 +459,7 @@ fn send_reset_and_play(
     client: &mut BridgeProbeClient,
     sequence: &mut Sequence,
     settings: &RuntimeSettings,
-    settle_motors: [f32; 4],
+    _settle_motors: [f32; 4],
 ) {
     client.send_actuator(&format_gazebo_actuator_line(
         sequence.next(),
@@ -456,9 +483,44 @@ fn send_reset_and_play(
     client.send_actuator(&format_gazebo_actuator_line(
         sequence.next(),
         None,
-        settle_motors,
+        [0.0, 0.0, 0.0, 0.0],
     ));
-    client.collect_frames(settings.reset_settle_frames, settings.timeout);
+    let frames = client.collect_frames(settings.reset_settle_frames, settings.timeout);
+    let cleanliness = summarize_reset_cleanliness(&frames);
+    assert!(
+        cleanliness.frames == settings.reset_settle_frames
+            && cleanliness.max_position_m <= settings.reset_max_position_m
+            && cleanliness.max_velocity_mps <= settings.reset_max_velocity_mps
+            && cleanliness.max_gyro_rps <= settings.reset_max_gyro_rps
+            && cleanliness.max_attitude_rad <= settings.reset_max_attitude_rad,
+        "G1 reset cleanliness failed before control start: summary={cleanliness:?}"
+    );
+    eprintln!("G1 reset cleanliness: {cleanliness:?}");
+}
+
+fn summarize_reset_cleanliness(frames: &[GazeboSensorLine]) -> ResetCleanlinessSummary {
+    assert!(!frames.is_empty(), "reset cleanliness needs settle frames");
+    let mut summary = ResetCleanlinessSummary {
+        frames: frames.len(),
+        max_position_m: 0.0,
+        max_velocity_mps: 0.0,
+        max_gyro_rps: 0.0,
+        max_attitude_rad: 0.0,
+    };
+
+    for frame in frames {
+        let position = frame
+            .position_ned_m
+            .expect("reset cleanliness requires Gazebo pose pn/pe/pd fields");
+        summary.max_position_m = summary.max_position_m.max(norm3(position));
+        summary.max_velocity_mps = summary.max_velocity_mps.max(norm3(frame.vel_ned_mps));
+        summary.max_gyro_rps = summary.max_gyro_rps.max(norm3(frame.gyro_rps));
+        summary.max_attitude_rad = summary
+            .max_attitude_rad
+            .max(frame_attitude_error_rad(frame).unwrap_or(0.0));
+    }
+
+    summary
 }
 
 fn airframe_config() -> GazeboAirframeConfig {
@@ -489,6 +551,24 @@ fn motor_spread(motors: [f32; 4]) -> f32 {
         max_motor = max_motor.max(motor);
     }
     max_motor - min_motor
+}
+
+fn norm3(values: [f32; 3]) -> f32 {
+    (values[0] * values[0] + values[1] * values[1] + values[2] * values[2]).sqrt()
+}
+
+fn frame_attitude_error_rad(frame: &GazeboSensorLine) -> Option<f32> {
+    if let Some([roll, pitch, yaw]) = frame.euler_rad {
+        return Some(norm3([roll, pitch, yaw]));
+    }
+
+    let [w, x, y, z] = frame.attitude_quaternion()?;
+    let norm = (w * w + x * x + y * y + z * z).sqrt();
+    if norm <= f32::EPSILON {
+        return None;
+    }
+    let w = (w / norm).clamp(-1.0, 1.0);
+    Some(2.0 * w.acos())
 }
 
 fn estimate_with_euler_deg(roll_deg: f32, pitch_deg: f32, yaw_deg: f32) -> EstimateSnapshot {

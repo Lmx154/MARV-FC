@@ -321,6 +321,19 @@ cargo test -p telemetry-app gazebo_bridge_client
 cargo test --manifest-path testing/deterministic-harness/Cargo.toml p08_gazebo_contract
 ```
 
+Quick Gazebo replay helper:
+
+```sh
+cargo run --manifest-path testing/deterministic-harness/Cargo.toml --bin gazebo_replay -- quick
+cargo run --manifest-path testing/deterministic-harness/Cargo.toml --bin gazebo_replay -- quick --relaxed-reset --keep-going
+```
+
+The helper shells out to the checked-in contract and ignored live Gazebo tests
+with auto-reset enabled. Use `--list` to inspect the selected commands without
+running them, `--endpoint HOST:PORT` to point at a non-default bridge, and
+presets such as `g0`, `g1`, `g2`, `g2-hardening`, `mission`, or `full` for
+larger replays.
+
 ## Phase 16 G2.5 Control Hardening
 
 Phase 16 starts the post-G2 hardening block with deterministic host gates before

@@ -3,7 +3,10 @@ use std::collections::BTreeMap;
 use common::{
     control::{
         attitude::AttitudeSetpoint,
-        mixing::{MotorOutputs, QUAD_MOTOR_COUNT, TorqueCommand},
+        mixing::{
+            MixerLimits, MotorGeometry, MotorOutputs, MotorSpec, PhysicalControlAllocator,
+            QUAD_MOTOR_COUNT, SpinDirection, TorqueCommand,
+        },
         pipeline::{EstimateSnapshot, ImuControlInput},
     },
     protocol::hilink::{HilSensorFrame, SimStamp, valid},
@@ -296,21 +299,41 @@ impl GazeboAirframeConfig {
     }
 
     pub fn runtime_control_motors(&self, command: TorqueCommand) -> MotorOutputs<QUAD_MOTOR_COUNT> {
-        let mut motors = [0.0; QUAD_MOTOR_COUNT];
-        let mut clamped = false;
+        PhysicalControlAllocator::new(self.runtime_motor_geometry(), MixerLimits::NORMALIZED)
+            .allocate(command)
+    }
+
+    pub fn runtime_motor_geometry(&self) -> MotorGeometry {
+        let mut motors = [runtime_motor_spec(
+            1,
+            0,
+            [1.0, 1.0, 1.0],
+            self.hover_motor_command(),
+            self.max_thrust_per_motor_n,
+            self.yaw_moment_per_thrust_m,
+        ); QUAD_MOTOR_COUNT];
 
         for motor in &self.motors {
             let signs = self.motor_runtime_signs(motor.output_index);
-            let raw = command.throttle
-                + command.roll * signs[0]
-                + command.pitch * signs[1]
-                + command.yaw * signs[2];
-            let clamped_raw = raw.clamp(0.0, 1.0);
-            clamped |= clamped_raw != raw;
-            motors[motor.output_index] = clamped_raw;
+            motors[motor.output_index] = runtime_motor_spec(
+                motor.output_index + 1,
+                motor.output_index,
+                signs,
+                self.hover_motor_command(),
+                self.max_thrust_per_motor_n,
+                self.yaw_moment_per_thrust_m,
+            );
         }
 
-        MotorOutputs::new(motors, clamped)
+        MotorGeometry {
+            motors,
+            hover_throttle: self.hover_motor_command(),
+            mass_kg: self.mass_kg,
+            gravity_mps2: self.gravity_mps2,
+            roll_inertia_kg_m2: self.inertia_kg_m2[0],
+            pitch_inertia_kg_m2: self.inertia_kg_m2[1],
+            yaw_inertia_kg_m2: self.inertia_kg_m2[2],
+        }
     }
 
     fn probe_low_motor_command(&self) -> f32 {
@@ -453,6 +476,31 @@ fn motor_bump_expectation(
         roll_positive: signs[0] >= 0.0,
         pitch_positive: signs[1] >= 0.0,
         yaw_positive: signs[2] >= 0.0,
+    }
+}
+
+fn runtime_motor_spec(
+    logical_motor: usize,
+    output_index: usize,
+    signs: [f32; 3],
+    hover_command: f32,
+    max_thrust_per_motor_n: f32,
+    yaw_moment_per_thrust_m: f32,
+) -> MotorSpec {
+    MotorSpec {
+        logical_motor,
+        output_index,
+        position_body_m: [signs[1], signs[0], 0.0],
+        spin_direction: if signs[2] >= 0.0 {
+            SpinDirection::CounterClockwise
+        } else {
+            SpinDirection::Clockwise
+        },
+        thrust_coefficient_n: max_thrust_per_motor_n,
+        reaction_torque_coefficient_nm: max_thrust_per_motor_n * yaw_moment_per_thrust_m,
+        hover_command,
+        min_command: 0.0,
+        max_command: 1.0,
     }
 }
 
@@ -701,6 +749,7 @@ impl GazeboSensorLine {
                 .then(|| origin.baro_down_m(self))
                 .flatten()
                 .map(f64::from),
+            estimator_reset: None,
         })
     }
 

@@ -157,6 +157,7 @@ fn sensor_at(timestamp_us: u64) -> SensorFrame {
         gps_position_ned_m: Some([0.0, 0.0, 0.0]),
         gps_velocity_ned_mps: Some([0.0, 0.0, 0.0]),
         baro_down_m: Some(0.0),
+        estimator_reset: None,
     }
 }
 
