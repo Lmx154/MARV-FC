@@ -18,6 +18,13 @@ actuators.motor_1.direction=1
 actuators.motor_2.direction=1
 actuators.motor_3.direction=1
 actuators.motor_4.direction=1
+# Hardware motor commands are MARV ESC/output ordered. The current Gazebo model
+# exposes its rotor velocity slots rotated relative to that hardware order, so
+# the bridge remaps command motor N to the Gazebo actuator velocity index below.
+actuators.motor_1.gazebo_index=1
+actuators.motor_2.gazebo_index=2
+actuators.motor_3.gazebo_index=3
+actuators.motor_4.gazebo_index=0
 
 nominal_battery_voltage_v=12.3
 synthetic_sensors=false

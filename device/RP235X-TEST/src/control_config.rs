@@ -19,6 +19,7 @@ pub const HIL_CONTROL_CONFIG: ControlLoopConfig = ControlLoopConfig::new(
         horizontal_integral_leak: 0.999,
         max_horizontal_integral_accel_mps2: 0.45,
         max_horizontal_accel_mps2: 1.5,
+        max_horizontal_accel_slew_mps3: 4.0,
         max_tilt_rad: 10.0 * core::f32::consts::PI / 180.0,
     },
     AltitudeControllerConfig {

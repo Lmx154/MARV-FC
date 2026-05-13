@@ -205,13 +205,22 @@ Direction:
 Bridge publishes to Gazebo.
 ```
 
-Motor order:
+Hardware command order:
 
 ```text
 motor 0 -> ESC output 1 -> rotor_0_joint / rotor_0 / rear_right  / CW
 motor 1 -> ESC output 2 -> rotor_1_joint / rotor_1 / front_right / CCW
 motor 2 -> ESC output 3 -> rotor_2_joint / rotor_2 / rear_left   / CCW
 motor 3 -> ESC output 4 -> rotor_3_joint / rotor_3 / front_left  / CW
+```
+
+Bridge-to-Gazebo actuator slot remap:
+
+```text
+hardware command motor 0 -> Gazebo velocity index 1
+hardware command motor 1 -> Gazebo velocity index 2
+hardware command motor 2 -> Gazebo velocity index 3
+hardware command motor 3 -> Gazebo velocity index 0
 ```
 
 Gazebo motor command field:

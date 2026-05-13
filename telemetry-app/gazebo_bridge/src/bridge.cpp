@@ -55,6 +55,7 @@ struct BridgeConfig {
     double max_rotor_velocity_rad_s = 1000.0;
     std::string motor_direction_mode = "gazebo_model";
     std::array<double, 4> motor_directions{1.0, 1.0, 1.0, 1.0};
+    std::array<std::size_t, 4> motor_gazebo_indices{0, 1, 2, 3};
 };
 
 void handle_signal(int) {
@@ -129,6 +130,14 @@ void load_config_file(const std::string& path, BridgeConfig& config) {
             const auto motor_index = static_cast<std::size_t>(key[16] - '1');
             if (motor_index < config.motor_directions.size() && key.find(".direction") != std::string::npos) {
                 config.motor_directions[motor_index] = std::stod(value);
+            } else if (motor_index < config.motor_gazebo_indices.size() && key.find(".gazebo_index") != std::string::npos) {
+                const auto gazebo_index = static_cast<std::size_t>(std::stoul(value));
+                if (gazebo_index < config.motor_gazebo_indices.size()) {
+                    config.motor_gazebo_indices[motor_index] = gazebo_index;
+                } else {
+                    std::cerr << "[bridge] ignoring out-of-range Gazebo actuator index "
+                              << gazebo_index << " for " << key << std::endl;
+                }
             }
         }
     }
@@ -224,10 +233,15 @@ bool pose_name_matches(const std::string& pose_name, const std::string& model_na
 
 class GazeboActuatorPublisher {
 public:
-    bool start(std::string topic, double max_rotor_velocity_rad_s, std::array<double, 4> directions) {
+    bool start(
+        std::string topic,
+        double max_rotor_velocity_rad_s,
+        std::array<double, 4> directions,
+        std::array<std::size_t, 4> gazebo_indices) {
         topic_ = std::move(topic);
         max_rotor_velocity_rad_s_ = max_rotor_velocity_rad_s;
         directions_ = directions;
+        gazebo_indices_ = gazebo_indices;
         publisher_ = node_.Advertise<gz::msgs::Actuators>(topic_);
         if (!publisher_) {
             std::cerr << "[bridge] failed to advertise Gazebo topic " << topic_ << std::endl;
@@ -240,9 +254,18 @@ public:
 
     void apply(const ActuatorCommand& command) {
         gz::msgs::Actuators message;
+        std::array<double, 4> gazebo_velocities{};
         for (std::size_t i = 0; i < command.motors.size(); ++i) {
             const auto normalized = std::clamp(static_cast<double>(command.motors[i]), 0.0, 1.0);
-            message.add_velocity(directions_[i] * normalized * max_rotor_velocity_rad_s_);
+            const auto gazebo_index = gazebo_indices_[i];
+            if (gazebo_index < gazebo_velocities.size()) {
+                gazebo_velocities[gazebo_index] =
+                    directions_[i] * normalized * max_rotor_velocity_rad_s_;
+            }
+        }
+
+        for (const auto velocity : gazebo_velocities) {
+            message.add_velocity(velocity);
         }
 
         if (command.has_sim_time) {
@@ -272,6 +295,7 @@ private:
     std::string topic_ = "/X3/gazebo/command/motor_speed";
     double max_rotor_velocity_rad_s_ = 1000.0;
     std::array<double, 4> directions_{1.0, 1.0, 1.0, 1.0};
+    std::array<std::size_t, 4> gazebo_indices_{0, 1, 2, 3};
 };
 
 class GazeboWorldController {
@@ -643,7 +667,8 @@ public:
         if (!actuator_publisher_.start(
                 config_.actuator_topic,
                 config_.max_rotor_velocity_rad_s,
-                config_.motor_directions)) {
+                config_.motor_directions,
+                config_.motor_gazebo_indices)) {
             server_.stop();
             return 1;
         }

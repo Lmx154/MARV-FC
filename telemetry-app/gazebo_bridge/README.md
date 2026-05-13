@@ -37,6 +37,19 @@ positive bridge motor directions. That means the bridge scales normalized motor
 commands to rotor speed magnitudes and delegates spin-direction/yaw sign to the
 Gazebo model's motor configuration.
 
+The checked-in config also remaps MARV hardware-ordered motor commands to the
+current Gazebo actuator velocity slots:
+
+```text
+hardware motor 1 -> Gazebo velocity index 1
+hardware motor 2 -> Gazebo velocity index 2
+hardware motor 3 -> Gazebo velocity index 3
+hardware motor 4 -> Gazebo velocity index 0
+```
+
+This keeps the harness airframe profile as the hardware source of truth while
+adapting the simulator-facing bridge to the model's rotor slot order.
+
 If your shell is inside `telemetry-app/`, use:
 
 ```bash

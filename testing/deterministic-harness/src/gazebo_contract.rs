@@ -12,10 +12,20 @@ use common::{
     protocol::hilink::{HilSensorFrame, SimStamp, valid},
 };
 
-use crate::SensorFrame;
-
 pub const GAZEBO_G0_DEFAULT_ENDPOINT: &str = "127.0.0.1:9000";
 const ESTIMATOR_LEVEL_GRAVITY_BODY_MPS2: [f32; 3] = [0.0, 0.0, -9.806_65];
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SensorFrame {
+    pub timestamp_us: u64,
+    pub accel_mps2: [f64; 3],
+    pub gyro_rps: [f64; 3],
+    pub gravity_body_mps2: Option<[f64; 3]>,
+    pub mag_body_ut: Option<[f64; 3]>,
+    pub gps_position_ned_m: Option<[f64; 3]>,
+    pub gps_velocity_ned_mps: Option<[f64; 3]>,
+    pub baro_down_m: Option<f64>,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct GazeboBridgeConfig {
@@ -32,6 +42,7 @@ pub struct GazeboBridgeConfig {
     pub max_rotor_velocity_rad_s: f64,
     pub motor_direction_mode: String,
     pub motor_directions: [f64; 4],
+    pub motor_gazebo_indices: [usize; 4],
     pub nominal_battery_voltage_v: f32,
     pub synthetic_sensors: bool,
 }
@@ -64,6 +75,12 @@ impl GazeboBridgeConfig {
                 required_parse(&values, "actuators.motor_3.direction")?,
                 required_parse(&values, "actuators.motor_4.direction")?,
             ],
+            motor_gazebo_indices: [
+                optional_parse(&values, "actuators.motor_1.gazebo_index")?.unwrap_or(0),
+                optional_parse(&values, "actuators.motor_2.gazebo_index")?.unwrap_or(1),
+                optional_parse(&values, "actuators.motor_3.gazebo_index")?.unwrap_or(2),
+                optional_parse(&values, "actuators.motor_4.gazebo_index")?.unwrap_or(3),
+            ],
             nominal_battery_voltage_v: required_parse(&values, "nominal_battery_voltage_v")?,
             synthetic_sensors: required_bool(&values, "synthetic_sensors")?,
         })
@@ -81,6 +98,15 @@ impl GazeboBridgeConfig {
     pub fn motor_speed_rad_s(&self, motor_index: usize, normalized: f32) -> f64 {
         let normalized = f64::from(normalized).clamp(0.0, 1.0);
         self.motor_directions[motor_index] * normalized * self.max_rotor_velocity_rad_s
+    }
+
+    pub fn gazebo_motor_speeds_rad_s(&self, normalized: [f32; 4]) -> [f64; 4] {
+        let mut speeds = [0.0; 4];
+        for (motor_index, command) in normalized.into_iter().enumerate() {
+            speeds[self.motor_gazebo_indices[motor_index]] =
+                self.motor_speed_rad_s(motor_index, command);
+        }
+        speeds
     }
 }
 
@@ -749,7 +775,6 @@ impl GazeboSensorLine {
                 .then(|| origin.baro_down_m(self))
                 .flatten()
                 .map(f64::from),
-            estimator_reset: None,
         })
     }
 
@@ -986,6 +1011,21 @@ where
     value
         .parse()
         .map_err(|error| format!("invalid Gazebo bridge config key {key}: {error}"))
+}
+
+fn optional_parse<T>(values: &BTreeMap<String, String>, key: &str) -> Result<Option<T>, String>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    values
+        .get(key)
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error| format!("invalid Gazebo bridge config key {key}: {error}"))
+        })
+        .transpose()
 }
 
 fn required_bool(values: &BTreeMap<String, String>, key: &str) -> Result<bool, String> {

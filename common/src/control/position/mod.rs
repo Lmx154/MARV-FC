@@ -16,6 +16,7 @@ pub struct PositionControllerConfig {
     pub horizontal_integral_leak: f32,
     pub max_horizontal_integral_accel_mps2: f32,
     pub max_horizontal_accel_mps2: f32,
+    pub max_horizontal_accel_slew_mps3: f32,
     pub max_tilt_rad: f32,
 }
 
@@ -29,6 +30,7 @@ impl Default for PositionControllerConfig {
             horizontal_integral_leak: 0.999,
             max_horizontal_integral_accel_mps2: 0.45,
             max_horizontal_accel_mps2: 1.5,
+            max_horizontal_accel_slew_mps3: 4.0,
             max_tilt_rad: 10.0 * core::f32::consts::PI / 180.0,
         }
     }
@@ -214,6 +216,8 @@ pub struct XYPositionVelocityOutput {
 pub struct XYPositionVelocityController {
     config: PositionControllerConfig,
     horizontal_integral_accel_ned_mps2: [Cell<f32>; 2],
+    previous_applied_accel_ned_mps2: [Cell<f32>; 2],
+    applied_accel_initialized: Cell<bool>,
 }
 
 impl XYPositionVelocityController {
@@ -221,10 +225,19 @@ impl XYPositionVelocityController {
         Self {
             config,
             horizontal_integral_accel_ned_mps2: [Cell::new(0.0), Cell::new(0.0)],
+            previous_applied_accel_ned_mps2: [Cell::new(0.0), Cell::new(0.0)],
+            applied_accel_initialized: Cell::new(false),
         }
     }
 
     pub fn reset(&self) {
+        self.reset_horizontal_integral();
+        self.previous_applied_accel_ned_mps2[0].set(0.0);
+        self.previous_applied_accel_ned_mps2[1].set(0.0);
+        self.applied_accel_initialized.set(false);
+    }
+
+    fn reset_horizontal_integral(&self) {
         self.horizontal_integral_accel_ned_mps2[0].set(0.0);
         self.horizontal_integral_accel_ned_mps2[1].set(0.0);
     }
@@ -283,10 +296,11 @@ impl XYPositionVelocityController {
                 + self.config.velocity_gain * velocity_error_ned_mps[1]
                 + integral_accel_ned_mps2[1],
         ];
-        let applied_accel_ned_mps2 = clamp_horizontal_vector(
+        let accel_limited_ned_mps2 = clamp_horizontal_vector(
             requested_accel_ned_mps2,
             self.config.max_horizontal_accel_mps2,
         );
+        let applied_accel_ned_mps2 = self.slew_limit_applied_accel(accel_limited_ned_mps2, dt_s);
 
         self.update_horizontal_integral(
             velocity_error_ned_mps,
@@ -326,7 +340,7 @@ impl XYPositionVelocityController {
                 positive_finite_or_zero(self.config.max_horizontal_accel_mps2),
             );
         if max_integral_accel <= f32::EPSILON {
-            self.reset();
+            self.reset_horizontal_integral();
             return;
         }
 
@@ -362,6 +376,41 @@ impl XYPositionVelocityController {
         self.horizontal_integral_accel_ned_mps2[0].set(next[0]);
         self.horizontal_integral_accel_ned_mps2[1].set(next[1]);
     }
+
+    fn slew_limit_applied_accel(&self, target_accel_ned_mps2: [f32; 2], dt_s: f32) -> [f32; 2] {
+        let max_slew_mps3 = positive_finite_or_zero(self.config.max_horizontal_accel_slew_mps3);
+        if max_slew_mps3 <= f32::EPSILON {
+            self.store_applied_accel(target_accel_ned_mps2);
+            return target_accel_ned_mps2;
+        }
+
+        let previous = if self.applied_accel_initialized.get() {
+            [
+                self.previous_applied_accel_ned_mps2[0].get(),
+                self.previous_applied_accel_ned_mps2[1].get(),
+            ]
+        } else {
+            [0.0, 0.0]
+        };
+        let max_delta = max_slew_mps3 * dt_s;
+        let delta = [
+            target_accel_ned_mps2[0] - previous[0],
+            target_accel_ned_mps2[1] - previous[1],
+        ];
+        let limited_delta = clamp_horizontal_vector(delta, max_delta);
+        let applied = [
+            previous[0] + limited_delta[0],
+            previous[1] + limited_delta[1],
+        ];
+        self.store_applied_accel(applied);
+        applied
+    }
+
+    fn store_applied_accel(&self, applied_accel_ned_mps2: [f32; 2]) {
+        self.previous_applied_accel_ned_mps2[0].set(applied_accel_ned_mps2[0]);
+        self.previous_applied_accel_ned_mps2[1].set(applied_accel_ned_mps2[1]);
+        self.applied_accel_initialized.set(true);
+    }
 }
 
 impl Clone for XYPositionVelocityController {
@@ -372,6 +421,11 @@ impl Clone for XYPositionVelocityController {
                 Cell::new(self.horizontal_integral_accel_ned_mps2[0].get()),
                 Cell::new(self.horizontal_integral_accel_ned_mps2[1].get()),
             ],
+            previous_applied_accel_ned_mps2: [
+                Cell::new(self.previous_applied_accel_ned_mps2[0].get()),
+                Cell::new(self.previous_applied_accel_ned_mps2[1].get()),
+            ],
+            applied_accel_initialized: Cell::new(self.applied_accel_initialized.get()),
         }
     }
 }
@@ -383,6 +437,11 @@ impl PartialEq for XYPositionVelocityController {
                 == other.horizontal_integral_accel_ned_mps2[0].get()
             && self.horizontal_integral_accel_ned_mps2[1].get()
                 == other.horizontal_integral_accel_ned_mps2[1].get()
+            && self.previous_applied_accel_ned_mps2[0].get()
+                == other.previous_applied_accel_ned_mps2[0].get()
+            && self.previous_applied_accel_ned_mps2[1].get()
+                == other.previous_applied_accel_ned_mps2[1].get()
+            && self.applied_accel_initialized.get() == other.applied_accel_initialized.get()
     }
 }
 
@@ -651,6 +710,7 @@ mod tests {
             horizontal_integral_leak: 0.0,
             max_horizontal_integral_accel_mps2: 0.0,
             max_horizontal_accel_mps2: 0.5,
+            max_horizontal_accel_slew_mps3: 0.0,
             max_tilt_rad: 1.0,
         });
 
@@ -685,6 +745,70 @@ mod tests {
     }
 
     #[test]
+    fn xy_accel_slew_is_loop_rate_invariant_for_same_elapsed_time() {
+        let accel_50hz = run_xy_slew_for_elapsed_time(0.02, 5);
+        let accel_100hz = run_xy_slew_for_elapsed_time(0.01, 10);
+        let accel_200hz = run_xy_slew_for_elapsed_time(0.005, 20);
+
+        assert!(
+            (0.19..=0.21).contains(&accel_50hz),
+            "50 Hz accel slew should be bounded near 0.20 m/s^2 after 0.1s: {accel_50hz}"
+        );
+        assert!(
+            (accel_100hz - accel_50hz).abs() < 0.000_1,
+            "100 Hz accel slew drifted from 50 Hz: {accel_100hz} vs {accel_50hz}"
+        );
+        assert!(
+            (accel_200hz - accel_50hz).abs() < 0.000_1,
+            "200 Hz accel slew drifted from 50 Hz: {accel_200hz} vs {accel_50hz}"
+        );
+    }
+
+    #[test]
+    fn xy_accel_slew_resets_with_controller_state() {
+        let controller = XYPositionVelocityController::new(PositionControllerConfig {
+            position_gain: 0.0,
+            velocity_gain: 1.0,
+            max_horizontal_velocity_mps: 10.0,
+            horizontal_integral_gain: 0.0,
+            horizontal_integral_leak: 1.0,
+            max_horizontal_integral_accel_mps2: 0.0,
+            max_horizontal_accel_mps2: 10.0,
+            max_horizontal_accel_slew_mps3: 2.0,
+            max_tilt_rad: 1.0,
+        });
+        let input = PositionControllerInput::new([0.0; 3], [0.0; 3]);
+        let positive = PositionControllerSetpoint::with_velocity_acceleration(
+            [0.0; 3],
+            [10.0, 0.0, 0.0],
+            [0.0; 3],
+            0.0,
+        );
+        for _ in 0..5 {
+            controller
+                .update(positive, input, 0.01)
+                .expect("finite update should remain valid");
+        }
+
+        controller.reset();
+        let negative = PositionControllerSetpoint::with_velocity_acceleration(
+            [0.0; 3],
+            [-10.0, 0.0, 0.0],
+            [0.0; 3],
+            0.0,
+        );
+        let output = controller
+            .update(negative, input, 0.01)
+            .expect("finite update should remain valid");
+
+        assert!(
+            (-0.020_1..=-0.019_0).contains(&output.applied_accel_ned_mps2[0]),
+            "reset slew should restart from zero and apply one bounded negative increment: {:?}",
+            output.applied_accel_ned_mps2
+        );
+    }
+
+    #[test]
     fn xy_integral_freezes_while_saturated_and_recovers_when_error_relieves_limit() {
         let controller = XYPositionVelocityController::new(PositionControllerConfig {
             position_gain: 10.0,
@@ -694,6 +818,7 @@ mod tests {
             horizontal_integral_leak: 1.0,
             max_horizontal_integral_accel_mps2: 2.0,
             max_horizontal_accel_mps2: 0.2,
+            max_horizontal_accel_slew_mps3: 0.0,
             max_tilt_rad: 1.0,
         });
         let saturated_setpoint = PositionControllerSetpoint::new([100.0, 0.0, 0.0], 0.0);
@@ -806,6 +931,7 @@ mod tests {
             horizontal_integral_leak: 1.0,
             max_horizontal_integral_accel_mps2: 10.0,
             max_horizontal_accel_mps2: 10.0,
+            max_horizontal_accel_slew_mps3: 0.0,
             max_tilt_rad: 1.0,
         });
         let setpoint = PositionControllerSetpoint::with_velocity_acceleration(
@@ -826,6 +952,38 @@ mod tests {
         }
 
         output.unwrap().integral_accel_ned_mps2[0]
+    }
+
+    fn run_xy_slew_for_elapsed_time(dt_s: f32, steps: usize) -> f32 {
+        let controller = XYPositionVelocityController::new(PositionControllerConfig {
+            position_gain: 0.0,
+            velocity_gain: 1.0,
+            max_horizontal_velocity_mps: 10.0,
+            horizontal_integral_gain: 0.0,
+            horizontal_integral_leak: 1.0,
+            max_horizontal_integral_accel_mps2: 0.0,
+            max_horizontal_accel_mps2: 10.0,
+            max_horizontal_accel_slew_mps3: 2.0,
+            max_tilt_rad: 1.0,
+        });
+        let setpoint = PositionControllerSetpoint::with_velocity_acceleration(
+            [0.0; 3],
+            [10.0, 0.0, 0.0],
+            [0.0; 3],
+            0.0,
+        );
+        let input = PositionControllerInput::new([0.0; 3], [0.0; 3]);
+        let mut output = None;
+
+        for _ in 0..steps {
+            output = Some(
+                controller
+                    .update(setpoint, input, dt_s)
+                    .expect("finite slew update should remain valid"),
+            );
+        }
+
+        output.unwrap().applied_accel_ned_mps2[0]
     }
 
     fn position_debug_with_tilt(roll_rad: f32, pitch_rad: f32) -> PositionControllerDebug {

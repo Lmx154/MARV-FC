@@ -1,63 +1,26 @@
-//! Host-side deterministic test harness for MARV.
+//! Host-side validation support for MARV GNC tests.
 //!
-//! The first harness increments establish host-runnable contracts, lockstep
-//! time, deterministic fixture loading, and failure reports before later phases
-//! add plant models and MARV pipeline adapters.
+//! The cleanup-first reset keeps only production-seam helpers here. Historical
+//! phase-numbered tests and synthetic plant/replay scaffolding have been
+//! removed from the active harness surface.
 
 pub const PHASE_0_CONTRACTS_FROZEN: bool = true;
 
-pub mod cases;
-pub mod clock;
-pub mod closed_loop;
-pub mod closed_loop_estimator;
-pub mod control_pipeline;
-pub mod estimator_replay;
-pub mod fixtures;
 pub mod gazebo_contract;
 pub mod hil_semantics;
-pub mod plant;
 
-pub use cases::{
-    HarnessFailure, HarnessReport, HarnessResult, HarnessTrace, StepTrace, TestCase,
-    assert_all_finite, assert_unit_interval,
-};
-pub use clock::{ClockSnapshot, ClockStep, LockstepClock};
-pub use closed_loop::{
-    ClosedLoopConfig, ClosedLoopRunner, ClosedLoopTrace, ClosedLoopTruthState, TruthPlant,
-};
-pub use closed_loop_estimator::{
-    BaroSpike, ClosedLoopEstimatorConfig, ClosedLoopEstimatorReport, ClosedLoopEstimatorRunner,
-    ClosedLoopEstimatorTrace, SimulatedSensorConfig, simulated_sensors,
-};
-pub use control_pipeline::{
-    ClampSource, ControlFrame, ControlInput, ControlNavPhase, ControlPipeline,
-    ControlPipelineTrace, ControlSetpoint, ControlSetpointSource, EstimateSnapshot,
-    EstimatorLocalState, EstimatorResetDelta, GuidanceCommand, GuidanceOutput, GuidancePhase,
-    GuidanceStateMachine, ImuControlInput, LocalTrajectorySetpoint, MissionWaypoint,
-    MixerLimitFlags, PureControlConfig, RateControllerOutput, RateLimitFlags, ThrustVectorConfig,
-    ThrustVectorController, ThrustVectorSetpoint, TrajectoryGenerator, TrajectoryLimits,
-    TruthEvidence,
-};
-pub use estimator_replay::{
-    EstimatorReplayConfig, EstimatorReplayDriver, EstimatorReplayReport, EstimatorReplayTrace,
-    EstimatorResetInjection, SensorFrame, replay_estimator_frames,
-};
-pub use fixtures::{Fixture, FixtureSample};
 pub use gazebo_contract::{
     GAZEBO_G0_DEFAULT_ENDPOINT, GazeboActuatorAxis, GazeboActuatorExpectation,
     GazeboActuatorTruthCase, GazeboAirframeConfig, GazeboAirframeMotorConfig, GazeboBodyFrame,
     GazeboBridgeConfig, GazeboRotorSpin, GazeboSensorLine, GazeboSimControlAction,
-    GazeboTruthOrigin, format_gazebo_actuator_line, format_gazebo_sim_control_line,
+    GazeboTruthOrigin, SensorFrame, format_gazebo_actuator_line, format_gazebo_sim_control_line,
     gazebo_g0_actuator_truth_cases,
 };
 pub use hil_semantics::{
     HilPublishedGroups, HilRouteRecorder, HilSemanticAdapter, HilSemanticArchive,
-    HilSemanticFrameConfig, HilSemanticTrace, hil_response_from_pipeline, hil_valid_flags,
+    HilSemanticFrameConfig, HilSemanticTrace, hil_response_from_samples, hil_valid_flags,
     response_has_flag, response_is_failsafe_zero_output, sensor_frame_to_hil_frame,
-    stale_hil_response_from_pipeline,
-};
-pub use plant::{
-    MotorGeometry, MotorSpec, OpenLoopPlant, OpenLoopResponse, SpinDirection, StaticPlantState,
+    stale_hil_response_from_samples,
 };
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use common::{
     utilities::time::MeasurementTimestamp,
 };
 
-use crate::{ControlPipelineTrace, EstimatorReplayTrace, SensorFrame};
+use crate::SensorFrame;
 
 const STANDARD_PRESSURE_PA: f32 = 101_325.0;
 const STANDARD_TEMPERATURE_C: f32 = 15.0;
@@ -255,28 +255,30 @@ pub fn hil_valid_flags(sensor: &SensorFrame) -> u32 {
     flags
 }
 
-pub fn hil_response_from_pipeline(
+pub fn hil_response_from_samples(
     stamp: SimStamp,
+    armed: bool,
     sensor_input_valid: bool,
-    estimate: &EstimatorReplayTrace,
-    control: &ControlPipelineTrace,
+    estimate: Option<StateEstimateSample>,
+    actuator: Option<ActuatorOutputSample>,
 ) -> HilResponseFrame {
     build_hil_response_frame(
         stamp,
         TEST_SYSTEM_STATE_ARMED,
-        control.armed,
+        armed,
         sensor_input_valid,
-        Some(state_estimate_for_stamp(stamp, estimate)),
-        Some(actuator_for_stamp(stamp, control)),
+        estimate.map(|sample| state_estimate_for_stamp(stamp, sample)),
+        actuator.map(|sample| actuator_for_stamp(stamp, sample)),
     )
 }
 
-pub fn stale_hil_response_from_pipeline(
+pub fn stale_hil_response_from_samples(
     stamp: SimStamp,
     stale_by_us: u64,
+    armed: bool,
     sensor_input_valid: bool,
-    estimate: &EstimatorReplayTrace,
-    control: &ControlPipelineTrace,
+    estimate: Option<StateEstimateSample>,
+    actuator: Option<ActuatorOutputSample>,
 ) -> HilResponseFrame {
     let stale_stamp = SimStamp {
         sim_tick: stamp.sim_tick.saturating_sub(1),
@@ -285,10 +287,10 @@ pub fn stale_hil_response_from_pipeline(
     build_hil_response_frame(
         stamp,
         TEST_SYSTEM_STATE_ARMED,
-        control.armed,
+        armed,
         sensor_input_valid,
-        Some(state_estimate_for_stamp(stale_stamp, estimate)),
-        Some(actuator_for_stamp(stamp, control)),
+        estimate.map(|sample| state_estimate_for_stamp(stale_stamp, sample)),
+        actuator.map(|sample| actuator_for_stamp(stamp, sample)),
     )
 }
 
@@ -300,25 +302,17 @@ pub fn response_is_failsafe_zero_output(response: HilResponseFrame) -> bool {
     response_has_flag(response, response_flags::FAILSAFE) && response.motor_cmd == [0; 4]
 }
 
-fn state_estimate_for_stamp(
-    stamp: SimStamp,
-    estimate: &EstimatorReplayTrace,
-) -> StateEstimateStamped {
+fn state_estimate_for_stamp(stamp: SimStamp, sample: StateEstimateSample) -> StateEstimateStamped {
     StateEstimateStamped {
         timestamp: MeasurementTimestamp::from_micros(stamp.sim_time_us),
-        sample: StateEstimateSample {
-            position_ned_m: estimate.position_ned_m.map(|value| value as f32),
-            velocity_ned_mps: estimate.velocity_ned_mps.map(|value| value as f32),
-            attitude_quat: estimate.quaternion.map(|value| value as f32),
-            valid: estimate.estimate_valid,
-        },
+        sample,
     }
 }
 
-fn actuator_for_stamp(stamp: SimStamp, control: &ControlPipelineTrace) -> ActuatorOutputStamped {
+fn actuator_for_stamp(stamp: SimStamp, sample: ActuatorOutputSample) -> ActuatorOutputStamped {
     ActuatorOutputStamped {
         timestamp: MeasurementTimestamp::from_micros(stamp.sim_time_us),
-        sample: ActuatorOutputSample::new(control.motors, control.control_valid, control.clamped),
+        sample,
     }
 }
 

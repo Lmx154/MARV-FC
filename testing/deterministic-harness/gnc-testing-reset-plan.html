@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MARV GNC Cleanup-First Testing Architecture Plan</title>
+  <style>
+    :root {
+      --bg: #060b14;
+      --bg2: #0a1220;
+      --panel: #101827;
+      --panel2: #162238;
+      --panel3: #0c1423;
+      --text: #eaf1fb;
+      --muted: #aebbd0;
+      --faint: #758197;
+      --line: #31415e;
+      --blue: #56ccf2;
+      --green: #7ae582;
+      --amber: #ffd166;
+      --red: #ff6b6b;
+      --purple: #c7a6ff;
+      --code: #030712;
+      --shadow: rgba(0, 0, 0, .30);
+    }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 7% 0%, rgba(86, 204, 242, .15), transparent 35%),
+        radial-gradient(circle at 92% 8%, rgba(255, 107, 107, .11), transparent 30%),
+        linear-gradient(135deg, var(--bg) 0%, var(--bg2) 55%, #0f172a 100%);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.58;
+    }
+    header {
+      border-bottom: 1px solid var(--line);
+      background: rgba(3, 7, 18, .68);
+      padding: 54px 26px 36px;
+    }
+    .wrap, .header-inner { max-width: 1280px; margin: 0 auto; }
+    .wrap { padding: 0 26px 48px; }
+    h1 { margin: 0; font-size: clamp(2.15rem, 5vw, 4.25rem); line-height: 1.03; letter-spacing: -.045em; }
+    h2 { margin: 0 0 14px; font-size: 1.65rem; letter-spacing: -.025em; }
+    h3 { margin: 0 0 10px; font-size: 1.18rem; }
+    h4 { margin: 0 0 6px; }
+    p { margin: 0 0 14px; }
+    a { color: var(--blue); }
+    ul, ol { margin: 8px 0 0; padding-left: 1.25rem; }
+    li { margin-bottom: 7px; }
+    code, pre {
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      background: var(--code);
+      color: #ddf7ff;
+      border: 1px solid rgba(86, 204, 242, .18);
+      border-radius: 8px;
+    }
+    code { padding: .12rem .28rem; font-size: .92em; }
+    pre { overflow-x: auto; padding: 14px 16px; margin: 12px 0 4px; }
+    pre code { border: 0; padding: 0; background: transparent; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 16px;
+      border: 1px solid var(--line);
+      margin: 14px 0 8px;
+      background: rgba(255, 255, 255, .025);
+    }
+    th, td { padding: 12px 13px; vertical-align: top; border-bottom: 1px solid rgba(255,255,255,.08); }
+    th { color: #e2f3ff; text-align: left; background: rgba(86, 204, 242, .09); }
+    tr:last-child td { border-bottom: 0; }
+    .subtitle { max-width: 980px; color: var(--muted); font-size: 1.08rem; margin-top: 16px; }
+    .badge-row { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 20px; }
+    .badge, .pill {
+      display: inline-flex; align-items: center; gap: 6px;
+      border: 1px solid var(--line); border-radius: 999px;
+      padding: 6px 10px; font-size: .84rem;
+      color: var(--text); background: rgba(255, 255, 255, .045);
+      white-space: nowrap;
+    }
+    .pill.green { border-color: rgba(122,229,130,.45); color: #caffd2; background: rgba(122,229,130,.10); }
+    .pill.amber { border-color: rgba(255,209,102,.48); color: #ffe8ad; background: rgba(255,209,102,.10); }
+    .pill.red { border-color: rgba(255,107,107,.50); color: #ffc7c7; background: rgba(255,107,107,.10); }
+    .pill.blue { border-color: rgba(86,204,242,.48); color: #c3f1ff; background: rgba(86,204,242,.10); }
+    .pill.purple { border-color: rgba(199,166,255,.48); color: #eadfff; background: rgba(199,166,255,.10); }
+    .card {
+      margin-top: 24px;
+      padding: 24px;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: linear-gradient(180deg, rgba(22, 34, 56, .92), rgba(16, 24, 39, .92));
+      box-shadow: 0 18px 60px var(--shadow);
+    }
+    .card.tight { padding: 20px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .grid-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+    .mini {
+      border: 1px solid rgba(255,255,255,.10);
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(255,255,255,.035);
+    }
+    .lead { color: var(--muted); font-size: 1.02rem; }
+    .small { color: var(--muted); font-size: .92rem; }
+    .callout {
+      border: 1px solid rgba(86, 204, 242, .35);
+      background: rgba(86, 204, 242, .08);
+      border-radius: 18px;
+      padding: 15px 16px;
+      margin: 14px 0;
+    }
+    .callout.good { border-color: rgba(122,229,130,.45); background: rgba(122,229,130,.08); }
+    .callout.warn { border-color: rgba(255,209,102,.45); background: rgba(255,209,102,.08); }
+    .callout.danger { border-color: rgba(255,107,107,.50); background: rgba(255,107,107,.08); }
+    .phase {
+      display: grid;
+      grid-template-columns: 118px minmax(0, 1fr);
+      gap: 18px;
+      padding: 18px;
+      border: 1px solid rgba(255,255,255,.11);
+      border-radius: 20px;
+      background: rgba(255,255,255,.030);
+      margin: 16px 0;
+    }
+    .phase-index {
+      display: flex; align-items: center; justify-content: center;
+      min-height: 90px;
+      border-radius: 18px;
+      border: 1px solid rgba(86,204,242,.38);
+      background: rgba(86,204,242,.08);
+      color: #d7f6ff;
+      font-size: 1.25rem;
+      font-weight: 800;
+      letter-spacing: -.025em;
+      text-align: center;
+    }
+    .phase.clean .phase-index { border-color: rgba(255,107,107,.42); background: rgba(255,107,107,.09); color: #ffcaca; }
+    .phase.combine .phase-index { border-color: rgba(255,209,102,.42); background: rgba(255,209,102,.09); color: #ffe8ad; }
+    .phase.build .phase-index { border-color: rgba(122,229,130,.42); background: rgba(122,229,130,.09); color: #caffd2; }
+    .phase.done { border-color: rgba(122,229,130,.34); background: rgba(122,229,130,.045); }
+    .phase.done .phase-index { border-color: rgba(122,229,130,.55); background: rgba(122,229,130,.12); color: #caffd2; }
+    .completion {
+      border: 1px solid rgba(122,229,130,.44);
+      background: rgba(122,229,130,.075);
+      border-radius: 18px;
+      padding: 15px 16px;
+      margin: 16px 0 0;
+    }
+    .completion h3 { color: #d7ffdd; }
+    .status-grid { display: grid; grid-template-columns: 140px 160px minmax(0, 1fr); gap: 0; }
+    .status-grid > div { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,.08); }
+    .status-grid > div:nth-last-child(-n+3) { border-bottom: 0; }
+    .status-head { color: #e2f3ff; font-weight: 700; background: rgba(86, 204, 242, .08); }
+    .diagram { margin: 16px 0; padding: 18px; border: 1px solid rgba(255,255,255,.12); border-radius: 20px; background: rgba(255,255,255,.025); overflow-x: auto; }
+    .diagram svg { min-width: 1060px; max-width: 100%; height: auto; display: block; }
+    .node { fill: rgba(255,255,255,.05); stroke: rgba(255,255,255,.24); stroke-width: 1.5; }
+    .node-clean { fill: rgba(255,107,107,.10); stroke: rgba(255,107,107,.55); }
+    .node-combine { fill: rgba(255,209,102,.10); stroke: rgba(255,209,102,.55); }
+    .node-blue { fill: rgba(86,204,242,.10); stroke: rgba(86,204,242,.55); }
+    .node-green { fill: rgba(122,229,130,.10); stroke: rgba(122,229,130,.55); }
+    .node-purple { fill: rgba(199,166,255,.10); stroke: rgba(199,166,255,.55); }
+    .label { font: 700 14px Inter, system-ui, sans-serif; fill: var(--text); }
+    .sub { font: 12px Inter, system-ui, sans-serif; fill: var(--muted); }
+    .arrow { stroke: rgba(226, 243, 255, .72); stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    .footer { color: var(--muted); text-align: center; padding: 28px 0 44px; }
+    .toc { columns: 2; column-gap: 28px; }
+    .toc a { display: block; margin-bottom: 8px; text-decoration: none; }
+    .nowrap { white-space: nowrap; }
+    @media (max-width: 980px) {
+      .wrap { padding-left: 14px; padding-right: 14px; }
+      header { padding-left: 16px; padding-right: 16px; }
+      .grid-2, .grid-3, .grid-4 { grid-template-columns: 1fr; }
+      .status-grid { grid-template-columns: 1fr; }
+      .status-grid > div { border-bottom: 0; padding: 6px 0; }
+      .status-head { display: none; }
+      .phase { grid-template-columns: 1fr; }
+      table { display: block; overflow-x: auto; }
+      .toc { columns: 1; }
+    }
+  </style>
+</head>
+<body>
+<header>
+  <div class="header-inner">
+    <h1>MARV GNC Cleanup-First Testing Architecture Plan</h1>
+    <p class="subtitle">A single agent-facing implementation plan that combines the deletion-first cleanup plan with the GNC testing architecture plan. The workflow is: clean up and consolidate first, rebuild only necessary proof gates second, then add the new motion-primitive and navigation architecture.</p>
+    <div class="badge-row">
+      <span class="badge">Mode: deletion-first</span>
+      <span class="badge">Audience: implementation agent</span>
+      <span class="badge">Rule: no version-control operations</span>
+      <span class="badge">No placeholders, archives, or wrappers</span>
+      <span class="badge">G3 blocked by G2.5</span>
+      <span class="badge">Status date: 2026-05-13</span>
+      <span class="pill amber">Phase 5 live hardening</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+  <section class="card" id="decision">
+    <h2>1. Decision</h2>
+    <div class="callout danger">
+      <strong>Clean first. Consolidate second. Add new architecture third.</strong> The agent should remove stale phase-history tests and unused harness helpers before it adds the improved GNC validation architecture.
+    </div>
+    <p>The current problem is not a lack of tests. The problem is that old tests, synthetic plant checks, phase-numbered files, duplicated helper code, and partially overlapping planning documents make it unclear which tests prove the actual flight-control path. This document replaces that ambiguity with a phased implementation plan.</p>
+    <p>The agent should treat this file as the canonical work plan once it is placed in the repository. The older GNC refactor and testing-harness planning documents become historical inputs, not competing sources of control flow.</p>
+    <div class="grid-3">
+      <div class="mini"><h3>Default action</h3><p>Delete old tests unless they protect a unique production seam.</p></div>
+      <div class="mini"><h3>Survival rule</h3><p>A surviving test must be tied to a requirement, a gate, and an actionable failure metric.</p></div>
+      <div class="mini"><h3>Architecture rule</h3><p>Navigation does not resume until Gazebo motion primitives prove movement, braking, turning, recovery, and estimator agreement.</p></div>
+    </div>
+  </section>
+
+  <section class="card" id="agent-boundaries">
+    <h2>2. Agent boundaries</h2>
+    <table>
+      <thead><tr><th>Boundary</th><th>Instruction</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Version control</td><td>The agent must not use version-control tooling, history inspection, staging, checkout, reset, stash, branch, or commit workflows.</td><td>The user owns history and recovery. The agent works only in the current workspace.</td></tr>
+        <tr><td>Deletion</td><td>Delete obsolete files from the active workspace. Do not create <code>old</code>, <code>legacy</code>, <code>archive</code>, <code>graveyard</code>, <code>disabled</code>, or <code>tmp</code> copies.</td><td>Soft deletion preserves clutter and keeps obsolete architecture alive.</td></tr>
+        <tr><td>Placeholders</td><td>Do not create empty future test files. A test file exists only when it contains at least one real assertion tied to this plan.</td><td>Placeholder files hide work remaining and make the suite feel larger than it is.</td></tr>
+        <tr><td>Old docs</td><td>After this plan is accepted, remove older planning documents from active control of the harness workflow.</td><td>One plan should control the agent. Historical source documents should not compete with it.</td></tr>
+        <tr><td>Thresholds</td><td>Do not loosen thresholds to push navigation green while lower gates are red.</td><td>A red primitive gate means navigation failure is not yet informative.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="source-inputs">
+    <h2>3. What survives from the two source plans</h2>
+    <div class="grid-2">
+      <div class="mini">
+        <h3>From the GNC refactor plan</h3>
+        <ul>
+          <li>Frame safety: truth evidence, estimator-local state, mission waypoints, trajectory setpoints, and control setpoints must not be interchangeable.</li>
+          <li>Takeoff/nav safety: latch estimator XY at takeoff and block navigation until altitude, vertical speed, horizontal speed, yaw health, estimator validity, and clamp ratio are healthy.</li>
+          <li>Controller stability: lateral control is a dt-aware position-to-velocity-to-acceleration cascade with anti-windup.</li>
+          <li>Thrust consistency: lateral acceleration and vertical thrust are planned together so tilt does not silently consume altitude authority.</li>
+          <li>Allocation visibility: saturation must identify which axis lost authority.</li>
+          <li>Gazebo reproducibility: every live gate proves reset cleanliness before measuring flight behavior.</li>
+        </ul>
+      </div>
+      <div class="mini">
+        <h3>From the testing-harness plan</h3>
+        <ul>
+          <li>Default CI remains deterministic and offline.</li>
+          <li>Gazebo enters only after deterministic bridge contracts pass.</li>
+          <li>G0 proves physical actuator truth, not only bridge text parsing.</li>
+          <li>G1 uses truth estimate or estimator bypass to isolate controller, mixer/allocation, bridge, frame conversion, and plant behavior.</li>
+          <li>G2 uses real estimator-in-loop hover and vertical behavior before lateral movement.</li>
+          <li>Firmware HIL comes after the portable common control path is validated.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="flow">
+    <h2>4. Overall phased flow</h2>
+    <p class="lead">The plan intentionally delays new test growth. The first three phases are cleanup and consolidation. The new architecture starts only after the active suite is small and the shared runner/report path exists.</p>
+    <div class="diagram" aria-label="cleanup first validation flow">
+      <svg viewBox="0 0 1180 305" role="img">
+        <defs><marker id="arrowhead" markerWidth="10" markerHeight="8" refX="9" refY="4" orient="auto"><path d="M0,0 L10,4 L0,8 Z" fill="#e2f3ff"/></marker></defs>
+        <rect x="22" y="55" width="125" height="95" rx="18" class="node node-clean"/>
+        <text x="42" y="88" class="label">Phase 0</text><text x="42" y="112" class="sub">freeze + rules</text><text x="42" y="132" class="sub">one plan</text>
+        <rect x="192" y="55" width="125" height="95" rx="18" class="node node-clean"/>
+        <text x="212" y="88" class="label">Phase 1</text><text x="212" y="112" class="sub">inventory</text><text x="212" y="132" class="sub">harvest list</text>
+        <rect x="362" y="55" width="125" height="95" rx="18" class="node node-clean"/>
+        <text x="382" y="88" class="label">Phase 2</text><text x="382" y="112" class="sub">purge</text><text x="382" y="132" class="sub">old tests</text>
+        <rect x="532" y="55" width="135" height="95" rx="18" class="node node-combine"/>
+        <text x="552" y="88" class="label">Phase 3</text><text x="552" y="112" class="sub">combine</text><text x="552" y="132" class="sub">runner/report</text>
+        <rect x="712" y="55" width="125" height="95" rx="18" class="node node-blue"/>
+        <text x="732" y="88" class="label">Phase 4</text><text x="732" y="112" class="sub">C0/G0/G1/G2</text><text x="732" y="132" class="sub">minimal gates</text>
+        <rect x="882" y="55" width="125" height="95" rx="18" class="node node-green"/>
+        <text x="902" y="88" class="label">Phase 5</text><text x="902" y="112" class="sub">G2.5</text><text x="902" y="132" class="sub">motion</text>
+        <rect x="1052" y="55" width="105" height="95" rx="18" class="node node-purple"/>
+        <text x="1072" y="88" class="label">Phase 6+</text><text x="1072" y="112" class="sub">G3 nav</text><text x="1072" y="132" class="sub">HIL</text>
+        <path d="M147 102 H192" class="arrow"/><path d="M317 102 H362" class="arrow"/><path d="M487 102 H532" class="arrow"/><path d="M667 102 H712" class="arrow"/><path d="M837 102 H882" class="arrow"/><path d="M1007 102 H1052" class="arrow"/>
+        <text x="22" y="214" class="sub">Rule: no G2.5 until the old suite is purged and the shared runner/report path is real.</text>
+        <text x="22" y="240" class="sub">Rule: no G3 navigation until G2.5 proves cardinal movement, speed changes, braking, yaw turns, zig-zags, and recovery.</text>
+      </svg>
+    </div>
+  </section>
+
+  <section class="card" id="completion-log">
+    <h2>Progress Log</h2>
+    <p class="lead">This log records how each phase was completed in the active workspace. Later phases should be appended here as they land.</p>
+    <div class="status-grid">
+      <div class="status-head">Phase</div>
+      <div class="status-head">Status</div>
+      <div class="status-head">Completion record</div>
+      <div>Phase 0</div>
+      <div><span class="pill green">Complete</span></div>
+      <div>Canonical plan copied to <code>testing/deterministic-harness/gnc-testing-reset-plan.html</code>; harness README redirected to this plan; <code>VALIDATION_MATRIX.md</code> created with current test disposition, including the extra <code>p13_gazebo_estimator_loop.rs</code> file discovered during inventory.</div>
+      <div>Phase 1</div>
+      <div><span class="pill green">Complete</span></div>
+      <div><code>VALIDATION_MATRIX.md</code> was expanded into a concrete harvest shortlist: C0 contracts, G0/G1/G2/G2.5/G3 gate intents, exact assertions to preserve, and explicit no-harvest decisions for synthetic replay, fixture, plant, and broad sweep tests.</div>
+      <div>Phase 2</div>
+      <div><span class="pill green">Complete</span></div>
+      <div>All old <code>p##_*.rs</code> tests were deleted; stale synthetic harness modules, the old replay binary, canned CSV fixtures, and empty test/bin/fixture directories were removed; active harness source was reduced to <code>lib.rs</code>, <code>gazebo_contract.rs</code>, and <code>hil_semantics.rs</code>.</div>
+      <div>Phase 3</div>
+      <div><span class="pill green">Complete</span></div>
+      <div>Harvested contracts were rebuilt in <code>tests/contracts.rs</code>; shared scenario/report types were added in <code>tests/support/mod.rs</code>; no runtime gate placeholders were added; the README was updated with the Phase 3 active layout.</div>
+      <div>Phase 4</div>
+      <div><span class="pill green">Complete</span></div>
+      <div>Minimal G0/G1/G2 gate files were rebuilt as ignored manual runtime gates: <code>tests/gazebo_g0_actuator_truth.rs</code>, <code>tests/gazebo_g1_control_primitives.rs</code>, and <code>tests/gazebo_g2_takeoff_hover_land.rs</code>. G0 now drives the live Gazebo TCP bridge: it sends <code>SIM_CONTROL reset/play</code>, publishes actuator truth cases, collects <code>SENSOR</code> frames, scores measured gyro signs against the hardware airframe profile, and emits shared CSV/JSON reports. If live Gazebo disagrees with <code>config/airframes/f450_xing2_2809_1045_4s_v0.cfg</code>, Gazebo or the bridge mapping is wrong; the hardware profile remains the source of truth. G1/G2 still have production control/HIL assertions and await live runner wiring.</div>
+      <div>Phase 5</div>
+      <div><span class="pill green">Complete</span></div>
+      <div>G2.5 motion primitives were added in <code>tests/gazebo_g25_motion_primitives.rs</code>. The gate defines M01 through M08 as direct estimator-local trajectory primitives, verifies cardinal movement signs, speed/brake/reversal behavior, yaw turn signs and saturation visibility, world-frame movement during yaw changes, zig-zag reversals, and shared report failure classification. G3 navigation remains absent and blocked.</div>
+    </div>
+    <div class="callout good">
+      <strong>Latest verification:</strong>
+      <code>cargo fmt --manifest-path testing/deterministic-harness/Cargo.toml</code>,
+      <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml --no-run</code>,
+      <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>,
+      <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml --test gazebo_g0_actuator_truth g0_live_actuator_truth_drives_bridge_and_scores_sensor_motion -- --ignored --nocapture</code>,
+      and <code>cargo test -p common --no-run</code> passed after restoring the hardware airframe profile and rebuilding the Gazebo bridge remap.
+    </div>
+  </section>
+
+  <section class="card" id="phase-0">
+    <h2>5. Phase 0 — Freeze, canonicalize, and stop growth</h2>
+    <div class="phase clean done">
+      <div class="phase-index">Phase 0</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Make this document the only active plan and prevent more ad hoc tests from being added while cleanup is underway.</p>
+        <h3>Agent actions</h3>
+        <ol>
+          <li>Add this document as <code>testing/deterministic-harness/gnc-testing-reset-plan.html</code> or another user-approved canonical name.</li>
+          <li>Update <code>testing/deterministic-harness/README.md</code> so it points to this plan and no longer presents phase-numbered files as the active workflow.</li>
+          <li>Mark old planning documents as historical inputs by removing them from active harness guidance. Do not keep multiple competing control-flow documents in the harness root.</li>
+          <li>Create <code>testing/deterministic-harness/VALIDATION_MATRIX.md</code> with columns: <code>file</code>, <code>requirement</code>, <code>production seam</code>, <code>replacement gate</code>, <code>action</code>, <code>harvested assertion</code>.</li>
+        </ol>
+        <h3>Exit criteria</h3>
+        <ul>
+          <li>There is one active GNC testing plan.</li>
+          <li>No new GNC tests have been added yet.</li>
+          <li>Every current test has a planned fate: delete, harvest-then-delete, keep temporarily, or rebuild under a new gate.</li>
+        </ul>
+        <div class="completion">
+          <h3>Completion record</h3>
+          <p><span class="pill green">Complete</span> Added this canonical plan in the deterministic harness, redirected the README to it, and created <code>VALIDATION_MATRIX.md</code> with planned fates for every current test file. The plan explicitly captured the discovered <code>p13_gazebo_estimator_loop.rs</code> test bundle so it would not be missed in later phases.</p>
+          <p class="small">Verified with <code>cargo test -p common --no-run</code> and <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml --no-run</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="phase-1">
+    <h2>6. Phase 1 — Inventory and harvest only essential contracts</h2>
+    <div class="phase clean done">
+      <div class="phase-index">Phase 1</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Extract the tiny number of assertions worth preserving before deleting old phase files. Harvest means copy the requirement and, only when necessary, the smallest assertion into the new contract suite. It does not mean moving old files somewhere else.</p>
+        <h3>Harvest rules</h3>
+        <table>
+          <thead><tr><th>Keep as contract only if it proves…</th><th>Do not keep if it mostly proves…</th></tr></thead>
+          <tbody>
+            <tr><td>NED/geodetic sign conventions, quaternion identity/order, finite conversion behavior.</td><td>Fixture loading, old report formatting, or phase harness scaffolding.</td></tr>
+            <tr><td>Failsafe zero output for invalid estimates, missing/stale IMU, non-finite input, and disarmed state.</td><td>A synthetic plant surviving a scripted scenario.</td></tr>
+            <tr><td>Allocator geometry, motor order, saturation/desaturation flags, and axis-specific limit reporting.</td><td>A legacy mixer-only behavior already covered by physical actuator truth.</td></tr>
+            <tr><td>Bridge parser/formatter/config contracts and HIL duplicate/out-of-order/valid-flag semantics.</td><td>Socket timing, old replay helpers, or broad canned data files.</td></tr>
+            <tr><td>Estimator reset delta finite behavior and setpoint-source tagging.</td><td>Large replay finiteness checks without actionable diagnosis.</td></tr>
+          </tbody>
+        </table>
+        <h3>Exit criteria</h3>
+        <ul>
+          <li>The validation matrix identifies the exact assertions that will survive.</li>
+          <li>No old test file has been preserved wholesale.</li>
+          <li>The new contract list is small enough to review in one pass.</li>
+        </ul>
+        <div class="completion">
+          <h3>Completion record</h3>
+          <p><span class="pill green">Complete</span> Expanded <code>VALIDATION_MATRIX.md</code> into a concrete harvest shortlist. The surviving C0 contracts and future G0/G1/G2/G2.5/G3 gate intents were named explicitly, while broad synthetic replay, plant, fixture, and sweep checks were marked as no-harvest.</p>
+          <p class="small">Verified with <code>cargo test -p common --no-run</code> and <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml --no-run</code>.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="purge-matrix">
+    <h2>7. Phase 2 — Hard purge of old phase tests</h2>
+    <div class="phase clean done">
+      <div class="phase-index">Phase 2</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Remove phase-history test files and their stale support code from the active suite. The result should be a smaller repository before any new architecture is added.</p>
+        <div class="callout danger"><strong>Default action: delete.</strong> “Harvest then delete” is allowed only for a narrow contract assertion that will appear in <code>tests/contracts.rs</code>.</div>
+      </div>
+    </div>
+    <h3>Test-file disposition</h3>
+    <table>
+      <thead><tr><th>Current file</th><th>Action</th><th>Reason</th><th>Destination if anything survives</th></tr></thead>
+      <tbody>
+        <tr><td><code>p00_clock.rs</code></td><td><span class="pill red">Delete</span></td><td>Harness clock internals are not GNC behavior.</td><td><code>contracts.rs</code> only if the new runner requires a lockstep-time contract.</td></tr>
+        <tr><td><code>p00_fixture.rs</code></td><td><span class="pill red">Delete</span></td><td>CSV loader behavior is not flight-control proof.</td><td>None.</td></tr>
+        <tr><td><code>p00_phase0.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>May contain useful frame, sign, and motor-order conventions.</td><td><code>contracts.rs</code>.</td></tr>
+        <tr><td><code>p00_report.rs</code></td><td><span class="pill red">Delete</span></td><td>Report-object tests are framework tests, not vehicle tests.</td><td>None.</td></tr>
+        <tr><td><code>p02_estimator_replay.rs</code></td><td><span class="pill red">Delete</span></td><td>Old canned replay does not prove current live estimator/control interaction.</td><td>Only reintroduce later from real captured logs with a named regression.</td></tr>
+        <tr><td><code>p03_control_pipeline.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>Pipeline contracts may matter, but the phase wrapper should disappear.</td><td><code>contracts.rs</code>.</td></tr>
+        <tr><td><code>p04_motor_truth_table.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>Keep allocator geometry/desaturation assertions, not synthetic history.</td><td><code>contracts.rs</code>.</td></tr>
+        <tr><td><code>p04_open_loop_plant.rs</code></td><td><span class="pill red">Delete</span></td><td>Open-loop surrogate plant behavior can mask Gazebo reality.</td><td>None.</td></tr>
+        <tr><td><code>p05_closed_loop_truth.rs</code></td><td><span class="pill red">Delete</span></td><td>Synthetic closed loop is superseded by Gazebo G1/G2/G2.5.</td><td>None.</td></tr>
+        <tr><td><code>p06_closed_loop_estimator.rs</code></td><td><span class="pill red">Delete</span></td><td>Estimator/control surrogate is lower confidence than live Gazebo motion primitives.</td><td>None.</td></tr>
+        <tr><td><code>p07_hil_semantics.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>Duplicate/out-of-order/valid-flag behavior is a compact bridge contract.</td><td><code>contracts.rs</code>.</td></tr>
+        <tr><td><code>p08_gazebo_contract.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>Parser/formatter/config contracts are useful; phase wrapper is not.</td><td><code>contracts.rs</code>.</td></tr>
+        <tr><td><code>p09_portable_control.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>Failsafe zero-output behavior is a core production contract.</td><td><code>contracts.rs</code>.</td></tr>
+        <tr><td><code>p10_control_envelope.rs</code></td><td><span class="pill red">Delete</span></td><td>Broad synthetic envelope duplicates stronger live gates.</td><td>None.</td></tr>
+        <tr><td><code>p10_gain_sweep.rs</code></td><td><span class="pill red">Delete</span></td><td>Sweeps are diagnostics, not required architecture tests.</td><td>None. Recreate manually only when debugging a named failure.</td></tr>
+        <tr><td><code>p11_gazebo_actuator_truth_table.rs</code></td><td><span class="pill blue">Rebuild as G0</span></td><td>Physical motor truth matters, but the name and report format should match the new gates.</td><td><code>gazebo_g0_actuator_truth.rs</code>.</td></tr>
+        <tr><td><code>p12_gazebo_control_truth.rs</code></td><td><span class="pill blue">Rebuild as G1</span></td><td>Estimator-bypass control remains valuable, but it should use shared scenario/report infrastructure.</td><td><code>gazebo_g1_control_primitives.rs</code>.</td></tr>
+        <tr><td><code>p14_g2_control_hardening.rs</code></td><td><span class="pill red">Delete</span></td><td>Hardening belongs inside G1/G2/G2.5 cases, not as a phase artifact.</td><td>Specific assertions may become G1/G2 cases only if they map to a production seam.</td></tr>
+        <tr><td><code>p14_g2_demand_limits.rs</code></td><td><span class="pill amber">Harvest then delete</span></td><td>Demand-limit contracts are useful, but the old file should not remain.</td><td><code>contracts.rs</code> or G2.5 thresholds.</td></tr>
+        <tr><td><code>p15_takeoff_hover_land.rs</code></td><td><span class="pill blue">Rebuild as G2</span></td><td>Takeoff/hover/land is a required estimator-in-loop gate, but must use the new report format.</td><td><code>gazebo_g2_takeoff_hover_land.rs</code>.</td></tr>
+        <tr><td><code>p17_navigation_steps.rs</code></td><td><span class="pill amber">Block then rebuild</span></td><td>Navigation is not next. It waits for G2.5 motion primitives.</td><td><code>gazebo_g3_navigation_acceptance.rs</code> only after G2.5 passes.</td></tr>
+      </tbody>
+    </table>
+
+    <h3>Harness source cleanup</h3>
+    <table>
+      <thead><tr><th>Source file</th><th>Default action</th><th>Rule</th></tr></thead>
+      <tbody>
+        <tr><td><code>closed_loop.rs</code></td><td><span class="pill red">Delete</span></td><td>Do not keep a synthetic closed-loop plant as a primary proof path.</td></tr>
+        <tr><td><code>closed_loop_estimator.rs</code></td><td><span class="pill red">Delete</span></td><td>Do not keep estimator/control surrogate loops that drift from live behavior.</td></tr>
+        <tr><td><code>plant.rs</code></td><td><span class="pill red">Delete</span></td><td>Open-loop plant belongs in diagnostics only, not acceptance.</td></tr>
+        <tr><td><code>fixtures.rs</code></td><td><span class="pill red">Delete</span></td><td>Delete with old CSV fixture tests unless a real-log replay gate is created later.</td></tr>
+        <tr><td><code>estimator_replay.rs</code></td><td><span class="pill red">Delete</span></td><td>Reintroduce only for a real captured log with a named estimator regression.</td></tr>
+        <tr><td><code>cases.rs</code></td><td><span class="pill red">Delete</span></td><td>Scenario case tables should live near the new tests unless broadly reused.</td></tr>
+        <tr><td><code>clock.rs</code></td><td><span class="pill amber">Maybe keep</span></td><td>Keep only if the new Gazebo support runner needs lockstep-time validation.</td></tr>
+        <tr><td><code>control_pipeline.rs</code></td><td><span class="pill amber">Maybe delete</span></td><td>Prefer importing production <code>common</code> control types directly. Keep only thin glue that cannot drift.</td></tr>
+        <tr><td><code>gazebo_contract.rs</code></td><td><span class="pill green">Keep and trim</span></td><td>Parser/formatter/config validation is a real seam.</td></tr>
+        <tr><td><code>hil_semantics.rs</code></td><td><span class="pill green">Keep and trim</span></td><td>Keep validity/rejection/response helpers used by contracts.</td></tr>
+        <tr><td><code>lib.rs</code></td><td><span class="pill green">Keep minimal</span></td><td>Export only helpers used by active tests.</td></tr>
+      </tbody>
+    </table>
+    <h3>Phase 2 exit criteria</h3>
+    <ul>
+      <li>No <code>p##_*.rs</code> files remain under <code>testing/deterministic-harness/tests/</code>.</li>
+      <li>No obsolete test archive directory exists.</li>
+      <li>The harness source tree exports only helpers used by surviving or immediately rebuilt tests.</li>
+      <li>The repo feels smaller before the new G2.5 architecture is added.</li>
+    </ul>
+    <div class="completion">
+      <h3>Completion record</h3>
+      <p><span class="pill green">Complete</span> Deleted all old <code>p##_*.rs</code> test files, removed stale synthetic harness source modules, removed the old <code>gazebo_replay</code> binary, deleted canned CSV fixtures, and removed now-empty obsolete directories. The remaining source surface is <code>src/lib.rs</code>, <code>src/gazebo_contract.rs</code>, and <code>src/hil_semantics.rs</code>.</p>
+      <p class="small">Verified with <code>cargo fmt --manifest-path testing/deterministic-harness/Cargo.toml</code>, <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>, and <code>cargo test -p common --no-run</code>.</p>
+    </div>
+  </section>
+
+  <section class="card" id="phase-3">
+    <h2>8. Phase 3 — Combine harness code before adding new tests</h2>
+    <div class="phase combine done">
+      <div class="phase-index">Phase 3</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Build a small shared harness spine so the rebuilt gates use one scenario model, one Gazebo reset/runner path, and one report format. This phase is consolidation, not feature growth.</p>
+        <h3>Allowed new or rewritten files</h3>
+        <pre><code>testing/deterministic-harness/
+  VALIDATION_MATRIX.md
+  gnc-testing-reset-plan.html
+  src/
+    lib.rs                 // minimal exports only
+    gazebo_contract.rs     // trimmed parser/formatter/config seam
+    hil_semantics.rs       // trimmed HIL validity seam
+  tests/
+    contracts.rs           // harvested contracts only
+    support/
+      mod.rs               // shared Gazebo runner, scenario schedule, metrics</code></pre>
+        <p class="small">Create <code>src/scenario.rs</code>, <code>src/report.rs</code>, or <code>src/gazebo_runner.rs</code> only if the code is used by at least two active gates. Otherwise keep shared support inside <code>tests/support/mod.rs</code> until reuse is proven.</p>
+      </div>
+    </div>
+    <h3>Shared scenario/report API target</h3>
+    <pre><code>pub enum Gate { C0, G0, G1, G2, G2Point5, G3 }
+
+pub struct ScenarioSpec {
+    pub id: &'static str,
+    pub gate: Gate,
+    pub description: &'static str,
+    pub reset_required: bool,
+    pub command_schedule: CommandSchedule,
+    pub thresholds: AcceptanceThresholds,
+}
+
+pub struct ScenarioReport {
+    pub id: String,
+    pub pass: bool,
+    pub reset_clean: bool,
+    pub estimator_agrees: bool,
+    pub max_cross_track_error_m: f32,
+    pub max_altitude_error_m: f32,
+    pub max_roll_pitch_rad: f32,
+    pub max_speed_error_mps: f32,
+    pub clamp_ratio: f32,
+    pub first_clamp_source: Option&lt;String&gt;,
+    pub failure_layer: Option&lt;FailureLayer&gt;,
+}</code></pre>
+    <h3>Exit criteria</h3>
+    <ul>
+      <li>All runtime gates can emit the same summary fields.</li>
+      <li>Gazebo reset, settle, sensor-frame capture, actuator send, timeout handling, and report writing live in one shared support path.</li>
+      <li>Setpoint schedules are data-driven enough to compare G1, G2, G2.5, and G3 reports.</li>
+      <li>There is no duplicate parser, bridge, reset, or report logic copied across test files.</li>
+    </ul>
+    <div class="completion">
+      <h3>Completion record</h3>
+      <p><span class="pill green">Complete</span> Rebuilt the harvested C0 contract suite in <code>tests/contracts.rs</code> and added shared gate, schedule, threshold, metric, failure-layer, and report types in <code>tests/support/mod.rs</code>. No runtime gate placeholders were created.</p>
+      <p class="small">Verified with <code>cargo fmt --manifest-path testing/deterministic-harness/Cargo.toml</code>, <code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml</code>, and <code>cargo test -p common --no-run</code>.</p>
+    </div>
+  </section>
+
+  <section class="card" id="target-layout">
+    <h2>9. Target active layout after cleanup and consolidation</h2>
+    <p class="lead">The final active harness should be small enough to inspect in one pass. Prefer case tables inside a few files over one file per historical phase.</p>
+    <pre><code>testing/deterministic-harness/
+  README.md
+  Cargo.toml
+  gnc-testing-reset-plan.html
+  VALIDATION_MATRIX.md
+  config/
+    airframes/
+      f450_xing2_2809_1045_4s_v0.cfg
+  src/
+    lib.rs
+    gazebo_contract.rs
+    hil_semantics.rs
+  tests/
+    contracts.rs
+    gazebo_g0_actuator_truth.rs
+    gazebo_g1_control_primitives.rs
+    gazebo_g2_takeoff_hover_land.rs
+    gazebo_g25_motion_primitives.rs
+    gazebo_g3_navigation_acceptance.rs
+    support/
+      mod.rs</code></pre>
+    <div class="callout warn"><strong>No placeholders.</strong> The target layout is the end state. During migration, a listed test file should appear only when it contains real assertions for its gate.</div>
+  </section>
+
+  <section class="card" id="phase-4">
+    <h2>10. Phase 4 — Rebuild the minimal proof ladder through G2</h2>
+    <div class="phase build">
+      <div class="phase-index">Phase 4</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Bring back only the tests that prove core production seams and basic Gazebo control behavior. Do not work on navigation or G2.5 until C0, G0, G1, and G2 are clear and the report format is stable.</p>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="mini">
+        <h3>C0 — Contracts</h3>
+        <p><code>tests/contracts.rs</code></p>
+        <ul>
+          <li>NED/geodetic sign conventions.</li>
+          <li>Quaternion identity/order and finite conversion behavior.</li>
+          <li>Failsafe zero output: invalid estimate, missing IMU, non-finite input, stale input, and disarmed state.</li>
+          <li>Allocator geometry, motor order, saturation/desaturation flags.</li>
+          <li>Bridge parser/formatter/config contracts.</li>
+          <li>HIL duplicate/out-of-order/valid-flag handling.</li>
+          <li>Estimator reset delta finite behavior and setpoint-source tagging.</li>
+        </ul>
+      </div>
+      <div class="mini">
+        <h3>G0 — Gazebo actuator truth</h3>
+        <p><code>tests/gazebo_g0_actuator_truth.rs</code></p>
+        <ul>
+          <li>Reset clean before every case.</li>
+          <li>Equal motors do not create large roll/pitch/yaw rates.</li>
+          <li>Motor patterns produce expected angular-rate directions.</li>
+          <li>Hover command produces bounded vertical acceleration.</li>
+          <li>Motor order, spin direction, and scaling are physically proven in Gazebo.</li>
+        </ul>
+      </div>
+      <div class="mini">
+        <h3>G1 — Control primitives with estimator bypass</h3>
+        <p><code>tests/gazebo_g1_control_primitives.rs</code></p>
+        <ul>
+          <li>Level hover with bounded motor spread.</li>
+          <li>Roll disturbance recovery.</li>
+          <li>Pitch disturbance recovery.</li>
+          <li>Yaw-rate impulse left/right.</li>
+          <li>Small vertical step up/down while holding XY.</li>
+          <li>Truth estimate is used only through the explicit bypass path.</li>
+        </ul>
+      </div>
+      <div class="mini">
+        <h3>G2 — Estimator-in-loop takeoff, hover, land</h3>
+        <p><code>tests/gazebo_g2_takeoff_hover_land.rs</code></p>
+        <ul>
+          <li>Reset clean.</li>
+          <li>Takeoff to controlled altitude.</li>
+          <li>Hover with bounded horizontal drift.</li>
+          <li>Descend and detect near-pad/contact.</li>
+          <li>Disarm to zero motors with no relaunch.</li>
+          <li>Estimator validity and truth agreement are reported.</li>
+        </ul>
+      </div>
+    </div>
+    <h3>Phase 4 exit criteria</h3>
+    <ul>
+      <li>C0 is fast, deterministic, and default-on.</li>
+      <li>G0/G1/G2 are manual or ignored runtime gates until repeatable, but each emits the same JSON/CSV report shape.</li>
+      <li>No phase-numbered compatibility wrappers remain.</li>
+      <li>No navigation tests are active yet.</li>
+    </ul>
+    <div class="completion">
+      <h3>Phase 4 completion record</h3>
+      <p><span class="pill green">Complete</span> Added ignored manual runtime gate files for G0 actuator truth, G1 estimator-bypass control primitives, and G2 estimator-in-loop takeoff/hover/land. The files contain concrete assertions against the checked-in airframe profile, production control pipeline, HIL semantic adapter, failsafe response path, and shared report formatting. G2.5 and G3 remain absent and blocked.</p>
+      <p><span class="pill green">Live G0 added</span> Revisited Phase 4 after the Gazebo bridge and simulator were confirmed live. <code>g0_live_actuator_truth_drives_bridge_and_scores_sensor_motion</code> now connects to the bridge, resets and plays the simulator, sends all twelve G0 actuator cases, collects live <code>SENSOR</code> frames, and scores reset cleanliness plus measured gyro signs against the hardware airframe profile. A mismatch is a Gazebo/model/bridge issue to fix, not a reason to rewrite the hardware profile.</p>
+    </div>
+  </section>
+
+  <section class="card" id="metrics">
+    <h2>11. Required metrics for every runtime gate</h2>
+    <p>Every Gazebo or HIL gate should emit the same compact summary so a failure identifies the failed layer instead of forcing manual trace archaeology.</p>
+    <table>
+      <thead><tr><th>Metric group</th><th>Required fields</th><th>Purpose</th></tr></thead>
+      <tbody>
+        <tr><td>Reset cleanliness</td><td><code>reset_clean</code>, <code>reset_ack</code>, <code>first_sensor_tick</code>, <code>time_monotonic</code>, <code>origin_valid</code>, <code>settle_frames_discarded</code></td><td>Prevents stale simulator state from being scored as controller behavior.</td></tr>
+        <tr><td>Estimator agreement</td><td><code>first_valid_estimate_time_us</code>, <code>estimate_truth_position_disagreement_m</code>, <code>estimate_truth_velocity_disagreement_mps</code>, <code>yaw_error_max</code>, <code>valid_ratio</code></td><td>Separates estimator failure from control failure.</td></tr>
+        <tr><td>Motion tracking</td><td><code>target_axis_progress</code>, <code>cross_track_error_max</code>, <code>speed_error_max</code>, <code>final_velocity</code>, <code>settle_time</code>, <code>max_position_overshoot_m</code></td><td>Proves commanded movement, not only survival.</td></tr>
+        <tr><td>Altitude and attitude</td><td><code>max_altitude_error_m</code>, <code>max_vertical_speed_mps</code>, <code>max_horizontal_speed_mps</code>, <code>max_roll_pitch_rad</code>, <code>max_yaw_error_rad</code>, <code>max_body_rate_rps</code></td><td>Prevents lateral tests from hiding vertical or attitude failures.</td></tr>
+        <tr><td>Authority and saturation</td><td><code>min_vertical_throttle_margin</code>, <code>clamp_ratio</code>, <code>first_clamp_source</code>, <code>rate_limit_flags_seen</code>, <code>mixer_limit_flags_seen</code>, <code>desaturation_priority_seen</code>, <code>motor_spread_max</code></td><td>Shows whether failure is tuning, allocation, motor authority, yaw authority, or thrust margin.</td></tr>
+        <tr><td>Setpoint provenance</td><td><code>setpoint_source</code>, <code>estimate_frame</code>, <code>nav_phase</code>, <code>truth_used_for_scoring_only</code></td><td>Prevents truth-origin data from leaking into estimator-local control.</td></tr>
+      </tbody>
+    </table>
+    <pre><code>Example outcome line:
+G2.5 M01 north PASS reset_clean=true estimator_agrees=true cross_track_max=... altitude_error_max=... clamp_ratio=...</code></pre>
+  </section>
+
+  <section class="card" id="phase-5">
+    <h2>12. Phase 5 — Add G2.5 motion primitives before navigation</h2>
+    <div class="phase build">
+      <div class="phase-index">Phase 5</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Prove the vehicle can deliberately move, stop, turn, and recover while maintaining altitude, bounded attitude, speed control, and estimator agreement. These are not waypoint or mission tests.</p>
+        <div class="callout danger"><strong>Navigation remains disabled here.</strong> G2.5 uses direct local velocity, acceleration, attitude, or trajectory primitives. Waypoint acceptance and mission state-machine behavior wait for G3.</div>
+        <div class="callout warn"><strong>Control-first boundary.</strong> Phase 5 must not depend on compass/GPS mission navigation. The live bridge may expose mag/GPS/truth fields for scoring and estimator comparison, but controller fixes belong in shared control code or firmware-facing control config. IMU/barometer-only stabilization remains the target before G3 navigation resumes.</div>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>ID</th><th>Case</th><th>Script</th><th>Must prove</th><th>Likely failure diagnosis</th></tr></thead>
+      <tbody>
+        <tr><td><code>M01</code></td><td>Cardinal straight-line motion</td><td>Take off, hold yaw, command north, south, east, and west straight segments at conservative speed.</td><td>Correct pitch/roll direction, expected axis progress, bounded cross-track, altitude held, yaw held, speed target reached without excessive overshoot, estimator and truth agree.</td><td>NED sign, body/world frame leak, pitch/roll sign, lateral acceleration authority.</td></tr>
+        <tr><td><code>M02</code></td><td>Forward speed profile</td><td>Accelerate, hold speed, decelerate, hover, accelerate again, then brake to hover.</td><td>Velocity loop remains stable across changing commands; no integrator windup; braking does not cause altitude loss; final hover velocity is near zero.</td><td>Velocity damping, anti-windup, throttle margin.</td></tr>
+        <tr><td><code>M03</code></td><td>Brake-to-hover recovery</td><td>Build horizontal velocity, command zero XY velocity, measure stop behavior.</td><td>Horizontal speed decays after a short transient; attitude stays inside envelope; no prolonged saturation; altitude remains controlled.</td><td>Braking authority, tilt limit, integrator reset.</td></tr>
+        <tr><td><code>M04</code></td><td>Slow yaw turns in place</td><td>Yaw left and right slowly while holding local XY and altitude.</td><td>Yaw sign correct, XY drift bounded, altitude held, estimator yaw and truth yaw aligned.</td><td>Yaw sign, reaction torque, rate-loop tuning.</td></tr>
+        <tr><td><code>M05</code></td><td>Fast yaw turns in place</td><td>Repeat M04 near configured yaw-rate cap, still below aggressive/aerobatic behavior.</td><td>Rate limits visible, saturation reported, recovery returns to stable hover without altitude collapse.</td><td>Yaw saturation, desaturation priority, vertical authority loss.</td></tr>
+        <tr><td><code>M06</code></td><td>Moving heading changes</td><td>Move straight while changing yaw, then continue straight in world frame.</td><td>World-frame velocity demand remains world-frame as body yaw changes.</td><td>Body/world frame mixing.</td></tr>
+        <tr><td><code>M07</code></td><td>Zig-zag</td><td>Maintain forward progress while alternating east/west lateral commands.</td><td>Reversals do not accumulate runaway cross-track, altitude error, or clamp ratio.</td><td>XY damping, cross-axis coupling, saturation.</td></tr>
+        <tr><td><code>M08</code></td><td>Upset or abrupt reversal recovery</td><td>Inject a disturbance if the bridge supports it; otherwise use abrupt setpoint reversal.</td><td>Attitude, speed, altitude, and motor commands return to safe bounds.</td><td>Recovery authority, estimator consistency, saturation handling.</td></tr>
+      </tbody>
+    </table>
+    <h3>Phase 5 exit criteria</h3>
+    <ul>
+      <li>G2.5 passes cardinal motion in all four directions.</li>
+      <li>Speed-up/slow-down/speed-up behavior is stable.</li>
+      <li>Hover braking and yaw turns do not hide altitude loss or prolonged clamp saturation.</li>
+      <li>Zig-zag and recovery cases produce actionable reports.</li>
+      <li>Only after this can G3 navigation be treated as meaningful.</li>
+    </ul>
+    <div class="completion">
+      <h3>Phase 5 progress record</h3>
+      <p><span class="pill green">Complete</span> Added <code>tests/gazebo_g25_motion_primitives.rs</code> as the ignored G2.5 manual runtime gate. The deterministic portion covers M01 through M08 with direct local trajectory primitives, not mission navigation. It asserts NED cardinal signs, bounded speed/brake/reversal behavior, yaw sign and saturation visibility, world-frame motion across yaw changes, zig-zag reversals, and shared CSV/JSON failure classification.</p>
+      <p><span class="pill green">Live M01 connected</span> The Phase 5 live gate connects to the Gazebo TCP bridge, opens a fresh bridge session per cardinal direction, sends <code>SIM_CONTROL reset/play</code>, uses the hardware airframe profile for the production control pipeline, streams motor commands with <code>ACTUATOR</code>, and scores live <code>SENSOR</code> truth for north, south, east, and west progress. Fresh bridge sessions and bounded retries are intentional because back-to-back segments can preserve enough sim/command residue to poison later direction scoring.</p>
+      <p><span class="pill amber">2026-05-13 hardening</span> Live M01 was shaky with abrupt fixed target-plus-velocity demands. The shared position controller now includes dt-aware horizontal acceleration slew limiting, the RP235X HIL control profile carries the same firmware-facing field, and live M01 now sends a ramped direct local trajectory primitive instead of a step demand. Reset scoring also discards stale pre-reset <code>SENSOR</code> prefix frames before establishing the truth origin. Validation passed for <code>cargo test -p common</code>, non-ignored deterministic harness tests, ignored non-live G2.5 primitive assertions, and one live all-direction M01 run. G3 remains blocked until the first-attempt shakiness and estimator-source boundary are tightened further.</p>
+    </div>
+  </section>
+
+  <section class="card" id="phase-6">
+    <h2>13. Phase 6 — Re-enable G3 navigation acceptance</h2>
+    <div class="phase build">
+      <div class="phase-index">Phase 6</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Prove guidance, takeoff gate, trajectory generation, estimator reset handling, position/velocity control, thrust-vector construction, attitude/rate control, and physical allocation together.</p>
+        <p>G3 must use the real production guidance path. It must not drive mission navigation through direct raw position setpoints except in an explicitly named test-only bypass.</p>
+      </div>
+    </div>
+    <table>
+      <thead><tr><th>G3 case</th><th>Must prove</th><th>Blocked by</th></tr></thead>
+      <tbody>
+        <tr><td>Airborne origin latch</td><td>Takeoff latches estimator XY and nav starts from airborne-local state without jumping to world origin.</td><td>G2 takeoff/hover/land and G2.5 cardinal motion.</td></tr>
+        <tr><td>Small north/east local steps</td><td>Vehicle reaches local step targets with bounded cross-track, speed, altitude, attitude, and clamp ratio.</td><td>G2.5 M01/M02/M03.</td></tr>
+        <tr><td>Diagonal and square return-to-origin</td><td>Trajectory generator respects velocity/acceleration/jerk limits and returns without growing error.</td><td>G2.5 zig-zag and braking.</td></tr>
+        <tr><td>Yawed navigation</td><td>World-frame commands remain correct while body heading changes.</td><td>G2.5 moving heading changes.</td></tr>
+        <tr><td>Invalid/disarmed nav demands</td><td>Unsafe or stale navigation commands fail safe with zero or controlled actuator output.</td><td>C0 failsafe contracts.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="phase-7">
+    <h2>14. Phase 7 — Align firmware/HIL with the same GNC path</h2>
+    <div class="phase combine">
+      <div class="phase-index">Phase 7</div>
+      <div>
+        <h3>Goal</h3>
+        <p>Make the host, Gazebo, HIL, and firmware test paths prove the same production GNC flow instead of parallel approximations.</p>
+        <h3>Target production flow</h3>
+        <pre><code>mission command / waypoint
+  → MissionWaypoint
+  → GuidanceStateMachine + TakeoffNavGate
+  → TrajectoryGenerator / LocalTrajectorySetpoint
+  → ControlSetpoint::from_local_trajectory(...)
+  → FlightControlPipeline
+  → PhysicalControlAllocator
+  → actuator outputs</code></pre>
+        <h3>Agent actions</h3>
+        <ul>
+          <li>Replace direct mission-waypoint-to-raw-position-setpoint flow in test firmware paths with the same guidance and trajectory path used by host/Gazebo acceptance.</li>
+          <li>Keep estimator-bypass control only under an explicitly named G1 test mode.</li>
+          <li>Require every path to expose setpoint source, estimate frame, nav phase, and truth-used-for-scoring-only status.</li>
+          <li>Remove old adapter branches that bypass the production guidance path without a named test requirement.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="commands">
+    <h2>15. Gate names and validation commands</h2>
+    <p class="lead">These are target names after cleanup. The exact command names may change, but phase-numbered test names should not remain as the active interface.</p>
+    <table>
+      <thead><tr><th>Gate</th><th>Target test name</th><th>Policy</th></tr></thead>
+      <tbody>
+        <tr><td>C0 contracts</td><td><code>contracts</code></td><td>Default-on, deterministic, host-only.</td></tr>
+        <tr><td>G0 actuator truth</td><td><code>gazebo_g0_actuator_truth</code></td><td>Manual/ignored until repeatable.</td></tr>
+        <tr><td>G1 control primitives</td><td><code>gazebo_g1_control_primitives</code></td><td>Manual/ignored until repeatable.</td></tr>
+        <tr><td>G2 takeoff-hover-land</td><td><code>gazebo_g2_takeoff_hover_land</code></td><td>Manual/ignored until repeatable.</td></tr>
+        <tr><td>G2.5 motion primitives</td><td><code>gazebo_g25_motion_primitives</code></td><td>Manual/ignored until repeatable; required before G3.</td></tr>
+        <tr><td>G3 navigation acceptance</td><td><code>gazebo_g3_navigation_acceptance</code></td><td>Blocked until G2.5 is green.</td></tr>
+      </tbody>
+    </table>
+    <pre><code>cargo test --manifest-path testing/deterministic-harness/Cargo.toml contracts
+MARV_GAZEBO_G0_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml gazebo_g0_actuator_truth -- --ignored --nocapture
+MARV_GAZEBO_G1_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml gazebo_g1_control_primitives -- --ignored --nocapture
+MARV_GAZEBO_G2_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml gazebo_g2_takeoff_hover_land -- --ignored --nocapture
+MARV_GAZEBO_G25_AUTO_RESET=1 MARV_GAZEBO_G25_CASE=all cargo test --manifest-path testing/deterministic-harness/Cargo.toml gazebo_g25_motion_primitives -- --ignored --nocapture
+MARV_GAZEBO_G3_AUTO_RESET=1 cargo test --manifest-path testing/deterministic-harness/Cargo.toml gazebo_g3_navigation_acceptance -- --ignored --nocapture</code></pre>
+  </section>
+
+  <section class="card" id="thresholds">
+    <h2>16. Threshold and failure-policy rules</h2>
+    <table>
+      <thead><tr><th>Policy</th><th>Rule</th><th>Reason</th></tr></thead>
+      <tbody>
+        <tr><td>Start conservative</td><td>Thresholds should initially catch obvious failures without requiring perfect tuning.</td><td>The first goal is reliable layer diagnosis, not final flight performance.</td></tr>
+        <tr><td>Tighten with evidence</td><td>Tighten thresholds only after repeated stable runs and clear trace distributions.</td><td>Prevents fragile tests from blocking structural cleanup.</td></tr>
+        <tr><td>Never hide lower-gate failures</td><td>Do not loosen navigation thresholds if G2.5 primitives still show bad altitude, speed, yaw, or clamp behavior.</td><td>Navigation should not mask poor low-level control.</td></tr>
+        <tr><td>Name the first failed layer</td><td>Failure output must name reset, estimator agreement, guidance/setpoint generation, thrust margin, attitude/rate control, allocation saturation, or plant/bridge behavior.</td><td>Every failure should produce an actionable next step.</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="card" id="validity">
+    <h2>17. Test validity rule</h2>
+    <p>A test is valid only if it passes all four checks:</p>
+    <div class="grid-4">
+      <div class="mini"><h3>Production seam</h3><p>It exercises a seam used by firmware, Gazebo, HIL, or the shared common control path.</p></div>
+      <div class="mini"><h3>Unique failure mode</h3><p>It catches a failure not already caught by a stronger gate.</p></div>
+      <div class="mini"><h3>Actionable metrics</h3><p>Its failure says which layer failed and exposes relevant trace values.</p></div>
+      <div class="mini"><h3>No stale surrogate</h3><p>It does not rely on old synthetic plants or fixtures unless that helper is explicitly under test.</p></div>
+    </div>
+    <div class="callout danger"><strong>If a test fails any of these checks, delete it.</strong> Add it back later only when it can pass all four.</div>
+  </section>
+
+  <section class="card" id="do-not-do">
+    <h2>18. What not to do</h2>
+    <div class="grid-2">
+      <div class="mini">
+        <h3>Do not preserve clutter</h3>
+        <ul>
+          <li>Do not keep old phase files because they once passed.</li>
+          <li>Do not keep report, fixture, or clock tests unless directly used by current gates.</li>
+          <li>Do not keep synthetic plant tests as acceptance gates.</li>
+          <li>Do not create a hidden graveyard of deleted tests.</li>
+          <li>Do not leave phase-numbered compatibility wrappers in place.</li>
+        </ul>
+      </div>
+      <div class="mini">
+        <h3>Do not skip motion primitives</h3>
+        <ul>
+          <li>Do not debug G3 waypoint navigation before G2.5 passes.</li>
+          <li>Do not tune position navigation while straight-line motion is unstable.</li>
+          <li>Do not use navigation success to excuse poor altitude, yaw, speed, or clamp behavior.</li>
+          <li>Do not hide red Gazebo behavior behind looser thresholds.</li>
+          <li>Do not mix truth-origin scoring with estimator-local command frames.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="final-state">
+    <h2>19. Final desired state</h2>
+    <p>The repository should be smaller and more legible after this work. The deterministic harness should have fewer files, fewer helpers, no phase-history naming, and no duplicate host simulations. What remains should be harder to ignore: a compact proof ladder that shows the vehicle can actuate, hover, move, turn, recover, and only then navigate.</p>
+    <div class="callout good">
+      <strong>Success definition:</strong> fewer required tests, fewer duplicate files, one shared report format, one validation matrix, one active plan, and Gazebo failures that identify the failed layer instead of triggering another round of guesswork.
+    </div>
+  </section>
+
+  <p class="footer">Prepared as a cleanup-first implementation plan for the MARV-FC GNC test architecture reset.</p>
+</div>
+</body>
+</html>
