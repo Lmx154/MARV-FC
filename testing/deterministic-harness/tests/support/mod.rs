@@ -31,6 +31,7 @@ pub enum CommandKind {
     Hold,
     LocalPosition,
     LocalTrajectory,
+    MissionWaypoint,
     ActuatorMotors,
     SimReset,
     SimPlay,

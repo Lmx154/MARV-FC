@@ -26,18 +26,18 @@ use support::{
 
 const AIRFRAME_CONFIG: &str = include_str!("../config/airframes/f450_xing2_2809_1045_4s_v0.cfg");
 const HOLD_ALTITUDE_DOWN_M: f32 = -1.0;
-const CONSERVATIVE_SPEED_MPS: f32 = 0.55;
-const CONSERVATIVE_ACCEL_MPS2: f32 = 0.60;
+const CONSERVATIVE_SPEED_MPS: f32 = 0.70;
+const CONSERVATIVE_ACCEL_MPS2: f32 = 0.70;
 const LIVE_SENSOR_STEP_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_SETTLE_TIMEOUT: Duration = Duration::from_secs(4);
 const LIVE_SETTLE_FRAMES: usize = 12;
 const LIVE_SETTLE_CANDIDATE_FRAMES: usize = 24;
-const LIVE_TAKEOFF_FRAMES: usize = 120;
+const LIVE_TAKEOFF_FRAMES: usize = 160;
 const LIVE_MOTION_FRAMES: usize = 110;
 const LIVE_MOTION_TARGET_M: f32 = 0.55;
-const LIVE_MOTION_SPEED_MPS: f32 = 0.45;
-const LIVE_MOTION_ACCEL_MPS2: f32 = 0.35;
-const LIVE_REQUIRED_PROGRESS_M: f32 = 0.30;
+const LIVE_MOTION_SPEED_MPS: f32 = 0.60;
+const LIVE_MOTION_ACCEL_MPS2: f32 = 0.50;
+const LIVE_REQUIRED_PROGRESS_M: f32 = 0.40;
 const LIVE_ATTEMPTS_PER_CARDINAL_CASE: usize = 2;
 const LIVE_ATTEMPTS_PER_SEQUENCE_CASE: usize = 2;
 const G25_TRACE_DIR_ENV: &str = "MARV_GAZEBO_G25_TRACE_DIR";
@@ -660,7 +660,7 @@ fn hardware_live_pipeline() -> FlightControlPipeline {
     airframe
         .validate()
         .expect("airframe config remains the hardware source of truth");
-    let mut loop_config = primitive_loop_config(0.16);
+    let mut loop_config = primitive_loop_config(0.15);
     loop_config.altitude.hover_throttle = airframe.hover_motor_command();
     FlightControlPipeline::new(common::control::pipeline::FlightControlConfig::new(
         loop_config,
@@ -679,25 +679,25 @@ fn yaw_limited_pipeline() -> FlightControlPipeline {
 fn primitive_loop_config(max_axis_command: f32) -> ControlLoopConfig {
     let mut config = ControlLoopConfig::default();
     config.position = PositionControllerConfig {
-        position_gain: 0.12,
-        velocity_gain: 0.32,
+        position_gain: 0.14,
+        velocity_gain: 0.38,
         max_horizontal_velocity_mps: CONSERVATIVE_SPEED_MPS,
         max_horizontal_accel_mps2: CONSERVATIVE_ACCEL_MPS2,
-        max_horizontal_accel_slew_mps3: 1.80,
-        max_tilt_rad: 10.0_f32.to_radians(),
+        max_horizontal_accel_slew_mps3: 4.0,
+        max_tilt_rad: 11.0_f32.to_radians(),
         ..PositionControllerConfig::default()
     };
     config.attitude = common::control::attitude::AttitudeControllerConfig {
         roll_rate_gain: 2.4,
         pitch_rate_gain: 2.4,
-        yaw_rate_gain: 2.0,
-        max_rate_rps: 1.35,
-        max_yaw_rate_rps: 1.0,
+        yaw_rate_gain: 2.5,
+        max_rate_rps: 1.0,
+        max_yaw_rate_rps: 1.2,
     };
     config.rate = RateControllerConfig {
         roll_gain: 0.06,
         pitch_gain: 0.06,
-        yaw_gain: 0.04,
+        yaw_gain: 0.075,
         max_axis_command,
         measured_rate_deadband_rps: 0.015,
         ..RateControllerConfig::default()
@@ -837,8 +837,8 @@ impl LivePrimitiveCase {
             Self::M03BrakeToHover => 165,
             Self::M04SlowYawTurns => 140,
             Self::M05FastYawTurns => 150,
-            Self::M06MovingHeadingChanges => 155,
-            Self::M07ZigZag => 180,
+            Self::M06MovingHeadingChanges => 185,
+            Self::M07ZigZag => 400,
             Self::M08AbruptReversal => 165,
         }
     }
@@ -875,8 +875,8 @@ impl LivePrimitiveCase {
                 trajectory([0.0, 0.0, HOLD_ALTITUDE_DOWN_M], [0.0; 3], [0.0; 3], yaw)
             }
             Self::M06MovingHeadingChanges => {
-                let (turn, turn_rate, turn_accel) = smooth_segment(elapsed_s, 1.50, 0.0, 0.85);
-                let radius_m = 0.55;
+                let (turn, turn_rate, turn_accel) = smooth_segment(elapsed_s, 2.30, 0.0, 0.85);
+                let radius_m = 0.65;
                 let sin_turn = turn.sin();
                 let cos_turn = turn.cos();
                 trajectory(
@@ -899,20 +899,31 @@ impl LivePrimitiveCase {
                 )
             }
             Self::M07ZigZag => {
-                let (north, north_velocity, north_accel) = piecewise_scalar(
+                let motion_duration_s = 7.0;
+                let settle_duration_s = 1.0;
+                let elapsed_s = elapsed_s.min(motion_duration_s + settle_duration_s);
+                let progress = (elapsed_s / motion_duration_s).clamp(0.0, 1.0);
+                let north = 1.05 * progress;
+                let north_velocity = if progress < 1.0 {
+                    1.05 / motion_duration_s
+                } else {
+                    0.0
+                };
+                let (east, east_velocity, _) = piecewise_scalar(
                     elapsed_s,
-                    0.72,
-                    &[(0.0, 0.28), (0.28, 0.56), (0.56, 0.84), (0.84, 1.12)],
-                );
-                let (east, east_velocity, east_accel) = piecewise_scalar(
-                    elapsed_s,
-                    0.72,
-                    &[(0.0, 0.28), (0.28, -0.28), (-0.28, 0.28), (0.28, 0.0)],
+                    1.4,
+                    &[
+                        (0.0, 0.30),
+                        (0.30, -0.65),
+                        (-0.65, -0.65),
+                        (-0.65, 0.35),
+                        (0.35, 0.0),
+                    ],
                 );
                 trajectory(
                     [north, east, HOLD_ALTITUDE_DOWN_M],
                     [north_velocity, east_velocity, 0.0],
-                    [north_accel, east_accel, 0.0],
+                    [0.0; 3],
                     0.0,
                 )
             }
@@ -1005,9 +1016,11 @@ impl LivePrimitiveCase {
                 turn_radius_error + (0.70 - metrics.yaw_span_rad()).max(0.0)
             }
             Self::M07ZigZag => {
-                (0.55 - metrics.max_position_ned_m[0]).max(0.0)
-                    + (0.26 - (metrics.max_position_ned_m[1] - metrics.min_position_ned_m[1]))
-                        .max(0.0)
+                let east_span = metrics.max_position_ned_m[1] - metrics.min_position_ned_m[1];
+                (0.75 - metrics.final_position_ned_m[0]).max(0.0)
+                    + (0.30 - east_span).max(0.0)
+                    + (metrics.final_position_ned_m[1].abs() - 0.25).max(0.0)
+                    + (metrics.max_abs_position_axis_m(1) - 0.75).max(0.0)
             }
             Self::M08AbruptReversal => {
                 (0.30 - (metrics.max_position_ned_m[0] - metrics.min_position_ned_m[0])).max(0.0)
@@ -1137,6 +1150,41 @@ struct LiveCardinalMetrics {
     first_clamp_source: Option<&'static str>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct PoseKinematicVelocity {
+    previous: Option<(u64, [f32; 3])>,
+}
+
+impl PoseKinematicVelocity {
+    fn apply(&mut self, estimate: &mut EstimateSnapshot, sim_time_us: u64) {
+        let position = estimate.position_ned_m;
+        let velocity = self
+            .previous
+            .and_then(|(previous_time_us, previous_position)| {
+                let dt_us = sim_time_us.checked_sub(previous_time_us)?;
+                if dt_us == 0 {
+                    return None;
+                }
+                let dt_s = dt_us.min(u64::from(u32::MAX)) as f32 / 1_000_000.0;
+                if !dt_s.is_finite() || dt_s <= f32::EPSILON {
+                    return None;
+                }
+
+                Some([
+                    (position[0] - previous_position[0]) / dt_s,
+                    (position[1] - previous_position[1]) / dt_s,
+                    (position[2] - previous_position[2]) / dt_s,
+                ])
+            });
+        self.previous = Some((sim_time_us, position));
+        if let Some(velocity) = velocity {
+            if velocity.iter().all(|value| value.is_finite()) {
+                estimate.velocity_ned_mps = velocity;
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct LiveTrace {
     case_name: &'static str,
@@ -1154,6 +1202,7 @@ struct LiveTraceRow {
     local_position_ned_m: [f32; 3],
     setpoint_position_ned_m: [f32; 3],
     velocity_ned_mps: [f32; 3],
+    reported_velocity_ned_mps: [f32; 3],
     setpoint_velocity_ned_mps: [f32; 3],
     controller_velocity_setpoint_ned_mps: Option<[f32; 2]>,
     controller_velocity_error_ned_mps: Option<[f32; 2]>,
@@ -1204,6 +1253,7 @@ impl LiveTrace {
             local_position_ned_m: estimate.position_ned_m,
             setpoint_position_ned_m: setpoint.position_ned_m,
             velocity_ned_mps: estimate.velocity_ned_mps,
+            reported_velocity_ned_mps: frame.vel_ned_mps,
             setpoint_velocity_ned_mps: setpoint.velocity_ned_mps,
             controller_velocity_setpoint_ned_mps: output.debug.velocity_setpoint_ned_mps,
             controller_velocity_error_ned_mps: output.debug.velocity_error_ned_mps,
@@ -1231,7 +1281,7 @@ impl LiveTrace {
             .map_err(|error| format!("failed to create trace file {}: {error}", path.display()))?;
         writeln!(
             file,
-            "case,attempt,frame_index,phase,sim_time_us,elapsed_motion_s,raw_pn_m,raw_pe_m,raw_pd_m,local_n_m,local_e_m,local_d_m,setpoint_n_m,setpoint_e_m,setpoint_d_m,error_n_m,error_e_m,error_d_m,vn_mps,ve_mps,vd_mps,setpoint_vn_mps,setpoint_ve_mps,setpoint_vd_mps,controller_vn_mps,controller_ve_mps,velocity_error_n_mps,velocity_error_e_mps,requested_accel_n_mps2,requested_accel_e_mps2,applied_accel_n_mps2,applied_accel_e_mps2,attitude_sp_roll_rad,attitude_sp_pitch_rad,attitude_sp_yaw_rad,rate_sp_roll_rps,rate_sp_pitch_rps,rate_sp_yaw_rps,throttle,roll_rad,pitch_rad,yaw_rad,setpoint_yaw_rad,motor0,motor1,motor2,motor3,clamped"
+            "case,attempt,frame_index,phase,sim_time_us,elapsed_motion_s,raw_pn_m,raw_pe_m,raw_pd_m,local_n_m,local_e_m,local_d_m,setpoint_n_m,setpoint_e_m,setpoint_d_m,error_n_m,error_e_m,error_d_m,vn_mps,ve_mps,vd_mps,reported_vn_mps,reported_ve_mps,reported_vd_mps,setpoint_vn_mps,setpoint_ve_mps,setpoint_vd_mps,controller_vn_mps,controller_ve_mps,velocity_error_n_mps,velocity_error_e_mps,requested_accel_n_mps2,requested_accel_e_mps2,applied_accel_n_mps2,applied_accel_e_mps2,attitude_sp_roll_rad,attitude_sp_pitch_rad,attitude_sp_yaw_rad,rate_sp_roll_rps,rate_sp_pitch_rps,rate_sp_yaw_rps,throttle,roll_rad,pitch_rad,yaw_rad,setpoint_yaw_rad,motor0,motor1,motor2,motor3,clamped"
         )
         .map_err(|error| format!("failed to write trace header {}: {error}", path.display()))?;
         for row in &self.rows {
@@ -1275,7 +1325,7 @@ impl LiveTraceRow {
 
         writeln!(
             file,
-            "{case_name},{attempt},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
+            "{case_name},{attempt},{},{},{},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{:.6},{}",
             self.frame_index,
             self.phase,
             self.sim_time_us,
@@ -1295,6 +1345,9 @@ impl LiveTraceRow {
             self.velocity_ned_mps[0],
             self.velocity_ned_mps[1],
             self.velocity_ned_mps[2],
+            self.reported_velocity_ned_mps[0],
+            self.reported_velocity_ned_mps[1],
+            self.reported_velocity_ned_mps[2],
             self.setpoint_velocity_ned_mps[0],
             self.setpoint_velocity_ned_mps[1],
             self.setpoint_velocity_ned_mps[2],
@@ -1412,14 +1465,16 @@ fn run_live_primitive_case(
     let pipeline = hardware_live_pipeline();
     let mut motion_start_sim_time_us = None;
     let mut trace = LiveTrace::new(case.name(), attempt);
+    let mut pose_velocity = PoseKinematicVelocity::default();
 
     for frame_index in 0..(LIVE_TAKEOFF_FRAMES + case.motion_frames()) {
         let frame = bridge.next_sensor_frame(LIVE_SENSOR_STEP_TIMEOUT)?;
         metrics.reset_clean &= frame.clock_source.as_deref() == Some("gazebo");
-        let Some(estimate) = frame.to_truth_estimate(origin) else {
+        let Some(mut estimate) = frame.to_truth_estimate(origin) else {
             metrics.estimator_agrees = false;
             continue;
         };
+        pose_velocity.apply(&mut estimate, frame.sim_time_us);
         let motion_phase = frame_index >= LIVE_TAKEOFF_FRAMES;
         let mut elapsed_motion_s = 0.0;
         let setpoint = if motion_phase {
@@ -1506,14 +1561,16 @@ fn run_live_cardinal_case(
     let pipeline = hardware_live_pipeline();
     let mut motion_start_sim_time_us = None;
     let mut trace = LiveTrace::new(case.name, attempt);
+    let mut pose_velocity = PoseKinematicVelocity::default();
 
     for frame_index in 0..(LIVE_TAKEOFF_FRAMES + LIVE_MOTION_FRAMES) {
         let frame = bridge.next_sensor_frame(LIVE_SENSOR_STEP_TIMEOUT)?;
         metrics.reset_clean &= frame.clock_source.as_deref() == Some("gazebo");
-        let Some(estimate) = frame.to_truth_estimate(origin) else {
+        let Some(mut estimate) = frame.to_truth_estimate(origin) else {
             metrics.estimator_agrees = false;
             continue;
         };
+        pose_velocity.apply(&mut estimate, frame.sim_time_us);
         let motion_phase = frame_index >= LIVE_TAKEOFF_FRAMES;
         let mut elapsed_motion_s = 0.0;
         let setpoint = if motion_phase {

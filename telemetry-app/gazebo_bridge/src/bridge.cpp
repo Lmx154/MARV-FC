@@ -56,6 +56,7 @@ struct BridgeConfig {
     std::string motor_direction_mode = "gazebo_model";
     std::array<double, 4> motor_directions{1.0, 1.0, 1.0, 1.0};
     std::array<std::size_t, 4> motor_gazebo_indices{0, 1, 2, 3};
+    bool pose_truth_velocity = true;
 };
 
 void handle_signal(int) {
@@ -124,6 +125,8 @@ void load_config_file(const std::string& path, BridgeConfig& config) {
             config.motor_direction_mode = value;
         } else if (key == "synthetic_sensors") {
             config.synthetic_sensors = parse_bool(value);
+        } else if (key == "truth.pose_velocity" || key == "pose_truth_velocity") {
+            config.pose_truth_velocity = parse_bool(value);
         } else if (key == "nominal_battery_voltage_v") {
             config.nominal_battery_voltage_v = std::stof(value);
         } else if (key.rfind("actuators.motor_", 0) == 0 && key.size() > 19) {
@@ -465,6 +468,9 @@ private:
         latest_.clock_source = std::move(clock_source);
         latest_.valid_flags = fresh_valid_flags_;
         latest_.battery_voltage_v = config_.nominal_battery_voltage_v;
+        if (config_.pose_truth_velocity) {
+            update_pose_truth_velocity(latest_, sim_time_us);
+        }
         if (latest_.battery_voltage_v > 0.0f && std::isfinite(latest_.battery_voltage_v)) {
             latest_.valid_flags |= kValidBattery;
         }
@@ -566,9 +572,11 @@ private:
         latest_.lat_deg = lat;
         latest_.lon_deg = lon;
         latest_.alt_msl_m = alt;
-        latest_.vel_north_mps = vel_ned[0];
-        latest_.vel_east_mps = vel_ned[1];
-        latest_.vel_down_mps = vel_ned[2];
+        if (!config_.pose_truth_velocity) {
+            latest_.vel_north_mps = vel_ned[0];
+            latest_.vel_east_mps = vel_ned[1];
+            latest_.vel_down_mps = vel_ned[2];
+        }
         latest_.sats = 12;
         latest_.fix_type = 3;
         mark_fresh(kValidGps);
@@ -625,10 +633,60 @@ private:
         return 44330.0f * (1.0f - std::pow(pressure_pa / 101325.0f, 1.0f / 5.255f));
     }
 
+    void update_pose_truth_velocity(SensorFrame& frame, std::uint64_t sim_time_us) {
+        const std::array<float, 3> position_ned{
+            frame.position_north_m,
+            frame.position_east_m,
+            frame.position_down_m,
+        };
+        if (!finite3(position_ned)) {
+            previous_pose_velocity_sample_.reset();
+            return;
+        }
+
+        if (previous_pose_velocity_sample_) {
+            const auto& previous = *previous_pose_velocity_sample_;
+            const auto dt_us = sim_time_us > previous.sim_time_us
+                ? sim_time_us - previous.sim_time_us
+                : 0;
+            if (dt_us > 0) {
+                const auto dt_s = static_cast<float>(dt_us) / 1'000'000.0f;
+                const std::array<float, 3> velocity_ned{
+                    (position_ned[0] - previous.position_ned[0]) / dt_s,
+                    (position_ned[1] - previous.position_ned[1]) / dt_s,
+                    (position_ned[2] - previous.position_ned[2]) / dt_s,
+                };
+                if (finite3(velocity_ned)) {
+                    frame.vel_north_mps = velocity_ned[0];
+                    frame.vel_east_mps = velocity_ned[1];
+                    frame.vel_down_mps = velocity_ned[2];
+                }
+            } else {
+                frame.vel_north_mps = 0.0f;
+                frame.vel_east_mps = 0.0f;
+                frame.vel_down_mps = 0.0f;
+            }
+        } else {
+            frame.vel_north_mps = 0.0f;
+            frame.vel_east_mps = 0.0f;
+            frame.vel_down_mps = 0.0f;
+        }
+
+        previous_pose_velocity_sample_ = PoseVelocitySample{
+            sim_time_us,
+            position_ned,
+        };
+    }
+
     void mark_fresh(std::uint32_t flags) {
         fresh_valid_flags_ |= flags;
         steady_valid_flags_ |= flags;
     }
+
+    struct PoseVelocitySample {
+        std::uint64_t sim_time_us = 0;
+        std::array<float, 3> position_ned{};
+    };
 
     BridgeConfig config_;
     gz::transport::Node node_;
@@ -636,6 +694,7 @@ private:
     SensorFrame latest_{};
     std::uint32_t fresh_valid_flags_ = 0;
     std::uint32_t steady_valid_flags_ = 0;
+    std::optional<PoseVelocitySample> previous_pose_velocity_sample_;
 };
 
 class BridgeApp {
