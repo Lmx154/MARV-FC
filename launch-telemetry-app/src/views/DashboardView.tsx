@@ -1,5 +1,6 @@
 import { Dial } from "../components/telemetry/Dial";
 import { MetricCard } from "../components/telemetry/MetricCard";
+import { RocketModelViewer } from "../components/telemetry/RocketModelViewer";
 import { stages } from "../constants/telemetry";
 import type { TelemetryPacket } from "../types";
 import { formatFeet, formatMeters, formatSpeed, formatTime, stageLabel, stageShortLabel } from "../utils/format";
@@ -15,12 +16,10 @@ export function DashboardView({ packet }: { packet: TelemetryPacket }) {
           <strong>{stageLabel(packet.stage)}</strong>
           <span>T+ {formatTime(packet.missionTimeMs)} / seq {packet.seq}</span>
         </div>
-        <div className="rocket-visual" aria-hidden="true">
+        <div className="rocket-visual">
+          <RocketModelViewer stage={packet.stage} />
           <div className="altitude-ladder">
             <i style={{ height: `${Math.min(96, packet.altitudeM / 80)}%` }} />
-          </div>
-          <div className={`rocket-body ${packet.stage === "BOOST" ? "boosting" : ""}`}>
-            <span />
           </div>
           <div className="sparkline">
             <b style={{ width: `${Math.min(100, packet.missionTimeMs / 950)}%` }} />
