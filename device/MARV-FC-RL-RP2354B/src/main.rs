@@ -7,6 +7,7 @@ mod clocks;
 mod config;
 mod core0;
 mod core1;
+mod gps;
 mod interrupts;
 mod pinmap;
 mod radio_link;

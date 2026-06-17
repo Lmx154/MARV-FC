@@ -1,60 +1,125 @@
+import { useCallback, useEffect, useState } from "react";
+
 import { MetricInline } from "../components/telemetry/MetricInline";
 import { SettingsPanel } from "../components/telemetry/SettingsPanel";
-import type { ThemeMode } from "../types";
+import {
+  connectSerial,
+  disconnectSerial,
+  isTauri,
+  listSerialPorts,
+  onLinkStatus,
+  sendCommand,
+  type RocketCommand,
+} from "../lib/backend";
+import type { DataSource, LinkStatus, SerialPortInfo, ThemeMode } from "../types";
+
+const BAUD_RATES = [9600, 57600, 115200, 230400, 460800, 921600];
 
 type SettingsViewProps = {
   theme: ThemeMode;
   onThemeChange: (theme: ThemeMode) => void;
+  source: DataSource;
+  onSourceChange: (source: DataSource) => void;
 };
 
-export function SettingsView({ theme, onThemeChange }: SettingsViewProps) {
+export function SettingsView({ theme, onThemeChange, source, onSourceChange }: SettingsViewProps) {
+  const tauri = isTauri();
+  const [ports, setPorts] = useState<SerialPortInfo[]>([]);
+  const [selectedPort, setSelectedPort] = useState<string>("");
+  // Default matches the MARV-RADIO ground-station host UART (HOST_UART_BAUD = 460_800).
+  const [baud, setBaud] = useState<number>(460800);
+  const [link, setLink] = useState<LinkStatus>({ connected: false, port: null, baud: 460800, lastError: null });
+
+  const refreshPorts = useCallback(async () => {
+    const found = await listSerialPorts();
+    setPorts(found);
+    setSelectedPort((current) => current || found[0]?.portName || "");
+  }, []);
+
+  useEffect(() => {
+    if (!tauri) return;
+    void refreshPorts();
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    onLinkStatus((status) => setLink(status)).then((fn) => {
+      if (active) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [tauri, refreshPorts]);
+
+  const connected = link.connected;
+
   return (
     <section className="settings-grid">
       <SettingsPanel title="Serial">
         <label>
           Port
-          <select defaultValue="/dev/ttyUSB0">
-            <option>/dev/ttyUSB0</option>
-            <option>/dev/ttyACM0</option>
-            <option>COM4</option>
+          <select value={selectedPort} onChange={(event) => setSelectedPort(event.currentTarget.value)} disabled={!tauri || connected}>
+            {ports.length === 0 && <option value="">No ports found</option>}
+            {ports.map((port) => (
+              <option key={port.portName} value={port.portName}>
+                {port.displayName}
+              </option>
+            ))}
           </select>
         </label>
         <label>
           Baud
-          <select defaultValue="115200">
-            <option>9600</option>
-            <option>57600</option>
-            <option>115200</option>
-            <option>230400</option>
-            <option>460800</option>
-            <option>921600</option>
+          <select value={baud} onChange={(event) => setBaud(Number(event.currentTarget.value))} disabled={!tauri || connected}>
+            {BAUD_RATES.map((rate) => (
+              <option key={rate} value={rate}>
+                {rate}
+              </option>
+            ))}
           </select>
         </label>
         <div className="button-row">
-          <button>Connect</button>
-          <button>Disconnect</button>
+          <button onClick={() => void connectSerial(selectedPort, baud)} disabled={!tauri || connected || !selectedPort}>
+            Connect
+          </button>
+          <button onClick={() => void disconnectSerial()} disabled={!tauri || !connected}>
+            Disconnect
+          </button>
+          <button onClick={() => void refreshPorts()} disabled={!tauri || connected}>
+            Refresh
+          </button>
         </div>
+        <MetricInline label="Status" value={connected ? `Connected ${link.port ?? ""}` : "Disconnected"} />
+        {link.lastError && <MetricInline label="Last error" value={link.lastError} />}
+        {!tauri && <MetricInline label="Note" value="Run the desktop app to use serial" />}
       </SettingsPanel>
 
-      <SettingsPanel title="Parser">
-        <label>
-          Packet Format
-          <select defaultValue="CSV">
-            <option>CSV</option>
-            <option>JSON Lines</option>
-          </select>
-        </label>
-        <label>
-          Prefix
-          <input defaultValue="TEL" />
-        </label>
-        <label className="switch">
-          <input type="checkbox" defaultChecked />
-          <span>Strict parsing</span>
-        </label>
+      <SettingsPanel title="Commands">
+        <div className="button-row">
+          <button onClick={() => void sendCommand("arm")} disabled={!tauri || !connected}>
+            Arm
+          </button>
+          <button onClick={() => void sendCommand("disarm")} disabled={!tauri || !connected}>
+            Disarm
+          </button>
+        </div>
+        <div className="button-row">
+          {(["ping", "motor_stop"] as RocketCommand[]).map((cmd) => (
+            <button key={cmd} onClick={() => void sendCommand(cmd)} disabled={!tauri || !connected}>
+              {cmd === "motor_stop" ? "Motor Stop" : "Ping"}
+            </button>
+          ))}
+        </div>
+        <MetricInline label="Link" value={connected ? "Commands enabled" : "Connect to send"} />
       </SettingsPanel>
 
       <SettingsPanel title="Display">
+        <label>
+          Data Source
+          <select value={source} onChange={(event) => onSourceChange(event.currentTarget.value as DataSource)}>
+            <option value="live">Live (serial)</option>
+            <option value="demo">Demo (simulated)</option>
+          </select>
+        </label>
         <label>
           Theme
           <select value={theme} onChange={(event) => onThemeChange(event.currentTarget.value as ThemeMode)}>
@@ -67,14 +132,6 @@ export function SettingsView({ theme, onThemeChange }: SettingsViewProps) {
           <select defaultValue="Imperial">
             <option>Imperial</option>
             <option>Metric</option>
-          </select>
-        </label>
-        <label>
-          UI Refresh
-          <select defaultValue="10 Hz">
-            <option>5 Hz</option>
-            <option>10 Hz</option>
-            <option>20 Hz</option>
           </select>
         </label>
       </SettingsPanel>

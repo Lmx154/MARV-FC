@@ -11,10 +11,12 @@ default = []
 estimation-diagnostics = []
 
 [dependencies]
+marv-hilink = { path = "../marv-hilink" }
 embedded-hal = "1.0"
 micromath = "2.1"
 defmt = "1.0.1"
 embedded-hal-async = "1.0"
+embedded-io-async = "0.6.1"
 bmp5 = { version = "0.2.2", features = ["defmt"] }
 heapless = { version = "0.8", features = ["defmt-03"] }
 lora-phy = "3.0.1"

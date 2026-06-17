@@ -226,6 +226,7 @@ fn telemetry_snapshot_payload(altitude_m: f32) -> hilink::TelemetrySnapshotPaylo
         rssi_dbm: 0,
         snr_db_x100: 0,
         loss_pct_x100: 0,
+        accel_mag_cms2: 0,
     }
 }
 

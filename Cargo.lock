@@ -572,11 +572,13 @@ dependencies = [
  "embassy-time",
  "embedded-hal 1.0.0",
  "embedded-hal-async",
+ "embedded-io-async 0.6.1",
  "embedded-sdmmc",
  "futures",
  "heapless 0.8.0",
  "lora-modulation",
  "lora-phy",
+ "marv-hilink",
  "micromath",
  "nalgebra",
  "num-traits",
@@ -2797,6 +2799,7 @@ dependencies = [
  "defmt 1.0.1",
  "defmt-rtt",
  "embassy-executor",
+ "embassy-futures",
  "embassy-rp",
  "embassy-sync 0.7.2",
  "embassy-time",
@@ -2827,6 +2830,10 @@ dependencies = [
  "rp235x-base",
  "static_cell",
 ]
+
+[[package]]
+name = "marv-hilink"
+version = "0.1.0"
 
 [[package]]
 name = "marv-radio-rp2354a"

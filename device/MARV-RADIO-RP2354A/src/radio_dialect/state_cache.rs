@@ -1,6 +1,34 @@
 use common::comms::links::lora::stats::LoraLinkStats;
 use common::protocol::hilink;
 
+/// Generate the latest-cache `store` / `due` / `note_sent` accessor trio for a periodic
+/// vehicle sensor snapshot, mirroring the hand-written flight/gps snapshot methods.
+macro_rules! vehicle_snapshot_accessors {
+    ($ty:ty, $latest:ident, $dirty:ident, $sent_once:ident, $last_sent:ident,
+     $store:ident, $due:ident, $note:ident) => {
+        pub fn $store(&mut self, snapshot: $ty) {
+            self.$latest = Some(snapshot);
+            self.$dirty = true;
+        }
+
+        pub fn $due(&self, now_ms: u32, period_ms: u32) -> Option<$ty> {
+            if !self.$dirty {
+                return None;
+            }
+            if self.$sent_once && now_ms.wrapping_sub(self.$last_sent) < period_ms {
+                return None;
+            }
+            self.$latest
+        }
+
+        pub fn $note(&mut self, now_ms: u32) {
+            self.$dirty = false;
+            self.$sent_once = true;
+            self.$last_sent = now_ms;
+        }
+    };
+}
+
 pub const COMMAND_CORRELATION_DEPTH: usize = 16;
 pub const VEHICLE_COMMAND_HISTORY_DEPTH: usize = 8;
 pub const PENDING_LORA_COMMAND_ACK_DEPTH: usize = 4;
@@ -43,6 +71,22 @@ pub struct RadioStateCache {
     vehicle_gps_snapshot_dirty: bool,
     vehicle_gps_snapshot_sent_once: bool,
     vehicle_gps_snapshot_last_sent_ms: u32,
+    latest_vehicle_imu1_snapshot: Option<hilink::LoRaImu1SnapshotPayload>,
+    vehicle_imu1_snapshot_dirty: bool,
+    vehicle_imu1_snapshot_sent_once: bool,
+    vehicle_imu1_snapshot_last_sent_ms: u32,
+    latest_vehicle_imu2_snapshot: Option<hilink::LoRaImu2SnapshotPayload>,
+    vehicle_imu2_snapshot_dirty: bool,
+    vehicle_imu2_snapshot_sent_once: bool,
+    vehicle_imu2_snapshot_last_sent_ms: u32,
+    latest_vehicle_mag_snapshot: Option<hilink::LoRaMagSnapshotPayload>,
+    vehicle_mag_snapshot_dirty: bool,
+    vehicle_mag_snapshot_sent_once: bool,
+    vehicle_mag_snapshot_last_sent_ms: u32,
+    latest_vehicle_baro_snapshot: Option<hilink::LoRaBaroSnapshotPayload>,
+    vehicle_baro_snapshot_dirty: bool,
+    vehicle_baro_snapshot_sent_once: bool,
+    vehicle_baro_snapshot_last_sent_ms: u32,
     latest_lora_link_status: Option<hilink::LoRaLinkStatusPayload>,
     lora_link_status_dirty: bool,
     lora_link_status_sent_once: bool,
@@ -77,6 +121,22 @@ impl RadioStateCache {
             vehicle_gps_snapshot_dirty: false,
             vehicle_gps_snapshot_sent_once: false,
             vehicle_gps_snapshot_last_sent_ms: 0,
+            latest_vehicle_imu1_snapshot: None,
+            vehicle_imu1_snapshot_dirty: false,
+            vehicle_imu1_snapshot_sent_once: false,
+            vehicle_imu1_snapshot_last_sent_ms: 0,
+            latest_vehicle_imu2_snapshot: None,
+            vehicle_imu2_snapshot_dirty: false,
+            vehicle_imu2_snapshot_sent_once: false,
+            vehicle_imu2_snapshot_last_sent_ms: 0,
+            latest_vehicle_mag_snapshot: None,
+            vehicle_mag_snapshot_dirty: false,
+            vehicle_mag_snapshot_sent_once: false,
+            vehicle_mag_snapshot_last_sent_ms: 0,
+            latest_vehicle_baro_snapshot: None,
+            vehicle_baro_snapshot_dirty: false,
+            vehicle_baro_snapshot_sent_once: false,
+            vehicle_baro_snapshot_last_sent_ms: 0,
             latest_lora_link_status: None,
             lora_link_status_dirty: false,
             lora_link_status_sent_once: false,
@@ -276,6 +336,42 @@ impl RadioStateCache {
             });
         }
         self.vehicle_fault_summary = Some(fault_summary);
+
+        if let Some(mut snapshot) = self.latest_vehicle_flight_snapshot {
+            snapshot.time_ms = now_ms;
+            snapshot.state = state;
+            snapshot.fault_summary = saturating_u32_to_u16(fault_summary);
+            self.store_vehicle_flight_snapshot(snapshot);
+        }
+    }
+
+    pub fn vehicle_flight_snapshot_template(
+        &self,
+        time_ms: u32,
+    ) -> hilink::LoRaFlightSnapshotPayload {
+        let mut snapshot =
+            self.latest_vehicle_flight_snapshot
+                .unwrap_or(hilink::LoRaFlightSnapshotPayload {
+                    time_ms,
+                    state: hilink::lora_state::UNKNOWN,
+                    mode: hilink::lora_mode::UNKNOWN,
+                    flags: 0,
+                    altitude_dm: hilink::lora_scaling::ALTITUDE_INVALID_DM,
+                    vertical_velocity_cms: 0,
+                    accel_mag_cms2: 0,
+                    battery_mv: 0,
+                    pyro_or_actuator_flags: 0,
+                    fault_summary: 0,
+                });
+
+        snapshot.time_ms = time_ms;
+        if let Some(state) = self.vehicle_system_state {
+            snapshot.state = state;
+        }
+        if let Some(fault_summary) = self.vehicle_fault_summary {
+            snapshot.fault_summary = saturating_u32_to_u16(fault_summary);
+        }
+        snapshot
     }
 
     pub fn store_vehicle_flight_snapshot(&mut self, snapshot: hilink::LoRaFlightSnapshotPayload) {
@@ -335,6 +431,50 @@ impl RadioStateCache {
         self.vehicle_gps_snapshot_sent_once = true;
         self.vehicle_gps_snapshot_last_sent_ms = now_ms;
     }
+
+    vehicle_snapshot_accessors!(
+        hilink::LoRaImu1SnapshotPayload,
+        latest_vehicle_imu1_snapshot,
+        vehicle_imu1_snapshot_dirty,
+        vehicle_imu1_snapshot_sent_once,
+        vehicle_imu1_snapshot_last_sent_ms,
+        store_vehicle_imu1_snapshot,
+        due_vehicle_imu1_snapshot,
+        note_vehicle_imu1_snapshot_sent
+    );
+
+    vehicle_snapshot_accessors!(
+        hilink::LoRaImu2SnapshotPayload,
+        latest_vehicle_imu2_snapshot,
+        vehicle_imu2_snapshot_dirty,
+        vehicle_imu2_snapshot_sent_once,
+        vehicle_imu2_snapshot_last_sent_ms,
+        store_vehicle_imu2_snapshot,
+        due_vehicle_imu2_snapshot,
+        note_vehicle_imu2_snapshot_sent
+    );
+
+    vehicle_snapshot_accessors!(
+        hilink::LoRaMagSnapshotPayload,
+        latest_vehicle_mag_snapshot,
+        vehicle_mag_snapshot_dirty,
+        vehicle_mag_snapshot_sent_once,
+        vehicle_mag_snapshot_last_sent_ms,
+        store_vehicle_mag_snapshot,
+        due_vehicle_mag_snapshot,
+        note_vehicle_mag_snapshot_sent
+    );
+
+    vehicle_snapshot_accessors!(
+        hilink::LoRaBaroSnapshotPayload,
+        latest_vehicle_baro_snapshot,
+        vehicle_baro_snapshot_dirty,
+        vehicle_baro_snapshot_sent_once,
+        vehicle_baro_snapshot_last_sent_ms,
+        store_vehicle_baro_snapshot,
+        due_vehicle_baro_snapshot,
+        note_vehicle_baro_snapshot_sent
+    );
 
     pub fn refresh_lora_link_status(
         &mut self,

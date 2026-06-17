@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-pub const ROLE_SUMMARY: &str = "storage, companion link, telemetry, diagnostics, indicators";
+pub const ROLE_SUMMARY: &str = "storage, telemetry, diagnostics, indicators";
 
 pub struct Core1Plan {
     pub owns_storage_domain: bool,
@@ -10,6 +10,6 @@ pub struct Core1Plan {
 
 pub const PLAN: Core1Plan = Core1Plan {
     owns_storage_domain: true,
-    owns_companion_link: true,
+    owns_companion_link: false,
     owns_status_indicators: true,
 };

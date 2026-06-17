@@ -15,13 +15,13 @@ pub struct StorageSpiBus {
 }
 
 pub struct RadioLinkUart {
-    pub uart: Peri<'static, peripherals::UART0>,
+    pub uart: Peri<'static, peripherals::UART1>,
     pub tx_dma: Peri<'static, peripherals::DMA_CH4>,
     pub rx_dma: Peri<'static, peripherals::DMA_CH5>,
 }
 
-pub struct CompanionLinkUart {
-    pub uart: Peri<'static, peripherals::UART1>,
+pub struct GpsUart {
+    pub uart: Peri<'static, peripherals::UART0>,
     pub tx_dma: Peri<'static, peripherals::DMA_CH6>,
     pub rx_dma: Peri<'static, peripherals::DMA_CH7>,
 }
@@ -52,7 +52,7 @@ pub struct BusResources {
     pub environmental: EnvironmentalI2cBus,
     pub auxiliary_navigation: AuxiliaryNavigationI2cBus,
     pub radio_link: RadioLinkUart,
-    pub companion_link: CompanionLinkUart,
+    pub gps: GpsUart,
     pub status_led: StatusLedPio,
     pub actuators: ActuatorPwm,
 }

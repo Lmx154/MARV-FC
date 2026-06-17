@@ -3,7 +3,7 @@ use common::messages::logging::{LogSinkState, LoggedSensor};
 use common::messages::runtime::FlightPhase;
 use common::services::acquisition::{
     BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleChannel, GpsFixSampleSubscriber,
-    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleSubscriber,
+    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleChannel, MagnetometerSampleSubscriber,
     PressureTransducerSampleSubscriber, TimeSampleChannel, TimeSampleSubscriber,
 };
 use common::services::health::LivenessUpdate;
@@ -40,10 +40,13 @@ pub struct ImuInitReport {
 }
 
 pub const IMU_CHANNEL_DEPTH: usize = 16;
-pub const IMU_CHANNEL_SUBS: usize = 2;
+// Primary IMU has liveness, logging, and radio-sample subscribers.
+pub const IMU_CHANNEL_SUBS: usize = 3;
 pub const IMU_CHANNEL_PUBS: usize = 1;
 pub const SENSOR_CHANNEL_DEPTH: usize = 16;
-pub const SENSOR_CHANNEL_SUBS: usize = 4;
+// Real-sensor path can hold liveness + altitude-LED + logging + radio-emitter barometer
+// subscribers simultaneously, so keep one slot of headroom beyond those four.
+pub const SENSOR_CHANNEL_SUBS: usize = 5;
 pub const SENSOR_CHANNEL_PUBS: usize = 1;
 pub const LOG_CHANNEL_DEPTH: usize = 32;
 pub const LOG_SINK_STATE_DEPTH: usize = 4;
@@ -121,10 +124,21 @@ pub type FcGpsSubscriber = GpsFixSampleSubscriber<
     SENSOR_CHANNEL_SUBS,
     SENSOR_CHANNEL_PUBS,
 >;
+pub type FcMagnetometerChannel = MagnetometerSampleChannel<
+    CriticalSectionRawMutex,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
+>;
+pub type FcMagnetometerSubscriber = MagnetometerSampleSubscriber<
+    'static,
+    CriticalSectionRawMutex,
+    SENSOR_CHANNEL_DEPTH,
+    SENSOR_CHANNEL_SUBS,
+    SENSOR_CHANNEL_PUBS,
+>;
 pub type DisabledPressureTransducerSubscriber =
     PressureTransducerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
-pub type DisabledMagnetometerSubscriber =
-    MagnetometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type FcFlightPhaseChannel = PubSubChannel<
     CriticalSectionRawMutex,
     FlightPhase,
@@ -146,6 +160,7 @@ pub static AUX_IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
 pub static TIME_CHANNEL: FcTimeChannel = FcTimeChannel::new();
 pub static BAROMETER_CHANNEL: FcBarometerChannel = FcBarometerChannel::new();
 pub static GPS_CHANNEL: FcGpsChannel = FcGpsChannel::new();
+pub static MAGNETOMETER_CHANNEL: FcMagnetometerChannel = FcMagnetometerChannel::new();
 pub static LOG_CHANNEL: LogChannel<CriticalSectionRawMutex, LOG_CHANNEL_DEPTH> = LogChannel::new();
 pub static LOG_SINK_STATE_CHANNEL: LogSinkStateChannel<
     CriticalSectionRawMutex,

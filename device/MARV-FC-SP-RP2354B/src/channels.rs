@@ -3,7 +3,7 @@ use common::messages::logging::{LogSinkState, LoggedSensor};
 use common::messages::runtime::FlightPhase;
 use common::services::acquisition::{
     BarometerSampleChannel, BarometerSampleSubscriber, GpsFixSampleChannel, GpsFixSampleSubscriber,
-    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleSubscriber,
+    ImuSampleChannel, ImuSampleSubscriber, MagnetometerSampleChannel, MagnetometerSampleSubscriber,
     PressureTransducerSampleSubscriber, TimeSampleChannel, TimeSampleSubscriber,
 };
 use common::services::health::LivenessUpdate;
@@ -40,7 +40,8 @@ pub struct ImuInitReport {
 }
 
 pub const IMU_CHANNEL_DEPTH: usize = 16;
-pub const IMU_CHANNEL_SUBS: usize = 2;
+// liveness + logging + radio-emitter raw-sample subscribers.
+pub const IMU_CHANNEL_SUBS: usize = 3;
 pub const IMU_CHANNEL_PUBS: usize = 1;
 pub const SENSOR_CHANNEL_DEPTH: usize = 16;
 pub const SENSOR_CHANNEL_SUBS: usize = 4;
@@ -125,6 +126,10 @@ pub type DisabledPressureTransducerSubscriber =
     PressureTransducerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
 pub type DisabledMagnetometerSubscriber =
     MagnetometerSampleSubscriber<'static, CriticalSectionRawMutex, 1, 1, 1>;
+// The quad carries no magnetometer; this channel exists only so the shared radio telemetry
+// emitter has a (never-published) magnetometer source. Its drain always yields nothing, so no
+// `Mag` frames are emitted.
+pub type FcMagnetometerChannel = MagnetometerSampleChannel<CriticalSectionRawMutex, 1, 1, 1>;
 pub type FcFlightPhaseChannel = PubSubChannel<
     CriticalSectionRawMutex,
     FlightPhase,
@@ -143,6 +148,7 @@ pub type FcFlightPhaseSubscriber = Subscriber<
 
 pub static IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
 pub static AUX_IMU_CHANNEL: FcImuChannel = FcImuChannel::new();
+pub static MAGNETOMETER_CHANNEL: FcMagnetometerChannel = FcMagnetometerChannel::new();
 pub static TIME_CHANNEL: FcTimeChannel = FcTimeChannel::new();
 pub static BAROMETER_CHANNEL: FcBarometerChannel = FcBarometerChannel::new();
 pub static GPS_CHANNEL: FcGpsChannel = FcGpsChannel::new();

@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 
 import { AppHeader } from "./components/layout/AppHeader";
 import { TabBar } from "./components/layout/TabBar";
-import { buildDebugLines } from "./data/demoTelemetry";
 import { useDemoTelemetry } from "./hooks/useDemoTelemetry";
-import type { DebugFilter, TabId, ThemeMode } from "./types";
+import { useLiveTelemetry } from "./hooks/useLiveTelemetry";
+import { isTauri } from "./lib/backend";
+import type { DataSource, DebugFilter, TabId, ThemeMode } from "./types";
 import { saveRawLog } from "./utils/logging";
 import { DashboardView } from "./views/DashboardView";
 import { DebugView } from "./views/DebugView";
@@ -19,7 +20,13 @@ function App() {
   const [recording, setRecording] = useState(true);
   const [debugFilter, setDebugFilter] = useState<DebugFilter>("ALL");
   const [clearedAtSeq, setClearedAtSeq] = useState(0);
-  const { debugLines, packet, recovery } = useDemoTelemetry();
+  const [source, setSource] = useState<DataSource>(() => (isTauri() ? "live" : "demo"));
+
+  // Both hooks always run (rules of hooks); we render whichever source is selected. The live
+  // hook only subscribes to Tauri events, the demo hook only runs a timer, so the idle one is cheap.
+  const demo = useDemoTelemetry();
+  const live = useLiveTelemetry();
+  const { debugLines, packet, recovery } = source === "live" ? live : demo;
 
   const visibleDebugLines = useMemo(
     () => debugLines.filter((line) => packet.seq >= clearedAtSeq && (debugFilter === "ALL" || line.kind === debugFilter)),
@@ -47,13 +54,20 @@ function App() {
             recording={recording}
             onClear={() => setClearedAtSeq(packet.seq + 1)}
             onFilterChange={setDebugFilter}
-            onSave={() => saveRawLog(buildDebugLines(packet))}
+            onSave={() => saveRawLog(debugLines)}
             onToggleAutoscroll={() => setAutoscroll((value) => !value)}
             onTogglePaused={() => setPaused((value) => !value)}
             onToggleRecording={() => setRecording((value) => !value)}
           />
         )}
-        {activeTab === "settings" && <SettingsView theme={theme} onThemeChange={setTheme} />}
+        {activeTab === "settings" && (
+          <SettingsView
+            theme={theme}
+            onThemeChange={setTheme}
+            source={source}
+            onSourceChange={setSource}
+          />
+        )}
       </main>
     </div>
   );

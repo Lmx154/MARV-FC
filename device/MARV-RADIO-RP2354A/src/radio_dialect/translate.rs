@@ -109,9 +109,62 @@ fn ground_station_rf_to_normal(
             )
             .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
         }
-        rf::RfMsgType::LoRaEvent | rf::RfMsgType::LoRaFaults | rf::RfMsgType::LoRaLinkStatus => {
-            RfToHostDecision::Handled
+        rf::RfMsgType::LoRaLinkStatus => {
+            let Ok(link) = rf::decode_rf_payload::<hilink::LoRaLinkStatusPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            encode_normal_frame(
+                &lora_link_status_to_radio_status(link),
+                cache.next_normal_tx_seq(),
+                now_ms,
+            )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
         }
+        rf::RfMsgType::LoRaImu1Snapshot => {
+            let Ok(imu) = rf::decode_rf_payload::<hilink::LoRaImu1SnapshotPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            encode_normal_frame(
+                &lora_imu1_to_normal_imu(imu),
+                cache.next_normal_tx_seq(),
+                now_ms,
+            )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
+        }
+        rf::RfMsgType::LoRaImu2Snapshot => {
+            let Ok(imu) = rf::decode_rf_payload::<hilink::LoRaImu2SnapshotPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            encode_normal_frame(
+                &lora_imu2_to_normal_aux_imu(imu),
+                cache.next_normal_tx_seq(),
+                now_ms,
+            )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
+        }
+        rf::RfMsgType::LoRaMagSnapshot => {
+            let Ok(mag) = rf::decode_rf_payload::<hilink::LoRaMagSnapshotPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            encode_normal_frame(
+                &lora_mag_to_normal_mag(mag),
+                cache.next_normal_tx_seq(),
+                now_ms,
+            )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
+        }
+        rf::RfMsgType::LoRaBaroSnapshot => {
+            let Ok(baro) = rf::decode_rf_payload::<hilink::LoRaBaroSnapshotPayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            encode_normal_frame(
+                &lora_baro_to_normal_baro(baro),
+                cache.next_normal_tx_seq(),
+                now_ms,
+            )
+            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
+        }
+        rf::RfMsgType::LoRaEvent | rf::RfMsgType::LoRaFaults => RfToHostDecision::Handled,
         _ => RfToHostDecision::Drop,
     }
 }
@@ -256,6 +309,48 @@ fn vehicle_normal_to_rf(
             ));
             HostToRfDecision::Cached
         }
+        hilink::MsgType::Imu => {
+            let Ok(imu) = hilink::decode_payload::<hilink::ImuPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            let time_ms = packet.header.send_time_ms;
+            // Keep folding accel magnitude into the flight snapshot for the legacy summary path,
+            // and also cache the full IMU sample as its own scheduled downlink class.
+            let mut snapshot = cache.vehicle_flight_snapshot_template(time_ms);
+            snapshot.accel_mag_cms2 = accel_magnitude_cms2(imu.accel_mps2);
+            cache.store_vehicle_flight_snapshot(snapshot);
+            cache.store_vehicle_imu1_snapshot(imu_to_lora_imu1(imu.accel_mps2, imu.gyro_rps, time_ms));
+            HostToRfDecision::Cached
+        }
+        hilink::MsgType::AuxImu => {
+            let Ok(imu) = hilink::decode_payload::<hilink::AuxImuPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            cache.store_vehicle_imu2_snapshot(imu_to_lora_imu2(
+                imu.accel_mps2,
+                imu.gyro_rps,
+                packet.header.send_time_ms,
+            ));
+            HostToRfDecision::Cached
+        }
+        hilink::MsgType::Baro => {
+            let Ok(baro) = hilink::decode_payload::<hilink::BaroPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            let time_ms = packet.header.send_time_ms;
+            let mut snapshot = cache.vehicle_flight_snapshot_template(time_ms);
+            snapshot.altitude_dm = altitude_m_to_dm(baro.altitude_m);
+            cache.store_vehicle_flight_snapshot(snapshot);
+            cache.store_vehicle_baro_snapshot(baro_to_lora_baro(baro, time_ms));
+            HostToRfDecision::Cached
+        }
+        hilink::MsgType::Mag => {
+            let Ok(mag) = hilink::decode_payload::<hilink::MagPayload>(packet) else {
+                return HostToRfDecision::Drop;
+            };
+            cache.store_vehicle_mag_snapshot(mag_to_lora_mag(mag, packet.header.send_time_ms));
+            HostToRfDecision::Cached
+        }
         hilink::MsgType::SystemState => {
             let Ok(state) = hilink::decode_payload::<hilink::SystemStatePayload>(packet) else {
                 return HostToRfDecision::Drop;
@@ -271,6 +366,9 @@ fn vehicle_normal_to_rf(
             let Ok(gps) = hilink::decode_payload::<hilink::GpsPayload>(packet) else {
                 return HostToRfDecision::Drop;
             };
+            let mut snapshot = cache.vehicle_flight_snapshot_template(packet.header.send_time_ms);
+            snapshot.flags = lora_flags_with_gps_validity(snapshot.flags, gps.fix_type > 0);
+            cache.store_vehicle_flight_snapshot(snapshot);
             cache.store_vehicle_gps_snapshot(gps_to_lora_gps(gps, packet.header.send_time_ms));
             HostToRfDecision::Cached
         }
@@ -376,11 +474,37 @@ fn telemetry_to_lora_flight(
         flags: telemetry_flags_to_lora_flags(telemetry.flags),
         altitude_dm: saturating_f32_to_i32(-telemetry.position_ned_m[2] * 10.0),
         vertical_velocity_cms: saturating_f32_to_i16(-telemetry.velocity_ned_mps[2] * 100.0),
-        accel_mag_cms2: 0,
+        accel_mag_cms2: telemetry.accel_mag_cms2,
         battery_mv: saturating_f32_to_u16(telemetry.battery_voltage_v * 1_000.0),
         pyro_or_actuator_flags: 0,
         fault_summary: saturating_u32_to_u16(telemetry_flags_to_fault_summary(telemetry.flags)),
     }
+}
+
+fn altitude_m_to_dm(altitude_m: f32) -> i32 {
+    if !altitude_m.is_finite() {
+        hilink::lora_scaling::ALTITUDE_INVALID_DM
+    } else {
+        saturating_f32_to_i32(altitude_m * 10.0)
+    }
+}
+
+fn accel_magnitude_cms2(accel_mps2: [f32; 3]) -> u16 {
+    let magnitude_mps2 = sqrt_f32(
+        accel_mps2[0] * accel_mps2[0]
+            + accel_mps2[1] * accel_mps2[1]
+            + accel_mps2[2] * accel_mps2[2],
+    );
+    saturating_f32_to_u16(magnitude_mps2 * 100.0)
+}
+
+fn lora_flags_with_gps_validity(mut flags: u16, gps_valid: bool) -> u16 {
+    if gps_valid {
+        flags |= hilink::lora_flags::GPS_VALID;
+    } else {
+        flags &= !hilink::lora_flags::GPS_VALID;
+    }
+    flags
 }
 
 fn gps_to_lora_gps(gps: hilink::GpsPayload, time_ms: u32) -> hilink::LoRaGpsSnapshotPayload {
@@ -431,6 +555,29 @@ fn lora_flight_to_telemetry_snapshot(
         rssi_dbm: 0,
         snr_db_x100: 0,
         loss_pct_x100: 0,
+        accel_mag_cms2: snapshot.accel_mag_cms2,
+    }
+}
+
+/// Convert the radio's LoRa link metrics into a normal-HILink `RadioStatus` message so
+/// the ground-station host (telemetry UI) sees RSSI / SNR / loss / rate. Previously these
+/// were consumed locally and never reached the host.
+fn lora_link_status_to_radio_status(
+    link: hilink::LoRaLinkStatusPayload,
+) -> hilink::RadioStatusPayload {
+    let total = u32::from(link.rx_packets_delta) + u32::from(link.lost_packets_delta);
+    let loss_pct_x100 = if total == 0 {
+        0
+    } else {
+        saturating_u32_to_u16(u32::from(link.lost_packets_delta) * 10_000 / total)
+    };
+    hilink::RadioStatusPayload {
+        rssi_dbm: i16::from(link.downlink_rssi_dbm),
+        // RF carries SNR in 0.25 dB units (x4); RadioStatus uses 0.01 dB units (x100).
+        snr_db_x100: i16::from(link.downlink_snr_x4) * 25,
+        loss_pct_x100,
+        packet_rate_hz: link.telemetry_rate_hz,
+        reserved0: 0,
     }
 }
 
@@ -462,29 +609,173 @@ fn lora_gps_to_normal_gps(snapshot: hilink::LoRaGpsSnapshotPayload) -> hilink::G
     }
 }
 
+const GRAVITY_MPS2: f32 = 9.806_65;
+const RAD_PER_DEG: f32 = 0.017_453_292;
+const DEG_PER_RAD: f32 = 57.295_78;
+
+fn sim_stamp_from_ms(time_ms: u32) -> hilink::SimStamp {
+    hilink::SimStamp {
+        sim_tick: 0,
+        sim_time_us: u64::from(time_ms) * 1_000,
+    }
+}
+
+fn accel_mps2_to_cg(accel_mps2: [f32; 3]) -> [i16; 3] {
+    [
+        saturating_f32_to_i16(accel_mps2[0] / GRAVITY_MPS2 * 100.0),
+        saturating_f32_to_i16(accel_mps2[1] / GRAVITY_MPS2 * 100.0),
+        saturating_f32_to_i16(accel_mps2[2] / GRAVITY_MPS2 * 100.0),
+    ]
+}
+
+fn cg_to_accel_mps2(accel_cg: [i16; 3]) -> [f32; 3] {
+    [
+        accel_cg[0] as f32 / 100.0 * GRAVITY_MPS2,
+        accel_cg[1] as f32 / 100.0 * GRAVITY_MPS2,
+        accel_cg[2] as f32 / 100.0 * GRAVITY_MPS2,
+    ]
+}
+
+fn gyro_rps_to_ddps(gyro_rps: [f32; 3]) -> [i16; 3] {
+    [
+        saturating_f32_to_i16(gyro_rps[0] * DEG_PER_RAD * 10.0),
+        saturating_f32_to_i16(gyro_rps[1] * DEG_PER_RAD * 10.0),
+        saturating_f32_to_i16(gyro_rps[2] * DEG_PER_RAD * 10.0),
+    ]
+}
+
+fn ddps_to_gyro_rps(gyro_ddps: [i16; 3]) -> [f32; 3] {
+    [
+        gyro_ddps[0] as f32 / 10.0 * RAD_PER_DEG,
+        gyro_ddps[1] as f32 / 10.0 * RAD_PER_DEG,
+        gyro_ddps[2] as f32 / 10.0 * RAD_PER_DEG,
+    ]
+}
+
+fn field_ut_to_mgauss(field_ut: [f32; 3]) -> [i16; 3] {
+    [
+        saturating_f32_to_i16(field_ut[0] * 10.0),
+        saturating_f32_to_i16(field_ut[1] * 10.0),
+        saturating_f32_to_i16(field_ut[2] * 10.0),
+    ]
+}
+
+fn mgauss_to_field_ut(field_mgauss: [i16; 3]) -> [f32; 3] {
+    [
+        field_mgauss[0] as f32 / 10.0,
+        field_mgauss[1] as f32 / 10.0,
+        field_mgauss[2] as f32 / 10.0,
+    ]
+}
+
+fn imu_to_lora_imu1(
+    accel_mps2: [f32; 3],
+    gyro_rps: [f32; 3],
+    time_ms: u32,
+) -> hilink::LoRaImu1SnapshotPayload {
+    hilink::LoRaImu1SnapshotPayload {
+        time_ms,
+        accel_cg: accel_mps2_to_cg(accel_mps2),
+        gyro_ddps: gyro_rps_to_ddps(gyro_rps),
+    }
+}
+
+fn imu_to_lora_imu2(
+    accel_mps2: [f32; 3],
+    gyro_rps: [f32; 3],
+    time_ms: u32,
+) -> hilink::LoRaImu2SnapshotPayload {
+    hilink::LoRaImu2SnapshotPayload {
+        time_ms,
+        accel_cg: accel_mps2_to_cg(accel_mps2),
+        gyro_ddps: gyro_rps_to_ddps(gyro_rps),
+    }
+}
+
+fn mag_to_lora_mag(mag: hilink::MagPayload, time_ms: u32) -> hilink::LoRaMagSnapshotPayload {
+    hilink::LoRaMagSnapshotPayload {
+        time_ms,
+        field_mgauss: field_ut_to_mgauss(mag.field_ut),
+    }
+}
+
+fn baro_to_lora_baro(baro: hilink::BaroPayload, time_ms: u32) -> hilink::LoRaBaroSnapshotPayload {
+    hilink::LoRaBaroSnapshotPayload {
+        time_ms,
+        pressure_pa: saturating_f32_to_u32(baro.pressure_pa),
+        altitude_dm: altitude_m_to_dm(baro.altitude_m),
+        temp_cc: saturating_f32_to_i16(baro.temperature_c * 100.0),
+    }
+}
+
+fn lora_imu1_to_normal_imu(snapshot: hilink::LoRaImu1SnapshotPayload) -> hilink::ImuPayload {
+    hilink::ImuPayload {
+        stamp: sim_stamp_from_ms(snapshot.time_ms),
+        accel_mps2: cg_to_accel_mps2(snapshot.accel_cg),
+        gyro_rps: ddps_to_gyro_rps(snapshot.gyro_ddps),
+    }
+}
+
+fn lora_imu2_to_normal_aux_imu(snapshot: hilink::LoRaImu2SnapshotPayload) -> hilink::AuxImuPayload {
+    hilink::AuxImuPayload {
+        stamp: sim_stamp_from_ms(snapshot.time_ms),
+        accel_mps2: cg_to_accel_mps2(snapshot.accel_cg),
+        gyro_rps: ddps_to_gyro_rps(snapshot.gyro_ddps),
+    }
+}
+
+fn lora_mag_to_normal_mag(snapshot: hilink::LoRaMagSnapshotPayload) -> hilink::MagPayload {
+    hilink::MagPayload {
+        stamp: sim_stamp_from_ms(snapshot.time_ms),
+        field_ut: mgauss_to_field_ut(snapshot.field_mgauss),
+    }
+}
+
+fn lora_baro_to_normal_baro(snapshot: hilink::LoRaBaroSnapshotPayload) -> hilink::BaroPayload {
+    let altitude_m = if snapshot.altitude_dm == hilink::lora_scaling::ALTITUDE_INVALID_DM {
+        0.0
+    } else {
+        snapshot.altitude_dm as f32 / 10.0
+    };
+    hilink::BaroPayload {
+        stamp: sim_stamp_from_ms(snapshot.time_ms),
+        pressure_pa: snapshot.pressure_pa as f32,
+        altitude_m,
+        temperature_c: snapshot.temp_cc as f32 / 100.0,
+    }
+}
+
+fn saturating_f32_to_u32(value: f32) -> u32 {
+    if !value.is_finite() {
+        0
+    } else {
+        round_f32(value).clamp(0.0, u32::MAX as f32) as u32
+    }
+}
+
 fn telemetry_flags_to_lora_flags(flags: u32) -> u16 {
     let mut lora_flags = 0;
     if (flags & hilink::response_flags::ARMED) != 0 {
-        lora_flags |= 1 << hilink::lora_flags::ARMED;
+        lora_flags |= hilink::lora_flags::ARMED;
     }
     if (flags & hilink::response_flags::FAILSAFE) != 0 {
-        lora_flags |= 1 << hilink::lora_flags::FAILSAFE;
+        lora_flags |= hilink::lora_flags::FAILSAFE;
     }
     if (flags & hilink::response_flags::ESTIMATOR_VALID) != 0 {
-        lora_flags |= 1 << hilink::lora_flags::ESTIMATOR_VALID;
+        lora_flags |= hilink::lora_flags::ESTIMATOR_VALID;
     }
     lora_flags
 }
 
 fn lora_flags_to_telemetry_flags(lora_flags: u16) -> u32 {
     let mut flags = 0;
-    if (lora_flags & (1 << hilink::lora_flags::ARMED)) != 0 {
+    if (lora_flags & hilink::lora_flags::ARMED) != 0 {
         flags |= hilink::response_flags::ARMED;
     }
-    if (lora_flags & (1 << hilink::lora_flags::FAILSAFE)) != 0 {
+    if (lora_flags & hilink::lora_flags::FAILSAFE) != 0 {
         flags |= hilink::response_flags::FAILSAFE;
     }
-    if (lora_flags & (1 << hilink::lora_flags::ESTIMATOR_VALID)) != 0 {
+    if (lora_flags & hilink::lora_flags::ESTIMATOR_VALID) != 0 {
         flags |= hilink::response_flags::ESTIMATOR_VALID;
     }
     flags

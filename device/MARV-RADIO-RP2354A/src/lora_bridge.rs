@@ -18,6 +18,7 @@ use crate::channels::{
     LORA_TO_HOST_CHANNEL, STATUS_INDICATOR_CHANNEL, StatusIndicatorEvent, StatusIndicatorSender,
 };
 use crate::config::{self, FirmwareRole};
+use crate::radio_dialect::airtime::{AirtimeBudget, DownlinkClass};
 use crate::radio_dialect::{policy, scheduler, state_cache::RadioStateCache, translate};
 use crate::resources::LoraPins;
 use crate::watchdog::WatchdogResources;
@@ -70,6 +71,10 @@ async fn lora_bridge_task(
     let mut health = LoraLinkHealth::new(policy);
     publish_state(indicator, health.state()).await;
 
+    // Derive per-class downlink periods from the live RF profile so airtime is shared by sensor
+    // update rate and auto-rescales if the profile changes.
+    let budget = AirtimeBudget::from_profile(radio.profile());
+
     info!(
         "sx1262 lora bridge ready: role={:?} freq={=u32}Hz spi={=u32}Hz airtime_max={=u32}us rx_window_symbols={=u16}",
         role,
@@ -78,8 +83,9 @@ async fn lora_bridge_task(
         timing.frame_airtime_us,
         timing.rx_window_symbols
     );
+    info!("lora downlink airtime budget: {:?}", budget);
 
-    run_bridge(&mut radio, role, indicator, &timing, &mut health).await;
+    run_bridge(&mut radio, role, indicator, &timing, &budget, &mut health).await;
 }
 
 fn node_role(role: FirmwareRole) -> LoraNodeRole {
@@ -286,6 +292,7 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
     source: LoraNodeRole,
     indicator: StatusIndicatorSender,
     health: &mut LoraLinkHealth,
+    budget: &AirtimeBudget,
     dialect_cache: &mut RadioStateCache,
 ) where
     SPI: embedded_hal_async::spi::SpiDevice<u8>,
@@ -324,13 +331,15 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
     let now_ms = status_time_ms();
     dialect_cache.refresh_lora_link_status(
         now_ms,
-        policy::LINK_STATUS_PERIOD_MS,
+        budget.period_ms(DownlinkClass::LinkStatus),
         health.stats(),
         0,
         policy::DEFAULT_TELEMETRY_RATE_HZ,
     );
 
-    let Some(payload) = scheduler::select_scheduled_rf_frame(role, dialect_cache, now_ms) else {
+    let Some(payload) =
+        scheduler::select_scheduled_rf_frame(role, dialect_cache, budget, now_ms)
+    else {
         return;
     };
     transmit_lora_frame(
@@ -461,6 +470,7 @@ async fn run_bridge<SPI, CTRL, WAIT>(
     role: FirmwareRole,
     indicator: StatusIndicatorSender,
     timing: &LoraLinkTiming,
+    budget: &AirtimeBudget,
     health: &mut LoraLinkHealth,
 ) -> !
 where
@@ -474,8 +484,16 @@ where
     let mut dialect_cache = RadioStateCache::new();
 
     loop {
-        transmit_queued_host_frame(radio, role, source, indicator, health, &mut dialect_cache)
-            .await;
+        transmit_queued_host_frame(
+            radio,
+            role,
+            source,
+            indicator,
+            health,
+            budget,
+            &mut dialect_cache,
+        )
+        .await;
         transmit_keepalive_if_due(radio, source, indicator, health, &mut schedule).await;
 
         if let Err(_) = radio.start_rx_single(timing.rx_window_symbols).await {

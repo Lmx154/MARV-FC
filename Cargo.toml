@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "marv-hilink",
     "common",
     "device/MARV-FC-RL-RP2354B",
     "device/MARV-FC-SP-RP2354B",

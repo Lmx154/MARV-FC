@@ -1,0 +1,12 @@
+[package]
+name = "marv-hilink"
+version = "0.1.0"
+edition = "2024"
+description = "HILink wire protocol (framing, encode/decode) shared by MARV firmware and host tools. no_std, zero deps."
+
+[lib]
+path = "src/lib.rs"
+
+# No dependencies: the wire format is explicit little-endian serialization over `core` only.
+# `#![cfg_attr(not(test), no_std)]` in lib.rs keeps this usable from both embedded firmware
+# and std host binaries (e.g. the ground-station Tauri backend).

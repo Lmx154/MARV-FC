@@ -4,12 +4,18 @@
 //! `COBS(Header + Payload + CRC16-CCITT-FALSE little-endian) + 0x00 delimiter`.
 //! Public packet structs are `repr(C)` for sharing shape, but the wire format is
 //! explicit little-endian serialization.
+//!
+//! This crate is `no_std` (zero dependencies) so the same encode/decode source is
+//! shared by the embedded firmware (`common` re-exports it as `protocol::hilink`)
+//! and host tools such as the ground-station telemetry backend. Tests run under std.
+#![cfg_attr(not(test), no_std)]
 
 pub mod rf;
 
 pub use rf::{
-    LoRaCommandAckPayload, LoRaCommandPayload, LoRaEventPayload, LoRaFaultsPayload,
-    LoRaFlightSnapshotPayload, LoRaGpsSnapshotPayload, LoRaLinkStatusPayload,
+    LoRaBaroSnapshotPayload, LoRaCommandAckPayload, LoRaCommandPayload, LoRaEventPayload,
+    LoRaFaultsPayload, LoRaFlightSnapshotPayload, LoRaGpsSnapshotPayload, LoRaImu1SnapshotPayload,
+    LoRaImu2SnapshotPayload, LoRaLinkStatusPayload, LoRaMagSnapshotPayload,
     LoRaRequestSnapshotPayload, LoRaSetProfilePayload, lora_command_flags, lora_command_id,
     lora_command_reason, lora_command_status, lora_event_id, lora_event_severity, lora_fault,
     lora_flags, lora_mode, lora_profile, lora_profile_flags, lora_pyro_actuator_flags,
@@ -64,6 +70,7 @@ pub enum MsgType {
     EstimatorState = 27,
     RadioStatus = 28,
     TelemetrySnapshot = 29,
+    AuxImu = 30,
 
     Arm = 40,
     Disarm = 41,
@@ -107,6 +114,7 @@ impl TryFrom<u8> for MsgType {
             27 => Ok(Self::EstimatorState),
             28 => Ok(Self::RadioStatus),
             29 => Ok(Self::TelemetrySnapshot),
+            30 => Ok(Self::AuxImu),
             40 => Ok(Self::Arm),
             41 => Ok(Self::Disarm),
             42 => Ok(Self::ControlWaypoint),
@@ -248,6 +256,16 @@ pub struct ImuPayload {
     pub gyro_rps: [f32; 3],
 }
 
+/// Secondary IMU sample. Identical layout to [`ImuPayload`]; carried as a distinct
+/// message type so the two physical IMUs (primary / auxiliary) stay separable downstream.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct AuxImuPayload {
+    pub stamp: SimStamp,
+    pub accel_mps2: [f32; 3],
+    pub gyro_rps: [f32; 3],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MagPayload {
@@ -301,6 +319,24 @@ pub struct TelemetrySnapshotPayload {
     pub rssi_dbm: i16,
     pub snr_db_x100: i16,
     pub loss_pct_x100: u16,
+    /// Acceleration magnitude in cm/s² (matches `rf::LoRaFlightSnapshotPayload.accel_mag_cms2`).
+    /// Divide by 980.665 for g. 0 = not reported.
+    pub accel_mag_cms2: u16,
+}
+
+/// Link-quality status measured by the ground-station radio and forwarded to the host.
+///
+/// The radio's LoRa dialect carries link metrics in `rf::LoRaLinkStatusPayload`, which the
+/// ground-station firmware previously consumed locally. It now re-encodes the host-relevant
+/// fields into this message (`MsgType::RadioStatus`) so the telemetry UI can show RSSI/SNR/loss.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RadioStatusPayload {
+    pub rssi_dbm: i16,
+    pub snr_db_x100: i16,
+    pub loss_pct_x100: u16,
+    pub packet_rate_hz: u8,
+    pub reserved0: u8,
 }
 
 #[repr(C)]
@@ -478,6 +514,23 @@ pub mod valid {
     pub const GPS: u32 = 1 << 4;
     pub const BATTERY: u32 = 1 << 5;
     pub const RADIO: u32 = 1 << 6;
+}
+
+/// Canonical rocket flight-state codes carried in the `system_state` byte of
+/// `HeartbeatPayload` / `SystemStatePayload` / `TelemetrySnapshotPayload`.
+///
+/// This is the contract the flight controller implements and the ground-station
+/// telemetry UI decodes; the codes line up 1:1 with the UI's `FlightStage` enum.
+/// (Distinct from the legacy `rf::lora_state` quad semantics.)
+pub mod flight_state {
+    pub const PAD: u8 = 0;
+    pub const BOOST: u8 = 1;
+    pub const BURNOUT: u8 = 2;
+    pub const COAST: u8 = 3;
+    pub const APOGEE: u8 = 4;
+    pub const DROGUE_DESCENT: u8 = 5;
+    pub const MAIN_DESCENT: u8 = 6;
+    pub const LANDED: u8 = 7;
 }
 
 pub mod response_flags {
@@ -1131,6 +1184,29 @@ impl WirePayload for ImuPayload {
     }
 }
 
+impl WirePayload for AuxImuPayload {
+    const MSG_TYPE: MsgType = MsgType::AuxImu;
+    const WIRE_LEN: usize = 40;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.sim_stamp(self.stamp)?;
+        w.f32x3(self.accel_mps2)?;
+        w.f32x3(self.gyro_rps)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            stamp: r.sim_stamp()?,
+            accel_mps2: r.f32x3()?,
+            gyro_rps: r.f32x3()?,
+        })
+    }
+}
+
 impl WirePayload for MagPayload {
     const MSG_TYPE: MsgType = MsgType::Mag;
     const WIRE_LEN: usize = 28;
@@ -1239,7 +1315,7 @@ impl WirePayload for SystemStatePayload {
 
 impl WirePayload for TelemetrySnapshotPayload {
     const MSG_TYPE: MsgType = MsgType::TelemetrySnapshot;
-    const WIRE_LEN: usize = 74;
+    const WIRE_LEN: usize = 76;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
         let mut w = Writer::new(out);
@@ -1254,6 +1330,7 @@ impl WirePayload for TelemetrySnapshotPayload {
         w.i16(self.rssi_dbm)?;
         w.i16(self.snr_db_x100)?;
         w.u16(self.loss_pct_x100)?;
+        w.u16(self.accel_mag_cms2)?;
         Ok(w.len())
     }
 
@@ -1272,6 +1349,34 @@ impl WirePayload for TelemetrySnapshotPayload {
             rssi_dbm: r.i16()?,
             snr_db_x100: r.i16()?,
             loss_pct_x100: r.u16()?,
+            accel_mag_cms2: r.u16()?,
+        })
+    }
+}
+
+impl WirePayload for RadioStatusPayload {
+    const MSG_TYPE: MsgType = MsgType::RadioStatus;
+    const WIRE_LEN: usize = 8;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.i16(self.rssi_dbm)?;
+        w.i16(self.snr_db_x100)?;
+        w.u16(self.loss_pct_x100)?;
+        w.u8(self.packet_rate_hz)?;
+        w.u8(self.reserved0)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            rssi_dbm: r.i16()?,
+            snr_db_x100: r.i16()?,
+            loss_pct_x100: r.u16()?,
+            packet_rate_hz: r.u8()?,
+            reserved0: r.u8()?,
         })
     }
 }
@@ -1921,9 +2026,21 @@ mod tests {
                 rssi_dbm: -48,
                 snr_db_x100: 1_150,
                 loss_pct_x100: 25,
+                accel_mag_cms2: 1_274,
             },
             35,
             3_005,
+        );
+        round_trip_payload(
+            &RadioStatusPayload {
+                rssi_dbm: -72,
+                snr_db_x100: 825,
+                loss_pct_x100: 140,
+                packet_rate_hz: 10,
+                reserved0: 0,
+            },
+            36,
+            3_006,
         );
     }
 

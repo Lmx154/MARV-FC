@@ -27,9 +27,8 @@ impl RadioPriority {
 }
 
 pub const DEFAULT_COMMAND_EXPIRES_MS: u16 = 2_000;
-pub const VEHICLE_FLIGHT_SNAPSHOT_PERIOD_MS: u32 = 200;
-pub const VEHICLE_GPS_SNAPSHOT_PERIOD_MS: u32 = 1_000;
-pub const LINK_STATUS_PERIOD_MS: u32 = 2_000;
+// Per-class downlink periods are now derived from the live RF profile by
+// `radio_dialect::airtime::AirtimeBudget`, not fixed here.
 pub const PENDING_LORA_EVENT_DEPTH: usize = 4;
 pub const DEFAULT_TELEMETRY_RATE_HZ: u8 = 5;
 
@@ -54,6 +53,10 @@ pub fn classify_normal_msg(packet: &hilink::DecodedPacket<'_>) -> RadioPriority 
         hilink::MsgType::TelemetrySnapshot
         | hilink::MsgType::HilSensorFrame
         | hilink::MsgType::HilResponseFrame
+        | hilink::MsgType::Imu
+        | hilink::MsgType::AuxImu
+        | hilink::MsgType::Mag
+        | hilink::MsgType::Baro
         | hilink::MsgType::Heartbeat
         | hilink::MsgType::SystemState
         | hilink::MsgType::MotorState

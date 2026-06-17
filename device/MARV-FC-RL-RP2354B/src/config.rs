@@ -20,8 +20,21 @@ pub const HIL_SYSTEM_ID: u8 = 42;
 pub const HIL_COMPONENT_ID: u8 = 1;
 pub const BMP581_I2C_FREQUENCY_HZ: u32 = 400_000;
 pub const BMP581_PERIOD_MS: u32 = 20;
-pub const RADIO_LINK_UART_BAUD: u32 = 115_200;
-pub const RADIO_LINK_UART_BUFFER_BYTES: usize = 256;
+pub const BMM350_I2C_FREQUENCY_HZ: u32 = 400_000;
+pub const BMM350_PERIOD_MS: u32 = 40;
+pub const RADIO_LINK_UART_BAUD: u32 = 460_800;
+pub const RADIO_LINK_UART_BUFFER_BYTES: usize = 512;
+pub const GPS_UART_BUFFER_BYTES: usize = 256;
+pub const RADIO_LINK_RX_LED_PULSE_MS: u64 = 120;
+pub const RADIO_LINK_STATUS_PERIOD_MS: u32 = 1_000;
+// FC→radio UART emit cadences. The radio caches the latest of each class and re-paces the
+// air link by its own airtime budget, so these only need to keep the cache fresh without
+// flooding the UART/priority queues — emitting far faster than the air rate just gets dropped.
+pub const RADIO_LINK_TELEMETRY_SNAPSHOT_PERIOD_MS: u32 = 50;
+pub const RADIO_LINK_GPS_PERIOD_MS: u32 = 1_000;
+pub const RADIO_LINK_IMU_PERIOD_MS: u32 = 50;
+pub const RADIO_LINK_MAG_PERIOD_MS: u32 = 100;
+pub const RADIO_LINK_BARO_PERIOD_MS: u32 = 100;
 
 #[derive(Clone, Copy, Debug)]
 pub struct LoggingConfig {
@@ -47,8 +60,8 @@ impl Default for LoggingConfig {
                     aux_imu: true,
                     barometer: true,
                     pressure_transducer: false,
-                    magnetometer: false,
-                    gps: false,
+                    magnetometer: true,
+                    gps: true,
                 },
                 flags: SensorSnapshotLogFlags {
                     include_sink_state: true,
@@ -65,6 +78,7 @@ impl Default for LoggingConfig {
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceConfig {
     pub bmp581: Bmp581RuntimeConfig,
+    pub bmm350: Bmm350RuntimeConfig,
     pub hil: HilConfig,
     pub mission: MissionConfig,
     pub fast_loop_hz: u32,
@@ -96,6 +110,23 @@ pub struct Bmp581RuntimeConfig {
     pub i2c_frequency_hz: u32,
     pub period_ms: u32,
     pub driver_config: Bmp581Config,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Bmm350RuntimeConfig {
+    pub enabled: bool,
+    pub i2c_frequency_hz: u32,
+    pub period_ms: u32,
+}
+
+impl Default for Bmm350RuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            i2c_frequency_hz: BMM350_I2C_FREQUENCY_HZ,
+            period_ms: BMM350_PERIOD_MS,
+        }
+    }
 }
 
 impl Default for Bmp581RuntimeConfig {
@@ -146,6 +177,7 @@ impl Default for DeviceConfig {
     fn default() -> Self {
         Self {
             bmp581: Bmp581RuntimeConfig::default(),
+            bmm350: Bmm350RuntimeConfig::default(),
             hil: HilConfig::default(),
             mission: MissionConfig::default(),
             fast_loop_hz: FAST_LOOP_HZ,

@@ -3,6 +3,7 @@ use core::cell::RefCell;
 use common::drivers::bmi088::{
     AccelRange as Bmi088AccelRange, Bmi088, GyroRange as Bmi088GyroRange,
 };
+use common::drivers::bmm350::{BMM350_ADDR, Bmm350};
 use common::drivers::bmp581::{
     BMP581_ADDR_ALT, BMP581_CHIP_ID_ALT, BMP581_CHIP_ID_PRIMARY, Bmp581, read_bmp581_chip_id,
 };
@@ -16,7 +17,8 @@ use common::messages::runtime::FlightPhase;
 use common::policies::mission::BarometerRgbLedMission;
 use common::policies::modes::phase_after_init;
 use common::services::acquisition::{
-    BarometerServiceConfig, Bmp581BarometerSource, run_barometer_service,
+    BarometerServiceConfig, Bmm350MagnetometerSource, Bmp581BarometerSource,
+    MagnetometerServiceConfig, run_barometer_service, run_magnetometer_service,
 };
 use common::services::acquisition::{Bmi088ImuSource, Lsm6dsv32xImuSource};
 use common::services::health::LivenessUpdate;
@@ -36,21 +38,22 @@ use embassy_rp::spi::{Config as SpiConfig, Spi};
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_hal_async::delay::DelayNs;
 
-use crate::buses::SensorSpiBus;
+use crate::buses::{AuxiliaryNavigationI2cBus, SensorSpiBus};
 use crate::channels::{
-    self, AUX_IMU_CHANNEL, BAROMETER_CHANNEL, DisabledMagnetometerSubscriber,
-    DisabledPressureTransducerSubscriber, FLIGHT_PHASE_CHANNEL, FcBarometerSubscriber,
-    FcFlightPhaseSubscriber, FcGpsSubscriber, FcImuSubscriber, FcLogSinkStateReceiver,
-    FcRgbLedCommandSender, FcSensorFaultReceiver, FcTimeSubscriber, FcWatchdogLivenessReceiver,
-    GPS_CHANNEL, HIL_EGRESS_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL,
-    LOG_SINK_STATE_CHANNEL, RGB_LED_COMMAND_CHANNEL, SENSOR_FAULT_CHANNEL, TIME_CHANNEL,
+    self, AUX_IMU_CHANNEL, BAROMETER_CHANNEL, DisabledPressureTransducerSubscriber,
+    FLIGHT_PHASE_CHANNEL, FcBarometerSubscriber, FcFlightPhaseSubscriber, FcGpsSubscriber,
+    FcImuSubscriber, FcLogSinkStateReceiver, FcMagnetometerSubscriber, FcRgbLedCommandSender,
+    FcSensorFaultReceiver, FcTimeSubscriber, FcWatchdogLivenessReceiver, GPS_CHANNEL,
+    HIL_EGRESS_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL, LOG_CHANNEL, LOG_SINK_STATE_CHANNEL,
+    MAGNETOMETER_CHANNEL, RGB_LED_COMMAND_CHANNEL, SENSOR_FAULT_CHANNEL, TIME_CHANNEL,
     WATCHDOG_LIVENESS_CHANNEL,
 };
 use crate::config::{DeviceConfig, STATUS_HEARTBEAT_PERIOD_MS};
 use crate::core1;
+use crate::gps;
 use crate::pinmap;
 use crate::radio_link;
-use crate::resources::{DeviceResources, SensorPins};
+use crate::resources::{AuxiliaryNavigationPins, DeviceResources, SensorPins};
 use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
 use crate::spi1_sensor_cluster::{
     ImuSchedule, SensorSpiClusterConfig, SensorSpiClusterError, run_spi1_sensor_cluster,
@@ -67,6 +70,7 @@ static CORE0_TIME_SENSITIVE_EXECUTOR: InterruptExecutor = InterruptExecutor::new
 
 bind_interrupts!(struct EnvironmentalI2cIrqs {
     I2C0_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C0>;
+    I2C1_IRQ => i2c::InterruptHandler<embassy_rp::peripherals::I2C1>;
 });
 
 #[allow(non_snake_case)]
@@ -310,6 +314,7 @@ async fn sensor_logging_task(
     mut imu_subscriber: Option<FcImuSubscriber>,
     mut aux_imu_subscriber: Option<FcImuSubscriber>,
     mut barometer_subscriber: Option<FcBarometerSubscriber>,
+    mut magnetometer_subscriber: Option<FcMagnetometerSubscriber>,
     mut gps_subscriber: Option<FcGpsSubscriber>,
     mut time_subscriber: Option<FcTimeSubscriber>,
     sink_state_receiver: Option<FcLogSinkStateReceiver>,
@@ -324,7 +329,7 @@ async fn sensor_logging_task(
         aux_imu_subscriber.as_mut(),
         barometer_subscriber.as_mut(),
         None::<&mut DisabledPressureTransducerSubscriber>,
-        None::<&mut DisabledMagnetometerSubscriber>,
+        magnetometer_subscriber.as_mut(),
         gps_subscriber.as_mut(),
         time_subscriber.as_mut(),
         sink_state_receiver.as_ref(),
@@ -390,6 +395,57 @@ async fn bmp581_barometer_task(
 }
 
 #[embassy_executor::task]
+async fn bmm350_magnetometer_task(
+    bus: AuxiliaryNavigationI2cBus,
+    pins: AuxiliaryNavigationPins,
+    config: crate::config::Bmm350RuntimeConfig,
+) -> ! {
+    let mut i2c_config = i2c::Config::default();
+    i2c_config.frequency = config.i2c_frequency_hz;
+
+    let i2c = I2c::new_async(
+        bus.i2c,
+        pins.scl,
+        pins.sda,
+        EnvironmentalI2cIrqs,
+        i2c_config,
+    );
+    let mut driver = Bmm350::new(i2c, BMM350_ADDR);
+    let mut init_delay = EmbassyDelay;
+
+    loop {
+        match driver.init(&mut init_delay).await {
+            Ok(()) => {
+                info!("BMM350 initialized at I2C address 0x{=u8:02X}", BMM350_ADDR);
+                break;
+            }
+            Err(error) => {
+                warn!("BMM350 initialization failed: {:?}", error);
+                try_report_sensor_fault(LoggedSensor::Magnetometer);
+                Timer::after(Duration::from_secs(1)).await;
+            }
+        }
+    }
+
+    let mut source = Bmm350MagnetometerSource::new(driver, EmbassyDelay);
+    let clock = EmbassyClock;
+    let mut delay = EmbassyDelay;
+
+    run_magnetometer_service(
+        &MAGNETOMETER_CHANNEL,
+        &mut source,
+        &clock,
+        &mut delay,
+        MagnetometerServiceConfig::new(config.enabled, config.period_ms),
+        |error| {
+            warn!("BMM350 acquisition error: {:?}", error);
+            try_report_sensor_fault(LoggedSensor::Magnetometer);
+        },
+    )
+    .await
+}
+
+#[embassy_executor::task]
 async fn altitude_led_mission_task(
     mut barometer_subscriber: FcBarometerSubscriber,
     command_sender: FcRgbLedCommandSender,
@@ -422,10 +478,14 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
     let sensor_pins = pins.sensors;
     let storage_pins = pins.storage;
     let radio_link_pins = pins.radio_link;
+    let gps_pins = pins.gps;
+    let auxiliary_navigation_pins = pins.auxiliary_navigation;
     let status_pins = pins.status;
     let sensor_bus = buses.sensors;
     let storage_bus = buses.storage;
     let radio_link_bus = buses.radio_link;
+    let gps_bus = buses.gps;
+    let auxiliary_navigation_bus = buses.auxiliary_navigation;
     let environmental_bus = buses.environmental;
     let status_led_bus = buses.status_led;
 
@@ -481,6 +541,15 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
             FlightPhase::Hil
         }
         SensorBackend::Real => {
+            gps::spawn(&spawner, gps_bus, gps_pins);
+            spawner
+                .spawn(bmm350_magnetometer_task(
+                    auxiliary_navigation_bus,
+                    auxiliary_navigation_pins,
+                    config.bmm350,
+                ))
+                .unwrap();
+
             let mut bmp581_i2c = None;
             let mut bmp581_detected_address = None;
 
@@ -653,8 +722,16 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                         } else {
                             None
                         };
+                        let magnetometer_subscriber = if logger.config().sensors.magnetometer
+                            && matches!(selected_backend, SensorBackend::Real)
+                            && config.bmm350.enabled
+                        {
+                            Some(MAGNETOMETER_CHANNEL.subscriber().unwrap())
+                        } else {
+                            None
+                        };
                         let gps_subscriber = if logger.config().sensors.gps
-                            && matches!(selected_backend, SensorBackend::Hil)
+                            && matches!(selected_backend, SensorBackend::Real)
                         {
                             Some(GPS_CHANNEL.subscriber().unwrap())
                         } else {
@@ -676,6 +753,7 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
                                 imu_subscriber,
                                 aux_imu_subscriber,
                                 barometer_subscriber,
+                                magnetometer_subscriber,
                                 gps_subscriber,
                                 time_subscriber,
                                 sink_state_receiver,
@@ -714,9 +792,13 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
         channels::TOPOLOGY.cross_core_bridges.len()
     );
     info!(
-        "key pins: radio=GP{=u8}/GP{=u8} sensor-spi=GP{=u8}/GP{=u8}/GP{=u8} sd-cs=GP{=u8}",
+        "key pins: gps=GP{=u8}/GP{=u8} radio=GP{=u8}/GP{=u8} mag-i2c=GP{=u8}/GP{=u8} sensor-spi=GP{=u8}/GP{=u8}/GP{=u8} sd-cs=GP{=u8}",
+        pinmap::GPS_UART_TX,
+        pinmap::GPS_UART_RX,
         pinmap::FC_RADIO_TX,
         pinmap::FC_RADIO_RX,
+        pinmap::AUX_I2C_SDA,
+        pinmap::AUX_I2C_SCL,
         pinmap::SENSOR_SPI_SCK,
         pinmap::SENSOR_SPI_MOSI,
         pinmap::SENSOR_SPI_MISO,

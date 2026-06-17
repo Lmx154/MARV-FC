@@ -8,7 +8,9 @@ compile_error!("select exactly one firmware role: `radio` or `ground-station`");
 
 pub const XOSC_HZ: u32 = 12_000_000;
 pub const WATCHDOG_TIMEOUT_MS: u32 = 250;
-pub const HOST_UART_BAUD: u32 = 115_200;
+// Raised to 460_800 so the FC↔radio link carries 100 Hz HILink telemetry with headroom.
+// Must stay in lockstep with RADIO_LINK_UART_BAUD in both flight-controller firmwares.
+pub const HOST_UART_BAUD: u32 = 460_800;
 pub const HOST_UART_BUFFER_BYTES: usize = 256;
 pub const HOST_UART_HEARTBEAT_PERIOD_MS: u64 = 1_000;
 pub const LORA_SPI_FREQUENCY_HZ: u32 = 4_000_000;

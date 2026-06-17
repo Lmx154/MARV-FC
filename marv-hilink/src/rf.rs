@@ -29,6 +29,10 @@ pub enum RfMsgType {
     LoRaEvent = 3,
     LoRaFaults = 4,
     LoRaLinkStatus = 5,
+    LoRaImu1Snapshot = 6,
+    LoRaImu2Snapshot = 7,
+    LoRaMagSnapshot = 8,
+    LoRaBaroSnapshot = 9,
     LoRaCommand = 16,
     LoRaCommandAck = 17,
     LoRaSetProfile = 18,
@@ -45,6 +49,10 @@ impl core::convert::TryFrom<u8> for RfMsgType {
             3 => Ok(Self::LoRaEvent),
             4 => Ok(Self::LoRaFaults),
             5 => Ok(Self::LoRaLinkStatus),
+            6 => Ok(Self::LoRaImu1Snapshot),
+            7 => Ok(Self::LoRaImu2Snapshot),
+            8 => Ok(Self::LoRaMagSnapshot),
+            9 => Ok(Self::LoRaBaroSnapshot),
             16 => Ok(Self::LoRaCommand),
             17 => Ok(Self::LoRaCommandAck),
             18 => Ok(Self::LoRaSetProfile),
@@ -62,6 +70,10 @@ impl RfMsgType {
             Self::LoRaEvent => LoRaEventPayload::WIRE_LEN,
             Self::LoRaFaults => LoRaFaultsPayload::WIRE_LEN,
             Self::LoRaLinkStatus => LoRaLinkStatusPayload::WIRE_LEN,
+            Self::LoRaImu1Snapshot => LoRaImu1SnapshotPayload::WIRE_LEN,
+            Self::LoRaImu2Snapshot => LoRaImu2SnapshotPayload::WIRE_LEN,
+            Self::LoRaMagSnapshot => LoRaMagSnapshotPayload::WIRE_LEN,
+            Self::LoRaBaroSnapshot => LoRaBaroSnapshotPayload::WIRE_LEN,
             Self::LoRaCommand => LoRaCommandPayload::WIRE_LEN,
             Self::LoRaCommandAck => LoRaCommandAckPayload::WIRE_LEN,
             Self::LoRaSetProfile => LoRaSetProfilePayload::WIRE_LEN,
@@ -186,6 +198,44 @@ pub struct LoRaSetProfilePayload {
 pub struct LoRaRequestSnapshotPayload {
     pub command_seq: u16,
     pub request_flags: u16,
+}
+
+/// Compact IMU sample for the air link. `accel_cg` is centi-g (m/s² × 100 / g),
+/// `gyro_ddps` is deci-deg/s (rad/s × 180/π × 10). One struct per IMU instance so
+/// the two physical IMUs travel as distinct RF message types.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LoRaImu1SnapshotPayload {
+    pub time_ms: u32,
+    pub accel_cg: [i16; 3],
+    pub gyro_ddps: [i16; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LoRaImu2SnapshotPayload {
+    pub time_ms: u32,
+    pub accel_cg: [i16; 3],
+    pub gyro_ddps: [i16; 3],
+}
+
+/// Compact magnetometer sample. `field_mgauss` is the field in 0.1 µT units (= milligauss).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LoRaMagSnapshotPayload {
+    pub time_ms: u32,
+    pub field_mgauss: [i16; 3],
+}
+
+/// Compact barometer sample. `pressure_pa` is absolute Pa, `altitude_dm` decimeters,
+/// `temp_cc` centi-°C.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct LoRaBaroSnapshotPayload {
+    pub time_ms: u32,
+    pub pressure_pa: u32,
+    pub altitude_dm: i32,
+    pub temp_cc: i16,
 }
 
 pub mod lora_state {
@@ -592,6 +642,88 @@ impl_payload!(
     }
 );
 
+impl_payload!(
+    LoRaImu1SnapshotPayload,
+    RfMsgType::LoRaImu1Snapshot,
+    16,
+    |this, w| {
+        w.u32(this.time_ms)?;
+        w.i16(this.accel_cg[0])?;
+        w.i16(this.accel_cg[1])?;
+        w.i16(this.accel_cg[2])?;
+        w.i16(this.gyro_ddps[0])?;
+        w.i16(this.gyro_ddps[1])?;
+        w.i16(this.gyro_ddps[2])?;
+    },
+    |r| {
+        Self {
+            time_ms: r.u32()?,
+            accel_cg: [r.i16()?, r.i16()?, r.i16()?],
+            gyro_ddps: [r.i16()?, r.i16()?, r.i16()?],
+        }
+    }
+);
+
+impl_payload!(
+    LoRaImu2SnapshotPayload,
+    RfMsgType::LoRaImu2Snapshot,
+    16,
+    |this, w| {
+        w.u32(this.time_ms)?;
+        w.i16(this.accel_cg[0])?;
+        w.i16(this.accel_cg[1])?;
+        w.i16(this.accel_cg[2])?;
+        w.i16(this.gyro_ddps[0])?;
+        w.i16(this.gyro_ddps[1])?;
+        w.i16(this.gyro_ddps[2])?;
+    },
+    |r| {
+        Self {
+            time_ms: r.u32()?,
+            accel_cg: [r.i16()?, r.i16()?, r.i16()?],
+            gyro_ddps: [r.i16()?, r.i16()?, r.i16()?],
+        }
+    }
+);
+
+impl_payload!(
+    LoRaMagSnapshotPayload,
+    RfMsgType::LoRaMagSnapshot,
+    10,
+    |this, w| {
+        w.u32(this.time_ms)?;
+        w.i16(this.field_mgauss[0])?;
+        w.i16(this.field_mgauss[1])?;
+        w.i16(this.field_mgauss[2])?;
+    },
+    |r| {
+        Self {
+            time_ms: r.u32()?,
+            field_mgauss: [r.i16()?, r.i16()?, r.i16()?],
+        }
+    }
+);
+
+impl_payload!(
+    LoRaBaroSnapshotPayload,
+    RfMsgType::LoRaBaroSnapshot,
+    14,
+    |this, w| {
+        w.u32(this.time_ms)?;
+        w.u32(this.pressure_pa)?;
+        w.i32(this.altitude_dm)?;
+        w.i16(this.temp_cc)?;
+    },
+    |r| {
+        Self {
+            time_ms: r.u32()?,
+            pressure_pa: r.u32()?,
+            altitude_dm: r.i32()?,
+            temp_cc: r.i16()?,
+        }
+    }
+);
+
 pub const fn encoded_rf_len(payload_len: usize) -> usize {
     RF_PACKET_OVERHEAD_LEN + payload_len
 }
@@ -757,6 +889,10 @@ mod tests {
         assert_eq!(LoRaEventPayload::WIRE_LEN, 15);
         assert_eq!(LoRaFaultsPayload::WIRE_LEN, 14);
         assert_eq!(LoRaLinkStatusPayload::WIRE_LEN, 18);
+        assert_eq!(LoRaImu1SnapshotPayload::WIRE_LEN, 16);
+        assert_eq!(LoRaImu2SnapshotPayload::WIRE_LEN, 16);
+        assert_eq!(LoRaMagSnapshotPayload::WIRE_LEN, 10);
+        assert_eq!(LoRaBaroSnapshotPayload::WIRE_LEN, 14);
         assert_eq!(LoRaCommandPayload::WIRE_LEN, 16);
         assert_eq!(LoRaCommandAckPayload::WIRE_LEN, 12);
         assert_eq!(LoRaSetProfilePayload::WIRE_LEN, 8);
@@ -781,6 +917,42 @@ mod tests {
 
         assert_eq!(packet.msg_type, RfMsgType::LoRaCommand);
         assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn sensor_rf_payloads_round_trip() {
+        let imu1 = LoRaImu1SnapshotPayload {
+            time_ms: 12_345,
+            accel_cg: [100, -200, 981],
+            gyro_ddps: [-1, 2, -3000],
+        };
+        let mut buf = [0u8; encoded_rf_len(LoRaImu1SnapshotPayload::WIRE_LEN)];
+        let len = encode_rf_packet(&imu1, &mut buf).unwrap();
+        let packet = decode_rf_packet(&buf[..len]).unwrap();
+        assert_eq!(packet.msg_type, RfMsgType::LoRaImu1Snapshot);
+        assert_eq!(decode_rf_payload::<LoRaImu1SnapshotPayload>(&packet).unwrap(), imu1);
+
+        let mag = LoRaMagSnapshotPayload {
+            time_ms: 7,
+            field_mgauss: [500, -500, 12],
+        };
+        let mut buf = [0u8; encoded_rf_len(LoRaMagSnapshotPayload::WIRE_LEN)];
+        let len = encode_rf_packet(&mag, &mut buf).unwrap();
+        let packet = decode_rf_packet(&buf[..len]).unwrap();
+        assert_eq!(packet.msg_type, RfMsgType::LoRaMagSnapshot);
+        assert_eq!(decode_rf_payload::<LoRaMagSnapshotPayload>(&packet).unwrap(), mag);
+
+        let baro = LoRaBaroSnapshotPayload {
+            time_ms: 99,
+            pressure_pa: 101_325,
+            altitude_dm: -42,
+            temp_cc: 2_350,
+        };
+        let mut buf = [0u8; encoded_rf_len(LoRaBaroSnapshotPayload::WIRE_LEN)];
+        let len = encode_rf_packet(&baro, &mut buf).unwrap();
+        let packet = decode_rf_packet(&buf[..len]).unwrap();
+        assert_eq!(packet.msg_type, RfMsgType::LoRaBaroSnapshot);
+        assert_eq!(decode_rf_payload::<LoRaBaroSnapshotPayload>(&packet).unwrap(), baro);
     }
 
     #[test]

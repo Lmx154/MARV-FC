@@ -1,6 +1,23 @@
 export type TabId = "dashboard" | "recovery" | "debug" | "settings";
 export type ThemeMode = "dark" | "light";
 
+/// Where the dashboard sources telemetry from.
+export type DataSource = "live" | "demo";
+
+/// Pushed by the Rust backend on the `link-status` event.
+export type LinkStatus = {
+  connected: boolean;
+  port: string | null;
+  baud: number;
+  lastError: string | null;
+};
+
+/// One serial port returned by the `list_serial_ports` command.
+export type SerialPortInfo = {
+  portName: string;
+  displayName: string;
+};
+
 export type FlightStage =
   | "PAD"
   | "BOOST"

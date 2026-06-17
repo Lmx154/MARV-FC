@@ -3,7 +3,7 @@
 use embassy_rp::{Peri, Peripherals, peripherals};
 
 use crate::buses::{
-    ActuatorPwm, AuxiliaryNavigationI2cBus, BusResources, CompanionLinkUart, EnvironmentalI2cBus,
+    ActuatorPwm, AuxiliaryNavigationI2cBus, BusResources, EnvironmentalI2cBus, GpsUart,
     RadioLinkUart, SensorSpiBus, StatusLedPio, StorageSpiBus,
 };
 use crate::config;
@@ -36,13 +36,13 @@ pub struct AuxiliaryNavigationPins {
 }
 
 pub struct RadioLinkPins {
-    pub tx: Peri<'static, peripherals::PIN_0>,
-    pub rx: Peri<'static, peripherals::PIN_1>,
-}
-
-pub struct CompanionLinkPins {
     pub tx: Peri<'static, peripherals::PIN_4>,
     pub rx: Peri<'static, peripherals::PIN_5>,
+}
+
+pub struct GpsPins {
+    pub tx: Peri<'static, peripherals::PIN_0>,
+    pub rx: Peri<'static, peripherals::PIN_1>,
 }
 
 pub struct StatusPins {
@@ -75,7 +75,7 @@ pub struct PinResources {
     pub environmental: EnvironmentalPins,
     pub auxiliary_navigation: AuxiliaryNavigationPins,
     pub radio_link: RadioLinkPins,
-    pub companion_link: CompanionLinkPins,
+    pub gps: GpsPins,
     pub status: StatusPins,
     pub expansion: ExpansionPins,
     pub vtx: VtxPins,
@@ -97,12 +97,12 @@ pub struct DeviceResources {
 
 pub fn split(peripherals: Peripherals) -> DeviceResources {
     let Peripherals {
-        PIN_0: fc_radio_tx,
-        PIN_1: fc_radio_rx,
+        PIN_0: gps_tx,
+        PIN_1: gps_rx,
         PIN_2: aux_i2c_sda,
         PIN_3: aux_i2c_scl,
-        PIN_4: fc_sbc_tx,
-        PIN_5: fc_sbc_rx,
+        PIN_4: fc_radio_tx,
+        PIN_5: fc_radio_rx,
         PIN_6: status_led_data,
         PIN_8: env_i2c_sda,
         PIN_9: env_i2c_scl,
@@ -131,16 +131,16 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
         SPI1: sensor_spi,
         I2C0: environmental_i2c,
         I2C1: auxiliary_navigation_i2c,
-        UART0: radio_uart,
-        UART1: companion_uart,
+        UART0: gps_uart,
+        UART1: radio_uart,
         DMA_CH0: sensor_spi_tx_dma,
         DMA_CH1: sensor_spi_rx_dma,
         DMA_CH2: storage_spi_tx_dma,
         DMA_CH3: storage_spi_rx_dma,
         DMA_CH4: radio_uart_tx_dma,
         DMA_CH5: radio_uart_rx_dma,
-        DMA_CH6: companion_uart_tx_dma,
-        DMA_CH7: companion_uart_rx_dma,
+        DMA_CH6: gps_uart_tx_dma,
+        DMA_CH7: gps_uart_rx_dma,
         DMA_CH8: status_led_dma,
         PWM_SLICE8: pwm8,
         PWM_SLICE9: pwm9,
@@ -182,9 +182,9 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
                 tx: fc_radio_tx,
                 rx: fc_radio_rx,
             },
-            companion_link: CompanionLinkPins {
-                tx: fc_sbc_tx,
-                rx: fc_sbc_rx,
+            gps: GpsPins {
+                tx: gps_tx,
+                rx: gps_rx,
             },
             status: StatusPins {
                 data: status_led_data,
@@ -229,10 +229,10 @@ pub fn split(peripherals: Peripherals) -> DeviceResources {
                 tx_dma: radio_uart_tx_dma,
                 rx_dma: radio_uart_rx_dma,
             },
-            companion_link: CompanionLinkUart {
-                uart: companion_uart,
-                tx_dma: companion_uart_tx_dma,
-                rx_dma: companion_uart_rx_dma,
+            gps: GpsUart {
+                uart: gps_uart,
+                tx_dma: gps_uart_tx_dma,
+                rx_dma: gps_uart_rx_dma,
             },
             status_led: StatusLedPio {
                 pio: pio0,
