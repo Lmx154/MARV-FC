@@ -1,10 +1,16 @@
 #![allow(dead_code)]
 
+use common::comms::links::lora::LoraProfile;
+
 #[cfg(all(feature = "radio", feature = "ground-station"))]
 compile_error!("features `radio` and `ground-station` are mutually exclusive");
 
 #[cfg(not(any(feature = "radio", feature = "ground-station")))]
 compile_error!("select exactly one firmware role: `radio` or `ground-station`");
+
+mod build_config {
+    include!(concat!(env!("OUT_DIR"), "/radio_build_config.rs"));
+}
 
 pub const XOSC_HZ: u32 = 12_000_000;
 pub const WATCHDOG_TIMEOUT_MS: u32 = 250;
@@ -17,9 +23,15 @@ pub const LORA_SPI_FREQUENCY_HZ: u32 = 4_000_000;
 pub const LORA_HEARTBEAT_PERIOD_MS: u64 = 2_000;
 pub const LORA_PING_PERIOD_MS: u64 = LORA_HEARTBEAT_PERIOD_MS;
 pub const LORA_LINK_STATUS_PERIOD_MS: u64 = 2_000;
+pub const LORA_STATION_ID_PERIOD_MS: u64 = 9 * 60 * 1_000;
 pub const LORA_LED_EVENT_HOLD_MS: u64 = 1_000;
 pub const LORA_PACKET_LOG_EVERY: u32 = 10;
 pub const LORA_MISS_LOG_EVERY: u8 = 6;
+pub const LORA_MODE_C_BANDWIDTH_HZ: u32 = 62_500;
+pub const LORA_FREQUENCY_HZ: u32 = build_config::LORA_FREQUENCY_HZ;
+pub const AMATEUR_CALLSIGN: &str = build_config::AMATEUR_CALLSIGN;
+pub const LORA_PROFILE: LoraProfile = LoraProfile::irec_33cm_mode_c(LORA_FREQUENCY_HZ);
+
 #[derive(Clone, Copy, Debug, defmt::Format, PartialEq, Eq)]
 pub enum FirmwareRole {
     Radio,

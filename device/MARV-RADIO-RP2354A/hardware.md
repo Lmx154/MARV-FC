@@ -12,6 +12,22 @@ cargo build -p marv-radio-rp2354a
 cargo build -p marv-radio-rp2354a --no-default-features --features ground-station
 ```
 
+## IREC 33 cm Mode C Build Configuration
+
+For 33 cm Mode C operation, build both the rocket radio and any transmitting ground-station
+radio with the amateur callsign and the FFRR-assigned SRAD center frequency:
+
+```sh
+MARV_AMATEUR_CALLSIGN=N0CALL MARV_LORA_FREQUENCY_HZ=902080000 cargo build -p marv-radio-rp2354a
+MARV_AMATEUR_CALLSIGN=N0CALL MARV_LORA_FREQUENCY_HZ=902080000 cargo build -p marv-radio-rp2354a --no-default-features --features ground-station
+```
+
+The firmware uses a fixed 62.5 kHz LoRa bandwidth Mode C profile and transmits a clear
+ASCII `DE <CALLSIGN>` station-ID frame every 9 minutes, ahead of normal telemetry or
+command traffic. The build script validates that the occupied bandwidth fits within the
+902.0-909.0 MHz SRAD range; the center frequency still must be the frequency assigned by
+ESRA for the flight.
+
 ## Microcontroller
 
 - RP2354A

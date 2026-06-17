@@ -1,6 +1,6 @@
-use common::comms::links::lora::ACTIVE;
 use common::comms::links::lora::frame::{
-    LoraFrame, LoraFrameKind, LoraNodeRole, MAX_FRAME_LEN, decode_frame, encode_frame,
+    LoraFrame, LoraFrameKind, LoraNodeRole, MAX_FRAME_LEN, MAX_FRAME_PAYLOAD_LEN, decode_frame,
+    encode_frame,
 };
 use common::comms::links::lora::state::{LoraLinkHealth, LoraLinkPolicy, LoraLinkState};
 use common::comms::links::lora::timing::LoraLinkTiming;
@@ -47,7 +47,18 @@ async fn lora_bridge_task(
     let txen = Output::new(pins.txen, Level::Low);
     let rxen = Output::new(pins.rxen, Level::Low);
 
-    let radio = Sx1262::new(spi_device, reset, busy, dio1, txen, rxen, ACTIVE, Delay).await;
+    let active_profile = config::LORA_PROFILE;
+    let radio = Sx1262::new(
+        spi_device,
+        reset,
+        busy,
+        dio1,
+        txen,
+        rxen,
+        active_profile,
+        Delay,
+    )
+    .await;
     let mut radio = match radio {
         Ok(radio) => radio,
         Err(_) => {
@@ -76,14 +87,24 @@ async fn lora_bridge_task(
     let budget = AirtimeBudget::from_profile(radio.profile());
 
     info!(
-        "sx1262 lora bridge ready: role={:?} freq={=u32}Hz spi={=u32}Hz airtime_max={=u32}us rx_window_symbols={=u16}",
+        "sx1262 lora bridge ready: role={:?} freq={=u32}Hz bw={=u32}Hz spi={=u32}Hz airtime_max={=u32}us rx_window_symbols={=u16}",
         role,
-        ACTIVE.frequency_hz,
+        active_profile.frequency_hz,
+        config::LORA_MODE_C_BANDWIDTH_HZ,
         config::LORA_SPI_FREQUENCY_HZ,
         timing.frame_airtime_us,
         timing.rx_window_symbols
     );
     info!("lora downlink airtime budget: {:?}", budget);
+    if config::AMATEUR_CALLSIGN.is_empty() {
+        warn!("amateur callsign missing; station ID frames disabled");
+    } else {
+        info!(
+            "amateur station ID enabled callsign={=str} interval_ms={=u64}",
+            config::AMATEUR_CALLSIGN,
+            config::LORA_STATION_ID_PERIOD_MS
+        );
+    }
 
     run_bridge(&mut radio, role, indicator, &timing, &budget, &mut health).await;
 }
@@ -174,6 +195,8 @@ struct BridgeSchedule {
     keepalive_period: Duration,
     next_keepalive_at: Instant,
     next_peer_keepalive_due_at: Instant,
+    station_id_period: Duration,
+    next_station_id_at: Instant,
 }
 
 impl BridgeSchedule {
@@ -192,6 +215,8 @@ impl BridgeSchedule {
             keepalive_period,
             next_keepalive_at: now + phase_offset,
             next_peer_keepalive_due_at: now + peer_keepalive_timeout,
+            station_id_period: Duration::from_millis(config::LORA_STATION_ID_PERIOD_MS),
+            next_station_id_at: now,
         }
     }
 
@@ -240,7 +265,8 @@ async fn transmit_lora_frame<SPI, CTRL, WAIT>(
     indicator: StatusIndicatorSender,
     health: &mut LoraLinkHealth,
     reason: &'static str,
-) where
+) -> bool
+where
     SPI: embedded_hal_async::spi::SpiDevice<u8>,
     CTRL: embedded_hal::digital::OutputPin,
     WAIT: embedded_hal_async::digital::Wait,
@@ -261,7 +287,7 @@ async fn transmit_lora_frame<SPI, CTRL, WAIT>(
                 kind,
                 payload.len()
             );
-            return;
+            return false;
         }
     };
 
@@ -270,7 +296,10 @@ async fn transmit_lora_frame<SPI, CTRL, WAIT>(
             health.note_tx_packet();
             if kind == LoraFrameKind::Data {
                 info!("lora bridge data tx bytes={=usize}", payload.len());
+            } else if kind == LoraFrameKind::StationId {
+                info!("lora bridge station ID tx bytes={=usize}", payload.len());
             }
+            true
         }
         Err(_) => {
             let previous = health.state();
@@ -282,8 +311,63 @@ async fn transmit_lora_frame<SPI, CTRL, WAIT>(
                 payload.len()
             );
             recover_rx(radio, indicator, health, reason).await;
+            false
         }
     }
+}
+
+fn station_id_payload(out: &mut [u8; MAX_FRAME_PAYLOAD_LEN]) -> Option<&[u8]> {
+    const PREFIX: &[u8] = b"DE ";
+
+    let callsign = config::AMATEUR_CALLSIGN.as_bytes();
+    if callsign.is_empty() || PREFIX.len() + callsign.len() > out.len() {
+        return None;
+    }
+
+    out[..PREFIX.len()].copy_from_slice(PREFIX);
+    out[PREFIX.len()..PREFIX.len() + callsign.len()].copy_from_slice(callsign);
+    Some(&out[..PREFIX.len() + callsign.len()])
+}
+
+async fn transmit_station_id_if_due<SPI, CTRL, WAIT>(
+    radio: &mut Sx1262<SPI, CTRL, WAIT, Delay>,
+    source: LoraNodeRole,
+    indicator: StatusIndicatorSender,
+    health: &mut LoraLinkHealth,
+    schedule: &mut BridgeSchedule,
+) where
+    SPI: embedded_hal_async::spi::SpiDevice<u8>,
+    CTRL: embedded_hal::digital::OutputPin,
+    WAIT: embedded_hal_async::digital::Wait,
+{
+    let now = Instant::now();
+    if now < schedule.next_station_id_at {
+        return;
+    }
+
+    let mut payload = [0u8; MAX_FRAME_PAYLOAD_LEN];
+    let Some(payload) = station_id_payload(&mut payload) else {
+        schedule.next_station_id_at = now + schedule.station_id_period;
+        return;
+    };
+
+    let sent = transmit_lora_frame(
+        radio,
+        source,
+        LoraFrameKind::StationId,
+        payload,
+        indicator,
+        health,
+        "station ID tx failed",
+    )
+    .await;
+
+    schedule.next_station_id_at = Instant::now()
+        + if sent {
+            schedule.station_id_period
+        } else {
+            Duration::from_millis(5_000)
+        };
 }
 
 async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
@@ -337,8 +421,7 @@ async fn transmit_queued_host_frame<SPI, CTRL, WAIT>(
         policy::DEFAULT_TELEMETRY_RATE_HZ,
     );
 
-    let Some(payload) =
-        scheduler::select_scheduled_rf_frame(role, dialect_cache, budget, now_ms)
+    let Some(payload) = scheduler::select_scheduled_rf_frame(role, dialect_cache, budget, now_ms)
     else {
         return;
     };
@@ -418,6 +501,7 @@ async fn handle_rx_frame(
     if frame.kind == LoraFrameKind::Beacon
         || frame.kind == LoraFrameKind::Heartbeat
         || frame.kind == LoraFrameKind::LinkStatus
+        || frame.kind == LoraFrameKind::StationId
     {
         schedule.note_peer_rx(timing);
         note_valid_peer_rx(indicator, health, rssi, snr_x4).await;
@@ -484,6 +568,7 @@ where
     let mut dialect_cache = RadioStateCache::new();
 
     loop {
+        transmit_station_id_if_due(radio, source, indicator, health, &mut schedule).await;
         transmit_queued_host_frame(
             radio,
             role,

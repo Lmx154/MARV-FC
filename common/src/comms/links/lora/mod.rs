@@ -150,6 +150,30 @@ impl LoraProfile {
         }
     }
 
+    pub const fn irec_33cm_mode_c(frequency_hz: u32) -> Self {
+        Self {
+            frequency_hz,
+            tcxo: Some(TcxoConfig {
+                voltage: TcxoVoltage::V1_8,
+                startup_delay_ms: 20,
+            }),
+            use_dcdc: true,
+            // 17 dBm is about 50 mW, matching the low end of the competition's
+            // recommended dense-RF practice while leaving room to raise it if approved.
+            tx_power_dbm: 17,
+            modulation: BaseBandModulationParams::new(
+                SpreadingFactor::_7,
+                Bandwidth::_62KHz,
+                CodingRate::_4_5,
+            ),
+            preamble_len: 12,
+            explicit_header: true,
+            crc_on: true,
+            invert_iq: false,
+            sync_word: 0x12,
+        }
+    }
+
     pub const fn time_on_air_us(&self, payload_len: u8) -> u32 {
         self.modulation.time_on_air_us(
             Some(self.preamble_len as u8),
@@ -164,4 +188,5 @@ pub const FAST_915: LoraProfile = LoraProfile::fast_915();
 pub const ROBUST_915: LoraProfile = LoraProfile::robust_915();
 pub const FALLBACK_915: LoraProfile = LoraProfile::fallback_915();
 pub const LONG_RANGE_915: LoraProfile = LoraProfile::long_range_915();
+pub const IREC_33CM_MODE_C_DEFAULT: LoraProfile = LoraProfile::irec_33cm_mode_c(902_080_000);
 pub const ACTIVE: LoraProfile = FAST_915;

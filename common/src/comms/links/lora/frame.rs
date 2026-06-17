@@ -30,6 +30,7 @@ pub enum LoraFrameKind {
     Data = 4,
     LinkStatus = 5,
     Heartbeat = 6,
+    StationId = 7,
 }
 
 impl LoraFrameKind {
@@ -41,6 +42,7 @@ impl LoraFrameKind {
             4 => Some(Self::Data),
             5 => Some(Self::LinkStatus),
             6 => Some(Self::Heartbeat),
+            7 => Some(Self::StationId),
             _ => None,
         }
     }
@@ -137,6 +139,23 @@ mod tests {
         assert_eq!(decoded.source, LoraNodeRole::Radio);
         assert_eq!(decoded.kind, LoraFrameKind::Data);
         assert_eq!(decoded.payload, b"hello");
+    }
+
+    #[test]
+    fn station_id_frame_round_trips() {
+        let mut buf = [0; 32];
+        let frame = LoraFrame {
+            source: LoraNodeRole::Radio,
+            kind: LoraFrameKind::StationId,
+            payload: b"DE N0CALL",
+        };
+
+        let len = encode_frame(frame, &mut buf).unwrap();
+        let decoded = decode_frame(&buf[..len]).unwrap();
+
+        assert_eq!(decoded.source, LoraNodeRole::Radio);
+        assert_eq!(decoded.kind, LoraFrameKind::StationId);
+        assert_eq!(decoded.payload, b"DE N0CALL");
     }
 
     #[test]
