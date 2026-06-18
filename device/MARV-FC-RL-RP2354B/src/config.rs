@@ -20,7 +20,16 @@ pub const LOG_RECORD_PERIOD_MS: u32 = 10;
 // conservative for the PCB's SD signal integrity. Raise toward 12-25 MHz if the
 // board's routing is clean and you want more headroom for flush stalls.
 pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 4_000_000;
-pub const LOG_SD_FLUSH_EVERY_LINES: usize = 8;
+// How many CSV rows to buffer between durable flushes. In embedded-sdmmc 0.7.0 a
+// "flush" is a full file close+reopen (no `flush_file` API exists), which is an
+// expensive multi-block blocking SD op. At 8 it fired every ~80 ms and stalled
+// the sink long enough to back-pressure the LOG_CHANNEL and drop ~1/3 of rows
+// (effective ~66 Hz vs the 100 Hz target). 32 amortizes that cost over ~4x more
+// rows — ~2x throughput headroom, no back-pressure — while bounding power-loss
+// data loss to ~320 ms (32 rows @ 100 Hz) of uncommitted tail. Lower it for
+// tighter crash-durability (at the cost of throughput); raise toward 64 for more
+// headroom on slow cards.
+pub const LOG_SD_FLUSH_EVERY_LINES: usize = 32;
 // Async settle delay before touching the SD card, giving its supply rail time to
 // come up after boot. Runs on `Timer::after` (yields), so the watchdog and
 // feed-critical sensor tasks keep running during it.

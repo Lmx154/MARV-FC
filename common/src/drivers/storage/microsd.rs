@@ -21,6 +21,18 @@ use crate::interfaces::storage::{
 
 pub const DEFAULT_FLUSH_EVERY_LINES: usize = 16;
 
+/// In-RAM staging buffer for log lines before they hit the card.
+///
+/// `embedded-sdmmc`'s `write()` flushes a *full* 512-byte block to the card on
+/// **every call** (with a read-modify-write whenever the write doesn't start on
+/// a block boundary). Writing line-by-line (plus a separate 1-byte newline
+/// write) therefore rewrote each block 3-4x per CSV row — the dominant cost that
+/// capped throughput at ~73 Hz regardless of `flush_every_lines`. Staging rows
+/// here and handing the volume manager one batched, mostly block-aligned write
+/// per drain collapses that to ~one block write per 512 bytes. 4 KiB holds ~25
+/// typical rows; any single row (<= MAX_LOG_LINE_LEN = 1 KiB) always fits.
+const WRITE_BUFFER_BYTES: usize = 4096;
+
 const READ_BUFFER_BYTES: usize = 512;
 const CSV_SEQUENCE_DIGITS: usize = 4;
 const CSV_EXTENSION: &str = "CSV";
@@ -76,6 +88,7 @@ pub struct MicrosdLogger<
     active_file: Option<ActiveLogFile>,
     pending_lines: usize,
     written_lines: usize,
+    write_buf: Vec<u8, WRITE_BUFFER_BYTES>,
 }
 
 impl<D, TS, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>
@@ -121,6 +134,7 @@ where
                         active_file: None,
                         pending_lines: 0,
                         written_lines: 0,
+                        write_buf: Vec::new(),
                     });
                 }
                 Err(error) => {
@@ -136,13 +150,33 @@ where
     }
 
     fn close_active_file(&mut self) -> Result<(), LogError> {
-        if let Some(active) = self.active_file.as_ref() {
-            self.volume_mgr
-                .close_file(active.handle)
-                .map_err(map_sd_error)?;
+        if self.active_file.is_some() {
+            // Commit any staged rows to the card before the close persists the
+            // directory entry, so the on-disk length covers everything written.
+            self.drain_write_buffer()?;
+            let handle = self.active_file.as_ref().unwrap().handle;
+            self.volume_mgr.close_file(handle).map_err(map_sd_error)?;
             self.active_file = None;
             self.pending_lines = 0;
         }
+        Ok(())
+    }
+
+    /// Flush the in-RAM staging buffer to the active file in one batched write.
+    /// No-op when nothing is staged. Does not close the file (the directory
+    /// entry is only persisted on close), so callers that need durability must
+    /// follow this with `close_active_file`.
+    fn drain_write_buffer(&mut self) -> Result<(), LogError> {
+        if self.write_buf.is_empty() {
+            return Ok(());
+        }
+        if let Some(active) = self.active_file.as_ref() {
+            let handle = active.handle;
+            self.volume_mgr
+                .write(handle, &self.write_buf)
+                .map_err(map_sd_error)?;
+        }
+        self.write_buf.clear();
         Ok(())
     }
 
@@ -452,15 +486,25 @@ where
     }
 
     fn append_line(&mut self, filename: &str, data: &str) -> Result<(), LogError> {
-        let file = self.ensure_active_file(filename)?;
-        self.volume_mgr
-            .write(file, data.as_bytes())
-            .map_err(map_sd_error)?;
-        self.volume_mgr.write(file, b"\n").map_err(map_sd_error)?;
+        // Open/switch the file (drains the buffer to the previous file on a
+        // filename change, via close_active_file inside ensure_active_file).
+        self.ensure_active_file(filename)?;
+
+        // Stage the row + newline in RAM. If it wouldn't fit, drain first; any
+        // single row is <= MAX_LOG_LINE_LEN (1 KiB) < buffer, so it then fits.
+        let needed = data.len().saturating_add(1);
+        if self.write_buf.len() + needed > self.write_buf.capacity() {
+            self.drain_write_buffer()?;
+        }
+        self.write_buf
+            .extend_from_slice(data.as_bytes())
+            .map_err(|_| LogError::LineTooLong)?;
+        self.write_buf.push(b'\n').map_err(|_| LogError::LineTooLong)?;
 
         self.pending_lines = self.pending_lines.saturating_add(1);
         self.written_lines = self.written_lines.saturating_add(1);
         if self.written_lines == 1 || self.pending_lines >= self.config.flush_every_lines.max(1) {
+            // Drain + close: persist the directory entry so the rows are durable.
             self.close_active_file()?;
         }
 
