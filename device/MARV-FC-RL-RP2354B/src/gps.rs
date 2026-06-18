@@ -2,7 +2,7 @@ use common::drivers::gnss::ublox_m10::{Event, UbloxM10};
 use common::protocol::ubx::{MAX_CFG_VALSET_FRAME_LEN, SamM10qConfig};
 use common::utilities::time::MeasurementTimestamp;
 use defmt::{info, warn};
-use embassy_executor::Spawner;
+use embassy_executor::SendSpawner;
 use embassy_rp::uart::{BufferedUart, BufferedUartRx, BufferedUartTx, Config as UartConfig};
 use embassy_time::{Duration, Instant, Timer};
 use embedded_io_async::{Read, Write};
@@ -27,7 +27,7 @@ static GPS_UART_TX_BUFFER: StaticCell<[u8; crate::config::GPS_UART_BUFFER_BYTES]
 static GPS_UART_RX_BUFFER: StaticCell<[u8; crate::config::GPS_UART_BUFFER_BYTES]> =
     StaticCell::new();
 
-pub fn spawn(spawner: &Spawner, bus: GpsUart, pins: GpsPins) {
+pub fn spawn(spawner: SendSpawner, bus: GpsUart, pins: GpsPins) {
     spawner
         .spawn(gps_uart_task(bus, pins))
         .expect("gps uart task spawn failed");

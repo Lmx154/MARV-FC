@@ -570,8 +570,17 @@ pub async fn run(spawner: Spawner, resources: DeviceResources) -> ! {
             FlightPhase::Hil
         }
         SensorBackend::Real => {
-            gps::spawn(&spawner, gps_bus, gps_pins);
-            spawner
+            // GPS (async UART) and the BMM350 magnetometer (async I2C) run on the
+            // time-sensitive interrupt executor — NOT the thread-mode executor.
+            // The thread-mode executor also runs the SD logger, whose writes are
+            // *blocking* (`Spi<Blocking>` + busy-wait `block_for`). Sharing an
+            // executor with that blocking sink starves these cooperative async
+            // acquisition tasks (their multi-round-trip init never completes, so
+            // they log as `missing`). The interrupt executor preempts thread mode,
+            // so it stays responsive through SD blocking — same protection the
+            // barometer task already gets here.
+            gps::spawn(time_sensitive_spawner, gps_bus, gps_pins);
+            time_sensitive_spawner
                 .spawn(bmm350_magnetometer_task(
                     auxiliary_navigation_bus,
                     auxiliary_navigation_pins,
