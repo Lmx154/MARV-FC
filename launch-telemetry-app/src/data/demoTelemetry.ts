@@ -30,6 +30,10 @@ export function buildDemoPacket(elapsedSeconds: number): TelemetryPacket {
     packetAgeMs: 120 + Math.round(Math.sin(t / 3) * 30),
     packetRateHz: 8.8 + Math.sin(t / 5) * 0.4,
     packetLossPct: Math.max(0, Math.sin(t / 7) * 1.8 + 0.8),
+    radioActiveKnown: true,
+    radioActivePreset: 0,
+    radioActiveTxPowerDbm: 17,
+    radioActiveFrequencyHz: 902_080_000,
   };
 }
 

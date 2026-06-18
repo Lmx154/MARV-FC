@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 use common::comms::links::lora::LoraProfile;
+use common::protocol::hilink;
 
 #[cfg(all(feature = "radio", feature = "ground-station"))]
 compile_error!("features `radio` and `ground-station` are mutually exclusive");
@@ -27,9 +28,24 @@ pub const LORA_STATION_ID_PERIOD_MS: u64 = 9 * 60 * 1_000;
 pub const LORA_LED_EVENT_HOLD_MS: u64 = 1_000;
 pub const LORA_PACKET_LOG_EVERY: u32 = 10;
 pub const LORA_MISS_LOG_EVERY: u8 = 6;
-pub const LORA_MODE_C_BANDWIDTH_HZ: u32 = 62_500;
 pub const LORA_FREQUENCY_HZ: u32 = build_config::LORA_FREQUENCY_HZ;
 pub const AMATEUR_CALLSIGN: &str = build_config::AMATEUR_CALLSIGN;
+
+/// Boot RF profile, expressed as the `(preset, frequency, power)` triple the runtime switch uses.
+/// `DEFAULT_PRESET` is the fastest Mode C narrowband preset; the default power matches the
+/// dense-RF ceiling. The bridge builds the live profile from these via `lora_profile_for_preset`.
+pub const DEFAULT_PRESET: u8 = hilink::lora_profile::FAST;
+pub const DEFAULT_TX_POWER_DBM: i8 = hilink::band_plan::DEFAULT_MAX_TX_POWER_DBM;
+
+/// Boot value for the idle-fallback window: how long this radio tolerates hearing nothing from its
+/// peer before unilaterally returning to the boot/"setup" profile ([`DEFAULT_PRESET`] @
+/// [`LORA_FREQUENCY_HZ`] @ [`DEFAULT_TX_POWER_DBM`]). Operator-tunable at runtime via the cache;
+/// both ends re-home to the same absolute channel so a dead link re-rendezvous there. See
+/// `hilink::idle_fallback`.
+pub const DEFAULT_IDLE_FALLBACK_MS: u32 = hilink::idle_fallback::DEFAULT_MS;
+
+/// Const fallback if `lora_profile_for_preset(DEFAULT_PRESET, ..)` ever fails to map (it will not
+/// for `FAST`, which is byte-identical to this). Kept as a compile-time safety net.
 pub const LORA_PROFILE: LoraProfile = LoraProfile::irec_33cm_mode_c(LORA_FREQUENCY_HZ);
 
 #[derive(Clone, Copy, Debug, defmt::Format, PartialEq, Eq)]

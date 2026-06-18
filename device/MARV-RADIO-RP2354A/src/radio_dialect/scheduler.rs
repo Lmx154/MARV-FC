@@ -1,3 +1,5 @@
+use common::protocol::hilink;
+
 use crate::channels::{
     HILINK_BRIDGE_FRAME_BYTES, HOST_TO_LORA_P0_CHANNEL, HOST_TO_LORA_P1_CHANNEL,
     HOST_TO_LORA_P2_CHANNEL, HOST_TO_LORA_P3_CHANNEL, HOST_TO_LORA_P4_CHANNEL, HilinkBridgeFrame,
@@ -49,6 +51,20 @@ pub fn select_scheduled_rf_frame(
 
     if let Some(faults) = cache.take_dirty_lora_faults() {
         return rf::encode_rf_frame(&faults).ok();
+    }
+
+    // A pending GS profile-switch command preempts telemetry until the vehicle acks (or the FSM
+    // gives up). Retransmits cover LoRa packet loss on this one-shot control message. No-op for
+    // the vehicle role (its switch FSM never enters the awaiting-ack phase).
+    if let Some(change) = cache.take_profile_switch_retransmit(now_ms) {
+        let set_profile = hilink::LoRaSetProfilePayload {
+            command_seq: change.command_seq,
+            preset: change.preset,
+            tx_power_dbm: change.tx_power_dbm,
+            frequency_hz: change.frequency_hz,
+            flags: change.flags,
+        };
+        return rf::encode_rf_frame(&set_profile).ok();
     }
 
     match role {

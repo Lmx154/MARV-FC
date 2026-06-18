@@ -49,7 +49,9 @@ pub fn classify_normal_msg(packet: &hilink::DecodedPacket<'_>) -> RadioPriority 
         | hilink::MsgType::MotorTest
         | hilink::MsgType::MotorSweep
         | hilink::MsgType::DshotCommand
-        | hilink::MsgType::ActuatorStatusRequest => RadioPriority::P1Command,
+        | hilink::MsgType::ActuatorStatusRequest
+        | hilink::MsgType::SetRadioProfile
+        | hilink::MsgType::SetIdleFallback => RadioPriority::P1Command,
         hilink::MsgType::TelemetrySnapshot
         | hilink::MsgType::HilSensorFrame
         | hilink::MsgType::HilResponseFrame

@@ -56,4 +56,11 @@ where
             })
         }
     }
+
+    fn reinitialize<Del: DelayMs>(
+        &mut self,
+        delay: &mut Del,
+    ) -> impl core::future::Future<Output = Result<(), Self::Error>> {
+        async move { self.driver.init(delay).await }
+    }
 }

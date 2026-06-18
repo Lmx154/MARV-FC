@@ -15,6 +15,7 @@ rp235xb = ["embassy-rp/rp235xb"]
 [dependencies]
 common = { path = "../../common" }
 defmt = "1.0.1"
+embassy-embedded-hal = { version = "0.5.0", features = ["defmt"] }
 embassy-executor = { version = "0.9.0", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 embassy-rp = { version = "0.8.0", features = ["defmt", "time-driver", "critical-section-impl", "binary-info", "imagedef-none"] }
 embassy-time = { version = "0.5.0", features = ["defmt", "defmt-timestamp-uptime"] }

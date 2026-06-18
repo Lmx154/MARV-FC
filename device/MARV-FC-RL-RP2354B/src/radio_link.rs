@@ -13,8 +13,8 @@ use static_cell::StaticCell;
 use crate::buses::RadioLinkUart;
 use crate::channels::{
     AUX_IMU_CHANNEL, BAROMETER_CHANNEL, FLIGHT_PHASE_CHANNEL, FcBarometerSubscriber,
-    FcFlightPhaseSubscriber, FcGpsSubscriber, FcImuSubscriber, FcMagnetometerSubscriber, GPS_CHANNEL,
-    IMU_CHANNEL, MAGNETOMETER_CHANNEL, RGB_LED_COMMAND_CHANNEL,
+    FcFlightPhaseSubscriber, FcGpsSubscriber, FcImuSubscriber, FcMagnetometerSubscriber,
+    GPS_CHANNEL, IMU_CHANNEL, MAGNETOMETER_CHANNEL, RGB_LED_COMMAND_CHANNEL,
 };
 use crate::interrupts::RadioLinkIrqs;
 use crate::resources::RadioLinkPins;

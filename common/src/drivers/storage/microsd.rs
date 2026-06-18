@@ -75,6 +75,7 @@ pub struct MicrosdLogger<
     config: MicrosdLoggerConfig,
     active_file: Option<ActiveLogFile>,
     pending_lines: usize,
+    written_lines: usize,
 }
 
 impl<D, TS, const MAX_DIRS: usize, const MAX_FILES: usize, const MAX_VOLUMES: usize>
@@ -119,6 +120,7 @@ where
                         config,
                         active_file: None,
                         pending_lines: 0,
+                        written_lines: 0,
                     });
                 }
                 Err(error) => {
@@ -457,7 +459,8 @@ where
         self.volume_mgr.write(file, b"\n").map_err(map_sd_error)?;
 
         self.pending_lines = self.pending_lines.saturating_add(1);
-        if self.pending_lines >= self.config.flush_every_lines.max(1) {
+        self.written_lines = self.written_lines.saturating_add(1);
+        if self.written_lines == 1 || self.pending_lines >= self.config.flush_every_lines.max(1) {
             self.close_active_file()?;
         }
 

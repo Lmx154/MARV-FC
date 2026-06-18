@@ -8,9 +8,23 @@ import {
   isTauri,
   listSerialPorts,
   onLinkStatus,
+  onTelemetry,
   sendCommand,
+  sendIdleFallback,
+  sendRadioProfile,
   type RocketCommand,
 } from "../lib/backend";
+import {
+  DEFAULT_FREQUENCY_HZ,
+  IDLE_FALLBACK_DEFAULT_MS,
+  IDLE_FALLBACK_MAX_MS,
+  IDLE_FALLBACK_MIN_MS,
+  RADIO_PRESETS,
+  clampIdleFallbackMs,
+  presetById,
+  presetName,
+  validateRadioProfile,
+} from "../constants/radio";
 import type { DataSource, LinkStatus, SerialPortInfo, ThemeMode } from "../types";
 
 const BAUD_RATES = [9600, 57600, 115200, 230400, 460800, 921600];
@@ -29,6 +43,17 @@ export function SettingsView({ theme, onThemeChange, source, onSourceChange }: S
   // Default matches the MARV-RADIO ground-station host UART (HOST_UART_BAUD = 460_800).
   const [baud, setBaud] = useState<number>(460800);
   const [link, setLink] = useState<LinkStatus>({ connected: false, port: null, baud: 460800, lastError: null });
+  // RF profile control state.
+  const [preset, setPreset] = useState<number>(RADIO_PRESETS[0].id);
+  const [freqMhz, setFreqMhz] = useState<number>(DEFAULT_FREQUENCY_HZ / 1e6);
+  const [txPower, setTxPower] = useState<number>(17);
+  const [powerOverride, setPowerOverride] = useState<boolean>(false);
+  const [rfStatus, setRfStatus] = useState<string | null>(null);
+  // Radio's live active profile (from RadioStatus telemetry) for switch verification.
+  const [radioActive, setRadioActive] = useState<{ preset: number; freqHz: number; power: number } | null>(null);
+  // Idle-fallback window (operator-facing unit is minutes; sent in ms).
+  const [idleFallbackMin, setIdleFallbackMin] = useState<number>(IDLE_FALLBACK_DEFAULT_MS / 60_000);
+  const [idleStatus, setIdleStatus] = useState<string | null>(null);
 
   const refreshPorts = useCallback(async () => {
     const found = await listSerialPorts();
@@ -51,7 +76,63 @@ export function SettingsView({ theme, onThemeChange, source, onSourceChange }: S
     };
   }, [tauri, refreshPorts]);
 
+  // Track the radio's reported active RF profile; only update state when it changes so telemetry-
+  // rate packets don't re-render the settings page.
+  useEffect(() => {
+    if (!tauri) return;
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    onTelemetry((packet) => {
+      if (!packet.radioActiveKnown) return;
+      setRadioActive((current) =>
+        current &&
+        current.preset === packet.radioActivePreset &&
+        current.freqHz === packet.radioActiveFrequencyHz &&
+        current.power === packet.radioActiveTxPowerDbm
+          ? current
+          : {
+              preset: packet.radioActivePreset,
+              freqHz: packet.radioActiveFrequencyHz,
+              power: packet.radioActiveTxPowerDbm,
+            },
+      );
+    }).then((fn) => {
+      if (active) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [tauri]);
+
   const connected = link.connected;
+
+  const frequencyHz = Math.round(freqMhz * 1e6);
+  const rfError = validateRadioProfile(preset, frequencyHz, txPower, powerOverride);
+
+  const applyRadioProfile = () => {
+    if (rfError) {
+      setRfStatus(`Rejected locally: ${rfError}`);
+      return;
+    }
+    void sendRadioProfile(preset, frequencyHz, txPower, powerOverride);
+    setRfStatus(
+      `Sent ${presetById(preset)?.name ?? preset} @ ${freqMhz.toFixed(3)} MHz, ${txPower} dBm — switching link-wide…`,
+    );
+  };
+
+  const applyIdleFallback = () => {
+    const ms = clampIdleFallbackMs(idleFallbackMin * 60_000);
+    void sendIdleFallback(ms);
+    setIdleStatus(`Sent ${(ms / 60_000).toFixed(0)} min — both ends re-home to setup freq when idle this long.`);
+  };
+
+  const radioMatchesSelection =
+    radioActive !== null &&
+    radioActive.preset === preset &&
+    radioActive.freqHz === frequencyHz &&
+    radioActive.power === txPower;
 
   return (
     <section className="settings-grid">
@@ -136,12 +217,96 @@ export function SettingsView({ theme, onThemeChange, source, onSourceChange }: S
         </label>
       </SettingsPanel>
 
-      <SettingsPanel title="RF Profile">
-        <MetricInline label="Frequency" value="915 MHz" />
-        <MetricInline label="Bandwidth" value="125 kHz" />
-        <MetricInline label="Spreading" value="SF7" />
-        <MetricInline label="Coding rate" value="4/5" />
-        <MetricInline label="Profile" value="Display only" />
+      <SettingsPanel title="RF Profile (link-wide)">
+        <label>
+          Preset
+          <select
+            value={preset}
+            onChange={(event) => setPreset(Number(event.currentTarget.value))}
+            disabled={!tauri || !connected}
+          >
+            {RADIO_PRESETS.map((option) => (
+              <option key={option.id} value={option.id}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Frequency (MHz)
+          <input
+            type="number"
+            step={0.025}
+            min={902}
+            max={909}
+            value={freqMhz}
+            onChange={(event) => setFreqMhz(Number(event.currentTarget.value))}
+            disabled={!tauri || !connected}
+          />
+        </label>
+        <label>
+          TX power (dBm)
+          <input
+            type="number"
+            step={1}
+            min={-9}
+            max={22}
+            value={txPower}
+            onChange={(event) => setTxPower(Number(event.currentTarget.value))}
+            disabled={!tauri || !connected}
+          />
+        </label>
+        <label className="settings-checkbox">
+          <input
+            type="checkbox"
+            checked={powerOverride}
+            onChange={(event) => setPowerOverride(event.currentTarget.checked)}
+            disabled={!tauri || !connected}
+          />
+          Allow power above 17 dBm (up to 22)
+        </label>
+        <div className="button-row">
+          <button onClick={applyRadioProfile} disabled={!tauri || !connected || rfError !== null}>
+            Apply profile
+          </button>
+        </div>
+        {rfError && <MetricInline label="Invalid" value={rfError} />}
+        {rfStatus && <MetricInline label="Last action" value={rfStatus} />}
+        <MetricInline
+          label="Radio active"
+          value={
+            radioActive
+              ? `${presetName(radioActive.preset)} @ ${(radioActive.freqHz / 1e6).toFixed(3)} MHz, ${radioActive.power} dBm`
+              : connected
+                ? "Awaiting radio status…"
+                : "Connect to read"
+          }
+        />
+        {radioActive && (
+          <MetricInline
+            label="Verification"
+            value={radioMatchesSelection ? "Link is on the selected profile ✓" : "Differs from selection above"}
+          />
+        )}
+        <MetricInline label="Safety" value="Both radios switch together; auto-reverts if unverified." />
+        <label>
+          Idle fallback to setup freq (min)
+          <input
+            type="number"
+            step={1}
+            min={IDLE_FALLBACK_MIN_MS / 60_000}
+            max={IDLE_FALLBACK_MAX_MS / 60_000}
+            value={idleFallbackMin}
+            onChange={(event) => setIdleFallbackMin(Number(event.currentTarget.value))}
+            disabled={!tauri || !connected}
+          />
+        </label>
+        <div className="button-row">
+          <button onClick={applyIdleFallback} disabled={!tauri || !connected}>
+            Apply idle fallback
+          </button>
+        </div>
+        {idleStatus && <MetricInline label="Idle fallback" value={idleStatus} />}
       </SettingsPanel>
     </section>
   );

@@ -10,7 +10,8 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
 use marv_hilink::{
-    encode_packet, ArmPayload, DisarmPayload, MotorStopPayload, PingPayload, WirePayload,
+    encode_packet, ArmPayload, DisarmPayload, MotorStopPayload, PingPayload, SetIdleFallbackPayload,
+    SetRadioProfilePayload, WirePayload,
 };
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use tauri::{AppHandle, Emitter};
@@ -154,6 +155,20 @@ impl Worker {
             CommandKind::Disarm => self.write_payload(&DisarmPayload),
             CommandKind::Ping => self.write_payload(&PingPayload),
             CommandKind::MotorStop => self.write_payload(&MotorStopPayload),
+            CommandKind::SetRadioProfile {
+                preset,
+                tx_power_dbm,
+                frequency_hz,
+                flags,
+            } => self.write_payload(&SetRadioProfilePayload {
+                preset,
+                tx_power_dbm,
+                frequency_hz,
+                flags,
+            }),
+            CommandKind::SetIdleFallback { idle_fallback_ms } => {
+                self.write_payload(&SetIdleFallbackPayload { idle_fallback_ms })
+            }
         };
         match result {
             Ok(()) => self.emit_debug(DebugKind::Link, format!("sent {kind:?} command")),

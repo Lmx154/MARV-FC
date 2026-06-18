@@ -50,6 +50,10 @@ export type TelemetryPacket = {
   packetAgeMs: number;
   packetRateHz: number;
   packetLossPct: number;
+  radioActiveKnown: boolean;
+  radioActivePreset: number;
+  radioActiveTxPowerDbm: number;
+  radioActiveFrequencyHz: number;
 };
 
 export type DebugLine = {

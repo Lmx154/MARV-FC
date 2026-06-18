@@ -14,8 +14,17 @@ pub const WATCHDOG_ENABLED_IN_HIL: bool = false;
 pub const STATUS_HEARTBEAT_PERIOD_MS: u64 = 1_000;
 pub const LOG_FILE_PREFIX: &str = "FLGT";
 pub const LOG_RECORD_PERIOD_MS: u32 = 10;
-pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 12_000_000;
-pub const LOG_SD_FLUSH_EVERY_LINES: usize = 64;
+// SD-card data clock used AFTER the card is initialised at 400 kHz (see the
+// two-stage clocking in `rp235x_base::storage::build_logger_engine`). 4 MHz is
+// ~12x the bandwidth a 100 Hz all-sensor CSV needs (~40 KB/s) while staying
+// conservative for the PCB's SD signal integrity. Raise toward 12-25 MHz if the
+// board's routing is clean and you want more headroom for flush stalls.
+pub const LOG_SD_SPI_FREQUENCY_HZ: u32 = 4_000_000;
+pub const LOG_SD_FLUSH_EVERY_LINES: usize = 8;
+// Async settle delay before touching the SD card, giving its supply rail time to
+// come up after boot. Runs on `Timer::after` (yields), so the watchdog and
+// feed-critical sensor tasks keep running during it.
+pub const LOG_SD_STARTUP_DELAY_MS: u64 = 1_000;
 pub const HIL_SYSTEM_ID: u8 = 42;
 pub const HIL_COMPONENT_ID: u8 = 1;
 pub const BMP581_I2C_FREQUENCY_HZ: u32 = 400_000;

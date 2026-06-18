@@ -1,6 +1,9 @@
 use common::comms::links::lora::stats::LoraLinkStats;
 use common::protocol::hilink;
 
+use crate::config;
+use crate::radio_dialect::profile_switch::{ProfileChange, ProfileSwitch, SwitchAction, VehicleArm};
+
 /// Generate the latest-cache `store` / `due` / `note_sent` accessor trio for a periodic
 /// vehicle sensor snapshot, mirroring the hand-written flight/gps snapshot methods.
 macro_rules! vehicle_snapshot_accessors {
@@ -96,6 +99,11 @@ pub struct RadioStateCache {
     last_link_status_lost_packets: u32,
     vehicle_system_state: Option<u8>,
     vehicle_fault_summary: Option<u32>,
+    profile_switch: ProfileSwitch,
+    local_active_preset: u8,
+    local_active_frequency_hz: u32,
+    local_active_tx_power_dbm: i8,
+    idle_fallback_ms: u32,
 }
 
 impl RadioStateCache {
@@ -146,7 +154,110 @@ impl RadioStateCache {
             last_link_status_lost_packets: 0,
             vehicle_system_state: None,
             vehicle_fault_summary: None,
+            profile_switch: ProfileSwitch::new(),
+            local_active_preset: hilink::band_plan::UNKNOWN_PRESET,
+            local_active_frequency_hz: 0,
+            local_active_tx_power_dbm: 0,
+            idle_fallback_ms: config::DEFAULT_IDLE_FALLBACK_MS,
         }
+    }
+
+    // --- Local active RF profile (reported to the host via RadioStatus for verification) ---
+
+    /// Record the radio's live RF profile. Set at link bring-up and after every profile switch so
+    /// the host's RadioStatus reflects exactly what this radio is transmitting on.
+    pub fn set_local_active_profile(&mut self, preset: u8, frequency_hz: u32, tx_power_dbm: i8) {
+        self.local_active_preset = preset;
+        self.local_active_frequency_hz = frequency_hz;
+        self.local_active_tx_power_dbm = tx_power_dbm;
+    }
+
+    pub fn local_active_preset(&self) -> u8 {
+        self.local_active_preset
+    }
+
+    pub fn local_active_frequency_hz(&self) -> u32 {
+        self.local_active_frequency_hz
+    }
+
+    pub fn local_active_tx_power_dbm(&self) -> i8 {
+        self.local_active_tx_power_dbm
+    }
+
+    // --- Idle fallback to the boot/"setup" profile (see `hilink::idle_fallback`) ---
+
+    /// Window (ms) this radio waits, hearing nothing from its peer, before re-homing to the setup
+    /// profile. Read each bridge loop so an operator change takes effect without a restart.
+    pub fn idle_fallback_ms(&self) -> u32 {
+        self.idle_fallback_ms
+    }
+
+    /// Set the idle-fallback window, clamped to the legal range. Driven by the host `SetIdleFallback`
+    /// command on the GS, and by the relayed `SET_IDLE_FALLBACK` LoRa command on the vehicle, so
+    /// both ends share the operator's value.
+    pub fn set_idle_fallback_ms(&mut self, idle_fallback_ms: u32) {
+        self.idle_fallback_ms = hilink::idle_fallback::clamp(idle_fallback_ms);
+    }
+
+    // --- Coordinated RF profile switch (see `radio_dialect::profile_switch`) ---
+
+    pub fn profile_switch_active(&self) -> bool {
+        self.profile_switch.is_active()
+    }
+
+    /// GS: arm a switch after a validated host request. Returns `false` if one is already running.
+    pub fn begin_gs_profile_switch(&mut self, change: ProfileChange, now_ms: u32) -> bool {
+        self.profile_switch.begin_gs(change, now_ms)
+    }
+
+    pub fn profile_switch_peer_accepted(&mut self, command_seq: u16, now_ms: u32) {
+        self.profile_switch.peer_accepted(command_seq, now_ms);
+    }
+
+    pub fn profile_switch_peer_rejected(&mut self, command_seq: u16) {
+        self.profile_switch.peer_rejected(command_seq);
+    }
+
+    /// Vehicle: validate + de-duplicate a `LoRaSetProfile`, arming the switch when fresh.
+    pub fn begin_vehicle_profile_switch(
+        &mut self,
+        change: ProfileChange,
+        now_ms: u32,
+    ) -> VehicleArm {
+        if change.to_profile().is_none() {
+            return VehicleArm::Rejected;
+        }
+        if self.vehicle_command_is_duplicate(
+            hilink::lora_command_id::SET_RADIO_PROFILE,
+            change.command_seq,
+        ) {
+            return VehicleArm::DuplicateAccepted;
+        }
+        if self.profile_switch.is_active() {
+            return VehicleArm::Busy;
+        }
+        self.note_vehicle_command_forwarded(
+            hilink::lora_command_id::SET_RADIO_PROFILE,
+            change.command_seq,
+        );
+        self.profile_switch.arm_vehicle(change, now_ms);
+        VehicleArm::Accepted
+    }
+
+    pub fn take_profile_switch_retransmit(&mut self, now_ms: u32) -> Option<ProfileChange> {
+        self.profile_switch.take_retransmit(now_ms)
+    }
+
+    pub fn note_switch_peer_seen(&mut self) {
+        self.profile_switch.note_peer_seen();
+    }
+
+    pub fn poll_profile_switch(&mut self, now_ms: u32) -> SwitchAction {
+        self.profile_switch.poll(now_ms)
+    }
+
+    pub fn abort_profile_switch(&mut self) {
+        self.profile_switch.abort();
     }
 
     pub fn next_rf_command_seq(&mut self) -> u16 {

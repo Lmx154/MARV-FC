@@ -182,14 +182,17 @@ pub struct LoRaCommandAckPayload {
     pub detail: i32,
 }
 
+/// Command the link onto a new RF profile. Sent ground-station → vehicle over the
+/// *current* link as part of the coordinated, link-wide switch. `preset` selects a legal
+/// Mode C narrowband profile ([`lora_profile`]); `frequency_hz` and `tx_power_dbm` are
+/// validated against the SRAD band / power policy by [`crate::band_plan::validate`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct LoRaSetProfilePayload {
     pub command_seq: u16,
-    pub profile: u8,
-    pub telemetry_rate_hz: u8,
-    pub gps_rate_hz: u8,
-    pub link_status_rate_hz: u8,
+    pub preset: u8,
+    pub tx_power_dbm: i8,
+    pub frequency_hz: u32,
     pub flags: u16,
 }
 
@@ -330,6 +333,9 @@ pub mod lora_command_id {
     pub const REQUEST_FAULTS: u16 = 10;
     pub const ENTER_RECOVERY_BEACON: u16 = 11;
     pub const PING: u16 = 12;
+    /// Set the idle-fallback window on the vehicle radio. Consumed by the vehicle radio itself
+    /// (not forwarded to the flight controller); `arg0` carries the window in milliseconds.
+    pub const SET_IDLE_FALLBACK: u16 = 13;
 }
 
 pub mod lora_command_status {
@@ -367,13 +373,26 @@ pub mod lora_profile_flags {
     pub const TEMPORARY: u16 = 1 << 0;
     pub const SAVE_DEFAULT: u16 = 1 << 1;
     pub const ENTER_RECOVERY_RX_WINDOWS: u16 = 1 << 2;
+    /// Permit a transmit power above the dense-RF default ceiling, up to the hardware max.
+    /// Without this flag the band-plan validator clamps to `band_plan::DEFAULT_MAX_TX_POWER_DBM`.
+    pub const POWER_OVERRIDE: u16 = 1 << 3;
 }
 
+/// Legal IREC 33 cm Mode C narrowband presets, indexed by the `preset` field of
+/// [`LoRaSetProfilePayload`]. Each maps to concrete SF / bandwidth / coding-rate in
+/// [`crate::band_plan::PRESETS`]; all stay at or below the Mode C narrowband ceiling
+/// (`band_plan::MODE_C_MAX_BANDWIDTH_HZ`). Numbering is contiguous from 0.
 pub mod lora_profile {
-    pub const SF7_500: u8 = 1;
-    pub const SF8_500: u8 = 2;
-    pub const SF8_250: u8 = 3;
-    pub const RECOVERY_BEACON: u8 = 4;
+    /// SF7 / 62.5 kHz / CR4-5 — fastest telemetry, shortest range (boot default).
+    pub const FAST: u8 = 0;
+    /// SF9 / 62.5 kHz / CR4-5 — more link margin, still streams telemetry.
+    pub const BALANCED: u8 = 1;
+    /// SF10 / 62.5 kHz / CR4-8 — robust, reduced telemetry rate.
+    pub const LONG_RANGE: u8 = 2;
+    /// SF12 / 20.8 kHz / CR4-8 — beacon/recovery only, maximum sensitivity.
+    pub const RECOVERY_BEACON: u8 = 3;
+    /// Number of defined presets (also the count of [`crate::band_plan::PRESETS`]).
+    pub const COUNT: u8 = 4;
 }
 
 pub mod lora_request_flags {
@@ -605,22 +624,20 @@ impl_payload!(
 impl_payload!(
     LoRaSetProfilePayload,
     RfMsgType::LoRaSetProfile,
-    8,
+    10,
     |this, w| {
         w.u16(this.command_seq)?;
-        w.u8(this.profile)?;
-        w.u8(this.telemetry_rate_hz)?;
-        w.u8(this.gps_rate_hz)?;
-        w.u8(this.link_status_rate_hz)?;
+        w.u8(this.preset)?;
+        w.i8(this.tx_power_dbm)?;
+        w.u32(this.frequency_hz)?;
         w.u16(this.flags)?;
     },
     |r| {
         Self {
             command_seq: r.u16()?,
-            profile: r.u8()?,
-            telemetry_rate_hz: r.u8()?,
-            gps_rate_hz: r.u8()?,
-            link_status_rate_hz: r.u8()?,
+            preset: r.u8()?,
+            tx_power_dbm: r.i8()?,
+            frequency_hz: r.u32()?,
             flags: r.u16()?,
         }
     }
@@ -895,8 +912,27 @@ mod tests {
         assert_eq!(LoRaBaroSnapshotPayload::WIRE_LEN, 14);
         assert_eq!(LoRaCommandPayload::WIRE_LEN, 16);
         assert_eq!(LoRaCommandAckPayload::WIRE_LEN, 12);
-        assert_eq!(LoRaSetProfilePayload::WIRE_LEN, 8);
+        assert_eq!(LoRaSetProfilePayload::WIRE_LEN, 10);
         assert_eq!(LoRaRequestSnapshotPayload::WIRE_LEN, 4);
+    }
+
+    #[test]
+    fn set_profile_payload_round_trips() {
+        let payload = LoRaSetProfilePayload {
+            command_seq: 7,
+            preset: lora_profile::LONG_RANGE,
+            tx_power_dbm: -3,
+            frequency_hz: 902_500_000,
+            flags: lora_profile_flags::POWER_OVERRIDE | lora_profile_flags::TEMPORARY,
+        };
+        let mut encoded = [0u8; encoded_rf_len(LoRaSetProfilePayload::WIRE_LEN)];
+
+        let len = encode_rf_packet(&payload, &mut encoded).unwrap();
+        let packet = decode_rf_packet(&encoded[..len]).unwrap();
+        let decoded = decode_rf_payload::<LoRaSetProfilePayload>(&packet).unwrap();
+
+        assert_eq!(packet.msg_type, RfMsgType::LoRaSetProfile);
+        assert_eq!(decoded, payload);
     }
 
     #[test]

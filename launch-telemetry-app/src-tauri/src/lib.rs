@@ -31,6 +31,8 @@ pub fn run() {
             commands::connect,
             commands::disconnect,
             commands::send_command,
+            commands::send_radio_profile,
+            commands::send_idle_fallback,
         ])
         .run(tauri::generate_context!())
         .expect("error while running launch telemetry application");

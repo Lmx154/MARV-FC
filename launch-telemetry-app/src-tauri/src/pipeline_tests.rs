@@ -52,6 +52,9 @@ fn full_pipeline_bytes_to_ui_packet() {
         loss_pct_x100: 140, // 1.4 %
         packet_rate_hz: 10,
         reserved0: 0,
+        active_preset: 0,
+        active_tx_power_dbm: 17,
+        active_frequency_hz: 902_080_000,
     };
 
     // Concatenate the three frames, then split mid-stream to prove reassembly across chunks.

@@ -1,5 +1,3 @@
-use core::cell::RefCell;
-
 use common::drivers::bmi088::{
     AccelRange as Bmi088AccelRange, Bmi088, GyroRange as Bmi088GyroRange,
 };
@@ -32,7 +30,12 @@ use crate::channels::{
     AUX_IMU_CHANNEL, BAROMETER_CHANNEL, IMU_CHANNEL, IMU_INIT_SIGNAL, MAGNETOMETER_CHANNEL,
 };
 use crate::resources::{AuxiliaryNavigationPins, EnvironmentalPins, SensorPins};
-use crate::sensor_spi::{SharedSensorSpiBus, SharedSpiDevice};
+use crate::sensor_spi::{
+    DEFAULT_SENSOR_I2C_TXN_TIMEOUT, DEFAULT_SENSOR_SPI_TXN_TIMEOUT, SharedSensorSpiBus, TimeoutI2c,
+    new_sensor_spi_device,
+};
+use embassy_sync::mutex::Mutex;
+use static_cell::StaticCell;
 use crate::spi1_sensor_cluster::{
     ImuSchedule, SensorSpiClusterConfig, SensorSpiClusterError, run_spi1_sensor_cluster,
 };
@@ -121,19 +124,42 @@ async fn spi1_sensor_cluster_task(pins: SensorPins, bus: SensorSpiBus) -> ! {
     spi_config.frequency = SENSOR_SPI_FREQUENCY_HZ;
 
     let spi = Spi::new(
-        bus.spi, pins.sck, pins.mosi, pins.miso, bus.tx_dma, bus.rx_dma, spi_config,
+        bus.spi,
+        pins.sck,
+        pins.mosi,
+        pins.miso,
+        bus.tx_dma,
+        bus.rx_dma,
+        spi_config.clone(),
     );
-    let shared_bus: SharedSensorSpiBus = RefCell::new(spi);
+
+    static SENSOR_SPI_BUS: StaticCell<SharedSensorSpiBus> = StaticCell::new();
+    let shared_bus: &'static SharedSensorSpiBus = SENSOR_SPI_BUS.init(Mutex::new(spi));
+
     let accel_cs = Output::new(pins.bmi088_accel_cs, Level::High);
     let gyro_cs = Output::new(pins.bmi088_gyro_cs, Level::High);
     let lsm6dsv32x_cs = Output::new(pins.lsm6dsv32x_cs, Level::High);
 
     let bmi088_driver = Bmi088::new(
-        SharedSpiDevice::new(&shared_bus, accel_cs).unwrap(),
-        SharedSpiDevice::new(&shared_bus, gyro_cs).unwrap(),
+        new_sensor_spi_device(
+            shared_bus,
+            accel_cs,
+            spi_config.clone(),
+            DEFAULT_SENSOR_SPI_TXN_TIMEOUT,
+        ),
+        new_sensor_spi_device(
+            shared_bus,
+            gyro_cs,
+            spi_config.clone(),
+            DEFAULT_SENSOR_SPI_TXN_TIMEOUT,
+        ),
     );
-    let lsm6dsv32x_driver =
-        Lsm6dsv32x::new(SharedSpiDevice::new(&shared_bus, lsm6dsv32x_cs).unwrap());
+    let lsm6dsv32x_driver = Lsm6dsv32x::new(new_sensor_spi_device(
+        shared_bus,
+        lsm6dsv32x_cs,
+        spi_config,
+        DEFAULT_SENSOR_SPI_TXN_TIMEOUT,
+    ));
 
     let mut bmi088_source = Bmi088ImuSource::new(
         bmi088_driver,
@@ -269,7 +295,10 @@ async fn bmm350_magnetometer_task(
         i2c_config,
     );
 
-    let mut driver = Bmm350::new(i2c, BMM350_ADDR);
+    let mut driver = Bmm350::new(
+        TimeoutI2c::new(i2c, DEFAULT_SENSOR_I2C_TXN_TIMEOUT),
+        BMM350_ADDR,
+    );
     let mut init_delay = EmbassyDelay;
 
     loop {

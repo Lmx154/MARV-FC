@@ -46,6 +46,12 @@ pub struct TelemetryAggregator {
     radio_rate_hz: f32,
     radio_at: Option<Instant>,
 
+    // Ground-station radio's active RF profile (from RadioStatus), for switch verification.
+    radio_active_known: bool,
+    radio_active_preset: u8,
+    radio_active_tx_power_dbm: i8,
+    radio_active_frequency_hz: u32,
+
     // Mission clock (from the FC stamp when present).
     mission_time_ms: u64,
     have_mission_time: bool,
@@ -109,6 +115,10 @@ impl TelemetryAggregator {
                 self.radio_loss_pct = f32::from(r.loss_pct_x100) / 100.0;
                 self.radio_rate_hz = f32::from(r.packet_rate_hz);
                 self.radio_at = Some(now);
+                self.radio_active_preset = r.active_preset;
+                self.radio_active_tx_power_dbm = r.active_tx_power_dbm;
+                self.radio_active_frequency_hz = r.active_frequency_hz;
+                self.radio_active_known = true;
             }
             ParsedMessage::Heartbeat(h) => {
                 self.system_state = h.system_state;
@@ -237,6 +247,10 @@ impl TelemetryAggregator {
             packet_age_ms,
             packet_rate_hz,
             packet_loss_pct,
+            radio_active_known: self.radio_active_known,
+            radio_active_preset: self.radio_active_preset,
+            radio_active_tx_power_dbm: self.radio_active_tx_power_dbm,
+            radio_active_frequency_hz: self.radio_active_frequency_hz,
         }
     }
 }

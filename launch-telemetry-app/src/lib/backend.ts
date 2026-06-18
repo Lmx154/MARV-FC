@@ -30,6 +30,25 @@ export async function sendCommand(kind: RocketCommand): Promise<void> {
   await invoke("send_command", { kind });
 }
 
+/** Command the ground-station radio to change the link RF profile (validated + driven link-wide). */
+export async function sendRadioProfile(
+  preset: number,
+  frequencyHz: number,
+  txPowerDbm: number,
+  powerOverride: boolean,
+): Promise<void> {
+  await invoke("send_radio_profile", { preset, frequencyHz, txPowerDbm, powerOverride });
+}
+
+/**
+ * Set the idle-fallback window (ms): how long a radio waits with no peer traffic before returning
+ * to the boot/"setup" profile. The GS adopts it and relays it to the vehicle so both ends re-home
+ * on the operator's schedule. The firmware re-clamps to its legal range.
+ */
+export async function sendIdleFallback(idleFallbackMs: number): Promise<void> {
+  await invoke("send_idle_fallback", { idleFallbackMs });
+}
+
 export function onTelemetry(handler: (packet: TelemetryPacket) => void): Promise<UnlistenFn> {
   return listen<TelemetryPacket>("telemetry", (event) => handler(event.payload));
 }

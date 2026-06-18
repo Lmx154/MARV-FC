@@ -64,6 +64,46 @@ pub fn send_command(state: State<AppState>, kind: String) -> Result<(), String> 
         .map_err(|e| e.to_string())
 }
 
+/// Change the link RF profile. The ground-station radio validates it against the band plan, then
+/// drives the coordinated, link-wide switch to the vehicle (with verification + rollback). The
+/// host learns the outcome from the command Ack/Nack and the radio's reported active profile.
+#[tauri::command]
+pub fn send_radio_profile(
+    state: State<AppState>,
+    preset: u8,
+    frequency_hz: u32,
+    tx_power_dbm: i8,
+    power_override: bool,
+) -> Result<(), String> {
+    let flags = if power_override {
+        marv_hilink::lora_profile_flags::POWER_OVERRIDE
+    } else {
+        0
+    };
+    state
+        .tx
+        .send(ControlMsg::SendCommand(CommandKind::SetRadioProfile {
+            preset,
+            tx_power_dbm,
+            frequency_hz,
+            flags,
+        }))
+        .map_err(|e| e.to_string())
+}
+
+/// Set the idle-fallback window (the firmware re-clamps to its legal range). The ground-station
+/// radio adopts it and relays it to the vehicle, so both ends return to the setup profile on the
+/// operator's schedule when the link has gone quiet. The outcome arrives as a command Ack/Nack.
+#[tauri::command]
+pub fn send_idle_fallback(state: State<AppState>, idle_fallback_ms: u32) -> Result<(), String> {
+    state
+        .tx
+        .send(ControlMsg::SendCommand(CommandKind::SetIdleFallback {
+            idle_fallback_ms,
+        }))
+        .map_err(|e| e.to_string())
+}
+
 fn format_port_display_name(port: &SerialPortInfo) -> String {
     let label = match &port.port_type {
         SerialPortType::UsbPort(usb) => {

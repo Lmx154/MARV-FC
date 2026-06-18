@@ -6,6 +6,7 @@ use embassy_sync::channel::TrySendError;
 use crate::interfaces::storage::{LogError, LoggerEngine};
 use crate::messages::logging::LogSinkState;
 use crate::services::logging::{LogChannel, LogSinkStateChannel, handle_log_command};
+use defmt::info;
 
 pub async fn run_sd_logging_task<M, S, E, F, const DEPTH: usize, const STATUS_DEPTH: usize>(
     channel: &'static LogChannel<M, DEPTH>,
@@ -22,11 +23,16 @@ where
     let receiver = channel.receiver();
     let sink_state_sender = sink_state_channel.map(|channel| channel.sender());
     let mut reported_state = LogSinkState::Healthy;
+    let mut committed_lines = 0usize;
 
     loop {
         let command = receiver.receive().await;
         match handle_log_command(&mut engine, command) {
             Ok(()) => {
+                committed_lines = committed_lines.saturating_add(1);
+                if committed_lines == 1 || committed_lines % 100 == 0 {
+                    info!("sd logging committed lines={=usize}", committed_lines);
+                }
                 if reported_state != LogSinkState::Healthy
                     && try_report_sink_state(sink_state_sender, LogSinkState::Healthy)
                 {

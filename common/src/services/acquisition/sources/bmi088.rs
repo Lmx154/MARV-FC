@@ -7,6 +7,7 @@ use embedded_hal_async::spi::SpiDevice;
 use crate::drivers::bmi088::{AccelRange, Bmi088, Error as Bmi088Error, GyroRange};
 use crate::interfaces::sensors::ImuSource;
 use crate::messages::sensor::ImuSample;
+use crate::utils::delay::DelayMs;
 
 const STANDARD_GRAVITY_MPS2: f32 = 9.80665;
 
@@ -71,6 +72,13 @@ where
                 ],
             })
         }
+    }
+
+    fn reinitialize<D: DelayMs>(
+        &mut self,
+        delay: &mut D,
+    ) -> impl core::future::Future<Output = Result<(), Self::Error>> {
+        async move { self.driver.init(delay).await }
     }
 }
 

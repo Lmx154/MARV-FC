@@ -2,6 +2,7 @@ use common::protocol::hilink::{self, WirePayload};
 
 use crate::channels::{HILINK_BRIDGE_FRAME_BYTES, HilinkBridgeFrame};
 use crate::config::FirmwareRole;
+use crate::radio_dialect::profile_switch::{ProfileChange, VehicleArm};
 use crate::radio_dialect::{normal, policy, rf, state_cache::RadioStateCache};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,8 +31,7 @@ pub fn host_to_rf(
     };
 
     match role {
-        FirmwareRole::GroundStation => ground_station_normal_to_rf(&packet, cache, now_ms)
-            .map_or(HostToRfDecision::Drop, HostToRfDecision::Translated),
+        FirmwareRole::GroundStation => ground_station_normal_to_rf(&packet, cache, now_ms),
         FirmwareRole::Radio => vehicle_normal_to_rf(&packet, cache, now_ms),
     }
 }
@@ -55,11 +55,26 @@ pub fn rf_to_host(
 fn ground_station_normal_to_rf(
     packet: &hilink::DecodedPacket<'_>,
     cache: &mut RadioStateCache,
-    _now_ms: u32,
-) -> Option<HilinkBridgeFrame> {
-    let msg_type = packet.header.message_type().ok()?;
-    let command_id = policy::normal_command_to_lora_command_id(msg_type)?;
-    normal_command_payload_is_valid(msg_type, packet)?;
+    now_ms: u32,
+) -> HostToRfDecision {
+    let Ok(msg_type) = packet.header.message_type() else {
+        return HostToRfDecision::Drop;
+    };
+
+    if msg_type == hilink::MsgType::SetRadioProfile {
+        return ground_station_initiate_profile_switch(packet, cache, now_ms);
+    }
+
+    if msg_type == hilink::MsgType::SetIdleFallback {
+        return ground_station_set_idle_fallback(packet, cache);
+    }
+
+    let Some(command_id) = policy::normal_command_to_lora_command_id(msg_type) else {
+        return HostToRfDecision::Drop;
+    };
+    if normal_command_payload_is_valid(msg_type, packet).is_none() {
+        return HostToRfDecision::Drop;
+    }
 
     let command_seq = cache.next_rf_command_seq();
     let command = hilink::LoRaCommandPayload {
@@ -71,9 +86,88 @@ fn ground_station_normal_to_rf(
         arg1: 0,
     };
 
-    let frame = rf::encode_rf_frame(&command).ok()?;
+    let Ok(frame) = rf::encode_rf_frame(&command) else {
+        return HostToRfDecision::Drop;
+    };
     cache.store_command_correlation(packet.header, command_seq, command_id);
-    Some(frame)
+    HostToRfDecision::Translated(frame)
+}
+
+/// Begin the GS side of a coordinated, link-wide RF profile switch on a host `SetRadioProfile`.
+///
+/// Validates the request against the band plan and refuses if a switch is already in flight or
+/// the request is illegal (dropped → the host command times out without an ack). On success it
+/// correlates the command for the eventual host ack and arms the switch FSM; the actual
+/// `LoRaSetProfile` frame (first send + retransmits) is emitted by the scheduler while the GS
+/// awaits the vehicle's ack, so nothing is transmitted inline here (`Cached`).
+fn ground_station_initiate_profile_switch(
+    packet: &hilink::DecodedPacket<'_>,
+    cache: &mut RadioStateCache,
+    now_ms: u32,
+) -> HostToRfDecision {
+    let Ok(request) = hilink::decode_payload::<hilink::SetRadioProfilePayload>(packet) else {
+        return HostToRfDecision::Drop;
+    };
+    let change = ProfileChange {
+        command_seq: 0,
+        preset: request.preset,
+        tx_power_dbm: request.tx_power_dbm,
+        frequency_hz: request.frequency_hz,
+        flags: request.flags,
+    };
+    if change.to_profile().is_none() || cache.profile_switch_active() {
+        return HostToRfDecision::Drop;
+    }
+
+    let command_seq = cache.next_rf_command_seq();
+    let change = ProfileChange {
+        command_seq,
+        ..change
+    };
+    cache.store_command_correlation(
+        packet.header,
+        command_seq,
+        hilink::lora_command_id::SET_RADIO_PROFILE,
+    );
+    cache.begin_gs_profile_switch(change, now_ms);
+    HostToRfDecision::Cached
+}
+
+/// Apply a host `SetIdleFallback` to the ground-station radio and relay it to the vehicle.
+///
+/// The GS adopts the (clamped) window immediately for its own idle-fallback watchdog, then emits a
+/// `SET_IDLE_FALLBACK` LoRa command carrying the window in `arg0` so the vehicle radio adopts the
+/// same value — both ends re-home to the setup profile on the operator's schedule. The relayed
+/// command is correlated so the vehicle's ack becomes the host's Ack/Nack.
+fn ground_station_set_idle_fallback(
+    packet: &hilink::DecodedPacket<'_>,
+    cache: &mut RadioStateCache,
+) -> HostToRfDecision {
+    let Ok(request) = hilink::decode_payload::<hilink::SetIdleFallbackPayload>(packet) else {
+        return HostToRfDecision::Drop;
+    };
+    let idle_fallback_ms = hilink::idle_fallback::clamp(request.idle_fallback_ms);
+    cache.set_idle_fallback_ms(idle_fallback_ms);
+
+    let command_seq = cache.next_rf_command_seq();
+    let command = hilink::LoRaCommandPayload {
+        command_id: hilink::lora_command_id::SET_IDLE_FALLBACK,
+        command_seq,
+        expires_ms: policy::DEFAULT_COMMAND_EXPIRES_MS,
+        flags: policy::command_flags(hilink::lora_command_id::SET_IDLE_FALLBACK),
+        arg0: idle_fallback_ms as i32,
+        arg1: 0,
+    };
+
+    let Ok(frame) = rf::encode_rf_frame(&command) else {
+        return HostToRfDecision::Drop;
+    };
+    cache.store_command_correlation(
+        packet.header,
+        command_seq,
+        hilink::lora_command_id::SET_IDLE_FALLBACK,
+    );
+    HostToRfDecision::Translated(frame)
 }
 
 fn ground_station_rf_to_normal(
@@ -113,12 +207,17 @@ fn ground_station_rf_to_normal(
             let Ok(link) = rf::decode_rf_payload::<hilink::LoRaLinkStatusPayload>(packet) else {
                 return RfToHostDecision::Drop;
             };
-            encode_normal_frame(
-                &lora_link_status_to_radio_status(link),
-                cache.next_normal_tx_seq(),
-                now_ms,
-            )
-            .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
+            // Stamp the ground-station radio's own active profile so the host can verify the link
+            // settled on the commanded settings (a decoded peer frame proves the vehicle matches).
+            let status = lora_link_status_to_radio_status(
+                link,
+                cache.local_active_preset(),
+                cache.local_active_frequency_hz(),
+                cache.local_active_tx_power_dbm(),
+            );
+            let seq = cache.next_normal_tx_seq();
+            encode_normal_frame(&status, seq, now_ms)
+                .map_or(RfToHostDecision::Drop, RfToHostDecision::Translated)
         }
         rf::RfMsgType::LoRaImu1Snapshot => {
             let Ok(imu) = rf::decode_rf_payload::<hilink::LoRaImu1SnapshotPayload>(packet) else {
@@ -179,6 +278,29 @@ fn vehicle_rf_to_normal(
             let Ok(command) = rf::decode_rf_payload::<hilink::LoRaCommandPayload>(packet) else {
                 return RfToHostDecision::Drop;
             };
+
+            // SET_IDLE_FALLBACK is consumed by the vehicle radio itself (not forwarded to the flight
+            // controller): adopt the operator's window so both ends re-home on the same schedule.
+            if command.command_id == hilink::lora_command_id::SET_IDLE_FALLBACK {
+                let (status, reason) = if cache
+                    .vehicle_command_is_duplicate(command.command_id, command.command_seq)
+                {
+                    (
+                        hilink::lora_command_status::DUPLICATE_ACCEPTED,
+                        hilink::lora_command_reason::DUPLICATE,
+                    )
+                } else {
+                    cache.set_idle_fallback_ms(command.arg0.max(0) as u32);
+                    cache.note_vehicle_command_forwarded(command.command_id, command.command_seq);
+                    (
+                        hilink::lora_command_status::ACCEPTED,
+                        hilink::lora_command_reason::NONE,
+                    )
+                };
+                cache.queue_pending_lora_command_ack(lora_command_ack(command, status, reason));
+                return RfToHostDecision::Handled;
+            }
+
             let Some(normal_msg_type) = normal_msg_type_for_lora_command(command.command_id) else {
                 cache.queue_pending_lora_command_ack(lora_command_ack(
                     command,
@@ -214,10 +336,64 @@ fn vehicle_rf_to_normal(
             );
             RfToHostDecision::Translated(frame)
         }
+        rf::RfMsgType::LoRaSetProfile => {
+            let Ok(request) = rf::decode_rf_payload::<hilink::LoRaSetProfilePayload>(packet) else {
+                return RfToHostDecision::Drop;
+            };
+            let change = ProfileChange {
+                command_seq: request.command_seq,
+                preset: request.preset,
+                tx_power_dbm: request.tx_power_dbm,
+                frequency_hz: request.frequency_hz,
+                flags: request.flags,
+            };
+            let (status, reason) = match cache.begin_vehicle_profile_switch(change, now_ms) {
+                VehicleArm::Accepted => (
+                    hilink::lora_command_status::ACCEPTED,
+                    hilink::lora_command_reason::NONE,
+                ),
+                VehicleArm::DuplicateAccepted => (
+                    hilink::lora_command_status::DUPLICATE_ACCEPTED,
+                    hilink::lora_command_reason::DUPLICATE,
+                ),
+                VehicleArm::Rejected => (
+                    hilink::lora_command_status::REJECTED,
+                    hilink::lora_command_reason::BAD_ARGUMENT,
+                ),
+                VehicleArm::Busy => (
+                    hilink::lora_command_status::BUSY,
+                    hilink::lora_command_reason::RADIO_BUSY,
+                ),
+            };
+            // The vehicle radio consumes the profile change itself (it is not a flight-controller
+            // command), acking back over the current link so the GS can complete the switch.
+            cache.queue_pending_lora_command_ack(set_profile_command_ack(
+                change.command_seq,
+                status,
+                reason,
+            ));
+            RfToHostDecision::Handled
+        }
         rf::RfMsgType::LoRaEvent | rf::RfMsgType::LoRaFaults | rf::RfMsgType::LoRaLinkStatus => {
             RfToHostDecision::Handled
         }
         _ => RfToHostDecision::Drop,
+    }
+}
+
+fn set_profile_command_ack(
+    command_seq: u16,
+    status: u8,
+    reason: u8,
+) -> hilink::LoRaCommandAckPayload {
+    hilink::LoRaCommandAckPayload {
+        command_id: hilink::lora_command_id::SET_RADIO_PROFILE,
+        command_seq,
+        status,
+        reason,
+        state: 0,
+        reserved: 0,
+        detail: 0,
     }
 }
 
@@ -398,6 +574,17 @@ fn translate_lora_command_ack_to_normal(
     now_ms: u32,
 ) -> Option<HilinkBridgeFrame> {
     let ack = rf::decode_rf_payload::<hilink::LoRaCommandAckPayload>(packet).ok()?;
+
+    // A SET_RADIO_PROFILE ack also drives the GS switch FSM: accept advances to the coordinated
+    // apply, reject abandons it. (Retransmit-triggered duplicate acks are no-ops past the await.)
+    if ack.command_id == hilink::lora_command_id::SET_RADIO_PROFILE {
+        if policy::lora_ack_status_is_ack(ack.status) {
+            cache.profile_switch_peer_accepted(ack.command_seq, now_ms);
+        } else {
+            cache.profile_switch_peer_rejected(ack.command_seq);
+        }
+    }
+
     let correlation = cache.take_command_correlation(ack.command_id, ack.command_seq)?;
 
     if policy::lora_ack_status_is_ack(ack.status) {
@@ -564,6 +751,9 @@ fn lora_flight_to_telemetry_snapshot(
 /// were consumed locally and never reached the host.
 fn lora_link_status_to_radio_status(
     link: hilink::LoRaLinkStatusPayload,
+    active_preset: u8,
+    active_frequency_hz: u32,
+    active_tx_power_dbm: i8,
 ) -> hilink::RadioStatusPayload {
     let total = u32::from(link.rx_packets_delta) + u32::from(link.lost_packets_delta);
     let loss_pct_x100 = if total == 0 {
@@ -578,6 +768,9 @@ fn lora_link_status_to_radio_status(
         loss_pct_x100,
         packet_rate_hz: link.telemetry_rate_hz,
         reserved0: 0,
+        active_preset,
+        active_tx_power_dbm,
+        active_frequency_hz,
     }
 }
 

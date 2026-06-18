@@ -3,10 +3,10 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+use marv_hilink::band_plan;
+use marv_hilink::rf::lora_profile;
+
 const DEFAULT_LORA_FREQUENCY_HZ: u32 = 902_080_000;
-const SRAD_LOWER_HZ: u32 = 902_000_000;
-const SRAD_UPPER_HZ: u32 = 909_000_000;
-const MODE_C_BANDWIDTH_HZ: u32 = 62_500;
 
 fn main() {
     let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
@@ -56,17 +56,18 @@ fn lora_frequency_hz() -> u32 {
 }
 
 fn validate_srad_frequency(frequency_hz: u32) {
-    let half_bandwidth_hz = MODE_C_BANDWIDTH_HZ / 2;
-    let lower_edge_hz = frequency_hz
-        .checked_sub(half_bandwidth_hz)
-        .expect("MARV_LORA_FREQUENCY_HZ is too low");
-    let upper_edge_hz = frequency_hz
-        .checked_add(half_bandwidth_hz)
-        .expect("MARV_LORA_FREQUENCY_HZ is too high");
-
-    if lower_edge_hz < SRAD_LOWER_HZ || upper_edge_hz > SRAD_UPPER_HZ {
+    // The firmware boots on the FAST preset at the default power ceiling; the runtime may later
+    // switch presets, each re-validated against this same `band_plan`. Validating here keeps the
+    // compile-time default and the runtime path honest about one definition of "legal".
+    if let Err(reason) = band_plan::validate(
+        lora_profile::FAST,
+        frequency_hz,
+        band_plan::DEFAULT_MAX_TX_POWER_DBM,
+        false,
+    ) {
         panic!(
-            "MARV_LORA_FREQUENCY_HZ={frequency_hz} with {MODE_C_BANDWIDTH_HZ} Hz bandwidth does not fit inside the 902.0-909.0 MHz IREC 33 cm SRAD range"
+            "MARV_LORA_FREQUENCY_HZ={frequency_hz} is not a legal IREC 33 cm SRAD Mode C channel for the default FAST preset: {}",
+            reason.as_str()
         );
     }
 }

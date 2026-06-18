@@ -26,6 +26,10 @@ const defaultPacket: TelemetryPacket = {
   packetAgeMs: 0,
   packetRateHz: 0,
   packetLossPct: 0,
+  radioActiveKnown: false,
+  radioActivePreset: 0xff,
+  radioActiveTxPowerDbm: 0,
+  radioActiveFrequencyHz: 0,
 };
 
 function nowTime() {

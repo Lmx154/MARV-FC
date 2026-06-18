@@ -4,6 +4,7 @@ use common::messages::sensor::{ImuSample, ImuSampleStamped};
 use common::services::acquisition::ImuSampleChannel;
 use common::utilities::time::MeasurementTimestamp;
 use common::utils::delay::DelayMs;
+use embassy_futures::yield_now;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -138,6 +139,25 @@ where
     Ok(())
 }
 
+/// Per-poll outcome for each scheduled source: `None` if it was not due this
+/// poll, `Some(true)` on a successful read, `Some(false)` on a read error.
+#[derive(Clone, Copy, Default)]
+struct PollOutcome {
+    primary: Option<bool>,
+    auxiliary: Option<bool>,
+}
+
+impl PollOutcome {
+    fn did_work(self) -> bool {
+        self.primary.is_some() || self.auxiliary.is_some()
+    }
+}
+
+/// Consecutive read failures tolerated before the cluster replays a source's
+/// hardware bring-up. With the per-transaction bus timeout, a parked read now
+/// surfaces as an error here instead of hanging forever.
+const REINIT_AFTER_CONSECUTIVE_FAILURES: u32 = 3;
+
 async fn poll_sensor_spi_cluster_once<
     'a,
     M,
@@ -157,7 +177,7 @@ async fn poll_sensor_spi_cluster_once<
     auxiliary_schedule: &mut ScheduledSource,
     clock: &C,
     on_error: &mut F,
-) -> bool
+) -> PollOutcome
 where
     M: RawMutex,
     Primary: ImuSource,
@@ -165,14 +185,13 @@ where
     C: MonotonicClock,
     F: FnMut(SensorSpiClusterError<Primary::Error, Auxiliary::Error>),
 {
-    let mut did_work = false;
+    let mut outcome = PollOutcome::default();
     let now = clock.now();
 
     if primary_schedule.is_due(now) {
-        did_work = true;
-        if let Err(error) =
-            read_and_publish_imu_sample(primary_channel, primary_source, clock).await
-        {
+        let result = read_and_publish_imu_sample(primary_channel, primary_source, clock).await;
+        outcome.primary = Some(result.is_ok());
+        if let Err(error) = result {
             on_error(SensorSpiClusterError::PrimaryImu(error));
         }
         primary_schedule.advance(clock.now());
@@ -180,16 +199,15 @@ where
 
     let now = clock.now();
     if auxiliary_schedule.is_due(now) {
-        did_work = true;
-        if let Err(error) =
-            read_and_publish_imu_sample(auxiliary_channel, auxiliary_source, clock).await
-        {
+        let result = read_and_publish_imu_sample(auxiliary_channel, auxiliary_source, clock).await;
+        outcome.auxiliary = Some(result.is_ok());
+        if let Err(error) = result {
             on_error(SensorSpiClusterError::AuxiliaryImu(error));
         }
         auxiliary_schedule.advance(clock.now());
     }
 
-    did_work
+    outcome
 }
 
 pub async fn run_spi1_sensor_cluster<
@@ -224,9 +242,11 @@ where
     let start = clock.now();
     let mut primary_schedule = ScheduledSource::new(config.primary_imu, start);
     let mut auxiliary_schedule = ScheduledSource::new(config.auxiliary_imu, start);
+    let mut primary_failures: u32 = 0;
+    let mut auxiliary_failures: u32 = 0;
 
     loop {
-        if !poll_sensor_spi_cluster_once(
+        let outcome = poll_sensor_spi_cluster_once(
             primary_channel,
             primary_source,
             &mut primary_schedule,
@@ -236,8 +256,41 @@ where
             clock,
             &mut on_error,
         )
-        .await
-        {
+        .await;
+
+        match outcome.primary {
+            Some(true) => primary_failures = 0,
+            Some(false) => {
+                primary_failures = primary_failures.saturating_add(1);
+                if primary_failures >= REINIT_AFTER_CONSECUTIVE_FAILURES {
+                    // Reset whether or not bring-up succeeds, so failures must
+                    // re-accumulate before the next attempt instead of hammering
+                    // the bus with back-to-back re-inits.
+                    primary_failures = 0;
+                    if let Err(error) = primary_source.reinitialize(delay).await {
+                        on_error(SensorSpiClusterError::PrimaryImu(error));
+                    }
+                }
+            }
+            None => {}
+        }
+        match outcome.auxiliary {
+            Some(true) => auxiliary_failures = 0,
+            Some(false) => {
+                auxiliary_failures = auxiliary_failures.saturating_add(1);
+                if auxiliary_failures >= REINIT_AFTER_CONSECUTIVE_FAILURES {
+                    auxiliary_failures = 0;
+                    if let Err(error) = auxiliary_source.reinitialize(delay).await {
+                        on_error(SensorSpiClusterError::AuxiliaryImu(error));
+                    }
+                }
+            }
+            None => {}
+        }
+
+        if outcome.did_work() {
+            yield_now().await;
+        } else {
             let delay_ms = next_due_delay_ms(primary_schedule, auxiliary_schedule, clock.now());
             delay.delay_ms(delay_ms).await;
         }

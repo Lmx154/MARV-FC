@@ -33,6 +33,12 @@ pub struct TelemetryPacket {
     pub packet_age_ms: u64,
     pub packet_rate_hz: f32,
     pub packet_loss_pct: f32,
+    // Ground-station radio's active RF profile (from RadioStatus), for the operator to confirm a
+    // link-wide profile switch took effect. `radio_active_known` is false until the first report.
+    pub radio_active_known: bool,
+    pub radio_active_preset: u8,
+    pub radio_active_tx_power_dbm: i8,
+    pub radio_active_frequency_hz: u32,
 }
 
 impl Default for TelemetryPacket {
@@ -56,6 +62,10 @@ impl Default for TelemetryPacket {
             packet_age_ms: 0,
             packet_rate_hz: 0.0,
             packet_loss_pct: 0.0,
+            radio_active_known: false,
+            radio_active_preset: 0xFF,
+            radio_active_tx_power_dbm: 0,
+            radio_active_frequency_hz: 0,
         }
     }
 }

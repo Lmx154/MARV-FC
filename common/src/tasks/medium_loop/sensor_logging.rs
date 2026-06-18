@@ -84,6 +84,18 @@ where
     let mut latest_authoritative_time = None;
     let mut last_emitted_timestamp = None;
 
+    // Hold an absolute, fixed-rate cadence so per-iteration work (draining,
+    // CSV formatting, enqueue) does not stretch the logging period. Sleeping a
+    // full `period_ms` after every pass makes the effective period
+    // `period_ms + work`, which drifts the rate below the configured target
+    // (e.g. ~99 Hz instead of 100 Hz) and never recovers. Scheduling against an
+    // absolute deadline grid keeps the long-run average exactly at the target
+    // rate. Delay granularity is whole milliseconds, so individual wakeups jitter
+    // by <1 ms, but the grid is anchored to absolute time so that error does not
+    // accumulate. The logged `log_us` column still records the true emit time.
+    let period_us = (logger.period_ms() as u64).saturating_mul(1_000).max(1_000);
+    let mut next_wake_us: Option<u64> = None;
+
     loop {
         if let Some(subscriber) = imu.as_deref_mut() {
             logger.drain_imu(subscriber);
@@ -121,22 +133,37 @@ where
         }
 
         let snapshot_time = latest_authoritative_time.unwrap_or_else(|| time_source());
-        if latest_authoritative_time.is_some() && Some(snapshot_time) == last_emitted_timestamp {
-            delay.delay_ms(logger.period_ms()).await;
-            continue;
-        }
+        // In authoritative-time (HIL) mode the loop wakes faster than sim time
+        // advances, so skip emitting a duplicate row for an unchanged timestamp.
+        let is_duplicate_authoritative_sample =
+            latest_authoritative_time.is_some() && Some(snapshot_time) == last_emitted_timestamp;
 
-        if let Err(error) = logger.emit_snapshot(log_channel, snapshot_time) {
-            if !matches!(
-                error,
-                SensorSnapshotLoggerError::Queue(TryEnqueueLogError::ChannelFull)
-            ) {
-                on_error(error);
+        if !is_duplicate_authoritative_sample {
+            if let Err(error) = logger.emit_snapshot(log_channel, snapshot_time) {
+                if !matches!(
+                    error,
+                    SensorSnapshotLoggerError::Queue(TryEnqueueLogError::ChannelFull)
+                ) {
+                    on_error(error);
+                }
+            } else {
+                last_emitted_timestamp = Some(snapshot_time);
             }
-        } else {
-            last_emitted_timestamp = Some(snapshot_time);
         }
 
-        delay.delay_ms(logger.period_ms()).await;
+        // Sleep until the next deadline on the absolute period grid.
+        let now_us = time_source().as_micros();
+        let mut target_us = next_wake_us.unwrap_or(now_us).saturating_add(period_us);
+        if target_us <= now_us {
+            // Fell behind (work plus any SD back-pressure exceeded the period).
+            // Re-anchor to "now" instead of bursting back-to-back rows to catch up.
+            target_us = now_us.saturating_add(period_us);
+        }
+        next_wake_us = Some(target_us);
+        // Floor to whole milliseconds; the absolute grid corrects the rounding.
+        // `max(1)` only engages in the rare catch-up window, guaranteeing the
+        // task always yields to the lower-priority SD sink.
+        let remaining_ms = ((target_us - now_us) / 1_000).max(1) as u32;
+        delay.delay_ms(remaining_ms).await;
     }
 }

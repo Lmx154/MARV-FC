@@ -10,6 +10,7 @@
 //! and host tools such as the ground-station telemetry backend. Tests run under std.
 #![cfg_attr(not(test), no_std)]
 
+pub mod band_plan;
 pub mod rf;
 
 pub use rf::{
@@ -79,6 +80,8 @@ pub enum MsgType {
     TofWaypoint = 44,
     MissionWaypoint = 45,
     Rtl = 46,
+    SetRadioProfile = 47,
+    SetIdleFallback = 48,
 
     BenchEnable = 60,
     BenchDisable = 61,
@@ -122,6 +125,8 @@ impl TryFrom<u8> for MsgType {
             44 => Ok(Self::TofWaypoint),
             45 => Ok(Self::MissionWaypoint),
             46 => Ok(Self::Rtl),
+            47 => Ok(Self::SetRadioProfile),
+            48 => Ok(Self::SetIdleFallback),
             60 => Ok(Self::BenchEnable),
             61 => Ok(Self::BenchDisable),
             62 => Ok(Self::MotorTest),
@@ -337,6 +342,43 @@ pub struct RadioStatusPayload {
     pub loss_pct_x100: u16,
     pub packet_rate_hz: u8,
     pub reserved0: u8,
+    /// Active RF profile of the ground-station radio reporting this status, so the operator can
+    /// confirm the link settled on the commanded profile. `active_preset` indexes
+    /// [`rf::lora_profile`] (`band_plan::UNKNOWN_PRESET` = no known match). Because a peer frame
+    /// can only be decoded on a matching profile, a flowing link plus this readout proves *both*
+    /// ends are on these settings.
+    pub active_preset: u8,
+    pub active_tx_power_dbm: i8,
+    pub active_frequency_hz: u32,
+}
+
+/// Ground operator request to move the whole link onto a new RF profile (`MsgType::SetRadioProfile`).
+///
+/// Originated by the ground-control software and sent over UART to the ground-station radio,
+/// which validates it (`band_plan::validate`) and then drives the coordinated, link-wide switch
+/// to the vehicle radio. `preset` indexes [`rf::lora_profile`]; `frequency_hz` / `tx_power_dbm`
+/// are checked against the SRAD band and power policy. `flags` mirrors [`rf::lora_profile_flags`]
+/// (e.g. `POWER_OVERRIDE` to permit power above the dense-RF default).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SetRadioProfilePayload {
+    pub preset: u8,
+    pub tx_power_dbm: i8,
+    pub frequency_hz: u32,
+    pub flags: u16,
+}
+
+/// Ground operator request to set the idle-fallback window (`MsgType::SetIdleFallback`).
+///
+/// Originated by the ground-control software and sent over UART to the ground-station radio, which
+/// applies it to itself and relays it to the vehicle radio (as a `SET_IDLE_FALLBACK` LoRa command)
+/// so both ends share the operator's value. `idle_fallback_ms` is the time a radio tolerates
+/// hearing nothing from its peer before returning to the boot/"setup" profile; both ends clamp it
+/// to [`idle_fallback::MIN_MS`]..[`idle_fallback::MAX_MS`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SetIdleFallbackPayload {
+    pub idle_fallback_ms: u32,
 }
 
 #[repr(C)]
@@ -577,6 +619,37 @@ pub mod header_flags {
     pub const RETRANSMISSION: u8 = 1 << 1;
     pub const MORE_FRAGMENTS: u8 = 1 << 2;
     pub const URGENT_CONTROL: u8 = 1 << 3;
+}
+
+/// Idle-fallback ("return to setup frequency") policy, shared so firmware, the desktop backend,
+/// and the operator UI all agree on the same bounds.
+///
+/// When a radio has heard nothing from its peer for [`DEFAULT_MS`] (operator-tunable between
+/// [`MIN_MS`] and [`MAX_MS`]), it unilaterally returns to its boot/"setup" RF profile. Both ends
+/// run this independently and re-home to the *same absolute* setup channel, so a link that has
+/// genuinely gone away re-rendezvous there without any coordination — the last-resort recovery
+/// after the short-timescale coordinated-switch rollback has nothing left to fall back to.
+pub mod idle_fallback {
+    /// Default idle window before re-homing to the setup profile (40 min — middle of the
+    /// 30–50 min operating range). Long enough that a real flight's link blackouts never trip it;
+    /// short enough that a powered-but-mismatched pair re-acquires during ground setup.
+    pub const DEFAULT_MS: u32 = 40 * 60 * 1_000;
+    /// Floor for the operator-set window. 1 min keeps bench-tuning practical (deliberately drop
+    /// the link and watch both ends re-home) without allowing a trip-on-every-hiccup value.
+    pub const MIN_MS: u32 = 60 * 1_000;
+    /// Ceiling for the operator-set window.
+    pub const MAX_MS: u32 = 60 * 60 * 1_000;
+
+    /// Clamp an operator-requested window to the legal `[MIN_MS, MAX_MS]` range.
+    pub const fn clamp(ms: u32) -> u32 {
+        if ms < MIN_MS {
+            MIN_MS
+        } else if ms > MAX_MS {
+            MAX_MS
+        } else {
+            ms
+        }
+    }
 }
 
 pub trait WirePayload: Sized {
@@ -1356,7 +1429,7 @@ impl WirePayload for TelemetrySnapshotPayload {
 
 impl WirePayload for RadioStatusPayload {
     const MSG_TYPE: MsgType = MsgType::RadioStatus;
-    const WIRE_LEN: usize = 8;
+    const WIRE_LEN: usize = 14;
 
     fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
         let mut w = Writer::new(out);
@@ -1365,6 +1438,9 @@ impl WirePayload for RadioStatusPayload {
         w.u16(self.loss_pct_x100)?;
         w.u8(self.packet_rate_hz)?;
         w.u8(self.reserved0)?;
+        w.u8(self.active_preset)?;
+        w.i8(self.active_tx_power_dbm)?;
+        w.u32(self.active_frequency_hz)?;
         Ok(w.len())
     }
 
@@ -1377,6 +1453,53 @@ impl WirePayload for RadioStatusPayload {
             loss_pct_x100: r.u16()?,
             packet_rate_hz: r.u8()?,
             reserved0: r.u8()?,
+            active_preset: r.u8()?,
+            active_tx_power_dbm: r.i8()?,
+            active_frequency_hz: r.u32()?,
+        })
+    }
+}
+
+impl WirePayload for SetRadioProfilePayload {
+    const MSG_TYPE: MsgType = MsgType::SetRadioProfile;
+    const WIRE_LEN: usize = 8;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u8(self.preset)?;
+        w.i8(self.tx_power_dbm)?;
+        w.u32(self.frequency_hz)?;
+        w.u16(self.flags)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            preset: r.u8()?,
+            tx_power_dbm: r.i8()?,
+            frequency_hz: r.u32()?,
+            flags: r.u16()?,
+        })
+    }
+}
+
+impl WirePayload for SetIdleFallbackPayload {
+    const MSG_TYPE: MsgType = MsgType::SetIdleFallback;
+    const WIRE_LEN: usize = 4;
+
+    fn encode_payload(&self, out: &mut [u8]) -> Result<usize> {
+        let mut w = Writer::new(out);
+        w.u32(self.idle_fallback_ms)?;
+        Ok(w.len())
+    }
+
+    fn decode_payload(input: &[u8]) -> Result<Self> {
+        expect_len(input, Self::WIRE_LEN)?;
+        let mut r = Reader::new(input);
+        Ok(Self {
+            idle_fallback_ms: r.u32()?,
         })
     }
 }
@@ -1541,6 +1664,10 @@ impl<'a> Writer<'a> {
         self.bytes(&value.to_le_bytes())
     }
 
+    fn i8(&mut self, value: i8) -> Result<()> {
+        self.bytes(&[value as u8])
+    }
+
     fn i16(&mut self, value: i16) -> Result<()> {
         self.bytes(&value.to_le_bytes())
     }
@@ -1610,6 +1737,10 @@ impl<'a> Reader<'a> {
 
     fn u8(&mut self) -> Result<u8> {
         Ok(self.take::<1>()?[0])
+    }
+
+    fn i8(&mut self) -> Result<i8> {
+        Ok(self.take::<1>()?[0] as i8)
     }
 
     fn u16(&mut self) -> Result<u16> {
@@ -2038,6 +2169,9 @@ mod tests {
                 loss_pct_x100: 140,
                 packet_rate_hz: 10,
                 reserved0: 0,
+                active_preset: rf::lora_profile::BALANCED,
+                active_tx_power_dbm: 17,
+                active_frequency_hz: 905_250_000,
             },
             36,
             3_006,
@@ -2116,6 +2250,38 @@ mod tests {
         assert_eq!(MsgType::try_from(1), Ok(MsgType::Ping));
         assert_eq!(MsgType::try_from(81), Err(Error::UnknownMsgType));
         assert_eq!(MsgType::try_from(100), Err(Error::UnknownMsgType));
+    }
+
+    #[test]
+    fn set_radio_profile_payload_round_trips() {
+        // Negative power exercises the i8 path; a real SRAD frequency the u32 path.
+        let payload = SetRadioProfilePayload {
+            preset: rf::lora_profile::LONG_RANGE,
+            tx_power_dbm: -5,
+            frequency_hz: 905_250_000,
+            flags: rf::lora_profile_flags::POWER_OVERRIDE,
+        };
+        round_trip_payload(&payload, 47, 4242);
+        assert_eq!(MsgType::try_from(47), Ok(MsgType::SetRadioProfile));
+    }
+
+    #[test]
+    fn set_idle_fallback_payload_round_trips() {
+        let payload = SetIdleFallbackPayload {
+            idle_fallback_ms: 35 * 60 * 1_000,
+        };
+        round_trip_payload(&payload, 48, 9001);
+        assert_eq!(MsgType::try_from(48), Ok(MsgType::SetIdleFallback));
+    }
+
+    #[test]
+    fn idle_fallback_clamp_bounds_the_window() {
+        use idle_fallback::{DEFAULT_MS, MAX_MS, MIN_MS, clamp};
+        assert_eq!(clamp(0), MIN_MS);
+        assert_eq!(clamp(MIN_MS - 1), MIN_MS);
+        assert_eq!(clamp(u32::MAX), MAX_MS);
+        assert_eq!(clamp(DEFAULT_MS), DEFAULT_MS);
+        assert!(MIN_MS < DEFAULT_MS && DEFAULT_MS < MAX_MS);
     }
 
     fn round_trip_payload<P>(payload: &P, seq: u16, send_time_ms: u32)
