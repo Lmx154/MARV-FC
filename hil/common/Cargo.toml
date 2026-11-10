@@ -1,0 +1,10 @@
+[package]
+name = "hil-common"
+description = "The one thing every on-target test shares: reporting the verdict to the host."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+defmt.workspace = true
+semihosting.workspace = true

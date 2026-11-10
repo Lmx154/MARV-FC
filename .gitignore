@@ -1,0 +1,5 @@
+target/
+/hil/logs/
+
+# Local working plan (owner requests and milestones)
+/docs/plan.md

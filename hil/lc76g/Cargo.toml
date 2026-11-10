@@ -1,0 +1,20 @@
+[package]
+name = "hil-lc76g"
+description = "On-target test of the lc76g driver. Run with tools/run.sh lc76g_smoke."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+lc76g = { path = "../../crates/lc76g", features = ["defmt"] }
+hil-common.workspace = true
+
+embassy-executor.workspace = true
+embassy-time.workspace = true
+embassy-rp.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+critical-section.workspace = true
+panic-probe.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "icm45686"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Driver for the TDK InvenSense ICM-45686 six-axis IMU over SPI. Async and blocking, on embedded-hal traits only."
+
+[features]
+defmt = ["dep:defmt"]
+
+[dependencies]
+embedded-hal = "1.0"
+embedded-hal-async = "1.0"
+defmt = { version = "1.0.1", optional = true }

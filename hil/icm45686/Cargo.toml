@@ -1,0 +1,23 @@
+[package]
+name = "hil-icm45686"
+description = "On-target test of the icm45686 driver. Run with tools/run.sh icm45686_smoke."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+icm45686 = { path = "../../crates/icm45686", features = ["defmt"] }
+hil-common.workspace = true
+
+embassy-executor.workspace = true
+embassy-time.workspace = true
+embassy-rp.workspace = true
+defmt.workspace = true
+defmt-rtt.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+critical-section.workspace = true
+panic-probe.workspace = true
+embedded-hal.workspace = true
+embedded-hal-async.workspace = true
+embedded-hal-bus.workspace = true
