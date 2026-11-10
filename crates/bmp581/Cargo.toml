@@ -3,6 +3,7 @@ name = "bmp581"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 description = "Driver for the Bosch BMP581 barometer over I2C. Async and blocking, on embedded-hal traits only."
 
 [features]

@@ -2,6 +2,7 @@
 
 Independent drivers for the devices on the MARV V2 Rev 1 flight controller (RP2354B), and the
 on-board tests that prove them. Phase one is data acquisition; this is the driver layer for it.
+The repository holds bare drivers only: no logging layer, no filesystem and no application.
 
 ## Layout
 
@@ -13,10 +14,13 @@ crates/            one crate per device; no crate depends on another
   bmp581/          Bosch BMP581 barometer (I2C)
   bmm350/          Bosch BMM350 magnetometer (I2C)
   lc76g/           Quectel LC76G GPS (UART)
+  qmi-psram/       ISSI IS66WVS16M8FBLL 16 MiB PSRAM on the RP2350's second QSPI chip select
+  ws2812c/         WS2812C-2020 status LED
 hil/               on-board tests, one package per driver; the only place that uses embassy-rp
 docs/pinout.md     pin map of the board
 docs/devices.md    register, timing and measured facts per device
 tools/run.sh       builds, flashes and runs one on-board test
+LICENSE            MIT
 ```
 
 ## Drivers
@@ -28,7 +32,21 @@ tools/run.sh       builds, flashes and runs one on-board test
 | `bmp581` | BMP581 | `I2c`, `DelayNs` | 496 Hz continuous; 242 us per read at 400 kHz I2C |
 | `bmm350` | BMM350 | `I2c`, `DelayNs` | 400 Hz with no missed sample; 443 us per compensated read at 400 kHz I2C |
 | `lc76g` | LC76G GPS | a buffered UART: `Read`, and `Write` for commands | 10 Hz, 100 fixes per 10 s with no checksum error; about 115 us to decode a sentence |
+| `qmi-psram` | 16 MiB PSRAM | a `DelayNs`, clk_sys in hertz, a `critical-section` implementation | all 16 MiB verified at 75 MHz; 20.8 MiB/s write, 24.4 MiB/s read |
+| `ws2812c` | status LED | a `Bus`: PIO for embassy-rp or any `SpiBus`, both included | every bit time inside the datasheet limits on both transports |
 | `pio-sdmmc` | microSD | a `Bus` (the PIO + DMA bus for embassy-rp is included) | 9.1 MB/s read, 5.8 to 7.9 MB/s write at 25 MHz |
+
+### Cargo features
+
+All features are off by default. Without them every crate is hardware-independent `no_std` code.
+
+| Feature | Crates | What it adds |
+|---|---|---|
+| `defmt` | all | `defmt::Format` for the public data and error types |
+| `embassy-rp` | `pio-sdmmc`, `ws2812c` | the PIO transport for embassy-rp; the application picks the chip feature (`rp235xa` or `rp235xb`) |
+| `rp2350` | `qmi-psram` | the raw-register RP2350 back-end; the application provides the `critical-section` implementation |
+| `sim` | `pio-sdmmc` | a simulated SD card with fault injection, for host tests of code built on the driver (needs `std`) |
+| `test-hooks` | `pio-sdmmc` | entry points that only the on-board back-pressure test uses |
 
 ### What the four sensor drivers have in common
 
@@ -102,6 +120,56 @@ loop {
 - The driver has no timer. On a silent line a read waits forever, so wrap calls in a timeout.
 - Decoding costs about 115 us per sentence on the RP2350, under 1 % of one core at 10 Hz.
 
+## PSRAM
+
+`qmi-psram` turns the PSRAM in socket U24 into 16 MiB of ordinary memory. The chip knowledge, the timing
+calculation and the start-up sequence are hardware-independent; the RP2350 back-end (feature `rp2350`)
+uses raw registers, so it needs no HAL and works under embassy-rp, another HAL or none.
+
+```rust
+let p = embassy_rp::init(Default::default());
+let (_qmi_cs1, _pin) = (p.QMI_CS1, p.PIN_0);              // keep both unused
+// SAFETY: QMI CS1 and GPIO0 belong to the driver; core 1 is not running from flash.
+let qmi = unsafe { qmi_psram::rp2350::Rp2350Qmi::new(qmi_psram::rp2350::Cs1Pin::Gpio0) };
+let mut psram = qmi_psram::Psram::new(qmi);
+psram.init(&mut embassy_time::Delay, embassy_rp::clocks::clk_sys_freq())?;
+let memory: &mut [u8] = psram.as_mut_slice();             // 16 MiB
+```
+
+- `init` works whatever state the chip was left in and does not write to the memory. Call it before
+  starting the second core: the flash the program runs from is unreachable for a few microseconds at a
+  time while it talks to the chip (interrupts are off for about 8 us at a time, measured).
+- Programming the in-package flash resets the RP2350's set-up for the PSRAM. Call `remap()` afterwards;
+  the contents are kept.
+- The memory is handed out at 0x15000000, the uncached address. The cached one (0x11000000) also works
+  but writes through it are slower (7.9 against 20.8 MiB/s).
+- Compile this crate optimised in debug builds too (`[profile.dev.package.qmi-psram] opt-level = 3`).
+  Unoptimised, its chip-select pulses last up to 13 us against the chip's 4 us limit.
+- The timing is computed from clk_sys: 75 MHz at 150 MHz, with one step of sampling margin measured on
+  each side on this board.
+
+## Status LED
+
+`ws2812c` drives the WS2812C-2020. Colour handling is pure code; the line goes through a `Bus`, with two
+transports in the crate:
+
+- `pio::PioTransport` (feature `embassy-rp`): one PIO state machine, any GPIO, no DMA needed for one LED.
+- `spi::SpiTransport`: any `embedded-hal` SPI bus at 3.0 to 3.45 MHz with a gapless stream. On the RP2350
+  that means SPI mode 1 or 3 and the async (DMA) write; modes 0 and 2 break the LED's timing.
+
+```rust
+let Pio { mut common, sm0, .. } = Pio::new(p.PIO1, Irqs);
+let bus = ws2812c::pio::PioTransport::new(&mut common, sm0, p.PIN_43)?;
+let mut led = ws2812c::Ws2812c::new(bus);
+led.set_brightness(32);
+led.set(ws2812c::Rgb::GREEN).await?;
+```
+
+- The pause the LED needs between frames (over 280 us) is kept by the transport; the caller never waits.
+- GPIO43 is reachable only with the PIO block set to GPIO16-47, so every other state machine in that block
+  must use pins in that range too (the SD bus does).
+- Blinking and patterns are left to the application.
+
 ## SD card
 
 `pio-sdmmc` has three layers. `proto` is the SD protocol as pure functions. `card` is the driver
@@ -155,16 +223,44 @@ On the board, through a debug probe (the script takes a lock, so runs never over
 
     tools/run.sh <binary> [timeout_seconds]
 
+Used here: Rust 1.99.1 with the `thumbv8m.main-none-eabihf` target, probe-rs 0.31.0, and a debug probe
+on the SWD header J10.
+
 | Binary | What it checks |
 |---|---|
 | `alive` | tool chain, probe and board |
 | `sd_bus` | the PIO bus alone: identification, data in both directions, a deliberately late DMA transfer, timing of each part |
 | `sd_smoke` | the card driver on the real bus: 1 MiB write and read-back, throughput by call size, write latency |
 | `icm45686_smoke`, `lsm6dsk320x_smoke`, `bmp581_smoke`, `bmm350_smoke` | identity, data-ready rate with missed-sample count, time per read, plausible values at rest, the blocking front-end |
+| `psram_smoke` | chip ID, start from either chip state, all 16 MiB written and read back twice, retention, chip against window, sampling margin, throughput, re-map, chip-select and interrupts-off times; never programs the flash |
+| `ws2812c_smoke` | the waveform on the LED pin for both transports against the datasheet limits, the pause between frames, the blocking front-end; then red, green, blue, white for a person to watch |
 | `lc76g_smoke` | firmware version, configuration to 10 Hz, fix rate and counters, plausible fixes, decode cost, PPS period, the blocking front-end, return to the module's defaults; never writes the module's flash |
 
 The exit status is 0 when every check passed. Full logs are kept under `hil/logs/`.
 `sd_bus` and `sd_smoke` overwrite blocks on the card.
+
+## Status
+
+As of 2026-11-10, on the Rev 1 board:
+
+- Host: `cargo test --workspace` passes 243 tests. Clippy, rustdoc and rustfmt are clean for the driver
+  crates, and every public item is documented.
+- Board: every test in the table above exited 0 when it was last run. `psram_smoke` and `ws2812c_smoke`
+  ran on this tree. The SD, sensor and GPS tests last ran when those drivers were finished; their code
+  and dependency versions have not changed since.
+
+Open:
+
+- Status LED: nobody has confirmed the colours by eye yet. The waveform on the pin is measured against
+  the datasheet limits; `ws2812c_smoke` ends with red, green, blue, white, then off, for that check.
+- GPS: once during development, `init` with the default configuration returned `NoAck` while the module
+  was running at 10 Hz. It did not happen again in the 16 runs on the final code. The cause is unknown.
+- On-board test programs: `cargo clippy` in `hil/` reports six style findings in `sd_bus`,
+  `icm45686_smoke`, `bmp581_smoke` and `bmm350_smoke`. They do not change any result.
+
+Scope, decided on 2026-11-10: the drivers stay bare and no logging layer is planned. The one addition
+under consideration is basic create, read, update and delete on the SD card, kept as small as possible.
+Nothing has been built for it.
 
 ## Not done
 
@@ -175,4 +271,11 @@ The exit status is 0 when every check passed. Full logs are kept under `hil/logs
 - GPS: baud-rate change and constellation selection (both restart the module), the module's accuracy
   estimate merged into the fix (the message is decoded on its own), time synchronisation from PPS, and
   recovery of a module that other software left flooded.
-- Drivers for the PSRAM and the status LED.
+- PSRAM: an allocator on top of the memory, the other two parts the socket accepts (APS6404L, W25Q32),
+  use while the second core runs from flash.
+- Status LED: patterns, long chains on SPI in one gapless write, DMA for long chains on PIO.
+
+## License
+
+MIT, see `LICENSE`. The drivers are written from the datasheets listed in `docs/devices.md`. Facts that
+come only from Bosch's `BMM350_SensorAPI` are marked in the `bmm350` crate; no code is copied from it.

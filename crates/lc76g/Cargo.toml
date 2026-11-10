@@ -3,6 +3,7 @@ name = "lc76g"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 description = "Driver for the Quectel LC76G GNSS module on a UART: sans-IO NMEA/PAIR/PQTM core, async and blocking drivers, on embedded-io traits only."
 
 [features]

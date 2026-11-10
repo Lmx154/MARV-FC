@@ -2,12 +2,24 @@
 # build cannot stop another driver's test. Run a test with `tools/run.sh <binary>` from the repo root.
 [workspace]
 resolver = "3"
-members = ["common", "alive", "pio-sdmmc", "icm45686", "lsm6dsk320x", "bmp581", "bmm350", "lc76g"]
+members = [
+    "common",
+    "alive",
+    "pio-sdmmc",
+    "icm45686",
+    "lsm6dsk320x",
+    "bmp581",
+    "bmm350",
+    "lc76g",
+    "qmi-psram",
+    "ws2812c",
+]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 
 [workspace.dependencies]
 hil-common = { path = "common" }

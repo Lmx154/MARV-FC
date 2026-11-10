@@ -3,6 +3,7 @@ name = "pio-sdmmc"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 description = "Native four-bit SD card host: a hardware-independent protocol core, with a PIO + DMA bus for embassy-rp"
 
 [features]

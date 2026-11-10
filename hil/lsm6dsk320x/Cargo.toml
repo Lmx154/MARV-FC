@@ -4,6 +4,7 @@ description = "On-target test of the lsm6dsk320x driver. Run with tools/run.sh l
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 lsm6dsk320x = { path = "../../crates/lsm6dsk320x", features = ["defmt"] }

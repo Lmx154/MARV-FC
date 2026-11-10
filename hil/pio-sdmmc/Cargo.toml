@@ -4,6 +4,7 @@ description = "On-target tests of the pio-sdmmc driver. Run with tools/run.sh sd
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 pio-sdmmc = { path = "../../crates/pio-sdmmc", features = ["defmt", "embassy-rp", "test-hooks"] }

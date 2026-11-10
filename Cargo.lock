@@ -1090,6 +1090,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "qmi-psram"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt",
+ "embedded-hal 1.0.0",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1583,6 +1592,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8c3b93199df0ab874cdf0c6a94f0a0dc3423fe41f1cafb62b8bd7b1deb277aef"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "ws2812c"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "embassy-rp",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
 ]
 
 [[package]]

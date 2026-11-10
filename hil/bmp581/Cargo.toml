@@ -4,6 +4,7 @@ description = "On-target test of the bmp581 driver. Run with tools/run.sh bmp581
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 bmp581 = { path = "../../crates/bmp581", features = ["defmt"] }

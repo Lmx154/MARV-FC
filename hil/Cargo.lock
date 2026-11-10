@@ -892,6 +892,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "hil-qmi-psram"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "critical-section",
+ "defmt",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-rp",
+ "embassy-time",
+ "hil-common",
+ "panic-probe",
+ "qmi-psram",
+]
+
+[[package]]
+name = "hil-ws2812c"
+version = "0.1.0"
+dependencies = [
+ "cortex-m",
+ "cortex-m-rt",
+ "critical-section",
+ "defmt",
+ "defmt-rtt",
+ "embassy-executor",
+ "embassy-futures",
+ "embassy-rp",
+ "embassy-time",
+ "hil-common",
+ "panic-probe",
+ "ws2812c",
+]
+
+[[package]]
 name = "icm45686"
 version = "0.1.0"
 dependencies = [
@@ -1291,6 +1326,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869675ad2d7541aea90c6d88c81f46a7f4ea9af8cd0395d38f11a95126998a0d"
 dependencies = [
  "defmt",
+]
+
+[[package]]
+name = "qmi-psram"
+version = "0.1.0"
+dependencies = [
+ "critical-section",
+ "defmt",
+ "embedded-hal 1.0.0",
 ]
 
 [[package]]
@@ -1812,6 +1856,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "ws2812c"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "embassy-rp",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
 ]
 
 [[package]]

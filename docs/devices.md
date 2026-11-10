@@ -146,7 +146,8 @@ Pins: see `pinout.md`, QMI CS1 / PSRAM.
 
 - 2.7-3.6 V, 128 Mbit = 16 MiB, 24-bit address, two stacked 64 Mbit dies. A burst must not cross the die
   boundary. 1024-byte wrapped page.
-- Powers up in SPI mode; wait >= 150 us after power-up.
+- Powers up in SPI mode; wait >= 150 us after power-up. No recovery time is given for the 0x66/0x99 reset;
+  150 us works. Measured: the reset kept the contents (64 KiB checked).
 - Commands: 0x66 reset-enable then 0x99 reset (must be consecutive); 0x9F read ID (SPI: 24 address bits
   don't-care, no wait); 0x03 read (33 MHz in SPI mode); 0x0B fast read (8 wait cycles SPI, 4 QPI);
   0xEB quad IO read (6 wait cycles, 104 MHz); 0x02 write; 0x38 quad IO write (0 wait, 104 MHz);
@@ -154,12 +155,20 @@ Pins: see `pinout.md`, QMI CS1 / PSRAM.
 - Read ID: manufacturer 0x9D, KGD 0x5D (0x55 = failed die), then 48-bit EID whose top three bits give the
   density (100 = 128 Mbit).
 - CE# low time limit tCEM: 4 us up to 85 degC. CE# high time >= 1 clock. Max clock 104 MHz.
-  Measured: the Read ID chip-select low time is 1953 ns against the 4000 ns limit.
+  Measured at 75 MHz: Read ID CE# low 1347 ns; window bursts end at 3.1 us with MAX_SELECT 7 (bound 3.85 us).
+- Driver `crates/qmi-psram`, test `tools/run.sh psram_smoke`. At clk_sys 150 MHz: QPI, EBh read with 24 dummy
+  bits, 38h write, CLKDIV 2 (75 MHz), RXDELAY 2, COOLDOWN 1, PAGEBREAK 1024, MAX_SELECT 7, MIN_DESELECT 2,
+  SELECT_SETUP 1. Measured RXDELAY pass window: 1-4 at CLKDIV 2, 0-5 at CLKDIV 3.
+- Measured, 1 MiB sequential: uncached alias write 20.8 MiB/s, read 24.4 MiB/s; cached alias write 7.9 MiB/s
+  (write-allocate), read 25.2 MiB/s. The driver hands out the uncached alias 0x15000000.
+- Measured with the driver compiled at opt-level 0 with debug assertions: direct-mode CE# low up to 13.4 us (over
+  tCEM); every data check still passed. Compile the driver optimised in debug builds too.
 - Differences from the APS6404L that `embassy_rp::psram` targets: manufacturer ID 0x9D instead of 0x0D,
   16 MiB instead of 8 MiB, 104 MHz instead of 144 MHz, tCEM 4 us instead of 8 us, QPI fast read at 84 MHz.
 - Socket U24 is one SOIC-8 land for either this PSRAM, an APS6404L-SQN-SN (8 MB QSPI PSRAM) or a W25Q32JVSNIQ
   (32 Mbit QSPI NOR). The PCB is assembled with U24 empty.
-- Programming the in-package flash resets the QMI configuration, so the CS1 set-up has to be repeated afterwards.
+- Programming the in-package flash resets the QMI configuration; `Psram::remap()` re-programs the window
+  without a chip command (verified with the M1 reset simulated).
 - The QMI registers used to reach it are under RP2350 below.
 
 ## Quectel LC76G (GNSS, UART1 and PPS on the bench)
@@ -198,8 +207,19 @@ Pins: see `pinout.md`, status LED.
 - One LED, data on GPIO43 through a 100 ohm series resistor, supplied from V5_SYS, driven by a PIO program in
   the GPIO16-47 window.
 - Fitted part: WS2812C-2020-V6, same pinout and pad drawing as the WS2812C-2020-V1 datasheet.
-- Data timing and colour byte order are not recorded in the sources; see the datasheet (p1-2).
-- Not verified on the board: LED colours (visual check open).
+- Driver `crates/ws2812c`, test `tools/run.sh ws2812c_smoke`.
+- Datasheet p4 limits: T0H 220-380 ns; T1H, T0L, T1L 580-1000 ns; reset low over 280 us; GRB, MSB first.
+- SPI encoding of the driver: 0 = `1000`, 1 = `1100`, so the SPI clock must be 3.0 to 3.448 MHz (derived from
+  the limits; nominal 3.2 MHz, which embassy-rp rounds to 3.125 MHz).
+- Measured on the board, PIO on GPIO43 at 150 MHz (divider 47): T0H 306-320, T1H 626, T0L 940, T1L 620-633 ns;
+  the 24 decoded bits equal the sent word.
+- Measured on the board, SPI1 (TX GPIO43, SCK on the unconnected GPIO26) at 3.125 MHz: mode 1 or 3 is gapless
+  (T0H 320, T1H 640, T0L 953-966, T1L 633-646 ns); modes 0 and 2 leave about 0.5 us between bytes and break the
+  limits. embassy-rp's blocking SPI write waits for each byte and is not gapless either.
+- Measured on the board: low time between two frames 318-356 us (PIO) and 345 us (SPI).
+- The pad input reads the driven waveform from another PIO block, so the line is checked without extra hardware.
+- Not verified in the driver's runs: the colours as seen by a person (the bring-up run was watched: red, green,
+  blue, white).
 
 ## ADC channels
 
@@ -229,7 +249,8 @@ Pins: see `pinout.md`, MCU and clock.
 - QMI: base 0x400d0000. Direct mode: set DIRECT_CSR.EN, wait BUSY low, assert CS1N, push to DIRECT_TX, always
   drain DIRECT_RX. XIP (the running program's flash) is inaccessible while direct mode is enabled, so that code
   must execute from RAM with interrupts off. M1 format/command registers: RFMT/RCMD/WFMT/WCMD
-  (p1236-1247). Writes through the window need CTRL.WRITABLE_M1. CS1 window base 0x11000000 is unverified.
+  (p1236-1247). Writes through the window need CTRL.WRITABLE_M1. Verified: window 1 at 0x11000000 (cached), 0x15000000
+  (uncached). Direct-mode FIFOs: faster via XIP_AUX 0x50500004/8 (p349). Cache clean by set/way: 0x1bffc001+8n (E11).
 
 ## Datasheets
 

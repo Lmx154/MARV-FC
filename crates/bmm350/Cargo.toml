@@ -3,6 +3,7 @@ name = "bmm350"
 version = "0.1.0"
 edition = "2024"
 publish = false
+license = "MIT"
 description = "Driver for the Bosch BMM350 magnetometer over I2C. Async and blocking, on embedded-hal traits only."
 
 [features]

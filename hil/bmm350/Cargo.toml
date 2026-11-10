@@ -4,6 +4,7 @@ description = "On-target test of the bmm350 driver. Run with tools/run.sh bmm350
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 bmm350 = { path = "../../crates/bmm350", features = ["defmt"] }
