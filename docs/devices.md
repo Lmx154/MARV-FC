@@ -156,7 +156,7 @@ Pins: see `pinout.md`, QMI CS1 / PSRAM.
   density (100 = 128 Mbit).
 - CE# low time limit tCEM: 4 us up to 85 degC. CE# high time >= 1 clock. Max clock 104 MHz.
   Measured at 75 MHz: Read ID CE# low 1347 ns; window bursts end at 3.1 us with MAX_SELECT 7 (bound 3.85 us).
-- Driver `crates/qmi-psram`, test `tools/run.sh psram_smoke`. At clk_sys 150 MHz: QPI, EBh read with 24 dummy
+- Driver `../MARV-V2-drivers/qmi-psram`, test `tools/run.sh psram_smoke`. At clk_sys 150 MHz: QPI, EBh read with 24 dummy
   bits, 38h write, CLKDIV 2 (75 MHz), RXDELAY 2, COOLDOWN 1, PAGEBREAK 1024, MAX_SELECT 7, MIN_DESELECT 2,
   SELECT_SETUP 1. Measured RXDELAY pass window: 1-4 at CLKDIV 2, 0-5 at CLKDIV 3.
 - Measured, 1 MiB sequential: uncached alias write 20.8 MiB/s, read 24.4 MiB/s; cached alias write 7.9 MiB/s
@@ -173,7 +173,7 @@ Pins: see `pinout.md`, QMI CS1 / PSRAM.
 
 ## Quectel LC76G (GNSS, UART1 and PPS on the bench)
 
-Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; driver: `crates/lc76g`.
+Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; driver: `../MARV-V2-drivers/lc76g`.
 
 - Protocol specification V1.1 (link below). Bench module `LC76GABNR12A05S`, build 2025/09/25 10:10:11 (`$PQTMVERNO`,
   p100). 115200 baud 8N1 confirmed. Get commands answer `$PAIR001,<id>,0`, then the value (p39): `$PAIR051,1000*13`.
@@ -207,7 +207,7 @@ Pins: see `pinout.md`, status LED.
 - One LED, data on GPIO43 through a 100 ohm series resistor, supplied from V5_SYS, driven by a PIO program in
   the GPIO16-47 window.
 - Fitted part: WS2812C-2020-V6, same pinout and pad drawing as the WS2812C-2020-V1 datasheet.
-- Driver `crates/ws2812c`, test `tools/run.sh ws2812c_smoke`.
+- Driver `../MARV-V2-drivers/ws2812c`, test `tools/run.sh ws2812c_smoke`.
 - Datasheet p4 limits: T0H 220-380 ns; T1H, T0L, T1L 580-1000 ns; reset low over 280 us; GRB, MSB first.
 - SPI encoding of the driver: 0 = `1000`, 1 = `1100`, so the SPI clock must be 3.0 to 3.448 MHz (derived from
   the limits; nominal 3.2 MHz, which embassy-rp rounds to 3.125 MHz).
