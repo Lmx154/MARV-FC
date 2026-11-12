@@ -8,33 +8,25 @@ semihosting with a pass verdict. It touches no bus and no sensor and has no flig
 
 ## Device drivers
 
-The device drivers are not part of this repository. Each one lives in its own repository and is used
-by local path (`../MARV-V2-drivers/<crate>` in `Cargo.toml`). The two folders must sit side by side:
+The device drivers are not part of this repository. Each one lives in its own GitHub repository and
+`Cargo.toml` takes it from there, pinned to a commit (`rev`); `Cargo.lock` is committed. The first build
+on a machine fetches them over https. To take a newer driver, change its `rev` and run
+`cargo update -p <crate>`. To work on a driver and the firmware together, add a `[patch]` entry with a
+local path (the comment in `Cargo.toml` shows it) instead of editing the dependency.
 
-```
-<parent folder>/
-|-- MARV-V2-firmware/        this repository
-|   |-- Cargo.toml  build.rs  memory.x  .cargo/config.toml
-|   |-- src/main.rs
-|   |-- tools/run.sh
-|   `-- docs/pinout.md  docs/devices.md
-`-- MARV-V2-drivers/
-    |-- icm45686/   lsm6dsk320x/   bmp581/   bmm350/
-    `-- lc76g/      pio-sdmmc/     qmi-psram/ ws2812c/
-```
-
-| Driver | Path | Device |
+| Driver crate | Repository | Device |
 |---|---|---|
-| icm45686 | `../MARV-V2-drivers/icm45686` | ICM-45686 6-axis IMU (SPI) |
-| lsm6dsk320x | `../MARV-V2-drivers/lsm6dsk320x` | LSM6DSK320X IMU with high-g accelerometer (SPI) |
-| bmp581 | `../MARV-V2-drivers/bmp581` | BMP581 barometer (I2C) |
-| bmm350 | `../MARV-V2-drivers/bmm350` | BMM350 magnetometer (I2C) |
-| lc76g | `../MARV-V2-drivers/lc76g` | LC76G GNSS receiver (UART) |
-| pio-sdmmc | `../MARV-V2-drivers/pio-sdmmc` | SD card on the RP2350 PIO, 4-bit SD bus |
-| qmi-psram | `../MARV-V2-drivers/qmi-psram` | 16 MiB QSPI PSRAM on the RP2350 QMI |
-| ws2812c | `../MARV-V2-drivers/ws2812c` | WS2812C status LED (PIO) |
+| icm45686 | <https://github.com/Lmx154/icm45686-rs> | ICM-45686 6-axis IMU (SPI) |
+| lsm6dsk320x | <https://github.com/Lmx154/lsm6dsk320x-rs> | LSM6DSK320X: high-g accelerometer plus low-g accelerometer and gyroscope (SPI) |
+| bmp581 | <https://github.com/Lmx154/bmp581-rs> | BMP581 barometer (I2C) |
+| bmm350 | <https://github.com/Lmx154/bmm350-rs> | BMM350 magnetometer (I2C) |
+| lc76g | <https://github.com/Lmx154/lc76g-rs> | LC76G GNSS receiver (UART) |
+| pio-sdmmc | <https://github.com/Lmx154/pio-sdmmc-rs> | SD card on the RP2350 PIO, 4-bit SD bus |
+| qmi-psram | <https://github.com/Lmx154/qmi-psram-rs> | 16 MiB QSPI PSRAM on the RP2350 QMI |
+| ws2812c | <https://github.com/Lmx154/ws2812c-rs> | WS2812C status LED (PIO) |
 
-For what each driver offers and how to use it, read the README in its own repository.
+For what each driver offers and how to use it, read the README in its own repository. What was proven
+on the board, what the firmware has to respect, and what is still open: `docs/handoff.md`.
 
 ## Build and run
 
@@ -52,6 +44,7 @@ per driver, then `alive` and `RESULT: PASS`; exit status 0.
 
 ## Board documentation
 
+- `docs/handoff.md`: the state of the drivers and the starting point for the firmware work (2026-11-11).
 - `docs/pinout.md`: the board pin assignment.
 - `docs/devices.md`: the devices on the board and what was measured on them.
 

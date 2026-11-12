@@ -7,14 +7,20 @@ publish = false
 license = "MIT"
 
 [dependencies]
-icm45686 = { path = "../MARV-V2-drivers/icm45686", features = ["defmt"] }
-lsm6dsk320x = { path = "../MARV-V2-drivers/lsm6dsk320x", features = ["defmt"] }
-bmp581 = { path = "../MARV-V2-drivers/bmp581", features = ["defmt"] }
-bmm350 = { path = "../MARV-V2-drivers/bmm350", features = ["defmt"] }
-lc76g = { path = "../MARV-V2-drivers/lc76g", features = ["defmt"] }
-pio-sdmmc = { path = "../MARV-V2-drivers/pio-sdmmc", features = ["defmt", "embassy-rp-0-10"] }
-qmi-psram = { path = "../MARV-V2-drivers/qmi-psram", features = ["rp2350", "defmt"] }
-ws2812c = { path = "../MARV-V2-drivers/ws2812c", features = ["defmt", "embassy-rp"] }
+# The device drivers, one GitHub repository each, pinned to a commit (the state verified on the board on
+# 2026-11-11; see docs/handoff.md). The crate name is the repository name without "-rs".
+# To take a newer driver: change its `rev` to the new commit and run `cargo update -p <crate>`.
+# To work on a driver and the firmware together, override it locally without editing this file:
+#   [patch."https://github.com/Lmx154/icm45686-rs.git"]
+#   icm45686 = { path = "../MARV-V2-drivers/icm45686" }
+icm45686 = { git = "https://github.com/Lmx154/icm45686-rs.git", rev = "867093eea748ea7b8ea968a2a1d8258ba7fa47e3", features = ["defmt"] }
+lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "07a888901f29654faa6ec51394f3aa8e81481e51", features = ["defmt"] }
+bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca9493e5dddd3d019a23b6d05395b", features = ["defmt"] }
+bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac832582f3c67be3332e12baf9970d0d6a", features = ["defmt"] }
+lc76g = { git = "https://github.com/Lmx154/lc76g-rs.git", rev = "2ee54f927bd0ffb7c4f7a4978c84cc2af962f405", features = ["defmt"] }
+pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "d07804875fedf32121bd48314ad975bbd9534f5f", features = ["defmt", "embassy-rp-0-10"] }
+qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "591ca04501144fa40b66ed17262df836f258c076", features = ["rp2350", "defmt"] }
+ws2812c = { git = "https://github.com/Lmx154/ws2812c-rs.git", rev = "831c70b527a87bba9e63969d3c5632cf8a7ac892", features = ["defmt", "embassy-rp"] }
 
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }

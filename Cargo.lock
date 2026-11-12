@@ -92,6 +92,7 @@ dependencies = [
 [[package]]
 name = "bmm350"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/bmm350-rs.git?rev=d233caac832582f3c67be3332e12baf9970d0d6a#d233caac832582f3c67be3332e12baf9970d0d6a"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
@@ -101,6 +102,7 @@ dependencies = [
 [[package]]
 name = "bmp581"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/bmp581-rs.git?rev=5046a13c476ca9493e5dddd3d019a23b6d05395b#5046a13c476ca9493e5dddd3d019a23b6d05395b"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
@@ -742,6 +744,7 @@ dependencies = [
 [[package]]
 name = "icm45686"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/icm45686-rs.git?rev=867093eea748ea7b8ea968a2a1d8258ba7fa47e3#867093eea748ea7b8ea968a2a1d8258ba7fa47e3"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
@@ -823,6 +826,7 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 [[package]]
 name = "lc76g"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/lc76g-rs.git?rev=2ee54f927bd0ffb7c4f7a4978c84cc2af962f405#2ee54f927bd0ffb7c4f7a4978c84cc2af962f405"
 dependencies = [
  "defmt",
  "embedded-io 0.7.1",
@@ -872,6 +876,7 @@ dependencies = [
 [[package]]
 name = "lsm6dsk320x"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/lsm6dsk320x-rs.git?rev=07a888901f29654faa6ec51394f3aa8e81481e51#07a888901f29654faa6ec51394f3aa8e81481e51"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
@@ -1104,6 +1109,7 @@ dependencies = [
 [[package]]
 name = "pio-sdmmc"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/pio-sdmmc-rs.git?rev=d07804875fedf32121bd48314ad975bbd9534f5f#d07804875fedf32121bd48314ad975bbd9534f5f"
 dependencies = [
  "defmt",
  "embassy-rp",
@@ -1159,6 +1165,7 @@ dependencies = [
 [[package]]
 name = "qmi-psram"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/qmi-psram-rs.git?rev=591ca04501144fa40b66ed17262df836f258c076#591ca04501144fa40b66ed17262df836f258c076"
 dependencies = [
  "critical-section",
  "defmt",
@@ -1680,6 +1687,7 @@ dependencies = [
 [[package]]
 name = "ws2812c"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/ws2812c-rs.git?rev=831c70b527a87bba9e63969d3c5632cf8a7ac892#831c70b527a87bba9e63969d3c5632cf8a7ac892"
 dependencies = [
  "defmt",
  "embassy-rp",
