@@ -168,8 +168,11 @@ USB
 - Leave `device_class`, `device_sub_class` and `device_protocol` at the defaults of
   `embassy_usb::Config::new`, and keep one handler slot free for `usb-cdc` (README, "What the application
   provides").
-- **This board is powered through its USB cable.** Pulling the cable switches the board off; it is not a
-  link going down with the board running. A debug session ends with it.
+- **With no battery attached this board is powered through its USB cable.** Pulling the cable then
+  switches the board off; it is not a link going down with the board running, and a debug session ends
+  with it. With a battery attached the board keeps running and the pull is a bus suspend: the link goes
+  down 3.2 ms after the last packet and a pending write ends with `NotConnected` (one pull, 2026-11-12;
+  `usb-cdc` README, check F).
 - The USB identity of the demonstration (vendor 0xc0de, product 0xcafe, "MARV V2 link demo") is a bench
   value (section 9).
 
@@ -242,8 +245,8 @@ a test that all 234 messages have the same wire form as the std `mavlink` crate.
   the link, so load, timing and jitter with the sensors running are not measured.
 - **Parameters that survive a reboot.** The demonstration keeps them in RAM. Where the firmware stores
   them is not decided.
-- A cable pulled while the board keeps running (the board is powered through that cable); a link taken
-  away by the computer (needs root there).
+- A link taken away by the computer (needs root there). A cable pulled while the board keeps running was
+  measured once on 2026-11-12 with a battery attached (section 5, USB); repeated pulls were not run.
 - Windows and macOS. Sessions longer than about a minute. A USB-serial adapter or a radio in between.
 - The fastest rates of the contract on the board (only the default rates ran).
 - Not built in the ground station: missions, a map, joystick input, firmware upload, download of logs
