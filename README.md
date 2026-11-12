@@ -45,6 +45,8 @@ per driver, then `alive` and `RESULT: PASS`; exit status 0.
 ## Board documentation
 
 - `docs/handoff.md`: the state of the drivers and the starting point for the firmware work (2026-11-11).
+- `docs/handoff-usb-mavlink.md`: the USB link, the MAVLink layer and the ground station, each in its own
+  GitHub repository, and how this firmware takes them (2026-11-12).
 - `docs/pinout.md`: the board pin assignment.
 - `docs/devices.md`: the devices on the board and what was measured on them.
 

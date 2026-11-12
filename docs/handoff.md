@@ -4,6 +4,9 @@ Written 2026-11-11 at the end of the driver work, for whoever starts the firmwar
 person). It says what exists, where it is, what was proven on the real board, what the firmware has to
 respect, and what is still open. Start the next session in this folder.
 
+Since then (2026-11-12): the link to the ground station exists. `docs/handoff-usb-mavlink.md` covers it and
+answers the ground-station items listed as not decided in section 8.
+
 ## 1. Where everything is
 
 | What | Local path | GitHub | Branch |
