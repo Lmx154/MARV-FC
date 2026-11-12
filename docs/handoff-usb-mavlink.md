@@ -12,7 +12,7 @@ was proven on the real board, what the firmware has to respect, and what is stil
 | Ground station (runs on the computer) | <https://github.com/Lmx154/MARV-GCS> | `3abc685` |
 | `usb-cdc`: bytes over the board's USB port | <https://github.com/Lmx154/usb-cdc> | `0002fe9` |
 | `marv-dialect`: the MAVLink message definitions, buildable for the board | <https://github.com/Lmx154/marv-dialect> | `61915e6` |
-| `mavlink-device`: the MAVLink layer of the board, on any byte stream | <https://github.com/Lmx154/mavlink-device> | `11e2141` |
+| `mavlink-device`: the MAVLink layer of the board, on any byte stream | <https://github.com/Lmx154/mavlink-device> | `a5e4f4f` |
 
 All four are public, MIT, version 0.1.0 and not on crates.io. They refer to each other by GitHub URL
 only: `mavlink-device` takes `marv-dialect`, and its on-board demonstration takes `usb-cdc`, as git
@@ -83,7 +83,7 @@ sensor drivers in `Cargo.toml`:
 
 ```toml
 usb-cdc = { git = "https://github.com/Lmx154/usb-cdc.git", rev = "0002fe99a8d2dfed44917d44e26dbda6ee92427e", features = ["defmt"] }
-mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "11e2141ec98061e149aecf086e1c47d7c6f4712f", features = ["defmt"] }
+mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "a5e4f4fe69599fe1d6d72e947df5f786f56d4228", features = ["defmt"] }
 
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt"] }
 embassy-sync = "0.8.0"
@@ -109,7 +109,7 @@ static_cell = "2.1.1"
 ## 4. Wiring it in: the shape that ran on the board
 
 The reference is the demonstration program,
-[`hil/src/bin/mavlink_demo.rs` of mavlink-device](https://github.com/Lmx154/mavlink-device/blob/11e2141ec98061e149aecf086e1c47d7c6f4712f/hil/src/bin/mavlink_demo.rs)
+[`hil/src/bin/mavlink_demo.rs` of mavlink-device](https://github.com/Lmx154/mavlink-device/blob/a5e4f4fe69599fe1d6d72e947df5f786f56d4228/hil/src/bin/mavlink_demo.rs)
 (463 lines; the USB set-up, the start gate and the link loop are about 140 of them). It ran on this board
 against the ground station. Its
 values are computed from the clock and its 13 parameters live in RAM; those two parts are what the
@@ -206,9 +206,11 @@ MARV-GCS; three phases, the board restarted before each):
 | A program that keeps DTR low | 0 bytes in the first second; first frame 0.6 ms after its HEARTBEAT |
 | The gate switched off (control) | all three phases fail |
 
-The last run of that check was made on the tree that was then committed as the commits of section 1,
-with the demonstration taking `usb-cdc` and `marv-dialect` from GitHub. It passed all three phases: 4343
-frames in the first 20 s with 0 errors, and a recording of 1103 frames, all decoded by pymavlink.
+The last run of that check was made on the tree that was then committed as `11e2141` of mavlink-device
+and `3abc685` of MARV-GCS, with the demonstration taking `usb-cdc` and `marv-dialect` from GitHub (the
+commit of mavlink-device in section 1 is one later and changes only its README). It passed all three
+phases: 4343 frames in the first 20 s with 0 errors, and a recording of 1103 frames, all decoded by
+pymavlink.
 
 `usb-cdc` alone (its own programs, README section "Measured on the MARV V2 Rev 1 board"): link up about
 345 ms after the pull-up; echo of 1 MiB in awkward sizes with 0 errors; 757 kB/s board to computer,
@@ -249,8 +251,6 @@ a test that all 234 messages have the same wire form as the std `mavlink` crate.
 - Not in the device layer, by design, each with its trigger in the contract (end of section 2): battery
   and system status, attitude, time synchronisation, parameter descriptions and ranges, signing, more
   parameter types.
-- Noticed, not changed: the README of `mavlink-device` still says in its status line that the crate "has
-  not run on a board"; its section "Measured on the MARV V2 Rev 1 board" is the current state.
 
 ## 9. The owner's to choose (none was decided)
 
