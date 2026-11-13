@@ -52,13 +52,13 @@ measurements M9 and M10). In short:
 - Unexplained: two ESCs stop answering for long stretches when sent only one frame per 0.4 s; the first
   run's failure itself.
 
-**Update, 20:05:** a later session continued this work while the first was paused: see
-`~/Documents/MARV-V2-drivers/_plan/continuation-pio-dshot-20261112.md` and
-`~/Documents/MARV-V2-drivers/dshot/docs/handoff-pio-dshot.md` (dshot 2b5bc33 on `wip-pio-dshot`). The
-decision document now holds the fifth amendment it obtained and implemented (a Qualifying state in the
-driver), and below it a section marked NOT IN FORCE: the different answer of the first consult, which
-arrived late (driver unchanged, the rule in the firmware). Which of the two stands is open with the owner.
-Do not have two sessions work in `dshot/` or on the board at once.
+**Update, 20:20:** the consult's answer arrived and is recorded as the fifth amendment in
+`~/Documents/MARV-V2-drivers/_plan/decision-esc-link-20261112.md` ("the logic stays in the firmware"): the
+driver is unchanged; the firmware's alarm is two Foreign captures on a Live line with no reply between; arming
+waits until every line has replied on every exchange for 1500 ms. A second session had meanwhile built a
+driver-side version; the owner rejected it ("I want to keep logic in firmware."; "if it made things violating
+the split delete them, do not archive trash.") and it was deleted. `wip-pio-dshot` is at b484b5a. Never have
+two sessions work in `dshot/` or on the board at once. The paragraph below is history.
 
 **An architect consult was dispatched at about 18:00 with five questions** (line states and rule 3.8
 given that burst; what checks 2 and 6 must assert; the lapse constant; the overlap of the burst with our
