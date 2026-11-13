@@ -52,6 +52,14 @@ measurements M9 and M10). In short:
 - Unexplained: two ESCs stop answering for long stretches when sent only one frame per 0.4 s; the first
   run's failure itself.
 
+**Update, 20:05:** a later session continued this work while the first was paused: see
+`~/Documents/MARV-V2-drivers/_plan/continuation-pio-dshot-20261112.md` and
+`~/Documents/MARV-V2-drivers/dshot/docs/handoff-pio-dshot.md` (dshot 2b5bc33 on `wip-pio-dshot`). The
+decision document now holds the fifth amendment it obtained and implemented (a Qualifying state in the
+driver), and below it a section marked NOT IN FORCE: the different answer of the first consult, which
+arrived late (driver unchanged, the rule in the firmware). Which of the two stands is open with the owner.
+Do not have two sessions work in `dshot/` or on the board at once.
+
 **An architect consult was dispatched at about 18:00 with five questions** (line states and rule 3.8
 given that burst; what checks 2 and 6 must assert; the lapse constant; the overlap of the burst with our
 frame). It was to append a "Fifth amendment" to
