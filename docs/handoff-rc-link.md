@@ -18,6 +18,18 @@ Standing words that bind: "I want to keep logic in firmware" (the driver reports
 Betaflight and ArduPilot, no extra safety features; "do not over engineer"; "don't let readmes get stale";
 "commit and push everything or just commit if local only".
 
+## UPDATE (2026-11-13, about 11:00): R2a is done and the owner has decided how the two modes are used
+
+R2a ran (two captures; facts file, section 8). On ELRS 4.0.1 the receiver sends stick messages in MAVLink mode
+only until it has output CRSF once in the same power-up; RADIO_STATUS and the ground-station traffic are not
+affected. The owner's decision, verbatim: "we use CRSF only for manual control and basic telemetry and mavlink
+only for telemetry rich and autonomous control" / "ok let's assume this approach now. record it. the cost is worth
+it for what we get in return." So: the link mode is the control authority; MAVLink mode has no stick source; a
+change of mode, also in the air, is ridden out by the firmware like an RF link loss. No receiver power cycle, no
+switched supply, no patched receiver firmware. The drivers do not change. Details: the decision document's last
+two sections. The "Next step" below is DONE; the next step now is `rc_follow` (the real port on the board: R2, R3,
+R4, R5 from one log), being written, then R6.
+
 ## State (2026-11-13 morning)
 
 | Piece | Where | State |
