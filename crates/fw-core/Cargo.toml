@@ -1,0 +1,10 @@
+[package]
+name = "fw-core"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "MARV V2 firmware core: pure no_std logic (health, parameters, record codecs, admission, handshake) and the lock-free cells between the two cores. Empty skeleton."
+rust-version = "1.99"
+
+[dependencies]

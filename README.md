@@ -42,6 +42,36 @@ tools/run.sh              # build, flash, run, print the log lines; exit status 
 test is using the probe. Its full log is kept under `logs/` (git-ignored). Expected output: one line
 per driver, then `alive` and `RESULT: PASS`; exit status 0.
 
+## Workspace
+
+The repository is a Cargo workspace with three members:
+
+```
+.                   the firmware binary (package marv-v2-firmware, the workspace root package)
+crates/fw-core      pure no_std logic and the lock-free cross-core cells, tested on the host
+crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core only
+```
+
+`fw-core` and `fw-flight` are empty skeletons for the foundation layer: they hold module files with
+doc comments only, and nothing is implemented yet. `fw-flight` must not depend on `embassy-time`,
+`embassy-sync` or `defmt`; check it with
+`cargo tree -p fw-flight -e normal --depth 1 | grep -cE 'embassy-time|embassy-sync|defmt'` (prints 0).
+
+`.cargo/config.toml` sets the board target for the whole workspace, so the two commands are:
+
+```
+cargo host-test -p fw-core    # tests on the host (alias: `cargo test --target x86_64-unknown-linux-gnu`)
+cargo build --release         # the firmware for the board (thumbv8m.main-none-eabihf)
+```
+
+`cargo host-clippy -p fw-core -p fw-flight --all-targets` is the matching host lint. The host alias
+assumes an x86_64 Linux host; on another host, pass your own `--target`.
+
+## Flash layout
+
+`memory.x` gives the program `FLASH` 2040K (0x10000000 to 0x101FE000) and reserves the last 8 KB of the
+2 MiB flash, 0x101FE000 to 0x10200000, as the `SETTINGS` region for the settings record.
+
 ## Board documentation
 
 - `docs/handoff.md`: the state of the drivers and the starting point for the firmware work (2026-11-11).

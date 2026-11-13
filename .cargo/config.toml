@@ -1,6 +1,13 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-rs run --chip RP235x"
 
+# The workspace default is the board, so `cargo build --release` and tools/run.sh are unchanged.
+# The pure libraries (fw-core, fw-flight) are tested on the host with these aliases, which only
+# add the host target (`cargo host-test -p fw-core`).
+[alias]
+host-test = "test --target x86_64-unknown-linux-gnu"
+host-clippy = "clippy --target x86_64-unknown-linux-gnu"
+
 [build]
 target = "thumbv8m.main-none-eabihf"
 

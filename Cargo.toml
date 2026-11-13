@@ -6,6 +6,10 @@ edition = "2024"
 publish = false
 license = "MIT"
 
+[workspace]
+members = ["crates/fw-core", "crates/fw-flight"]
+resolver = "3"
+
 [dependencies]
 # The device drivers, one GitHub repository each, pinned to a commit (the state verified on the board on
 # 2026-11-11; see docs/handoff.md). The crate name is the repository name without "-rs".

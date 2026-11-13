@@ -1,0 +1,11 @@
+[package]
+name = "fw-flight"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "MARV V2 flight-core tasks (core 1). No embassy-time, embassy-sync or defmt by rule. Empty skeleton."
+rust-version = "1.99"
+
+[dependencies]
+fw-core = { path = "../fw-core" }

@@ -3,8 +3,17 @@ MEMORY {
      * The RP2350 has either external or internal flash.
      *
      * 2 MiB is a safe default here, although a Pico 2 has 4 MiB.
+     * The last 8 KB are not program space: they are the SETTINGS region (below), so FLASH
+     * ends at 0x101FE000.
      */
-    FLASH : ORIGIN = 0x10000000, LENGTH = 2048K
+    FLASH : ORIGIN = 0x10000000, LENGTH = 2040K
+    /*
+     * The settings record, the last 8 KB of the 2 MiB flash (two 4 KB erase sectors).
+     * Design: _plan/decision-foundation-20261113.md in the MARV-V2-drivers repository, item 1
+     * (FLASH shrinks to 2040K; the settings region is 0x101FE000 to 0x10200000).
+     * Nothing is placed here by the linker; the firmware reads and writes it by address.
+     */
+    SETTINGS : ORIGIN = 0x101FE000, LENGTH = 8K
     /*
      * RAM consists of 8 banks, SRAM0-SRAM7, with a striped mapping.
      * This is usually good for performance, as it distributes load on

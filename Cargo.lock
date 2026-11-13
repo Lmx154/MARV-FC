@@ -682,6 +682,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 
 [[package]]
+name = "fw-core"
+version = "0.1.0"
+
+[[package]]
+name = "fw-flight"
+version = "0.1.0"
+dependencies = [
+ "fw-core",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"

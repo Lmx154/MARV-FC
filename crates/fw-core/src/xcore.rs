@@ -1,0 +1,1 @@
+//! Lock-free cells between the two cores: `Seqlock` (flight core to core 0, the writer never waits), `TripleBuffer` (core 0 to flight core, wait-free on both sides) and `Kick` (cross-core wake and requests).
