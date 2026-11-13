@@ -55,15 +55,19 @@ Done on the board (zero throttle, no motors): the removal passed two full runs; 
 Drop) restructured and passing; cancel sweep with a release attempt after each of 2156 cancels and a
 double-cancel sweep (940): every failure counter 0; NO driver defect found by any of it.
 
-In progress when the session stopped: the bench program's check 2 is being changed to the SEVENTH amendment
-(the controller's arming transient is bounded: at most 3 odd exchanges per line per start, around arming; our
-own frames stay strict), with addendum C's exemption at our release and a 25 us pacing margin. The engineer
-was told to stop and commit a WIP checkpoint: **read the last commit message on `wip-pio-dshot`
-(`git -C ~/Documents/MARV-V2-drivers/dshot log -3`) for how far it got and whether it builds.**
+State of the tree when the session stopped (23:15): the last commit on `wip-pio-dshot` is 4226808 ("WIP
+checkpoint: lapse lock and bench reply rules removed"). Everything after it is UNCOMMITTED in the working tree
+(`git -C ~/Documents/MARV-V2-drivers/dshot status`): check 6 restructured, the single and double cancel sweeps
+(passing on the board in logs -221711, -222912, -223115), and the SEVENTH amendment fully coded in
+`hil/src/bin/dshot_smoke.rs` (check 2 with the bounded transient: `classify`, `a_form`, `Zone`; addendum C's
+exemption at our release; the 25 us pacing margin; the five negative controls) but NOT YET RUN on the board. It
+builds (`cargo build --release --bin dshot_smoke` and clippy clean in `hil/`); `src/` is unchanged since the
+host checks last passed. The engineer's own checkpoint commit was refused by the permission system, so the
+first act of the next session (or the owner) is to commit that tree as a WIP checkpoint.
 
 Remaining, in order (all delegated; the lead only audits and troubleshoots):
-1. Finish the seventh-amendment change in `dshot/hil/src/bin/dshot_smoke.rs` if the commit message says it
-   is unfinished; then THREE CONSECUTIVE full runs, `tools/run.sh dshot_smoke 600` in `dshot/` (about 70 s
+1. Commit the working tree as a WIP checkpoint; ONE development run of the seventh-amendment code and fix
+   only what it shows; then THREE CONSECUTIVE full runs, `tools/run.sh dshot_smoke 600` in `dshot/` (about 70 s
    each, exit 0, no source change between them). If one fails: look at the failing lines with their edges and
    check AM32's source before believing a bench theory.
 2. Independent review (reviewer) of the whole back-end against the decision document. Nothing has been reviewed.
