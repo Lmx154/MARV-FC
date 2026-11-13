@@ -157,4 +157,5 @@ Attached by hand on the current board; the PCB itself provides the pins above.
 - LC76G GPS on silk T1/R1: T1 = GPIO24 = UART1 TX (MCU output, to GPS RX); R1 = GPIO25 = UART1 RX (MCU input, from GPS TX). PPS on silk S5 = GPIO5, a plain GPIO input (S5 is otherwise the servo PWM5 pad).
 - IS66WVS16M8FBLL PSRAM hand-fitted in socket U24 (SOIC-8): CS on GPIO0 (QMI CS1n), shared QSPI clock/data, supply V3V3_SYS.
 - BMM350 magnetometer on the magnetometer port: SDA = GPIO12, SCL = GPIO13 (I2C0, 4.7k pull-ups to V3V3_SYS, powered from the V3V3_SYS pin of the IO block). INT on silk S6 = GPIO4, a plain GPIO input (S6 is otherwise the servo PWM6 pad).
-- Empty: T0/R0 (GPIO14/17). The current-sense source pad is floating.
+- Motors (owner, 2026-11-13; four Emax ECO II 2807 1700KV, 14 magnets, on the GOKU G55M with AM32 2.20; directions seen in the spin test at 5 % throttle, no propellers): M1 = GPIO39 = rear left, counter-clockwise; M2 = GPIO38 = front left, clockwise; M3 = GPIO37 = rear right, clockwise; M4 = GPIO36 = front right, counter-clockwise. The direction is a setting of each ESC (reversed on M1's and M4's).
+- T0/R0 (GPIO14/17, UART0) is assigned to the ELRS receiver (owner, 2026-11-13: "T0 R0 are the ELRS receiver"); whether it is attached yet, and its supply, are not recorded. The current-sense source pad is floating.

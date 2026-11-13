@@ -37,11 +37,11 @@ Driver crates: `~/Documents/MARV-V2-drivers/<crate>`, accepted work on `main`, p
 | AM32 passthrough | DONE on the standalone demo: the real configurator read, changed a setting, flashed one ESC, verified byte for byte (esc-passthrough) |
 | `pio-uart` `OneWire` and `UartRx` | DONE, reviewed; no real ESC telemetry received yet |
 | DShot pure core | DONE, pushed (dshot-rs main 43c212d) |
-| **DShot back-end `PioDshot`** | **IN PROGRESS, NOT ACCEPTED: local branch `wip-pio-dshot`, not pushed, NOT REVIEWED, README stale** |
+| DShot back-end `PioDshot` | DONE at zero throttle, no motors: accepted, reviewed, README current, pushed (dshot-rs main b7c823a, 2026-11-12 night). Not yet run with motors |
 | READMEs / "Works with" / package metadata | Done and pushed for the 14 other crates |
 | crates.io | Six crates prepared (icm45686, lsm6dsk320x, lc76g, bmm350 as `bmm350-async`, bmp581 as `bmp581-async`, esc-passthrough); nothing published (the owner's e-mail was not verified); PARKED by the owner |
 | ESC serial telemetry, firmware passthrough hookup, firmware arming rules | NOT STARTED |
-| Motors | NOT soldered. The owner waits for the lead's word, which comes when the back-end is accepted |
+| Motors | NOT soldered. The owner has the lead's word to solder (back-end accepted) |
 
 ## The DShot back-end: exactly where it stands
 
@@ -64,6 +64,11 @@ exemption at our release; the 25 us pacing margin; the five negative controls) b
 builds (`cargo build --release --bin dshot_smoke` and clippy clean in `hil/`); `src/` is unchanged since the
 host checks last passed. The engineer's own checkpoint commit was refused by the permission system, so the
 first act of the next session (or the owner) is to commit that tree as a WIP checkpoint.
+
+**UPDATE (next session, same night): steps 1 to 4 below are DONE** (plan log, last entry: six passing full
+runs, two reviews PASS, squashed to dshot-rs main b7c823a; `wip-pio-dshot` is local and has the same tree). The
+"State of the tree" paragraph above is history. START AT STEP 5, after the owner has soldered the motors. Before
+step 5's runs, consider the bench-review follow-ups listed in the plan log.
 
 Remaining, in order (all delegated; the lead only audits and troubleshoots):
 1. Commit the working tree as a WIP checkpoint; ONE development run of the seventh-amendment code and fix
