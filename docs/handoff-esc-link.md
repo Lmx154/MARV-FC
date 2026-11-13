@@ -65,6 +65,15 @@ builds (`cargo build --release --bin dshot_smoke` and clippy clean in `hil/`); `
 host checks last passed. The engineer's own checkpoint commit was refused by the permission system, so the
 first act of the next session (or the owner) is to commit that tree as a WIP checkpoint.
 
+**UPDATE 2 (2026-11-13, about 03:10): step 5 is DONE as far as the first spin.** Motors soldered (Emax ECO II 2807
+1700KV, 14 magnets, 4S; M1 rear left CCW, M2 front left CW, M3 rear right CW, M4 front right CCW: `docs/pinout.md`).
+Three zero-throttle runs with the motors attached passed; `dshot_spin` (feature `motor-test`, guards G2 to G6,
+cap 5 %) spun all four, one at a time: `dshot_spin-20261113-030326`, RESULT: PASS; dshot-rs main `3557eb1`. AM32
+reports a 2 us period ("not started yet") until its first commutation: never read an eRPM above what the motor
+can do as a speed. STILL OPEN in the ESC program: the stop on signal loss; the board's current scale (the ESCs'
+own current reading, about 155 A at rest, is unusable as a reference); ESC serial telemetry; the firmware's
+passthrough hookup and arming rules. The radio link has its own handoff: `docs/handoff-rc-link.md`.
+
 **UPDATE (next session, same night): steps 1 to 4 below are DONE** (plan log, last entry: six passing full
 runs, two reviews PASS, squashed to dshot-rs main b7c823a; `wip-pio-dshot` is local and has the same tree). The
 "State of the tree" paragraph above is history. START AT STEP 5, after the owner has soldered the motors. Before
