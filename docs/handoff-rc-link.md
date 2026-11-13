@@ -30,6 +30,25 @@ switched supply, no patched receiver firmware. The drivers do not change. Detail
 two sections. The "Next step" below is DONE; the next step now is `rc_follow` (the real port on the board: R2, R3,
 R4, R5 from one log), being written, then R6.
 
+## UPDATE 2 (2026-11-13, about 12:45): the driver side is done on the board
+
+Every check that needs the radio has run on the owner's hardware (facts file, sections 8 to 11):
+- R2 CRSF in, R3 telemetry out, R5 following 16 changes each way (`rc_follow`); R4 MAVLink on the port: radio
+  status, radio off, flow control and overload (`rc_link`); R6 the project's own message `MARV_TEST` both ways
+  through the radio: 193 of 202 to the ground station, 100 of 100 to the board.
+- MARV-GCS showed the board over the radio (UDP 14550) and now speaks the `marv` dialect (MARV-GCS main `4d27f58`).
+- Pushed: mavlink-device-rs, marv-dialect (`f35f332`, with `MARV_TEST` and a `serde` feature), MARV-GCS. Local
+  only, no remote yet (the owner will make them): `crsf-codec`, `rc-port`.
+- Set-up facts for the laptop side: the Pocket's TX backpack must be on 1.5.0 or newer (it is on 1.5.9); the
+  telemetry network comes from Backpack -> Telemetry -> WiFi in the ELRS Lua script, is named "ExpressLRS TX
+  Backpack 000000" (password `expresslrs`), and its access point hijacks DNS: the desktop's connection to it is
+  set to ignore its DNS and never be a default route (`nmcli connection modify ... ipv4.ignore-auto-dns yes
+  ipv4.never-default yes`, done for that network).
+LEFT: the overload seen from the ground station and a counted run over minutes (optional); the slowdown's negative
+control; frames captured from the receiver as test vectors in `crsf-codec`; GitHub repositories for the two local
+crates (owner); and R7, the firmware's rules (the link mode is the control authority; a change of mode is ridden
+out like a link loss), which wait for the firmware itself.
+
 ## State (2026-11-13 morning)
 
 | Piece | Where | State |
