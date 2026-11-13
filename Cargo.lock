@@ -27,6 +27,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "atomic-waker"
+version = "1.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -684,6 +690,10 @@ checksum = "1944426bf7d03f1d14f708785e4b33efd750b36d48a157b836b3efc15ede8e1d"
 [[package]]
 name = "fw-core"
 version = "0.1.0"
+dependencies = [
+ "atomic-waker",
+ "mavlink-device",
+]
 
 [[package]]
 name = "fw-flight"
@@ -895,6 +905,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "marv-dialect"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/marv-dialect.git?rev=61915e658105a5bb88ff239c560cd923f66a56f7#61915e658105a5bb88ff239c560cd923f66a56f7"
+dependencies = [
+ "bitflags 2.13.2",
+ "mavlink-bindgen",
+ "mavlink-core",
+ "num-derive",
+ "num-traits",
+]
+
+[[package]]
 name = "marv-v2-firmware"
 version = "0.1.0"
 dependencies = [
@@ -925,6 +947,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "mavlink-bindgen"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "695fe1dff0efebde67fde50fb800f4703e8188e0447ab6332f48cb3066bcf982"
+dependencies = [
+ "crc-any",
+ "proc-macro2",
+ "quick-xml",
+ "quote",
+ "regex",
+ "thiserror",
+]
+
+[[package]]
+name = "mavlink-core"
+version = "0.21.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff9827ded6087bf5adbb2f4d4450c167096888c1a1619b16834fe9bfb9759d0b"
+dependencies = [
+ "crc-any",
+ "embedded-io 0.7.1",
+ "embedded-io-async 0.7.0",
+]
+
+[[package]]
+name = "mavlink-device"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/mavlink-device.git?rev=7811580344ea0119917156b4e9dbd5e6acbb81a9#7811580344ea0119917156b4e9dbd5e6acbb81a9"
+dependencies = [
+ "embedded-hal-async",
+ "embedded-io-async 0.7.0",
+ "marv-dialect",
 ]
 
 [[package]]
@@ -961,6 +1018,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys",
+]
+
+[[package]]
+name = "num-derive"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4e98dc3b890f6c23a0f9d3d491a2823d0dea0fa656302a13dd225fa924112a8"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.10",
 ]
 
 [[package]]
@@ -1181,6 +1249,15 @@ dependencies = [
  "critical-section",
  "defmt",
  "embedded-hal 1.0.0",
+]
+
+[[package]]
+name = "quick-xml"
+version = "0.41.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

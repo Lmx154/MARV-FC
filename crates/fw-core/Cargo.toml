@@ -8,3 +8,9 @@ description = "MARV V2 firmware core: pure no_std logic (health, parameters, rec
 rust-version = "1.99"
 
 [dependencies]
+# The lock-free waker behind `xcore::Kick` (the one cross-core wake; design: two-core amendment, rules).
+atomic-waker = "1.1.2"
+# The parameter protocol's `ParamStore` trait, `ParamName`, `ParamValue`, which `params` implements.
+# Pinned to a commit of mavlink-device `main`; to take a newer one change `rev` and run
+# `cargo update -p mavlink-device`.
+mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "7811580344ea0119917156b4e9dbd5e6acbb81a9" }
