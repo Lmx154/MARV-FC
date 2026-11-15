@@ -70,7 +70,7 @@ pub struct SensorMasks {
 
 /// The SYS_STATUS bits of a device; 0 for the devices that have none (SD, PSRAM, LED, ESC).
 pub fn sensor_bits(device: MarvDevice) -> u32 {
-    let flags = match device {
+    match device {
         MarvDevice::MARV_DEVICE_IMU1 => {
             MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_3D_GYRO.bits()
                 | MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_3D_ACCEL.bits()
@@ -90,8 +90,7 @@ pub fn sensor_bits(device: MarvDevice) -> u32 {
         | MarvDevice::MARV_DEVICE_PSRAM
         | MarvDevice::MARV_DEVICE_LED
         | MarvDevice::MARV_DEVICE_ESC => 0,
-    };
-    flags
+    }
 }
 
 fn is_enabled(row: &DeviceRow) -> bool {
