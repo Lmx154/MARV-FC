@@ -7,7 +7,7 @@ and executor is assigned once, here. The bench programs of the driver crates eac
 firmware. Status of each line: FIXED = dictated by the board; CHOSEN = decided here; OPEN = waits for the
 foundation design. Run as one program so far (2026-11-14): the two-core skeleton (core 1 started with `spawn_core1`, USB with a
 MAVLink node on core 0, `DMA_IRQ_0` off on core 0), the BMP581 barometer on core 0 (I2C1 without DMA, `I2C1_IRQ`, the data-ready
-input GPIO21 through `IO_IRQ_BANK0`) and IMU1, the ICM-45686, on core 1 (SPI0 at 8 MHz mode 0 with DMA channels 0 and 1 on
+input GPIO21 through `IO_IRQ_BANK0`), the BMM350 magnetometer on core 0 (2026-11-15: I2C0 without DMA, `I2C0_IRQ`, GPIO12 SDA, GPIO13 SCL, data-ready GPIO4 through `IO_IRQ_BANK0`), the battery monitor on core 0 (2026-11-15: the ADC without DMA, `ADC_IRQ_FIFO`, GPIO41 and GPIO42; GPIO40 unused) and IMU1, the ICM-45686, on core 1 (SPI0 at 8 MHz mode 0 with DMA channels 0 and 1 on
 `DMA_IRQ_0`, INT1 on GPIO15 through core 1's `IO_IRQ_BANK0`, all built inside core 1's entry closure; start-up checks:
 `DMA_IRQ_0` enabled on core 1, not on core 0) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
 see the table below); no other device, PIO block or DMA channel of this plan has run in it yet.

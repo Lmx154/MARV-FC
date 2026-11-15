@@ -4,18 +4,18 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-device, the BMP581 barometer; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG) and the battery monitor on the ADC (BATT), and IMU1 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the barometer's five parameters (see Parameters),
+  second, the parameter protocol over the 13 parameters of BARO, MAG and BATT (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
-  action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, the barometer's device task (see
+  action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag` and `batt`, the three core-0 device tasks (see
   Device layer).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, and IMU1
@@ -28,8 +28,8 @@ It has no flight functionality.
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
   enabled on core 0 after core 1 started.
 
-Not in it yet: IMU1's parameters and calibration (a fixed configuration for now), IMU2 and the devices
-other than IMU1 and the barometer, the calibrations and the self-test, the radio link
+Not in it yet: IMU1's parameters and calibration (a fixed configuration for now), IMU2, GNSS and the receiver row, the compass
+calibration command (only the `MAG_OFF*` parameters it will write exist), the calibrations and the self-test, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
 a ground station's node runs; when it is full, newer texts are dropped with a log line).
 
@@ -61,8 +61,10 @@ the ICM-45686 has no 1 kHz rate. Single-sample mode
 (`read()` on every data-ready signal, the driver README's single-sample path), with INT1_STATUS0 (clear on
 read) read with every sample so that the status read after a late CHECK sees a fresh flag; no FIFO, so
 the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
-temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the barometer's as
-SCALED_PRESSURE at 25 Hz.
+temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the magnetometer's field in gauss (1 G = 100 uT) as `xmag`, `ymag`, `zmag` with their `fields_updated` bits
+set only when a MAG sample exists; the barometer's as SCALED_PRESSURE at 25 Hz. SYS_STATUS carries
+`voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample (65535 and -1, MAVLink's "unknown", while there is none);
+`battery_remaining` stays -1.
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`. `FEATURES=inject-imu1-missed-edge
@@ -99,6 +101,25 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 | Row | Device | Bus | Configuration | P | T | Stuck after |
 |---|---|---|---|---|---|---|
 | BARO | BMP581 (`src/baro.rs`) | I2C1 at 400 kHz, SDA GPIO22, SCL GPIO23, data-ready GPIO21 (rising edge), no DMA | from the parameters (below); the defaults are the driver's default: pressure 16x, temperature 2x, normal mode, 50.056 Hz output data rate, no filter; always no FIFO, data-ready pulsed | 19 978 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 59.9 ms at the default | max(1 s, 20 P) |
+| MAG | BMM350 (`src/mag.rs`) | I2C0 at 400 kHz, SDA GPIO12, SCL GPIO13, data-ready GPIO4 (rising edge), no DMA | from `MAG_ODR_HZ` and `MAG_AVG`; defaults = the driver's bench config: 100 Hz, averaging 2, all axes, normal mode, data-ready pulsed, active high, push-pull | 10 000 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 30 ms at the default | max(1 s, 20 P) |
+| BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
+
+**MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
+data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge), then `read_field`: the
+compensated field in microtesla and the die temperature, minus `MAG_OFFX/Y/Z` in software (the chip's offset registers are not
+used). `Reading::Mag { field_ut, temperature_c }`. The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
+`verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and
+rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
+The field at rest on the driver's bench was about 66 to 67 uT.
+
+**BATT.** One sample every 100 ms from a period timer (the "data ready" of this device; a period wait is no bus call). `acquire`
+converts the voltage and the current channel with interrupt-driven single conversions, each awaited (one discarded after the channel
+switch, then 16 averaged), and `adc-battery` turns the sums into millivolts and milliamps; both conversions together must finish within
+3 periods, else it is an error event (timeout). **"Ok" for BATT means only that the ADC converts**: there is no chip identity, `start`
+succeeds when one conversion of each channel completes (after 150 ms for the pads to settle), `verify` and `apply` have nothing to do
+(the parameters are read for every sample), `recover` and `restart` are a conversion of each channel. With the battery unplugged the
+voltage reads about 0 V (a few counts, tens of millivolts); the current is NOT calibrated (the default scale, 0.020 V/A with its zero at
+0 V, is the crate's bench PLACEHOLDER, so an unplugged board reports a small positive current). `Reading::Batt { voltage_v, current_a }`.
 
 The row's period P is a value that changes: the adapter sets it from the configured rate (at every start
 and every apply, before the chip is configured), so T = max(3 P, 10 ms), the stuck threshold and the
@@ -158,6 +179,8 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
 - `FEATURES=inject-baro-fail-until-restart tools/run.sh 120`: as `persistent` (after 5 s every `acquire`,
   `recover` and `restart` fails; Recovering, 4 attempts, Failed), until a RESTART request has been raised
   (`device restart BARO` from the ground station); from then on everything works and the device is Ok again.
+- `FEATURES=inject-mag-fail-until-restart tools/run.sh 120`: as the barometer's, around the magnetometer's adapter (the barometer is
+  not injected): 5 s after the first good sample every `acquire`, `recover` and `restart` fails until `device restart MAG`.
 - `FEATURES=inject-baro-por tools/run.sh 60`: one `acquire` answers a power-on reset. Shows the
   power-on-reset path: Ok -> Recovering at once (no Degraded, `errors` not incremented, `last_error` POR),
   WARNING, a recovery, Ok, NOTICE.
@@ -171,7 +194,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The first real parameter table (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG and BATT (after it); `fw_settings::TABLE` joins them (13 entries). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -205,6 +228,29 @@ configuration and "applied" (`[INFO] BARO: configuration: ...`). About 5 ms from
 Every start and restart reads the stored values the same way. A write is NOT saved to flash: it is lost at
 a reset unless the station's "Save to flash" (`marv-cli param save`) follows it (see Settings in flash).
 Every parameter write, accepted or refused, has an `[INFO] param <NAME> = <value>: ...` line.
+
+### MAG parameters
+
+`crates/fw-settings/src/mag.rs`, device MAG. The two configuration parameters are the `Configure` class (the whole candidate goes
+through the driver's `Config::validate` before the value is stored); the three offsets are `Live` and `calibration`
+(`param reset-calibration` resets them), reserved for the compass calibration command, which is not built.
+
+| Name | Type | Default | Range | Means |
+|---|---|---|---|---|
+| `MAG_ODR_HZ` | F32 | 100 | 1.5625 to 400 | output data rate in Hz: 400, 200, 100, 50, 25, 12.5, 6.25, 3.125 or 1.5625; refused otherwise ("rate not offered by the chip") |
+| `MAG_AVG` | I32 | 2 | 1 to 8 | samples averaged: 1, 2, 4 or 8 ("not 1, 2, 4 or 8"); the rate allows at most 1 at 400 Hz, 2 at 200 Hz, 4 at 100 Hz, 8 below ("averaging too high for the rate") |
+| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla subtracted from the field of that axis in every sample |
+
+### BATT parameters
+
+`crates/fw-settings/src/batt.rs`, device BATT, all `F32`, `Live`: applied to the next sample, no validator. The defaults are the
+`adc-battery` bench program's configuration.
+
+| Name | Default | Range | Means |
+|---|---|---|---|
+| `BATT_V_SCALE` | 1.0 | 0.1 to 10 | gain on the battery voltage (100k / 10k divider, 3.3 V reference): the crate's `gain_ppm` is `(scale - 1) * 1e6`; 2.0 doubles the voltage; the bench's one-point trim for this board would be 1.007603 (not applied) |
+| `BATT_A_SCALE` | 0.02 | 0 to 10 | volts at the pin per ampere of the ESC's current output; the default is the crate's PLACEHOLDER, not calibrated; 0 reads 0 A |
+| `BATT_A_OFFSET` | 0.0 | -3.3 to 3.3 | volts at the pin with no current (the crate's `zero_uv`) |
 
 ## Settings in flash
 
@@ -293,7 +339,7 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 
 | Command (`marv-cli`) | What it does today |
 |---|---|
-| `device restart BARO` | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
+| `device restart BARO`, `MAG`, `BATT` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
@@ -315,6 +361,7 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | icm45686 | <https://github.com/Lmx154/icm45686-rs> | ICM-45686 6-axis IMU (SPI) |
 | lsm6dsk320x | <https://github.com/Lmx154/lsm6dsk320x-rs> | LSM6DSK320X: high-g accelerometer plus low-g accelerometer and gyroscope (SPI) |
 | bmp581 | <https://github.com/Lmx154/bmp581-rs> | BMP581 barometer (I2C) |
+| adc-battery | <https://github.com/Lmx154/adc-battery> | battery voltage and current from ADC sums (pinned at 3d8ad8e, its `main`) |
 | bmm350 | <https://github.com/Lmx154/bmm350-rs> | BMM350 magnetometer (I2C) |
 | lc76g | <https://github.com/Lmx154/lc76g-rs> | LC76G GNSS receiver (UART) |
 | pio-sdmmc | <https://github.com/Lmx154/pio-sdmmc-rs> | SD card on the RP2350 PIO, 4-bit SD bus |
