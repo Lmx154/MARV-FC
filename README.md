@@ -35,7 +35,11 @@ loop over a firmware-side `DeviceAdapter` (`data_ready`, `start`, `acquire`, `st
 `fw_core::health::Health` and carries out its action. Sampling is `select(with_timeout(T, data ready),
 wake)` with T = max(3 P, 10 ms); a timeout makes ONE status read: data waiting = a missed edge, read it;
 nothing = a deadline miss. Every bus call is awaited to completion, never inside a `select` or a timeout.
-`verify()` runs about once per second between reads. Each device has a static registry row (`DEVICES`): id,
+A start, `recover` or `restart` that returns `Ok` only says the bus and the device answer: the loop then
+waits for ONE fresh sample (`with_timeout(T, data ready)`, then one `acquire` awaited to completion) before
+it tells `Health` the step worked; a timeout or a failed `acquire` counts as a failure (a failed `recover`
+goes on to `restart`, a failed `restart` ends the attempt, a failed start is a failed start), so "recovered"
+and "started" mean data flows. `verify()` runs about once per second between reads. Each device has a static registry row (`DEVICES`): id,
 name, nominal period P, the latest-sample `Watch` (Pa, degC, board time in us, `seq` +1 per publish,
 source), a status cell its task alone writes, `progress` (bumped after every await) and `stuck` (written
 by the supervisor when `progress` stands still for max(1 s, 20 P)); `RUNNING` holds the id of the device
@@ -65,9 +69,8 @@ running, the first timeout of an outage would find that stale flag, count a "mis
 data as a new sample, and only the second timeout would be a real deadline miss. With the read in every
 `acquire` the flag the timeout path sees is fresh: it is set only by a sample that has not been read. About
 one extra short transaction per sample (50 Hz). If that read shows the power-on-reset flag (also
-clear-on-read) `acquire` returns the error `Por` and remembers the flag, and the next `status` answers
-`PowerOnReset` from it (the loop turns a power-on reset into an `Event` only on the status path; the first
-`Por` result counts as one error event).
+clear-on-read) `acquire` returns `Err(Por)`, which the loop feeds to `Health` as a power-on-reset event
+(Recovering at once, not an error event).
 
 Fault injection (cargo features, off by default; `src/inject.rs`, a wrapper around the adapter that calls
 the real adapter and then replaces its result; each acts once, 5 s after the first good sample, and logs an
@@ -83,14 +86,17 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   the chip keeps producing data. Shows the missed-edge path: the wait times out, the status read finds data,
   `missed edges` goes up (at least 1) and the sample is read; no health event (state Ok, errors 0,
   timeouts 0, recoveries 0, no text).
-- `FEATURES=inject-baro-silent tools/run.sh 60`: for 1 s the edges are swallowed, `status` answers
-  "nothing pending" and `recover` and `restart` fail (without that, `recover`, which checks the bus and not
-  the data flow, succeeds at once and the device flaps Ok - Recovering inside the window). Shows the deadline-miss path: `timeouts` > 0, `last_error` TIMEOUT, Ok -> Degraded ->
-  Recovering (WARNING; 3 misses, so about 3 T = 180 ms after the last good sample), then a recovery attempt
-  that succeeds -> Ok (NOTICE, `recoveries` 1).
+- `FEATURES=inject-baro-silent tools/run.sh 60`: for 1 s the edges are swallowed and `status` answers
+  "nothing pending". Shows the deadline-miss path: `timeouts` > 0, `last_error` TIMEOUT, Ok -> Degraded ->
+  Recovering (WARNING; 3 misses, so about 3 T = 180 ms after the last good sample); recovery attempts fail
+  while the window is open (the bus answers but no fresh sample comes), then one succeeds -> Ok (NOTICE,
+  `recoveries` 1).
 - `FEATURES=inject-baro-verify tools/run.sh 60`: one `verify` answers "mismatch". Shows the reconfigure
   path: one error event (`last_error` CONFIG_MISMATCH), the adapter's `apply` runs on the chip,
   `config_restored` 1, back to Ok without Recovering and without text.
+- `FEATURES=inject-baro-por tools/run.sh 60`: one `acquire` answers a power-on reset. Shows the
+  power-on-reset path: Ok -> Recovering at once (no Degraded, `errors` not incremented, `last_error` POR),
+  WARNING, a recovery, Ok, NOTICE.
 - `FEATURES=inject-baro-stuck tools/run.sh 60`: `acquire` never returns. Shows the supervisor's stuck
   check: after max(1 s, 20 P) `stuck` is set, the device's `MARV_DEVICE_STATUS` row reports FAILED with
   STUCK, one ERROR text "BARO: stuck"; the board is not reset (no watchdog yet) and the rest of the

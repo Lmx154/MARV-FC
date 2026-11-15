@@ -97,8 +97,12 @@ pub trait DeviceAdapter {
     /// Waits for the device's data-ready signal. No bus traffic: it may be dropped at any await.
     async fn data_ready(&mut self);
     /// Init and configure.
+    ///
+    /// The loop does not take `Ok` as "started": it then waits for one fresh sample (see
+    /// [`recover`](Self::recover)); if none comes the start has failed, with `identified: true`.
     async fn start(&mut self) -> Result<(), StartFailure>;
-    /// Reads one sample.
+    /// Reads one sample. `Err(ErrorKind::Por)` means the device reported a power-on reset: the loop
+    /// feeds it to `Health` as a power-on-reset event, not as an error event.
     async fn acquire(&mut self) -> Result<Reading, ErrorKind>;
     /// The one status read after a data-ready timeout.
     async fn status(&mut self) -> Result<Pending, ErrorKind>;
@@ -107,6 +111,12 @@ pub trait DeviceAdapter {
     /// Configures the running device with the adapter's configuration.
     async fn apply(&mut self) -> Result<(), ErrorKind>;
     /// Brings the bus and the device back in step without a reset.
+    ///
+    /// Contract (also of [`restart`](Self::restart)): `Ok` only says the bus and the device answer. The
+    /// loop then waits for ONE fresh sample, `with_timeout(T, data_ready())` and one `acquire` awaited
+    /// to completion, and only if that works does it report success to `Health`. A timeout or a failed
+    /// `acquire` counts as if the adapter had returned an error: a failed `recover` goes on to
+    /// `restart`, a failed `restart` ends the attempt.
     async fn recover(&mut self) -> Result<(), ErrorKind>;
     /// Bus clear where the bus has one, then init and configure.
     async fn restart(&mut self) -> Result<(), ErrorKind>;
@@ -297,7 +307,10 @@ pub async fn run_device<A: DeviceAdapter>(
     loop {
         let event = match step.action {
             Action::Start => match adapter.start().await {
-                Ok(()) => Event::StartOk,
+                Ok(()) if fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await => {
+                    Event::StartOk
+                }
+                Ok(()) => Event::StartFailed { identified: true },
                 Err(f) => Event::StartFailed {
                     identified: f.identified,
                 },
@@ -314,13 +327,15 @@ pub async fn run_device<A: DeviceAdapter>(
                     now,
                     now.saturating_sub(last_failure_ms)
                 );
-                Event::RecoverDone {
-                    ok: adapter.recover().await.is_ok(),
-                }
+                let ok = adapter.recover().await.is_ok()
+                    && fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await;
+                Event::RecoverDone { ok }
             }
-            Action::Restart => Event::RestartDone {
-                ok: adapter.restart().await.is_ok(),
-            },
+            Action::Restart => {
+                let ok = adapter.restart().await.is_ok()
+                    && fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await;
+                Event::RestartDone { ok }
+            }
             Action::WaitUntil(until) => {
                 sleep_until(dev, until).await;
                 Event::Tick
@@ -425,6 +440,22 @@ async fn sample<A: DeviceAdapter>(
     }
 }
 
+/// After a start, `recover` or `restart` that returned `Ok`: waits for one fresh sample (a timeout
+/// around the data-ready wait, which is no bus call, then one `acquire` awaited to completion).
+async fn fresh_sample<A: DeviceAdapter>(
+    dev: &'static Device,
+    adapter: &mut A,
+    status: &mut DeviceStatus,
+    seq: &mut u32,
+    sender: &Sender<'static, CriticalSectionRawMutex, Sample, READERS>,
+) -> bool {
+    let ready = with_timeout(dev.deadline(), adapter.data_ready())
+        .await
+        .is_ok();
+    dev.mark();
+    ready && matches!(read(adapter, status, seq, sender).await, Event::Good)
+}
+
 /// Reads and publishes one sample.
 async fn read<A: DeviceAdapter>(
     adapter: &mut A,
@@ -449,6 +480,7 @@ async fn read<A: DeviceAdapter>(
             status.samples = status.samples.wrapping_add(1);
             Event::Good
         }
+        Err(ErrorKind::Por) => Event::PowerOnReset,
         Err(kind) => Event::Error(kind),
     }
 }
@@ -597,7 +629,11 @@ fn send_text(dev: &Device, notice: Notice) {
         Notice::Stuck => (MavSeverity::MAV_SEVERITY_ERROR, "stuck"),
     };
     let error = error_name(dev.status().health.last_error);
-    crate::text_fmt(severity, format_args!("{}: {} ({})", dev.name, what, error));
+    if matches!(notice, Notice::Stuck) {
+        crate::text_fmt(severity, format_args!("{}: {}", dev.name, what));
+    } else {
+        crate::text_fmt(severity, format_args!("{}: {} ({})", dev.name, what, error));
+    }
     defmt::info!(
         "[INFO] text {=str}: {=str}: {=str} ({=str})",
         severity_name(severity),

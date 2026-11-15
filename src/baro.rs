@@ -39,8 +39,6 @@ pub struct Bmp581Adapter {
     chip: Option<Bmp581<Bus>>,
     config: Config,
     calls: u32,
-    /// `acquire` read the power-on flag (clear-on-read, so gone from the chip): `status` reports it.
-    por: bool,
 }
 
 impl Bmp581Adapter {
@@ -58,7 +56,6 @@ impl Bmp581Adapter {
             chip: None,
             config: config(),
             calls: 0,
-            por: false,
         };
         adapter.chip = Some(Bmp581::new(adapter.bus(), DEFAULT_ADDRESS));
         defmt::info!(
@@ -168,7 +165,6 @@ impl DeviceAdapter for Bmp581Adapter {
         // after a data-ready timeout fresh (otherwise the first timeout of an outage finds a stale one).
         let int = chip.interrupt_status().await.map_err(|e| kind(&e))?;
         if int.power_on_reset {
-            self.por = true;
             return Err(ErrorKind::Por);
         }
         // `NoSample` (data registers at their reset value) counts as a decode error.
@@ -180,9 +176,6 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn status(&mut self) -> Result<Pending, ErrorKind> {
-        if core::mem::take(&mut self.por) {
-            return Ok(Pending::PowerOnReset);
-        }
         let status = self
             .chip()?
             .interrupt_status()

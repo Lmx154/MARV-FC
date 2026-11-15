@@ -62,10 +62,11 @@ inject-baro-transient = ["inject"]
 inject-baro-persistent = ["inject"]
 # Also around the adapter, each acting once, 5 s after the first good sample: the data-ready edges
 # swallowed for 200 ms (missed-edge) or 1 s with `status` saying "nothing pending" (silent); one
-# `verify` answering "mismatch"; `acquire` that never returns (stuck).
+# `verify` answering "mismatch"; one `acquire` answering a power-on reset (por); `acquire` that never returns (stuck).
 inject-baro-missed-edge = ["inject"]
 inject-baro-silent = ["inject"]
 inject-baro-verify = ["inject"]
+inject-baro-por = ["inject"]
 inject-baro-stuck = ["inject"]
 # Internal: on when any injection feature is on.
 inject = []

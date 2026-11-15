@@ -6,8 +6,8 @@
 //!   fails (it wins when both features are on).
 //! - `inject-baro-missed-edge`: after 5 s of good samples, the data-ready edges are swallowed for
 //!   200 ms while the chip keeps producing data, once.
-//! - `inject-baro-silent`: the same for 1 s, `status` answers "nothing pending" and `recover` and
-//!   `restart` fail meanwhile (a silent device is not brought back by them).
+//! - `inject-baro-silent`: the same for 1 s, and `status` answers "nothing pending" meanwhile.
+//! - `inject-baro-por`: after 5 s of good samples, one `acquire` answers a power-on reset, once.
 //! - `inject-baro-verify`: after 5 s of good samples, one `verify` answers "mismatch", once.
 //! - `inject-baro-stuck`: after 5 s of good samples, `acquire` never returns.
 //!
@@ -25,6 +25,7 @@ const TRANSIENT: bool = cfg!(feature = "inject-baro-transient");
 const MISSED_EDGE: bool = cfg!(feature = "inject-baro-missed-edge");
 const SILENT: bool = cfg!(feature = "inject-baro-silent");
 const VERIFY: bool = cfg!(feature = "inject-baro-verify");
+const POR: bool = cfg!(feature = "inject-baro-por");
 const STUCK: bool = cfg!(feature = "inject-baro-stuck");
 /// How long the edges are swallowed (`silent` wins over `missed-edge`).
 const WINDOW: Option<Duration> = if SILENT {
@@ -48,6 +49,7 @@ pub struct Inject<A> {
     injected: u8,
     phase: Phase,
     verify_injected: bool,
+    por_injected: bool,
     applied: bool,
 }
 
@@ -63,6 +65,8 @@ impl<A: DeviceAdapter> Inject<A> {
                 "missed-edge"
             } else if VERIFY {
                 "verify"
+            } else if POR {
+                "por"
             } else if STUCK {
                 "stuck"
             } else {
@@ -75,6 +79,7 @@ impl<A: DeviceAdapter> Inject<A> {
             injected: 0,
             phase: Phase::Idle,
             verify_injected: false,
+            por_injected: false,
             applied: false,
         }
     }
@@ -161,6 +166,14 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
             );
             match core::future::pending::<core::convert::Infallible>().await {}
         }
+        if POR && !self.por_injected && self.due() {
+            self.por_injected = true;
+            defmt::info!(
+                "[INFO] inject: acquire answers a power-on reset at {=u64} ms",
+                Instant::now().as_millis()
+            );
+            return Err(ErrorKind::Por);
+        }
         if self.fail("acquire") {
             return Err(ErrorKind::Bus);
         }
@@ -202,9 +215,6 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.recover().await;
-        if SILENT && self.window_open() {
-            return Err(ErrorKind::Bus);
-        }
         if PERSISTENT && self.fail("recover") {
             return Err(ErrorKind::Bus);
         }
@@ -213,9 +223,6 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.restart().await;
-        if SILENT && self.window_open() {
-            return Err(ErrorKind::Bus);
-        }
         if PERSISTENT && self.fail("restart") {
             return Err(ErrorKind::Bus);
         }
