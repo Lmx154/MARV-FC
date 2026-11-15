@@ -62,7 +62,7 @@ the ICM-45686 has no 1 kHz rate. Single-sample mode
 read) read with every sample so that the status read after a late CHECK sees a fresh flag; no FIFO, so
 the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
 temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the magnetometer's field in gauss (1 G = 100 uT) as `xmag`, `ymag`, `zmag` with their `fields_updated` bits
-set only when a MAG sample exists; the barometer's as SCALED_PRESSURE at 25 Hz. SYS_STATUS carries
+set only while the latest MAG sample is younger than 1 s (the same rule for the IMU1 fields: NaN and clear bits when older; SCALED_PRESSURE is not sent when its sample is older than 1 s); the barometer's as SCALED_PRESSURE at 25 Hz. SYS_STATUS carries
 `voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample (65535 and -1, MAVLink's "unknown", while there is none);
 `battery_remaining` stays -1.
 
@@ -105,7 +105,7 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 | BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
 
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
-data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge), then `read_field`: the
+data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge: accepted, the bench-proven pulsed mode is kept and latched mode is not used), then `read_field`: the
 compensated field in microtesla and the die temperature, minus `MAG_OFFX/Y/Z` in software (the chip's offset registers are not
 used). `Reading::Mag { field_ut, temperature_c }`. The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
 `verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and

@@ -49,7 +49,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use defmt_rtt as _;
 use device::{
-    BARO, BATT, DEVICE_COUNT, DEVICES, Device, IMU1, MAG, Reading, Supervision, TextLine,
+    BARO, BATT, DEVICE_COUNT, DEVICES, Device, IMU1, MAG, Reading, Sample, Supervision, TextLine,
 };
 use embassy_executor::{Executor, Spawner};
 use embassy_futures::select::{Either, select};
@@ -138,6 +138,8 @@ const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / DEVICE_COUNT.div_ceil(MAX_BAT
 const HIGHRES_IMU_ID: u32 = 105;
 const SCALED_PRESSURE_ID: u32 = 29;
 const VALUES_INTERVAL_US: i32 = 40_000;
+/// A sensor value older than this is not sent as fresh.
+const STALE_US: u64 = 1_000_000;
 /// The boot text line; the reset cause follows (", reset: timeout|forced|power-on").
 const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": flight core up");
 
@@ -256,12 +258,34 @@ impl Telemetry for Board {
             else {
                 return false;
             };
-            // The magnetometer's latest sample, in gauss (1 G = 100 uT); its bits only when one exists.
-            let (mag, mag_flags) = match MAG.latest.try_get().map(|s| s.reading) {
-                Some(Reading::Mag {
-                    field_ut: [x, y, z],
+            // A field is shown as updated only while its latest sample is younger than 1 s.
+            let fresh = |t_us: u64| now_us.saturating_sub(t_us) < STALE_US;
+            let (imu_values, imu_flags) = if fresh(sample.t_us) {
+                (
+                    [xacc, yacc, zacc, xgyro, ygyro, zgyro, temperature_c],
+                    HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XACC
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YACC
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZACC
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XGYRO
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YGYRO
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZGYRO
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE,
+                )
+            } else {
+                ([f32::NAN; 7], HighresImuUpdatedFlags::empty())
+            };
+            let [xacc, yacc, zacc, xgyro, ygyro, zgyro, temperature_c] = imu_values;
+            // The magnetometer's latest sample, in gauss (1 G = 100 uT).
+            let (mag, mag_flags) = match MAG.latest.try_get() {
+                Some(Sample {
+                    reading:
+                        Reading::Mag {
+                            field_ut: [x, y, z],
+                            ..
+                        },
+                    t_us,
                     ..
-                }) => (
+                }) if fresh(t_us) => (
                     [x / 100.0, y / 100.0, z / 100.0],
                     HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XMAG
                         | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YMAG
@@ -285,14 +309,7 @@ impl Telemetry for Board {
                     diff_pressure: f32::NAN,
                     pressure_alt: f32::NAN,
                     temperature: temperature_c,
-                    fields_updated: HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XACC
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YACC
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZACC
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE
-                        | mag_flags,
+                    fields_updated: imu_flags | mag_flags,
                     id: 0,
                 })
                 .is_ok();
@@ -308,6 +325,10 @@ impl Telemetry for Board {
             else {
                 return false;
             };
+            // No fresh sample (the barometer failed): no message rather than a stale value.
+            if now_us.saturating_sub(sample.t_us) >= STALE_US {
+                return false;
+            }
             return out
                 .push(&SCALED_PRESSURE_DATA {
                     time_boot_ms: u32::try_from(sample.t_us / 1000).unwrap_or(u32::MAX),
