@@ -219,6 +219,22 @@ nor its bench program does anything with it beyond counting edges, and there is 
   the four UART error counters, resyncs and the bytes they threw away, the fix type, satellites used, HDOP x 100, the UTC time of the latest fix and
   the age of the last valid sentence.
 
+**GNSS on the board** (2026-11-15). The receiver is not indoors-without-sky on this bench: it reported a fix at every sample (fix type 4, DGPS/SBAS,
+28 to 29 satellites used, HDOP 0.5), so the NO_FIX branch of `fix_type` and of GPS_RAW_INT was NOT seen on the board. Clean run (330 s, log
+`marv-v2-firmware-20261115-130145.log`): six rows Ok throughout, 0 transitions after the start, all 7 `[PASS]` start-up lines, no `[FAIL]`,
+no reset, watchdog stalls begun 0. GNSS: the first valid sentence 367 ms after the start of its task (424 and 847 ms in two other runs), Ok at 467 ms;
+1.0000 fixes/s (nominal 1 Hz) and 19.0 sentences/s, 300 fixes and 5698 sentences at 300 s, 0 errors, 0 timeouts, 0 recoveries, 0 checksum errors,
+0 malformed, 0 overflows, 0 epochs dropped, UART1 errors 0 (overrun, framing, break, parity), largest gap between fixes 1.033 s. The other rows at 300 s:
+IMU1 803.6/s, IMU2 800.7/s, BARO 49.80/s, MAG 100.1/s, BATT 10.00/s, all 0 errors (the earlier clean run: IMU1 803.52, IMU2 800.48). `marv-cli devices`:
+six rows OK; `marv-cli status`: the health word lists GPS and `devices 6`; `marv-link-test` 20 s: GPS_RAW_INT 21 (both ends of the 20 s counted), SYS_STATUS 21,
+SCALED_PRESSURE 501, HIGHRES_IMU 502, SCALED_IMU2 501, MARV_DEVICE_STATUS 164, 0 lost, 0 checksum failures. `device restart GNSS` on the healthy
+row: ACCEPTED, `Ok -> Starting` at 40 710 ms and `Starting -> Ok` at 40 946 ms (the UART flushed, 0 bytes). Injection `inject-gnss-silent`
+(log of the 100 s run): Ok at 522 ms, sentences swallowed from 10 524 ms (the last good sample was at about 9.5 s); error events (TIMEOUT) at 12.02 s
+(Degraded), 14.5 s and 17.02 s (Degraded -> Recovering, WARNING text): 7.5 s after the last good sample, 6.5 s after the swallowing began; recovery
+attempts 1 to 4 start at 17.12, 22.43, 28.53 and 36.54 s (100, 300, 1000 and 3000 ms after the previous failure), each takes 5.0 s (`recover` then
+`restart`, each waiting 2.5 s for a fix); Failed at 41.55 s after exactly 4 attempts with ONE ERROR text; the other five rows undisturbed, no reset; at
+79.0 s `device restart GNSS`: ACCEPTED, `Failed -> Starting`, Ok at 80.53 s (the swallowing ends with the request).
+
 **BATT.** One sample every 100 ms from a period timer (the "data ready" of this device; a period wait is no bus call). `acquire`
 converts the voltage and the current channel with interrupt-driven single conversions, each awaited (one discarded after the channel
 switch, then 16 averaged), and `adc-battery` turns the sums into millivolts and milliamps; both conversions together must finish within
