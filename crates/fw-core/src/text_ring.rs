@@ -1,22 +1,21 @@
 //! The STATUSTEXT ring shared by the ground-station links (design: decision-foundation, item 4).
 //!
-//! Eight entries in order of arrival and one read cursor per link: every text reaches each link
-//! once, in order. When a link falls more than eight texts behind (it is slow, or down), the oldest
+//! [`DEPTH`] (8) entries in order of arrival (another depth through the const parameter `N`) and
+//! one read cursor per link: every text reaches each link once, in order. When a link falls more
+//! than `N` texts behind (it is slow, or down), the oldest
 //! texts are dropped for that link only and counted; a link that never reads holds back neither the
 //! writer nor the other links. Two sticky slots (the boot report) are kept until every link has
 //! taken them, so a link that connects later still gets them; a link takes its sticky texts first,
 //! oldest first, then the ring's.
 
-/// Entries in the ring.
+/// Entries in the ring unless `N` says otherwise.
 pub const DEPTH: usize = 8;
 /// Sticky slots (the boot report).
 pub const STICKY: usize = 2;
 
-const DEPTH_U32: u32 = DEPTH as u32;
-
-/// The ring with a cursor for each of `LINKS` links (link ids `0..LINKS`).
-pub struct TextRing<T, const LINKS: usize> {
-    entries: [Option<T>; DEPTH],
+/// The ring of `N` entries with a cursor for each of `LINKS` links (link ids `0..LINKS`).
+pub struct TextRing<T, const LINKS: usize, const N: usize = DEPTH> {
+    entries: [Option<T>; N],
     /// Sequence number of the next text written.
     head: u32,
     /// Per link: the sequence number of the next text it reads.
@@ -30,15 +29,21 @@ pub struct TextRing<T, const LINKS: usize> {
     sticky_next: u32,
 }
 
-impl<T: Copy, const LINKS: usize> TextRing<T, LINKS> {
+impl<T: Copy, const LINKS: usize, const N: usize> TextRing<T, LINKS, N> {
     /// An empty ring.
     pub const fn new() -> Self {
         Self::starting_at(0)
     }
 
+    const N_U32: u32 = N as u32;
+
+    const fn index(seq: u32) -> usize {
+        (seq % Self::N_U32) as usize
+    }
+
     const fn starting_at(seq: u32) -> Self {
         Self {
-            entries: [const { None }; DEPTH],
+            entries: [const { None }; N],
             head: seq,
             cursors: [seq; LINKS],
             dropped: [0; LINKS],
@@ -48,18 +53,18 @@ impl<T: Copy, const LINKS: usize> TextRing<T, LINKS> {
         }
     }
 
-    /// Appends a text for every link. A link already eight texts behind loses its oldest unread
+    /// Appends a text for every link. A link already `N` texts behind loses its oldest unread
     /// text (counted in [`Self::dropped`]). Returns the number of links that lost one.
     pub fn push(&mut self, text: T) -> usize {
-        if let Some(slot) = self.entries.get_mut(index(self.head)) {
+        if let Some(slot) = self.entries.get_mut(Self::index(self.head)) {
             *slot = Some(text);
         }
         self.head = self.head.wrapping_add(1);
         let mut losers = 0;
         for (cursor, dropped) in self.cursors.iter_mut().zip(self.dropped.iter_mut()) {
             let lag = self.head.wrapping_sub(*cursor);
-            if lag > DEPTH_U32 {
-                let over = lag - DEPTH_U32;
+            if lag > Self::N_U32 {
+                let over = lag - Self::N_U32;
                 *cursor = cursor.wrapping_add(over);
                 *dropped = dropped.saturating_add(over);
                 losers += 1;
@@ -92,7 +97,7 @@ impl<T: Copy, const LINKS: usize> TextRing<T, LINKS> {
         if *cursor == self.head {
             return None;
         }
-        let text = self.entries.get(index(*cursor)).copied().flatten();
+        let text = self.entries.get(Self::index(*cursor)).copied().flatten();
         *cursor = cursor.wrapping_add(1);
         text
     }
@@ -127,20 +132,16 @@ impl<T: Copy, const LINKS: usize> TextRing<T, LINKS> {
         sticky || self.cursors.get(link).is_some_and(|&c| c != self.head)
     }
 
-    /// Texts `link` lost because it was more than eight behind (0 for an unknown link).
+    /// Texts `link` lost because it was more than `N` behind (0 for an unknown link).
     pub fn dropped(&self, link: usize) -> u32 {
         self.dropped.get(link).copied().unwrap_or(0)
     }
 }
 
-impl<T: Copy, const LINKS: usize> Default for TextRing<T, LINKS> {
+impl<T: Copy, const LINKS: usize, const N: usize> Default for TextRing<T, LINKS, N> {
     fn default() -> Self {
         Self::new()
     }
-}
-
-const fn index(seq: u32) -> usize {
-    (seq % DEPTH_U32) as usize
 }
 
 #[cfg(test)]
@@ -186,6 +187,21 @@ mod tests {
         }
         assert_eq!(drain(&mut ring, 1), [5, 6, 7, 8, 9, 10, 11, 12]);
         assert_eq!((ring.dropped(0), ring.dropped(1)), (0, 4));
+    }
+
+    #[test]
+    fn a_deeper_ring_holds_n_texts_for_the_slow_link() {
+        let mut ring = TextRing::<u32, 2, 32>::new();
+        for t in 1..=40 {
+            ring.push(t);
+            assert_eq!(ring.pop(0), Some(t));
+        }
+        let mut out = Vec::new();
+        while let Some(t) = ring.pop(1) {
+            out.push(t);
+        }
+        assert_eq!(out, (9..=40).collect::<Vec<_>>());
+        assert_eq!(ring.dropped(1), 8);
     }
 
     #[test]

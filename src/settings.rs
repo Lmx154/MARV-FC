@@ -303,14 +303,14 @@ fn load_from_flash(st: &mut Storage, what: &str) -> Result<u32, &'static str> {
             ("record", sector_name(sector), record.sequence())
         }
         Boot::DefaultsErased => {
-            crate::text(
+            crate::text_sticky(
                 MavSeverity::MAV_SEVERITY_INFO,
                 "settings: none stored, defaults",
             );
             ("none stored (both sectors erased), defaults", "-", 0)
         }
         Boot::DefaultsInvalid => {
-            crate::text(
+            crate::text_sticky(
                 MavSeverity::MAV_SEVERITY_WARNING,
                 "settings: stored record invalid, defaults",
             );

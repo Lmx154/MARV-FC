@@ -184,7 +184,7 @@ pub fn boot(wd: &mut Watchdog) {
         line.as_str()
     );
     if let Some(r) = report {
-        crate::text(severity(r.severity()), line.as_str());
+        crate::text_sticky(severity(r.severity()), line.as_str());
     }
 }
 

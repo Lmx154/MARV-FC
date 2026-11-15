@@ -47,11 +47,13 @@ mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
 mod mag;
+mod rc;
 mod settings;
 mod store;
 mod watchdog;
 
 use core::any::type_name;
+use core::cell::RefCell;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -67,19 +69,21 @@ use embassy_rp::multicore::{Stack, spawn_core1};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, USB};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{bind_interrupts, dma};
+use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
+use fw_core::text_ring::TextRing;
 use fw_core::watchdog::task;
 use fw_core::xcore::Kick;
 use fw_flight::tagged;
 use mavlink_device::dialect::{
     HIGHRES_IMU_DATA, HighresImuUpdatedFlags, MavSeverity, MavState, MavSysStatusSensor,
-    SCALED_IMU2_DATA, SCALED_PRESSURE_DATA, SYS_STATUS_DATA,
+    RC_CHANNELS_DATA, SCALED_IMU2_DATA, SCALED_PRESSURE_DATA, SYS_STATUS_DATA,
 };
+use mavlink_device::marv::MARV_DEVICE_STATUS_DATA;
 use mavlink_device::{
     CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, MAX_BATCH, Node, Outgoing,
     ParamStore, RunError, Stream, StreamSlot, Telemetry, Texts,
@@ -148,10 +152,13 @@ static LINK_STATE: AtomicU8 = AtomicU8::new(LINK_DOWN);
 const LINK_DOWN: u8 = 0;
 const LINK_GATE: u8 = 1;
 const LINK_RUN: u8 = 2;
-/// The STATUSTEXTs for the node's text hook (the design's ring of 8 is a later packet). Held until
-/// a ground station's node runs, so the boot's settings texts (queued first) reach a later link.
-static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), TEXTS_DEPTH> =
-    Channel::new();
+/// The link ids of the text ring and the action book: USB and the radio.
+pub const LINK_USB: usize = 0;
+pub const LINK_RADIO: usize = 1;
+/// The STATUSTEXT ring (`fw_core::text_ring`): a cursor per link, each text once per link, the
+/// boot report and the settings classification in the sticky slots until each link took them.
+type Ring = TextRing<(MavSeverity, TextLine), 2, TEXTS_DEPTH>;
+static TEXTS: Mutex<CriticalSectionRawMutex, RefCell<Ring>> = Mutex::new(RefCell::new(Ring::new()));
 /// 8; with `latency-text` 32, so that the boot's texts and the two sets of latency texts (4 each)
 /// all wait for a station that connects after 590 s.
 const TEXTS_DEPTH: usize = if cfg!(feature = "latency-text") {
@@ -159,6 +166,8 @@ const TEXTS_DEPTH: usize = if cfg!(feature = "latency-text") {
 } else {
     8
 };
+/// The registry rows and the RC row (report only, `rc`), in the order sent.
+pub const ROWS: usize = DEVICE_COUNT + 1;
 
 const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
@@ -166,7 +175,7 @@ const PONG_STALE: Duration = Duration::from_millis(200);
 const SYS_STATUS_ID: u32 = 1;
 /// The project dialect's MARV_DEVICE_STATUS; every registry row at least once per second.
 const DEVICE_STATUS_ID: u32 = 42421;
-const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / DEVICE_COUNT.div_ceil(MAX_BATCH) as i32;
+const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / ROWS.div_ceil(MAX_BATCH) as i32;
 /// The sensor values: HIGHRES_IMU (IMU1 as id 0), SCALED_IMU2 (IMU2) and SCALED_PRESSURE (BARO),
 /// 25 Hz each.
 const HIGHRES_IMU_ID: u32 = 105;
@@ -178,6 +187,9 @@ const VALUES_INTERVAL_US: i32 = 40_000;
 /// GPS_RAW_INT at the receiver's fix rate, 1 Hz.
 const GPS_RAW_INT_ID: u32 = 24;
 const GPS_INTERVAL_US: i32 = 1_000_000;
+/// RC_CHANNELS at 5 Hz while stick reports are fresh (USB only).
+const RC_CHANNELS_ID: u32 = 65;
+const RC_CHANNELS_INTERVAL_US: i32 = 200_000;
 /// The receiver's value is not sent once its latest sample is older than this (3 fix periods; the
 /// 1 s of the fast sensors would be one period of this one).
 const GPS_STALE_US: u64 = 3_000_000;
@@ -287,8 +299,66 @@ struct Board {
     cursor: usize,
 }
 
-fn rows() -> [DeviceRow; DEVICE_COUNT] {
-    DEVICES.map(Device::row)
+fn rows() -> [DeviceRow; ROWS] {
+    let devices = DEVICES.map(Device::row);
+    core::array::from_fn(|i| devices.get(i).copied().unwrap_or_else(rc::row))
+}
+
+/// Row `i`'s MARV_DEVICE_STATUS (`i` = `DEVICE_COUNT` is the RC row).
+pub fn device_message(i: usize, now_us: u64) -> Option<MARV_DEVICE_STATUS_DATA> {
+    match DEVICES.get(i) {
+        Some(dev) => Some(dev.message(now_us)),
+        None => (i == DEVICE_COUNT).then(|| rc::message(now_us)),
+    }
+}
+
+/// GPS_RAW_INT from the receiver's latest fix while it is younger than 3 s.
+pub fn push_gps_raw_int(now_us: u64, out: &mut Outgoing<'_>) -> bool {
+    let Some(sample) = GNSS.latest.try_get() else {
+        return false;
+    };
+    if now_us.saturating_sub(sample.t_us) >= GPS_STALE_US {
+        return false;
+    }
+    gnss::raw_int(&sample.reading, sample.t_us).is_some_and(|message| out.push(&message).is_ok())
+}
+
+/// The HEARTBEAT `system_status` from the rows.
+pub fn heartbeat_state(now_us: u64) -> MavState {
+    system_status(&rows(), now_us / 1000, calibration::calibrating())
+}
+
+/// SYS_STATUS from the rows and the BATT row.
+pub fn push_sys_status(now_us: u64, out: &mut Outgoing<'_>) -> bool {
+    // The latest BATT sample while it is younger than 1 s, or MAVLink's "not sent" values:
+    // millivolts, centiamps.
+    let (voltage_battery, current_battery) = match BATT.latest.try_get() {
+        Some(Sample {
+            reading:
+                Reading::Batt {
+                    voltage_v,
+                    current_a,
+                },
+            t_us,
+            ..
+        }) if now_us.saturating_sub(t_us) < STALE_US => (
+            (voltage_v * 1000.0).clamp(0.0, 65_534.0) as u16,
+            (current_a * 100.0).clamp(-32_768.0, 32_767.0) as i16,
+        ),
+        _ => (u16::MAX, -1),
+    };
+    let masks = sensor_masks(&rows());
+    out.push(&SYS_STATUS_DATA {
+        onboard_control_sensors_present: MavSysStatusSensor::from_bits_truncate(masks.present),
+        onboard_control_sensors_enabled: MavSysStatusSensor::from_bits_truncate(masks.enabled),
+        onboard_control_sensors_health: MavSysStatusSensor::from_bits_truncate(masks.health),
+        voltage_battery,
+        current_battery,
+        // Not estimated: MAVLink's "not sent" value.
+        battery_remaining: -1,
+        ..SYS_STATUS_DATA::DEFAULT
+    })
+    .is_ok()
 }
 
 impl Telemetry for Board {
@@ -427,65 +497,33 @@ impl Telemetry for Board {
                 .is_ok();
         }
         if message_id == GPS_RAW_INT_ID {
-            let Some(sample) = GNSS.latest.try_get() else {
-                return false;
-            };
-            if now_us.saturating_sub(sample.t_us) >= GPS_STALE_US {
-                return false;
-            }
-            return gnss::raw_int(&sample.reading, sample.t_us)
-                .is_some_and(|message| out.push(&message).is_ok());
+            return push_gps_raw_int(now_us, out);
+        }
+        if message_id == RC_CHANNELS_ID {
+            return rc::rc_channels(now_us).is_some_and(|m: RC_CHANNELS_DATA| out.push(&m).is_ok());
         }
         if message_id == DEVICE_STATUS_ID {
             let mut sent = false;
-            for _ in 0..DEVICE_COUNT.min(MAX_BATCH) {
-                if self.cursor >= DEVICE_COUNT {
+            for _ in 0..ROWS.min(MAX_BATCH) {
+                if self.cursor >= ROWS {
                     self.cursor = 0;
                 }
-                let Some(dev) = DEVICES.get(self.cursor) else {
+                let Some(message) = device_message(self.cursor, now_us) else {
                     break;
                 };
                 self.cursor += 1;
-                sent |= out.push(&dev.message(now_us)).is_ok();
+                sent |= out.push(&message).is_ok();
             }
             return sent;
         }
         if message_id != SYS_STATUS_ID {
             return false;
         }
-        // The latest BATT sample while it is younger than 1 s, or MAVLink's "not sent" values:
-        // millivolts, centiamps.
-        let (voltage_battery, current_battery) = match BATT.latest.try_get() {
-            Some(Sample {
-                reading:
-                    Reading::Batt {
-                        voltage_v,
-                        current_a,
-                    },
-                t_us,
-                ..
-            }) if now_us.saturating_sub(t_us) < STALE_US => (
-                (voltage_v * 1000.0).clamp(0.0, 65_534.0) as u16,
-                (current_a * 100.0).clamp(-32_768.0, 32_767.0) as i16,
-            ),
-            _ => (u16::MAX, -1),
-        };
-        let masks = sensor_masks(&rows());
-        out.push(&SYS_STATUS_DATA {
-            onboard_control_sensors_present: MavSysStatusSensor::from_bits_truncate(masks.present),
-            onboard_control_sensors_enabled: MavSysStatusSensor::from_bits_truncate(masks.enabled),
-            onboard_control_sensors_health: MavSysStatusSensor::from_bits_truncate(masks.health),
-            voltage_battery,
-            current_battery,
-            // Not estimated: MAVLink's "not sent" value.
-            battery_remaining: -1,
-            ..SYS_STATUS_DATA::DEFAULT
-        })
-        .is_ok()
+        push_sys_status(now_us, out)
     }
 
     fn status(&mut self, now_us: u64) -> Option<MavState> {
-        let state = system_status(&rows(), now_us / 1000, calibration::calibrating());
+        let state = heartbeat_state(now_us);
         if HEARTBEAT_STATE.swap(state as u8, Ordering::Relaxed) != state as u8 {
             defmt::info!(
                 "[INFO] HEARTBEAT system_status {=str}",
@@ -500,24 +538,38 @@ impl Telemetry for Board {
     }
 
     fn texts(&mut self, _now_us: u64, out: &mut Texts<'_>) {
-        if let Ok((severity, text)) = TEXTS.try_receive() {
+        if let Some((severity, text)) = take_text(LINK_USB) {
             defmt::info!("[INFO] text to the link: {=str}", text.as_str());
             let _ = out.push(severity, text.as_str());
         }
     }
 
     fn command(&mut self, req: &CommandRequest, now_us: u64) -> CommandOutcome {
-        actions::command(req, now_us / 1000)
+        actions::command(req, LINK_USB as u8, now_us / 1000)
     }
 
     fn acks(&mut self, now_us: u64) -> Option<LateAck> {
-        actions::next_ack(now_us / 1000)
+        actions::next_ack(LINK_USB as u8, now_us / 1000)
     }
 }
 
-/// A STATUSTEXT waits for the node (see `actions::next_ack`).
-fn texts_pending() -> bool {
-    !TEXTS.is_empty()
+/// A STATUSTEXT waits for link `link`'s node (see `actions::next_ack`).
+fn texts_pending(link: usize) -> bool {
+    TEXTS.lock(|r| r.borrow().pending(link))
+}
+
+/// The next STATUSTEXT for link `link`.
+fn take_text(link: usize) -> Option<(MavSeverity, TextLine)> {
+    TEXTS.lock(|r| r.borrow_mut().pop(link))
+}
+
+/// A boot text kept until every link took it (the boot report, the settings classification); an
+/// ordinary text when both sticky slots are still owed.
+fn text_sticky(severity: MavSeverity, text: &str) {
+    let line = TextLine::new(format_args!("{}", text));
+    if !TEXTS.lock(|r| r.borrow_mut().push_sticky((severity, line))) {
+        text_fmt(severity, format_args!("{}", text));
+    }
 }
 
 fn text(severity: MavSeverity, text: &str) {
@@ -527,8 +579,12 @@ fn text(severity: MavSeverity, text: &str) {
 /// Queues one STATUSTEXT for the node (at most 50 bytes; longer text is cut).
 fn text_fmt(severity: MavSeverity, args: fmt::Arguments<'_>) {
     let line = TextLine::new(args);
-    if TEXTS.try_send((severity, line)).is_err() {
-        defmt::warn!("[INFO] text queue full, dropped: {=str}", line.as_str());
+    let losers = TEXTS.lock(|r| r.borrow_mut().push((severity, line)));
+    if losers > 0 {
+        defmt::warn!(
+            "[INFO] text ring: the oldest unread text dropped for {=usize} link(s)",
+            losers
+        );
     }
 }
 
@@ -624,6 +680,11 @@ async fn link_loop(
             default_interval_us: GPS_INTERVAL_US,
             min_interval_us: 100_000,
         }),
+        StreamSlot::new(Stream {
+            message_id: RC_CHANNELS_ID,
+            default_interval_us: RC_CHANNELS_INTERVAL_US,
+            min_interval_us: 20_000,
+        }),
     ];
     let mut node = Node::new(NodeConfig::new(1, 1), &mut slots);
     let mut params = store::Store;
@@ -635,7 +696,7 @@ async fn link_loop(
         LINK_STATE.store(LINK_GATE, Ordering::Relaxed);
         if !start_gate(&mut rx, &link, &mut node, &mut params).await {
             node.on_link_down();
-            actions::link_lost();
+            actions::link_lost(LINK_USB as u8);
             continue;
         }
         LINK_STATE.store(LINK_RUN, Ordering::Relaxed);
@@ -660,7 +721,7 @@ async fn link_loop(
             node.stats()
         );
         node.on_link_down();
-        actions::link_lost();
+        actions::link_lost(LINK_USB as u8);
     }
 }
 
@@ -759,6 +820,7 @@ async fn supervise() -> ! {
                 );
             }
             devices.stat(now);
+            rc::stat(now);
             calibration::stat();
             watchdog::stat();
         }
@@ -958,6 +1020,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(batt::task(batt::adapter(
         p.ADC, p.PIN_41, p.PIN_42
     ))));
+    spawner.spawn(defmt::unwrap!(rc::task(p.UART0, p.PIN_14, p.PIN_17)));
     #[cfg(not(feature = "wdg-scratch-probe"))]
     watchdog::start_monitor(wd);
     #[cfg(feature = "hang-flight")]

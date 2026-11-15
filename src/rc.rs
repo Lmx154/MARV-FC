@@ -1,0 +1,511 @@
+//! The radio: the ExpressLRS receiver on UART0 through `rc-port`, which follows the receiver
+//! between CRSF (420000 baud) and MAVLink (460800 baud) by itself. This module only REPORTS: the
+//! RC row (no health machine, no recovery), RC_CHANNELS for USB, the `[STAT] RC:` line, the BATT
+//! value as CRSF telemetry, and the radio's MAVLink node (link 1, active only while the port is
+//! locked on MAVLink). Nothing here uses the sticks, arms, or decides about link loss or authority.
+//!
+//! UART0 as the bench (`rc-port/hil/src/bin/rc_link.rs`) set it up: `BufferedUart` (interrupt
+//! driven, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART
+//! is built (embassy-rp 0.10 leaves the pad without a pull). The task runs on core 0's thread-mode
+//! executor; the bench ran the port on the `SWI_IRQ_0` interrupt executor so that no thread-mode
+//! task could delay its reads (decided after a radio-on run, from the UART overrun counter).
+use core::cell::RefCell;
+use core::sync::atomic::{AtomicU32, Ordering};
+use embassy_rp::bind_interrupts;
+use embassy_rp::peripherals::{PIN_14, PIN_17, UART0};
+use embassy_rp::uart::{self, BufferedInterruptHandler, BufferedUart};
+use embassy_rp::{Peri, pac};
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_time::{Delay, Duration, Instant, Timer};
+use embedded_io_async::{ErrorType, Read, Write};
+use fw_core::health::{Counters, ErrorKind, State};
+use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
+use fw_core::watchdog::task;
+use fw_flight::tagged;
+use mavlink_device::dialect::{MavState, RC_CHANNELS_DATA};
+use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
+use mavlink_device::{
+    CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, Outgoing, Stream, StreamSlot,
+    Telemetry, Texts,
+};
+use rc_port::crsf_codec::{Battery, LinkStatistics, MAX_FRAME_LEN, encode_battery};
+use rc_port::{
+    Config, Hooks, MAVLINK_BAUD, Mode, RadioStatus, RcPort, Report, SetBaud, Stats, TxBusy,
+};
+use static_cell::StaticCell;
+
+use crate::device::{BATT, Reading, Sample};
+
+bind_interrupts!(struct Irqs {
+    UART0_IRQ => BufferedInterruptHandler<UART0>;
+});
+
+const RX_GPIO: usize = 17;
+const RING_LEN: usize = 256;
+static TX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
+static RX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
+static SLOTS: StaticCell<[StreamSlot; 3]> = StaticCell::new();
+
+/// The radio node's streams (HEARTBEAT 1 Hz is the node's own). The fastest interval a station may
+/// ask for is the default, so the radio's budget cannot be raised from the ground.
+const SYS_STATUS_ID: u32 = 1;
+const DEVICE_STATUS_ID: u32 = 42421;
+const GPS_RAW_INT_ID: u32 = 24;
+const RADIO_STREAMS: [(u32, i32); 3] = [
+    (SYS_STATUS_ID, 1_000_000),
+    (DEVICE_STATUS_ID, 1_000_000),
+    (GPS_RAW_INT_ID, 2_000_000),
+];
+/// Stick reports and link figures older than this are not shown.
+const FRESH_US: u64 = 1_000_000;
+/// Pause before `run` is called again after it returned.
+const RESTART_MS: u64 = 100;
+
+/// Bytes the UART took at the CRSF baud and at 460800 (the port writes only while locked, in the
+/// locked protocol), baud changes, and returns of `run`.
+static TX_CRSF: AtomicU32 = AtomicU32::new(0);
+static TX_MAV: AtomicU32 = AtomicU32::new(0);
+static BAUD_CHANGES: AtomicU32 = AtomicU32::new(0);
+static RESTARTS: AtomicU32 = AtomicU32::new(0);
+
+/// What the port's hooks last reported, for the row, RC_CHANNELS and the stat line.
+#[derive(Clone, Copy)]
+struct Shared {
+    stats: Option<Stats>,
+    ever_locked: bool,
+    lock_losses: u32,
+    sticks: Option<([u16; 16], u64)>,
+    crsf_link: Option<(LinkStatistics, u64)>,
+    radio: Option<(RadioStatus, u64)>,
+}
+
+static SHARED: Mutex<CriticalSectionRawMutex, RefCell<Shared>> = Mutex::new(RefCell::new(Shared {
+    stats: None,
+    ever_locked: false,
+    lock_losses: 0,
+    sticks: None,
+    crsf_link: None,
+    radio: None,
+}));
+
+fn shared() -> Shared {
+    SHARED.lock(|s| *s.borrow())
+}
+
+fn locked(mode: Option<Mode>) -> bool {
+    matches!(mode, Some(Mode::Crsf | Mode::Mavlink))
+}
+
+impl Shared {
+    fn mode(&self) -> Option<Mode> {
+        self.stats.map(|s| s.mode)
+    }
+
+    /// Locked = Ok; searching = Starting until the first lock since boot, then Degraded.
+    fn state(&self) -> State {
+        if locked(self.mode()) {
+            State::Ok
+        } else if self.ever_locked {
+            State::Degraded
+        } else {
+            State::Starting
+        }
+    }
+
+    fn errors(&self) -> u32 {
+        self.stats.map_or(0, |s| {
+            s.crc_errors
+                .saturating_add(s.uart_framing)
+                .saturating_add(s.uart_parity)
+                .saturating_add(s.uart_break)
+                .saturating_add(s.uart_overrun)
+                .saturating_add(s.uart_other)
+        })
+    }
+}
+
+/// The RC row for SYS_STATUS (health = locked) and the HEARTBEAT state.
+pub fn row() -> DeviceRow {
+    let s = shared();
+    DeviceRow {
+        device: MarvDevice::MARV_DEVICE_RC,
+        present: s.ever_locked,
+        state: s.state(),
+        stuck: false,
+        locked: locked(s.mode()),
+    }
+}
+
+/// The RC row's `MARV_DEVICE_STATUS`: samples = stick reports + RADIO_STATUS reports, errors =
+/// CRC + UART errors, timeouts = lock losses.
+pub fn message(now_us: u64) -> MARV_DEVICE_STATUS_DATA {
+    let s = shared();
+    let ms = |us: u64| u32::try_from(us / 1000).unwrap_or(u32::MAX);
+    let (samples, last) = s.stats.map_or((0, None), |st| {
+        (
+            st.sticks.wrapping_add(st.radio_status),
+            st.last_sticks_us.max(st.last_radio_status_us),
+        )
+    });
+    device_status(&StatusInput {
+        device: MarvDevice::MARV_DEVICE_RC,
+        state: s.state(),
+        counters: Counters {
+            errors: s.errors(),
+            timeouts: s.lock_losses,
+            recoveries: 0,
+            attempts: 0,
+            config_restored: 0,
+            overflows: 0,
+            last_error: ErrorKind::None,
+            present: s.ever_locked,
+        },
+        stuck: false,
+        samples,
+        last_sample_age_ms: last.map(|t| ms(now_us.saturating_sub(t))),
+        hil: false,
+        self_test: false,
+        time_boot_ms: ms(now_us),
+    })
+}
+
+/// RC_CHANNELS for USB while the latest stick report is younger than 1 s. `rssi`: CRSF uplink link
+/// quality 0..100 % scaled to 0..254; in MAVLink mode RADIO_STATUS `rssi` (already 0..254); 255
+/// (unknown) without a fresh link figure.
+pub fn rc_channels(now_us: u64) -> Option<RC_CHANNELS_DATA> {
+    let s = shared();
+    let fresh = |t: u64| now_us.saturating_sub(t) < FRESH_US;
+    let (ch, t_us) = s.sticks.filter(|&(_, t)| fresh(t))?;
+    let rssi = match (s.mode(), s.crsf_link, s.radio) {
+        (Some(Mode::Crsf), Some((l, t)), _) if fresh(t) => {
+            (u16::from(l.uplink_link_quality.min(100)) * 254 / 100) as u8
+        }
+        (Some(Mode::Mavlink), _, Some((r, t))) if fresh(t) => r.rssi.min(254),
+        _ => u8::MAX,
+    };
+    Some(RC_CHANNELS_DATA {
+        time_boot_ms: u32::try_from(t_us / 1000).unwrap_or(u32::MAX),
+        chan1_raw: ch[0],
+        chan2_raw: ch[1],
+        chan3_raw: ch[2],
+        chan4_raw: ch[3],
+        chan5_raw: ch[4],
+        chan6_raw: ch[5],
+        chan7_raw: ch[6],
+        chan8_raw: ch[7],
+        chan9_raw: ch[8],
+        chan10_raw: ch[9],
+        chan11_raw: ch[10],
+        chan12_raw: ch[11],
+        chan13_raw: ch[12],
+        chan14_raw: ch[13],
+        chan15_raw: ch[14],
+        chan16_raw: ch[15],
+        chan17_raw: u16::MAX,
+        chan18_raw: u16::MAX,
+        chancount: 16,
+        rssi,
+    })
+}
+
+/// The port's hooks: copy into `SHARED`, never block, never format.
+struct RcHooks;
+
+impl Hooks for RcHooks {
+    fn report(&mut self, report: Report) {
+        SHARED.lock(|s| {
+            let mut s = s.borrow_mut();
+            match report {
+                Report::Sticks(r) => s.sticks = Some((r.channels_us, r.at_us)),
+                Report::CrsfLink(r) => s.crsf_link = Some((r.stats, r.at_us)),
+                Report::RadioStatus(r) => s.radio = Some((r.status, r.at_us)),
+                _ => {}
+            }
+        });
+    }
+
+    /// The BATT row's latest sample while younger than 1 s (remaining percent and capacity are
+    /// not estimated: 0).
+    fn crsf_frame(&mut self, now_us: u64, out: &mut [u8; MAX_FRAME_LEN]) -> Option<usize> {
+        let Some(Sample {
+            reading:
+                Reading::Batt {
+                    voltage_v,
+                    current_a,
+                },
+            t_us,
+            ..
+        }) = BATT.latest.try_get()
+        else {
+            return None;
+        };
+        if now_us.saturating_sub(t_us) >= FRESH_US {
+            return None;
+        }
+        let battery = Battery {
+            voltage_dv: (voltage_v * 10.0 + 0.5).clamp(0.0, 65_535.0) as u16,
+            current_da: (current_a * 10.0 + 0.5).clamp(0.0, 65_535.0) as u16,
+            capacity_used_mah: 0,
+            remaining_percent: 0,
+        };
+        encode_battery(&battery, out).ok()
+    }
+
+    fn stats(&mut self, stats: &Stats) {
+        let before = SHARED.lock(|s| {
+            let mut s = s.borrow_mut();
+            let before = s.mode();
+            if locked(Some(stats.mode)) {
+                s.ever_locked = true;
+            } else if locked(before) {
+                s.lock_losses = s.lock_losses.saturating_add(1);
+            }
+            s.stats = Some(*stats);
+            before
+        });
+        if before == Some(Mode::Mavlink) && stats.mode != Mode::Mavlink {
+            crate::actions::link_lost(crate::LINK_RADIO as u8);
+        }
+    }
+}
+
+/// `BufferedUart` with the bytes each write took counted by baud rate, and the baud changes.
+struct CountingUart {
+    uart: BufferedUart,
+    baud: u32,
+}
+
+impl ErrorType for CountingUart {
+    type Error = uart::Error;
+}
+
+impl Read for CountingUart {
+    async fn read(&mut self, buf: &mut [u8]) -> Result<usize, uart::Error> {
+        self.uart.read(buf).await
+    }
+}
+
+impl Write for CountingUart {
+    async fn write(&mut self, buf: &[u8]) -> Result<usize, uart::Error> {
+        let r = self.uart.write(buf).await;
+        if let Ok(n) = r {
+            let counter = if self.baud == MAVLINK_BAUD {
+                &TX_MAV
+            } else {
+                &TX_CRSF
+            };
+            counter.fetch_add(n as u32, Ordering::Relaxed);
+        }
+        r
+    }
+
+    async fn flush(&mut self) -> Result<(), uart::Error> {
+        self.uart.flush().await
+    }
+}
+
+impl SetBaud for CountingUart {
+    fn set_baud(&mut self, baud: u32) {
+        self.uart.set_baud(baud);
+        self.baud = baud;
+        BAUD_CHANGES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl TxBusy for CountingUart {
+    fn tx_busy(&self) -> bool {
+        self.uart.tx_busy()
+    }
+}
+
+/// The radio node's hooks (link 1): HEARTBEAT state, SYS_STATUS, one MARV_DEVICE_STATUS row per
+/// message (a row whose state changed since it was last sent on the radio first, else in turn),
+/// GPS_RAW_INT, the texts of link 1, commands through the one book.
+struct RadioBoard {
+    cursor: usize,
+    sent_state: [Option<u8>; crate::ROWS],
+}
+
+impl Telemetry for RadioBoard {
+    fn sample(&mut self, message_id: u32, now_us: u64, out: &mut Outgoing<'_>) -> bool {
+        match message_id {
+            SYS_STATUS_ID => crate::push_sys_status(now_us, out),
+            GPS_RAW_INT_ID => crate::push_gps_raw_int(now_us, out),
+            DEVICE_STATUS_ID => {
+                let messages: [Option<MARV_DEVICE_STATUS_DATA>; crate::ROWS] =
+                    core::array::from_fn(|i| crate::device_message(i, now_us));
+                let changed = messages.iter().zip(self.sent_state.iter()).position(
+                    |(m, sent)| matches!((m, sent), (Some(m), Some(s)) if m.state as u8 != *s),
+                );
+                let i = changed.unwrap_or_else(|| {
+                    let i = self.cursor % crate::ROWS;
+                    self.cursor = i + 1;
+                    i
+                });
+                let Some(Some(message)) = messages.get(i) else {
+                    return false;
+                };
+                if let Some(sent) = self.sent_state.get_mut(i) {
+                    *sent = Some(message.state as u8);
+                }
+                out.push(message).is_ok()
+            }
+            _ => false,
+        }
+    }
+
+    fn status(&mut self, now_us: u64) -> Option<MavState> {
+        Some(crate::heartbeat_state(now_us))
+    }
+
+    fn texts(&mut self, _now_us: u64, out: &mut Texts<'_>) {
+        if let Some((severity, text)) = crate::take_text(crate::LINK_RADIO) {
+            defmt::info!("[INFO] text to the radio: {=str}", text.as_str());
+            let _ = out.push(severity, text.as_str());
+        }
+    }
+
+    fn command(&mut self, req: &CommandRequest, now_us: u64) -> CommandOutcome {
+        crate::actions::command(req, crate::LINK_RADIO as u8, now_us / 1000)
+    }
+
+    fn acks(&mut self, now_us: u64) -> Option<LateAck> {
+        crate::actions::next_ack(crate::LINK_RADIO as u8, now_us / 1000)
+    }
+}
+
+#[embassy_executor::task]
+pub async fn task(
+    uart0: Peri<'static, UART0>,
+    tx: Peri<'static, PIN_14>,
+    rx: Peri<'static, PIN_17>,
+) -> ! {
+    tagged(&crate::watchdog::RUNNING0, task::RC, rc_link(uart0, tx, rx)).await
+}
+
+async fn rc_link(
+    uart0: Peri<'static, UART0>,
+    tx: Peri<'static, PIN_14>,
+    rx: Peri<'static, PIN_17>,
+) -> ! {
+    // Built at 460800: the port's first actions set 460800 whatever the UART was built with.
+    let mut cfg = uart::Config::default();
+    cfg.baudrate = MAVLINK_BAUD;
+    let uart = BufferedUart::new(
+        uart0,
+        tx,
+        rx,
+        Irqs,
+        TX_BUF.init([0; RING_LEN]),
+        RX_BUF.init([0; RING_LEN]),
+        cfg,
+    );
+    // The HAL leaves GPIO17's pad without a pull; an idle UART line is high.
+    pac::PADS_BANK0.gpio(RX_GPIO).modify(|w| w.set_pue(true));
+    let pad = pac::PADS_BANK0.gpio(RX_GPIO).read();
+    let level = (pac::SIO.gpio_in(0).read() >> RX_GPIO) & 1;
+    defmt::info!(
+        "[INFO] rc_link: UART0 BufferedUart (no DMA), TX GPIO14, RX GPIO17 pull-up {=bool} pull-down {=bool} level {=u32}; rings {=usize} B; thread-mode executor; radio node system 1 component 1, link 1",
+        pad.pue(),
+        pad.pde(),
+        level,
+        RING_LEN
+    );
+    let mut uart = CountingUart {
+        uart,
+        baud: MAVLINK_BAUD,
+    };
+    let slots = SLOTS.init(RADIO_STREAMS.map(|(message_id, interval)| {
+        StreamSlot::new(Stream {
+            message_id,
+            default_interval_us: interval,
+            min_interval_us: interval.unsigned_abs(),
+        })
+    }));
+    let Ok(mut port) = RcPort::new(Config::new(), NodeConfig::new(1, 1), slots) else {
+        defmt::panic!("[FAIL] rc_link: port not built");
+    };
+    let mut params = crate::store::Store;
+    let mut radio = RadioBoard {
+        cursor: 0,
+        sent_state: [None; crate::ROWS],
+    };
+    let mut hooks = RcHooks;
+    loop {
+        let end = port
+            .run(
+                &mut uart,
+                &mut Delay,
+                crate::now_us,
+                &mut params,
+                &mut radio,
+                &mut hooks,
+            )
+            .await;
+        let n = RESTARTS.fetch_add(1, Ordering::Relaxed) + 1;
+        defmt::warn!(
+            "[INFO] rc_link: run returned ({=str}), restart {=u32}",
+            match end {
+                rc_port::RunError::Write(_) => "write error",
+                rc_port::RunError::WriteZero => "write zero",
+                rc_port::RunError::EndOfStream => "end of stream",
+            },
+            n
+        );
+        Timer::after(Duration::from_millis(RESTART_MS)).await;
+    }
+}
+
+/// The `[STAT] RC:` line (every 10 s, from the supervisor): rates over the interval since the last.
+pub fn stat(now: Instant) {
+    static LAST: Mutex<CriticalSectionRawMutex, RefCell<(u32, u32, u64)>> =
+        Mutex::new(RefCell::new((0, 0, 0)));
+    let s = shared();
+    let st = s.stats.unwrap_or_default();
+    let now_us = now.as_micros();
+    let (sticks0, radio0, at0) = LAST.lock(|l| l.replace((st.sticks, st.radio_status, now_us)));
+    let secs = (now_us.saturating_sub(at0) / 1_000_000).max(1) as u32;
+    let fresh = |t: u64| now_us.saturating_sub(t) < FRESH_US;
+    let (lq, rssi_dbm) = match s.crsf_link {
+        Some((l, t)) if fresh(t) => (
+            i16::from(l.uplink_link_quality),
+            -i16::from(l.uplink_rssi_1),
+        ),
+        _ => (-1, 0),
+    };
+    let (radio_rssi, txbuf) = match s.radio {
+        Some((r, t)) if fresh(t) => (i16::from(r.rssi), i16::from(r.txbuf)),
+        _ => (-1, -1),
+    };
+    defmt::info!(
+        "[STAT] RC: {=str} for {=u64} ms, state {=str}, {=u32} stick/s, {=u32} radio-status/s, LQ {=i16} RSSI {=i16} dBm, radio rssi {=i16} txbuf {=i16}, slowdown {=u32} ms; CRC {=u32}, UART framing {=u32} parity {=u32} break {=u32} overrun {=u32} other {=u32}, garbage {=u32} B; locks lost {=u32}, mode changes {=u32}, baud changes {=u32}, run restarts {=u32}; sent CRSF {=u32} B MAVLink {=u32} B",
+        match st.mode {
+            Mode::Crsf => "Crsf",
+            Mode::Mavlink => "Mavlink",
+            _ => "Searching",
+        },
+        now_us.saturating_sub(st.mode_since_us) / 1000,
+        crate::device::state_name(s.state()),
+        st.sticks.wrapping_sub(sticks0) / secs,
+        st.radio_status.wrapping_sub(radio0) / secs,
+        lq,
+        rssi_dbm,
+        radio_rssi,
+        txbuf,
+        st.stream_slowdown_ms,
+        st.crc_errors,
+        st.uart_framing,
+        st.uart_parity,
+        st.uart_break,
+        st.uart_overrun,
+        st.uart_other,
+        st.garbage_bytes,
+        s.lock_losses,
+        st.mode_changes,
+        BAUD_CHANGES.load(Ordering::Relaxed),
+        RESTARTS.load(Ordering::Relaxed),
+        TX_CRSF.load(Ordering::Relaxed),
+        TX_MAV.load(Ordering::Relaxed)
+    );
+}

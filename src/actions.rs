@@ -1,5 +1,6 @@
 //! The firmware's commands: the one `fw_core::admission::ActionBook`, the action each admitted
-//! command starts, and how each action ends. Link id 0 is USB; `armed` and `hil` are false until
+//! command starts, and how each action ends. Link id 0 is USB, 1 the radio (`crate::LINK_*`); the
+//! final ACK goes only to the origin link (the book's rule). `armed` and `hil` are false until
 //! the arming code and the HIL source exist.
 //!
 //! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration), save to
@@ -25,9 +26,6 @@ use crate::calibration::Step;
 use crate::device::{find, raise_apply};
 use crate::store;
 
-/// The link id of USB in the books.
-const USB: u8 = 0;
-
 static BOOK: Mutex<CriticalSectionRawMutex, RefCell<ActionBook>> =
     Mutex::new(RefCell::new(ActionBook::new()));
 
@@ -51,9 +49,10 @@ fn result_name(result: MavResult) -> &'static str {
 /// The longest an ACK is held back because of pending texts, in ms.
 const HOLD_MAX_MS: u64 = 300;
 
-/// When `next_ack` first saw the text queue non-empty and held back (core 0 only); `None` when
-/// no hold is running.
-static HOLD_SINCE: Mutex<CriticalSectionRawMutex, Cell<Option<u64>>> = Mutex::new(Cell::new(None));
+/// Per link: when `next_ack` first saw that link's texts pending and held back (core 0 only);
+/// `None` when no hold is running.
+static HOLD_SINCE: Mutex<CriticalSectionRawMutex, [Cell<Option<u64>>; 2]> =
+    Mutex::new([const { Cell::new(None) }; 2]);
 
 /// What the action is called in the log and in the "not built yet" text.
 fn action_name(action: Action) -> &'static str {
@@ -79,11 +78,12 @@ fn action_name(action: Action) -> &'static str {
 
 /// `Telemetry::command`: admits the command and starts its action. The answer is the book's
 /// (IN_PROGRESS 0 % for an admitted action; its final ACK follows through [`next_ack`]).
-pub fn command(req: &CommandRequest, now_ms: u64) -> CommandOutcome {
-    let decision = BOOK.lock(|b| b.borrow_mut().admit(req, USB, false, false, now_ms));
+pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
+    let decision = BOOK.lock(|b| b.borrow_mut().admit(req, link, false, false, now_ms));
     defmt::info!(
-        "[INFO] command {=u32} from {=u8}/{=u8}: {=str}{=str}{=str}",
+        "[INFO] command {=u32} on link {=u8} from {=u8}/{=u8}: {=str}{=str}{=str}",
         req.command as u32,
+        link,
         req.sender.system_id,
         req.sender.component_id,
         result_name(decision.outcome.result),
@@ -103,32 +103,35 @@ pub fn command(req: &CommandRequest, now_ms: u64) -> CommandOutcome {
     decision.outcome
 }
 
-/// `Telemetry::acks`: the next late ACK for USB.
-pub fn next_ack(now_ms: u64) -> Option<LateAck> {
+/// `Telemetry::acks`: the next late ACK for link `link`.
+pub fn next_ack(link: u8, now_ms: u64) -> Option<LateAck> {
     // The node sends ACKs before it takes texts from `Telemetry::texts`: hold the ACK until the
     // queued text (a calibration's result or failure) has gone out, so the text precedes it. The
     // hold lasts at most `HOLD_MAX_MS` (a flood of texts must not hold ACKs for good): after that
     // the ACK goes out even if texts are still waiting, so a text can then arrive after its ACK.
     // The action's own time limit is not applied here but in `tick`, every supervisor tick.
     let mut by_bound = false;
-    if crate::texts_pending() {
-        let since = HOLD_SINCE.lock(|h| match h.get() {
-            Some(since) => since,
-            None => {
-                h.set(Some(now_ms));
-                now_ms
-            }
-        });
+    let link_ix = usize::from(link);
+    if crate::texts_pending(link_ix) {
+        let since = HOLD_SINCE
+            .lock(|h| {
+                let cell = h.get(link_ix)?;
+                Some(cell.get().unwrap_or_else(|| {
+                    cell.set(Some(now_ms));
+                    now_ms
+                }))
+            })
+            .unwrap_or(now_ms);
         if now_ms.saturating_sub(since) < HOLD_MAX_MS {
             return None;
         }
         by_bound = true;
     } else {
-        HOLD_SINCE.lock(|h| h.set(None));
+        clear_hold(link_ix);
     }
-    let ack = BOOK.lock(|b| b.borrow_mut().next_ack(USB, now_ms))?;
+    let ack = BOOK.lock(|b| b.borrow_mut().next_ack(link, now_ms))?;
     if by_bound {
-        HOLD_SINCE.lock(|h| h.set(None));
+        clear_hold(link_ix);
         defmt::info!(
             "[INFO] ACK of command {=u32} held for texts: hold ended by the {=u64} ms bound",
             ack.command as u32,
@@ -150,9 +153,17 @@ pub fn next_ack(now_ms: u64) -> Option<LateAck> {
     Some(ack)
 }
 
-/// The USB link went down: no ACK can be delivered for the running action.
-pub fn link_lost() {
-    BOOK.lock(|b| b.borrow_mut().link_lost(USB));
+fn clear_hold(link: usize) {
+    HOLD_SINCE.lock(|h| {
+        if let Some(cell) = h.get(link) {
+            cell.set(None);
+        }
+    });
+}
+
+/// Link `link` went down (USB closed, or the port left MAVLink): no ACK can be delivered on it.
+pub fn link_lost(link: u8) {
+    BOOK.lock(|b| b.borrow_mut().link_lost(link));
 }
 
 fn start(action: Action, now_ms: u64) {
