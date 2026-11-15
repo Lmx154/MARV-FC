@@ -3,11 +3,13 @@
 //! final ACK goes only to the origin link (the book's rule). `armed` and `hil` are false until
 //! the arming code and the HIL source exist.
 //!
-//! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration), save to
-//! and reload from the flash settings region (`settings`), reboot (the watchdog monitor resets the
-//! board 100 ms after the final ACK was handed to the link; nothing is saved), the gyro and the
-//! one-position accelerometer and the compass calibrations (`calibration`). Every other action
-//! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
+//! Built: restart of every registry row (IMU1, IMU2, BARO, MAG, GNSS, BATT), the self-test of
+//! MAG, IMU1 and IMU2 (the driver's test, then the restart under the same request number; one
+//! STATUSTEXT with the result before the final ACK), parameters to defaults (all, calibration),
+//! save to and reload from the flash settings region (`settings`), reboot (the watchdog monitor
+//! resets the board 100 ms after the final ACK was handed to the link; nothing is saved), the gyro
+//! and the one-position accelerometer and the compass calibrations (`calibration`). Every other
+//! action the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
 

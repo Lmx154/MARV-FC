@@ -981,9 +981,11 @@ impl Supervision {
         for (dev, w) in DEVICES.iter().zip(self.watchers.iter_mut()) {
             mirror(dev, w, now);
             // A parked flight-core row (Failed, Absent) makes no progress by design: it is not
-            // kicked and waits only for RESTART, so it is not stuck.
-            let parked =
-                dev.flight.is_some() && matches!(dev.status().state, State::Failed | State::Absent);
+            // kicked and waits only for RESTART, so it is not stuck. Nor is a row while its
+            // self-test flag is set (the test is one long adapter call).
+            let parked = (dev.flight.is_some()
+                && matches!(dev.status().state, State::Failed | State::Absent))
+                || dev.self_testing.load(Ordering::Relaxed);
             let progress = dev.progress.load(Ordering::Relaxed);
             let stuck = dev.stuck.load(Ordering::Relaxed);
             if progress != w.progress {

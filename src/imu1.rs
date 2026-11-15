@@ -78,15 +78,16 @@ type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDe
 type DevError = DeviceError<spi::Error, Infallible>;
 
 /// The flight core's delay, on the time driver's counter: no timer queue, no lock. A wait shorter
-/// than 1 ms is a busy wait (a verify step on an indirect register waits 10 us twice); a wait of
-/// 1 ms or longer polls the clock and yields to the executor between polls (`wake_by_ref`), so the
-/// other tasks of the flight core run meanwhile. Both IMU tasks wait through it (start, recover,
-/// restart, self-test).
+/// than 50 us is a busy wait (a verify step on an indirect register waits 10 us twice, so the
+/// sample loop never yields inside a verify step); a wait of 50 us or longer polls the clock and
+/// yields to the executor between polls (`wake_by_ref`), so the other tasks of the flight core run
+/// meanwhile (the ICM-45686 self-test's 100 us result polls). Both IMU tasks wait through it
+/// (start, recover, restart, self-test).
 pub struct SpinDelay;
 
 impl SpinDelay {
     async fn wait(time: Duration) {
-        if time < Duration::from_millis(1) {
+        if time < Duration::from_micros(50) {
             block_for(time);
             return;
         }
