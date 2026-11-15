@@ -731,7 +731,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (162 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (170 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far (`text_ring` is not wired into the binary yet). Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
@@ -743,6 +743,7 @@ the host (162 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, 
 | `scratch` | The watchdog's record in four scratch registers (layout version 2) |
 | `admission` | What happens to a MAVLink command: classification of 241, 245, 246 and the project's 42430, the admission order, and the books of the one long action with its progress and its single final acknowledgement |
 | `sys_status` | From the device rows to SYS_STATUS's three masks, the HEARTBEAT state and the `MARV_DEVICE_STATUS` row |
+| `text_ring` | The STATUSTEXT ring for the ground-station links: 8 entries, a read cursor per link (each text reaches each link once, in order), the oldest dropped and counted for a link more than 8 behind, so a slow or absent link holds back nobody; 2 sticky slots (the boot report) kept until every link took them, taken first |
 
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, over the `bmp581` driver's `Config`, without the

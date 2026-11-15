@@ -30,6 +30,7 @@ pub mod params;
 pub mod record;
 pub mod scratch;
 pub mod sys_status;
+pub mod text_ring;
 pub mod watchdog;
 pub mod xcore;
 
