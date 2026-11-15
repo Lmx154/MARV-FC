@@ -631,16 +631,22 @@ fn send_text(dev: &Device, notice: Notice) {
     let error = error_name(dev.status().health.last_error);
     if matches!(notice, Notice::Stuck) {
         crate::text_fmt(severity, format_args!("{}: {}", dev.name, what));
+        defmt::info!(
+            "[INFO] text {=str}: {=str}: {=str}",
+            severity_name(severity),
+            dev.name,
+            what
+        );
     } else {
         crate::text_fmt(severity, format_args!("{}: {} ({})", dev.name, what, error));
+        defmt::info!(
+            "[INFO] text {=str}: {=str}: {=str} ({=str})",
+            severity_name(severity),
+            dev.name,
+            what,
+            error
+        );
     }
-    defmt::info!(
-        "[INFO] text {=str}: {=str}: {=str} ({=str})",
-        severity_name(severity),
-        dev.name,
-        what,
-        error
-    );
 }
 
 fn severity_name(severity: MavSeverity) -> &'static str {
