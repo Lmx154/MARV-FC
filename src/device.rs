@@ -876,7 +876,7 @@ impl Supervision {
                     )
                 });
                 defmt::info!(
-                    "[STAT] {=str} flight core: delay count {=u32} ({=u32} after the start), CHECK kicks taken {=u32}, verifies {=u32} took last {=u32} min {=u32} max {=u32} us, sample already waiting after {=u32}, gaps over 1.5 P {=u32} ({=u32} across a verify), longest run without a yield {=u32} us, yields {=u32}, |accel| {=f32} m/s^2, accel {} m/s^2, gyro {} rad/s, temperature {=f32} C, progress {=u32}",
+                    "[STAT] {=str} flight core: delay count {=u32} ({=u32} after the start), CHECK kicks taken {=u32}, verify steps {=u32} took last {=u32} min {=u32} max {=u32} us, passes {=u32}, sample already waiting after a step {=u32}, gaps over 1.5 P {=u32} ({=u32} across a step), longest run {=u32} us (last 10 s window {=u32} us), polls {=u32}, |accel| {=f32} m/s^2, accel {} m/s^2, gyro {} rad/s, temperature {=f32} C, progress {=u32}",
                     dev.name,
                     f.delays,
                     f.delays_after_start,
@@ -885,11 +885,13 @@ impl Supervision {
                     f.verify_last_us,
                     f.verify_min_us,
                     f.verify_max_us,
+                    f.verify_passes,
                     f.verify_pending,
                     f.long_gaps,
                     f.long_gaps_after_verify,
-                    f.stretch_max_us,
-                    f.yields,
+                    f.latency.max_us,
+                    f.latency.window_us,
+                    f.latency.polls,
                     norm(accel),
                     accel,
                     gyro,

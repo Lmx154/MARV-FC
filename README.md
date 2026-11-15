@@ -25,15 +25,20 @@ It has no flight functionality.
   core 1, each running the flight-core device loop `fw_flight::imu` in its own task (see Flight-core device
   loop). The program's one `DMA_IRQ_0` binding (`DmaIrqs` in `src/main.rs`) lists the four channels. No log, no critical-section primitive of its own, and no
   timer in the sample loop there.
-- RULE of the flight core (lead's ruling, 2026-11-15): no task holds the executor longer than one bus
-  transaction or one short busy wait. Every SPI transaction of a flight-core adapter is followed by a yield
-  (`flight_yield::YieldSpi` around the SPI device of both IMU drivers: one `transaction`, then
-  `embassy_futures::yield_now`), and a busy wait yields until its time has passed (IMU1's `SpinDelay`), so
-  another flight task whose data is ready runs in between. It lives in the binary's adapters, not in
-  `fw-flight` and not in the drivers. Each IMU task's longest poll (the longest stretch it ran without
-  yielding, us) and its poll count are taken around every poll (`flight_yield::measured`), published
-  through its status cell (`ImuAdapter::latency`) and logged in its `[STAT]` line ("longest run without a
-  yield", "yields"): the flight core's latency figure.
+- RULE of the flight core (lead's ruling, 2026-11-15): the flight core verifies INCREMENTALLY (as ArduPilot's
+  `check_next_register`). The sample loop never runs a whole-configuration `verify`: after every K-th sample,
+  and never while a sample is waiting (the latched data-ready level, `ImuAdapter::data_waiting`), it takes ONE
+  `verify_step`, which checks one register (one or two SPI transactions; the ICM-45686's indirect registers
+  add their two 10 us busy waits; a register that differs is read once more). K = samples per second /
+  registers per pass, so one pass takes about 1 s: IMU1 33 registers, K 24 (792 samples, 0.99 s); IMU2 32
+  registers, K 25 (800 samples, 1.0 s). A mismatch is the same health event as a failed `verify`
+  (reconfigure); a bus error at a step is an error event. The steps come from the drivers' additive
+  `verify_steps` / `verify_step` (branch `verify-step` of both driver repositories). The earlier rule (a
+  yield after every transaction and busy wait) was withdrawn: it helped the other task but stretched a
+  whole `verify` past one period, during which the task cannot read its own samples. Each IMU task's
+  longest poll (the longest stretch it ran without yielding, since boot and over the last 10 s window) and
+  its poll count are taken around every poll (`flight_latency::measured`), published through its status
+  cell (`ImuAdapter::latency`) and logged in its `[STAT]` line: the flight core's latency figure.
 - Between the cores only atomics and `fw_core::xcore` cells (`Kick`, and each IMU's `Seqlock` and `Kick` in
   `fw_flight::imu::ImuCells`), in internal SRAM. `DMA_IRQ_0` is disabled on core 0 before core 1 starts (all
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
@@ -54,9 +59,10 @@ supervisor kicks CHECK every 10 ms tick while the row's last sample is older tha
 woken task compares the clock with its last sample and, if late by more than T, makes the one status read
 (sample waiting = missed edge, read it; nothing = deadline miss). RESTART comes with its request number
 through the same kick; APPLY is reserved. Start and recovery wait through the `DelayNs` passed in, wrapped in
-`CountingDelay` (count after the start: 0 in a clean run, invariant F2); `verify` between samples (about
-once per second) waits by yielding until the time driver's counter has passed (no timer), and
-is followed by one status read: a sample already waiting is read at once (a host test pins this rule).
+`CountingDelay` (count after the start: 0 in a clean run, invariant F2); the configuration is checked one
+register at a time between samples (the rule below), with no status read after a step: with a latched
+data-ready a sample that arrived during the step keeps the line high and is read next (host tests pin the
+pass length, the mismatch and bus-error events and "never while a sample is waiting").
 The board time is `embassy_time::Instant::now()`, lock-free on core 1 (embassy-rp 0.10.0
 `time_driver.rs:35-44` reads the timer's raw registers; only `schedule_wake`, `:46-47`, takes the critical
 section, and the sample loop never schedules). Everything core 0 needs
@@ -105,7 +111,8 @@ IMU2 482 gaps, 4239 us, 800.42/s. Open for the lead.
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
-same for IMU2 (`device restart IMU2`); one wrapper serves both IMUs (`src/imu_inject.rs`). `FEATURES=inject-imu1-missed-edge
+same for IMU2 (`device restart IMU2`); `inject-imu2-verify`: one IMU2 verify step answers "mismatch" once
+(reconfigure, `config restored` 1); one wrapper serves both IMUs (`src/imu_inject.rs`). `FEATURES=inject-imu1-missed-edge
 tools/run.sh 60`: 5 s after the first good sample the data-ready edges are swallowed for 200 ms. The
 injection state goes out through the cells and core 0 logs it. `FEATURES=stall-core0 tools/run.sh 60`: one
 core-0 task spins 1.2 s without yielding 20 s after start and logs IMU1's and IMU2's samples before and after (F1).
@@ -501,7 +508,7 @@ What each cargo feature does under the watchdog:
 |---|---|
 | `no-fbeat` | the watchdog is not started (a pre-watchdog negative control); no reset |
 | `inject-baro-*` (transient, persistent, missed-edge, silent, verify, por, fail-until-restart, stuck) | device faults inside awaits: the executor runs on, the watchdog stays fed, no reset (stuck: measured) |
-| `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent` | IMU faults on the flight core; `fbeat` still answers, no reset |
+| `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify` | IMU faults on the flight core; `fbeat` still answers, no reset |
 | `stall-core0` | 1.2 s spin: a "core 0 stalled" text, no reset; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
 | `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |

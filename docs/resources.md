@@ -108,12 +108,13 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 8. The flight core schedules no timer in its sample loops, takes no critical-section primitive of its own and
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
    buffer into it, atomic flags with a lock-free waker for requests).
-9. On the flight core no task holds the executor longer than one bus transaction or one short busy wait
-   (lead's ruling, 2026-11-15): every SPI transaction and every busy wait of a flight-core adapter is followed
-   by a yield to the executor (`src/flight_yield.rs`: `YieldSpi` around both IMUs' SPI devices; IMU1's
-   `SpinDelay` yields while it waits). No timer, no critical-section primitive, no log; in the binary's
-   adapters, not in `fw-flight` or the drivers. Each IMU task's longest stretch without a yield is published
-   and logged in its `[STAT]` line.
+9. The flight core verifies incrementally (lead's ruling, 2026-11-15): the sample loop never runs a
+   whole-configuration `verify`; after every K-th sample, never while a sample is waiting, it checks ONE
+   register (`verify_step`: one or two SPI transactions, the ICM's indirect registers with their 10 us
+   waits), K chosen per IMU for one pass in about 1 s (IMU1 K 24 over 33 registers, IMU2 K 25 over 32). The
+   earlier rule, a yield after every transaction and busy wait, was withdrawn: it stretched a whole `verify`
+   past one sample period, during which the task cannot read its own samples. Each IMU task's longest
+   stretch without a yield (since boot and per 10 s window) is published and logged in its `[STAT]` line.
 
 ## Not yet decided or measured
 

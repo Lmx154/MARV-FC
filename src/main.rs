@@ -37,7 +37,7 @@ mod baro;
 mod batt;
 mod busclear;
 mod device;
-mod flight_yield;
+mod flight_latency;
 mod imu1;
 mod imu2;
 #[cfg(feature = "inject-imu")]

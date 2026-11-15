@@ -6,7 +6,7 @@
 
 use core::convert::Infallible;
 
-use crate::flight_yield::{Stretch, YieldSpi, measured};
+use crate::flight_latency::{Stretch, measured};
 use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH2, DMA_CH3, PIN_7, PIN_8, PIN_9, PIN_10, PIN_11, SPI1};
@@ -16,7 +16,8 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::health::{ErrorKind, Limits};
 use fw_flight::imu::{
-    ImuAdapter, ImuCells, ImuReading, ImuTask, Pending, StartFailure, VerifyError,
+    ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
+    VerifyStep,
 };
 use lsm6dsk320x::{
     AccelFullScale, Config, DataReady, DataReadyMode, Error, GyroFullScale, HaodrSet, IntRouting,
@@ -67,13 +68,14 @@ pub struct Parts {
     pub rx_dma: Peri<'static, DMA_CH3>,
 }
 
-type Dev = YieldSpi<ExclusiveDevice<Spi<'static, SPI1, spi::Async>, Output<'static>, NoDelay>>;
+type Dev = ExclusiveDevice<Spi<'static, SPI1, spi::Async>, Output<'static>, NoDelay>;
 type DevError = DeviceError<spi::Error, Infallible>;
 
 pub struct Lsm6dsk320xAdapter {
     chip: Lsm6dsk320x<Dev>,
     int1: Input<'static>,
     calls: u32,
+    step: usize,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -105,9 +107,10 @@ impl Lsm6dsk320xAdapter {
             Err(never) => match never {},
         };
         Self {
-            chip: Lsm6dsk320x::new(YieldSpi(device)),
+            chip: Lsm6dsk320x::new(device),
             int1: Input::new(p.int1, Pull::None),
             calls: 0,
+            step: 0,
         }
     }
 
@@ -118,6 +121,7 @@ impl Lsm6dsk320xAdapter {
 
     /// Software reset, identity check and the configuration.
     async fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<DevError>> {
+        self.step = 0;
         self.call().init(delay, &config()).await.map(|_| ())
     }
 }
@@ -157,16 +161,35 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
         })
     }
 
-    async fn verify(&mut self) -> Result<(), VerifyError> {
-        match self.call().verify().await {
-            Ok(()) => Ok(()),
+    async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError> {
+        let index = self.step;
+        let result = self.call().verify_step(index).await;
+        self.step = index + 1;
+        if self.step >= self.chip.verify_steps() {
+            self.step = 0;
+        }
+        match result {
+            Ok(()) if self.step == 0 => Ok(VerifyStep::PassComplete),
+            Ok(()) => Ok(VerifyStep::More),
             Err(Error::ConfigMismatch(_)) => Err(VerifyError::Mismatch),
             Err(e) => Err(VerifyError::Failed(kind(&e))),
         }
     }
 
+    /// K = samples per second / registers per pass: one pass in about 1 s.
+    fn verify_every(&self) -> u32 {
+        let steps = u32::try_from(self.chip.verify_steps()).unwrap_or(u32::MAX);
+        (1_000_000 / PERIOD_US / steps.max(1)).max(1)
+    }
+
+    /// INT1 is latched: high while a sample waits.
+    fn data_waiting(&mut self) -> bool {
+        self.int1.is_high()
+    }
+
     /// Configure in place, then one read discarded (a data-ready flag survives `configure`).
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
+        self.step = 0;
         self.call()
             .configure(delay, &config())
             .await
@@ -192,7 +215,7 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
         self.calls
     }
 
-    fn latency(&self) -> (u32, u32) {
+    fn latency(&self) -> Latency {
         STRETCH.get()
     }
 }
@@ -207,12 +230,16 @@ pub fn adapter(parts: Parts) -> Adapter {
     #[cfg(not(feature = "inject-imu2"))]
     return Lsm6dsk320xAdapter::new(parts);
     #[cfg(feature = "inject-imu2")]
-    return crate::imu_inject::Inject::new(
-        Lsm6dsk320xAdapter::new(parts),
-        &CELLS,
-        crate::imu_inject::Mode::Persistent,
-    );
+    return crate::imu_inject::Inject::new(Lsm6dsk320xAdapter::new(parts), &CELLS, INJECT);
 }
+
+#[cfg(feature = "inject-imu2-persistent")]
+const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::Persistent;
+#[cfg(all(
+    feature = "inject-imu2-verify",
+    not(feature = "inject-imu2-persistent")
+))]
+const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::VerifyMismatch;
 
 #[embassy_executor::task]
 pub async fn task(adapter: Adapter) -> ! {

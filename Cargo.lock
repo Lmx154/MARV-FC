@@ -831,7 +831,7 @@ dependencies = [
 [[package]]
 name = "icm45686"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/icm45686-rs.git?rev=867093eea748ea7b8ea968a2a1d8258ba7fa47e3#867093eea748ea7b8ea968a2a1d8258ba7fa47e3"
+source = "git+https://github.com/Lmx154/icm45686-rs.git?rev=78b13c709acc2464194c08731434750b85799927#78b13c709acc2464194c08731434750b85799927"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
@@ -963,7 +963,7 @@ dependencies = [
 [[package]]
 name = "lsm6dsk320x"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/lsm6dsk320x-rs.git?rev=07a888901f29654faa6ec51394f3aa8e81481e51#07a888901f29654faa6ec51394f3aa8e81481e51"
+source = "git+https://github.com/Lmx154/lsm6dsk320x-rs.git?rev=6762ec64767ea52fca49748be260e4c932629a32#6762ec64767ea52fca49748be260e4c932629a32"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",

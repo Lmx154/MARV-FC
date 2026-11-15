@@ -6,18 +6,18 @@
 
 use core::convert::Infallible;
 
-use crate::flight_yield::{Stretch, YieldSpi, measured};
-use embassy_futures::yield_now;
+use crate::flight_latency::{Stretch, measured};
 use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_15, PIN_16, PIN_18, PIN_19, PIN_20, SPI0};
 use embassy_rp::spi::{self, Spi};
-use embassy_time::{Delay, Duration, Instant};
+use embassy_time::{Delay, Duration, block_for};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::health::{ErrorKind, Limits};
 use fw_flight::imu::{
-    ImuAdapter, ImuCells, ImuReading, ImuTask, Pending, StartFailure, VerifyError,
+    ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
+    VerifyStep,
 };
 use icm45686::{
     AccelFullScale, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config, Int1Mode, Odr,
@@ -66,32 +66,20 @@ pub struct Parts {
     pub rx_dma: Peri<'static, DMA_CH1>,
 }
 
-type Dev = YieldSpi<ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>>;
+type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>;
 type DevError = DeviceError<spi::Error, Infallible>;
 
-/// A wait on the time driver's counter that yields to the executor until the time has passed: no
-/// timer, no lock (`verify` between samples reads indirect registers with a 10 us wait each).
+/// A busy wait on the time driver's counter: no timer, no lock (a verify step on an indirect
+/// register waits 10 us twice).
 struct SpinDelay;
-
-impl SpinDelay {
-    async fn wait_us(us: u64) {
-        let until = Instant::now() + Duration::from_micros(us);
-        loop {
-            yield_now().await;
-            if Instant::now() >= until {
-                return;
-            }
-        }
-    }
-}
 
 impl DelayNs for SpinDelay {
     async fn delay_ns(&mut self, ns: u32) {
-        Self::wait_us(u64::from(ns.div_ceil(1000))).await;
+        block_for(Duration::from_micros(u64::from(ns.div_ceil(1000))));
     }
 
     async fn delay_us(&mut self, us: u32) {
-        Self::wait_us(u64::from(us)).await;
+        block_for(Duration::from_micros(u64::from(us)));
     }
 }
 
@@ -99,6 +87,7 @@ pub struct Icm45686Adapter {
     chip: Icm45686<Dev>,
     int1: Input<'static>,
     calls: u32,
+    step: usize,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -130,9 +119,10 @@ impl Icm45686Adapter {
             Err(never) => match never {},
         };
         Self {
-            chip: Icm45686::new(YieldSpi(device)),
+            chip: Icm45686::new(device),
             int1: Input::new(p.int1, Pull::None),
             calls: 0,
+            step: 0,
         }
     }
 
@@ -145,6 +135,7 @@ impl Icm45686Adapter {
     /// sample's status is not the reset's.
     async fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<DevError>> {
         let config = config();
+        self.step = 0;
         self.call().init(delay, &config).await?;
         self.call().interrupt_status().await?;
         Ok(())
@@ -192,16 +183,35 @@ impl ImuAdapter for Icm45686Adapter {
         })
     }
 
-    async fn verify(&mut self) -> Result<(), VerifyError> {
-        match self.call().verify(&mut SpinDelay).await {
-            Ok(()) => Ok(()),
+    async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError> {
+        let index = self.step;
+        let result = self.call().verify_step(&mut SpinDelay, index).await;
+        self.step = index + 1;
+        if self.step >= self.chip.verify_steps() {
+            self.step = 0;
+        }
+        match result {
+            Ok(()) if self.step == 0 => Ok(VerifyStep::PassComplete),
+            Ok(()) => Ok(VerifyStep::More),
             Err(Error::ConfigMismatch(_)) => Err(VerifyError::Mismatch),
             Err(e) => Err(VerifyError::Failed(kind(&e))),
         }
     }
 
+    /// K = samples per second / registers per pass: one pass in about 1 s.
+    fn verify_every(&self) -> u32 {
+        let steps = u32::try_from(self.chip.verify_steps()).unwrap_or(u32::MAX);
+        (1_000_000 / PERIOD_US / steps.max(1)).max(1)
+    }
+
+    /// INT1 is latched: high while a sample waits.
+    fn data_waiting(&mut self) -> bool {
+        self.int1.is_high()
+    }
+
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
         let config = config();
+        self.step = 0;
         self.call()
             .configure(delay, &config)
             .await
@@ -222,7 +232,7 @@ impl ImuAdapter for Icm45686Adapter {
         self.calls
     }
 
-    fn latency(&self) -> (u32, u32) {
+    fn latency(&self) -> Latency {
         STRETCH.get()
     }
 }

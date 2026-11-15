@@ -5,7 +5,9 @@
 //! last sample and, only if it is late by more than T = max(3 P, 10 ms), makes the one status read.
 //! Everything core 0 needs is published through one [`Seqlock`] ([`ImuStatus`]), written after
 //! every step. Waits only through the [`DelayNs`] passed in, on the start and recovery paths,
-//! counted by [`CountingDelay`]. No log, no lock, no timer.
+//! counted by [`CountingDelay`]. The configuration is checked incrementally: after every K-th
+//! sample one [`ImuAdapter::verify_step`] (one register), never while a sample is waiting; the loop
+//! never runs a whole-configuration check. No log, no lock, no timer.
 
 use core::future::{Future, poll_fn};
 use core::pin::pin;
@@ -27,8 +29,6 @@ pub const TRANSITIONS: usize = 4;
 
 /// Floor of the data-ready deadline T = max(3 P, 10 ms).
 const DEADLINE_FLOOR_US: u64 = 10_000;
-/// `verify()` between samples, about once per second.
-const VERIFY_EVERY_US: u64 = 1_000_000;
 /// Longest single back-off wait: progress moves and a RESTART is seen between slices.
 const SLICE_MS: u64 = 100;
 /// Copies a core-0 reader attempts before it gives up for this tick.
@@ -74,7 +74,27 @@ pub struct StartFailure {
     pub identified: bool,
 }
 
-/// A failed `verify()`.
+/// What a successful verify step found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifyStep {
+    /// The register matched; more registers in this pass.
+    More,
+    /// The register matched and it was the last of the pass.
+    PassComplete,
+}
+
+/// The flight task's latency figures (measured around every poll by the binary).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Latency {
+    /// The longest stretch the task ran without yielding, us, since boot.
+    pub max_us: u32,
+    /// The same over the last completed 10 s window, us.
+    pub window_us: u32,
+    /// Polls of the task (every poll but the last ends in a yield).
+    pub polls: u32,
+}
+
+/// A failed verify step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VerifyError {
     /// A register differs from the configuration.
@@ -89,8 +109,8 @@ pub enum VerifyError {
 /// [`restart`](Self::restart) only says the bus and the device answer: the loop then waits for one
 /// fresh sample (a data-ready edge and one good [`acquire`](Self::acquire)) before it reports
 /// success; no edge within T (seen at a kick) or a failed `acquire` counts as a failure.
-/// The `delay` passed in is the task's [`CountingDelay`]; [`verify`](Self::verify) runs between
-/// samples and gets none: it must not wait on a timer.
+/// The `delay` passed in is the task's [`CountingDelay`]; [`verify_step`](Self::verify_step) runs
+/// between samples and gets none: it must not wait on a timer.
 #[allow(async_fn_in_trait)]
 pub trait ImuAdapter {
     /// Waits for the data-ready edge. No bus traffic: it may be dropped at any await.
@@ -102,8 +122,14 @@ pub trait ImuAdapter {
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind>;
     /// The one status read after a late CHECK.
     async fn status(&mut self) -> Result<Pending, ErrorKind>;
-    /// Checks the configuration registers, changing nothing.
-    async fn verify(&mut self) -> Result<(), VerifyError>;
+    /// One step of the incremental configuration check, changing nothing: at most one register (one
+    /// or two bus transactions, a short busy wait at most); [`VerifyStep::PassComplete`] after the
+    /// last register of a pass.
+    async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError>;
+    /// K: one verify step after every K-th sample (at least 1).
+    fn verify_every(&self) -> u32;
+    /// True while a sample is waiting (the latched data-ready level). No bus traffic.
+    fn data_waiting(&mut self) -> bool;
     /// Configures the running device with the adapter's configuration.
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind>;
     /// Brings the bus and the device back in step without a reset.
@@ -117,9 +143,9 @@ pub trait ImuAdapter {
     fn injection(&self) -> (u32, u64) {
         (0, 0)
     }
-    /// The task's longest stretch without a yield (us) and its yield count; `(0, 0)` unmeasured.
-    fn latency(&self) -> (u32, u32) {
-        (0, 0)
+    /// The task's latency figures; all 0 when unmeasured.
+    fn latency(&self) -> Latency {
+        Latency::default()
     }
 }
 
@@ -226,24 +252,24 @@ pub struct ImuStatus {
     pub inject: u32,
     /// Board time the injection state last changed, us.
     pub inject_since_us: u64,
-    /// `verify()` calls between samples.
+    /// Verify steps taken between samples.
     pub verifies: u32,
-    /// Duration of the latest, shortest and longest `verify()`, us.
+    /// Verify passes completed (every owned register checked once).
+    pub verify_passes: u32,
+    /// Duration of the latest verify step, us.
     pub verify_last_us: u32,
-    /// Shortest `verify()`, us.
+    /// Shortest verify step, us.
     pub verify_min_us: u32,
-    /// Longest `verify()`, us.
+    /// Longest verify step, us.
     pub verify_max_us: u32,
-    /// Verifies after which a sample was already waiting (the status read right after).
+    /// Verify steps after which a sample was already waiting (the data-ready level; no bus read).
     pub verify_pending: u32,
     /// Intervals between two samples longer than 1.5 P, counted in Ok and Degraded.
     pub long_gaps: u32,
-    /// Of those, intervals that contained a `verify()`.
+    /// Of those, intervals that contained a verify step.
     pub long_gaps_after_verify: u32,
-    /// The longest stretch the task ran without yielding, us (`ImuAdapter::latency`).
-    pub stretch_max_us: u32,
-    /// The task's yields (`ImuAdapter::latency`).
-    pub yields: u32,
+    /// The task's latency figures (`ImuAdapter::latency`).
+    pub latency: Latency,
 }
 
 impl ImuStatus {
@@ -283,14 +309,18 @@ impl ImuStatus {
         inject: 0,
         inject_since_us: 0,
         verifies: 0,
+        verify_passes: 0,
         verify_last_us: 0,
         verify_min_us: 0,
         verify_max_us: 0,
         verify_pending: 0,
         long_gaps: 0,
         long_gaps_after_verify: 0,
-        stretch_max_us: 0,
-        yields: 0,
+        latency: Latency {
+            max_us: 0,
+            window_us: 0,
+            polls: 0,
+        },
     };
 }
 
@@ -377,7 +407,7 @@ pub struct ImuTask<'a, A, D> {
     status: ImuStatus,
     seq: u32,
     pending: u8,
-    last_verify_us: u64,
+    since_step: u32,
     last_status_us: u64,
     restart_run: Option<u32>,
     strong_first: bool,
@@ -413,7 +443,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             status: ImuStatus::INITIAL,
             seq: 0,
             pending: 0,
-            last_verify_us: now,
+            since_step: 0,
             last_status_us: 0,
             restart_run: None,
             strong_first: false,
@@ -484,13 +514,23 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
                 let now = (self.now_us)();
                 if self.take(REQ_APPLY) {
                     Event::Tick
-                } else if now.saturating_sub(self.last_verify_us) >= VERIFY_EVERY_US {
-                    self.last_verify_us = now;
-                    let result = self.adapter.verify().await;
+                } else if self.since_step >= self.adapter.verify_every()
+                    && !self.adapter.data_waiting()
+                {
+                    // A sample waiting is read first (the branch below); then the step.
+                    self.since_step = 0;
+                    let result = self.adapter.verify_step().await;
                     self.bump();
                     self.note_verify(now);
+                    if self.adapter.data_waiting() {
+                        self.status.verify_pending = self.status.verify_pending.wrapping_add(1);
+                    }
                     match result {
-                        Ok(()) => self.after_verify().await,
+                        Ok(VerifyStep::More) => Event::Tick,
+                        Ok(VerifyStep::PassComplete) => {
+                            self.status.verify_passes = self.status.verify_passes.wrapping_add(1);
+                            Event::Tick
+                        }
                         Err(VerifyError::Mismatch) => Event::VerifyMismatch,
                         Err(VerifyError::Failed(kind)) => Event::Error(kind),
                     }
@@ -584,7 +624,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         let (inject, since) = self.adapter.injection();
         self.status.inject = inject;
         self.status.inject_since_us = since;
-        (self.status.stretch_max_us, self.status.yields) = self.adapter.latency();
+        self.status.latency = self.adapter.latency();
         self.writer.write(self.status);
     }
 
@@ -655,7 +695,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         }
     }
 
-    /// Records the duration of the `verify()` that began at `begun` (us).
+    /// Records the duration of the verify step that began at `begun` (us).
     fn note_verify(&mut self, begun: u64) {
         let took = u32::try_from((self.now_us)().saturating_sub(begun)).unwrap_or(u32::MAX);
         let s = &mut self.status;
@@ -668,23 +708,6 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         s.verify_last_us = took;
         s.verifies = s.verifies.wrapping_add(1);
         self.verified = true;
-    }
-
-    /// After a `verify()` between samples: one status read, and a sample already waiting is read
-    /// at once (its data-ready signal may have come and gone while `verify` ran: waiting for the
-    /// next one would lose it).
-    async fn after_verify(&mut self) -> Event {
-        let pending = self.adapter.status().await;
-        self.bump();
-        match pending {
-            Ok(Pending::Data) => {
-                self.status.verify_pending = self.status.verify_pending.wrapping_add(1);
-                self.read().await
-            }
-            Ok(Pending::Nothing) => Event::Tick,
-            Ok(Pending::PowerOnReset) => Event::PowerOnReset,
-            Err(kind) => Event::Error(kind),
-        }
     }
 
     /// Reads and publishes one sample.
@@ -714,6 +737,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
                 });
                 self.seq = self.seq.wrapping_add(1);
                 self.status.samples = self.status.samples.wrapping_add(1);
+                self.since_step = self.since_step.saturating_add(1);
                 Event::Good
             }
             Err(ErrorKind::Por) => Event::PowerOnReset,
@@ -771,7 +795,22 @@ mod tests {
         acquire_fails: bool,
         recover_ok: bool,
         restart_ok: bool,
-        slow_verify: bool,
+        /// Registers per verify pass (N) and samples per step (K).
+        steps_n: u32,
+        every: u32,
+        step_index: u32,
+        steps: u32,
+        /// The step index that answers "mismatch" (once) or a bus error (once).
+        mismatch_at: Option<u32>,
+        bus_error_at: Option<u32>,
+        applies: u32,
+        /// The data-ready level: a sample is waiting.
+        waiting: bool,
+        /// Each good acquire leaves the next sample waiting, every other time.
+        toggle_waiting: bool,
+        steps_while_waiting: u32,
+        /// A step longer than one period: the next sample is waiting when it returns.
+        slow_step: bool,
         calls: u32,
         starts: u32,
         restarts: u32,
@@ -788,7 +827,9 @@ mod tests {
     impl ImuAdapter for FakeAdapter {
         async fn data_ready(&mut self) {
             poll_fn(|_| {
-                if self.0.borrow().producing {
+                if self.0.borrow().waiting {
+                    Poll::Ready(())
+                } else if self.0.borrow().producing {
                     advance(P_US);
                     Poll::Ready(())
                 } else {
@@ -808,14 +849,10 @@ mod tests {
         async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
             self.call();
             let mut fake = self.0.borrow_mut();
-            if fake.slow_verify && fake.pending == Pending::Data {
-                fake.pending = Pending::Nothing;
-                fake.producing = true;
-            }
-            drop(fake);
-            if self.0.borrow().acquire_fails {
+            if fake.acquire_fails {
                 Err(ErrorKind::Bus)
             } else {
+                fake.waiting = fake.toggle_waiting && !fake.waiting;
                 Ok(ImuReading {
                     accel_ms2: [0.0, 0.0, 9.81],
                     ..ImuReading::default()
@@ -828,21 +865,47 @@ mod tests {
             Ok(self.0.borrow().pending)
         }
 
-        async fn verify(&mut self) -> Result<(), VerifyError> {
+        async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError> {
             self.call();
             let mut fake = self.0.borrow_mut();
-            if fake.slow_verify {
-                // Longer than one period: the next sample's data-ready signal came and went
-                // while it ran; the sample is waiting in the device.
-                advance(P_US * 8 / 5);
-                fake.producing = false;
-                fake.pending = Pending::Data;
+            fake.steps += 1;
+            if fake.waiting {
+                fake.steps_while_waiting += 1;
             }
-            Ok(())
+            if fake.slow_step {
+                advance(P_US * 8 / 5);
+                fake.waiting = true;
+            }
+            let index = fake.step_index;
+            fake.step_index = (index + 1) % fake.steps_n;
+            if fake.mismatch_at == Some(index) {
+                fake.mismatch_at = None;
+                return Err(VerifyError::Mismatch);
+            }
+            if fake.bus_error_at == Some(index) {
+                fake.bus_error_at = None;
+                return Err(VerifyError::Failed(ErrorKind::Bus));
+            }
+            Ok(if fake.step_index == 0 {
+                VerifyStep::PassComplete
+            } else {
+                VerifyStep::More
+            })
+        }
+
+        fn verify_every(&self) -> u32 {
+            self.0.borrow().every
+        }
+
+        fn data_waiting(&mut self) -> bool {
+            self.0.borrow().waiting
         }
 
         async fn apply<D: DelayNs>(&mut self, _delay: &mut D) -> Result<(), ErrorKind> {
             self.call();
+            let mut fake = self.0.borrow_mut();
+            fake.applies += 1;
+            fake.step_index = 0;
             Ok(())
         }
 
@@ -890,7 +953,17 @@ mod tests {
             acquire_fails: false,
             recover_ok: true,
             restart_ok: true,
-            slow_verify: false,
+            steps_n: 5,
+            every: 4,
+            step_index: 0,
+            steps: 0,
+            mismatch_at: None,
+            bus_error_at: None,
+            applies: 0,
+            waiting: false,
+            toggle_waiting: false,
+            steps_while_waiting: 0,
+            slow_step: false,
             calls: 0,
             starts: 0,
             restarts: 0,
@@ -961,7 +1034,9 @@ mod tests {
         }
         let s = status(cells);
         assert_eq!(s.latest.map(|l| l.seq + 1), Some(s.samples));
-        assert!(s.samples > 2900);
+        // Every loop step is one sample or one verify step.
+        assert!(s.samples + s.verifies >= 2999);
+        assert!(s.verifies > 500);
         assert_eq!(s.health.errors, 0);
         assert_eq!(s.missed_edges, 0);
         assert_eq!(s.max_gap_us, P_US);
@@ -970,10 +1045,11 @@ mod tests {
     }
 
     #[test]
-    fn a_sample_waiting_after_a_long_verify_is_read_at_once() {
+    fn a_sample_waiting_after_a_long_step_is_read_at_once() {
         let (cells, mut task, fake) = started();
-        fake.borrow_mut().slow_verify = true;
+        fake.borrow_mut().slow_step = true;
         let mut last = status(cells);
+        let before = last.verifies;
         for _ in 0..2500 {
             assert!(
                 step(&mut task),
@@ -986,14 +1062,104 @@ mod tests {
             last = s;
         }
         let s = status(cells);
-        assert!(s.verifies >= 2);
-        assert_eq!(s.verify_pending, s.verifies);
+        assert!(s.verifies >= before + 2);
+        assert_eq!(s.verify_pending, s.verifies - before);
         assert_eq!(s.verify_last_us, 1600);
         assert_eq!(s.latest.map(|l| l.seq + 1), Some(s.samples));
         assert_eq!(s.missed_edges, 0);
         assert_eq!(s.health.errors, 0);
         assert_eq!(s.state, State::Ok);
         assert!(s.max_gap_us < 2 * P_US);
+    }
+
+    #[test]
+    fn a_full_verify_pass_takes_n_steps_over_n_times_k_samples_with_no_gap() {
+        let (cells, mut task, fake) = setup();
+        let (n, k) = (fake.borrow().steps_n, fake.borrow().every);
+        let mut last: Option<u32> = None;
+        for _ in 0..1000 {
+            assert!(step(&mut task));
+            let s = status(cells);
+            if let (Some(a), Some(b)) = (last, s.latest.map(|l| l.seq)) {
+                assert!(b == a || b == a + 1);
+            }
+            last = s.latest.map(|l| l.seq);
+            if s.verify_passes == 1 {
+                break;
+            }
+        }
+        let s = status(cells);
+        assert_eq!(s.verify_passes, 1);
+        assert_eq!(s.verifies, n);
+        assert_eq!(s.samples, n * k);
+        assert_eq!(fake.borrow().steps, n);
+        assert_eq!(s.max_gap_us, P_US);
+        assert_eq!(s.long_gaps, 0);
+        assert_eq!(s.state, State::Ok);
+        assert_eq!(s.health.errors, 0);
+    }
+
+    #[test]
+    fn a_mismatch_at_step_j_is_the_mismatch_event_and_reconfigures() {
+        let (cells, mut task, fake) = started();
+        fake.borrow_mut().mismatch_at = Some(3);
+        let mut seen = false;
+        for _ in 0..200 {
+            assert!(step(&mut task));
+            let s = status(cells);
+            seen |= (0..TRANSITIONS)
+                .any(|i| s.ring[i].is_some_and(|t| t.error == ErrorKind::ConfigMismatch));
+            if s.health.config_restored == 1 {
+                break;
+            }
+        }
+        let s = status(cells);
+        assert_eq!(s.health.config_restored, 1);
+        assert_eq!(fake.borrow().applies, 1);
+        assert!(seen || s.health.last_error == ErrorKind::ConfigMismatch);
+        for _ in 0..50 {
+            assert!(step(&mut task));
+        }
+        let s = status(cells);
+        assert!(matches!(s.state, State::Ok | State::Degraded));
+        assert_eq!(s.health.config_restored, 1);
+    }
+
+    #[test]
+    fn a_bus_error_at_a_step_is_an_error_event() {
+        let (cells, mut task, fake) = started();
+        fake.borrow_mut().bus_error_at = Some(2);
+        for _ in 0..100 {
+            assert!(step(&mut task));
+            if status(cells).health.errors == 1 {
+                break;
+            }
+        }
+        let s = status(cells);
+        assert_eq!(s.health.errors, 1);
+        assert_eq!(s.health.last_error, ErrorKind::Bus);
+        assert_eq!(s.state, State::Degraded);
+        assert_eq!(fake.borrow().applies, 0);
+    }
+
+    #[test]
+    fn a_step_is_never_taken_while_a_sample_is_waiting() {
+        let (cells, mut task, fake) = started();
+        fake.borrow_mut().toggle_waiting = true;
+        let mut last = status(cells);
+        for _ in 0..3000 {
+            assert!(step(&mut task));
+            let s = status(cells);
+            if let (Some(a), Some(b)) = (last.latest, s.latest) {
+                assert!(b.seq == a.seq || b.seq == a.seq + 1);
+            }
+            last = s;
+        }
+        let s = status(cells);
+        assert!(fake.borrow().steps > 10);
+        assert_eq!(fake.borrow().steps_while_waiting, 0);
+        assert_eq!(s.health.errors, 0);
+        assert_eq!(s.state, State::Ok);
     }
 
     #[test]

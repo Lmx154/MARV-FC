@@ -1,12 +1,15 @@
 //! Fault injection around a flight-core IMU adapter (features `inject-imu1-persistent`,
-//! `inject-imu1-missed-edge`, `inject-imu2-persistent`), 5 s after the first good sample. One
+//! `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify`), 5 s after the first
+//! good sample. One
 //! wrapper for both IMUs: `imu1::adapter` and `imu2::adapter` wrap their adapter in [`Inject`]
 //! with their own cells and [`Mode`]. Runs on the flight core: no log, its state goes out through
 //! `injection()` and core 0 logs it.
 
 use embedded_hal_async::delay::DelayNs;
 use fw_core::health::ErrorKind;
-use fw_flight::imu::{ImuAdapter, ImuCells, ImuReading, Pending, StartFailure, VerifyError};
+use fw_flight::imu::{
+    ImuAdapter, ImuCells, ImuReading, Latency, Pending, StartFailure, VerifyError, VerifyStep,
+};
 
 /// Injection state words published through the cells (`ImuStatus::inject`).
 pub mod inject_state {
@@ -28,6 +31,9 @@ pub enum Mode {
     /// The data-ready signal is not seen for 200 ms while the chip keeps producing.
     #[cfg(feature = "inject-imu1-missed-edge")]
     MissedEdge,
+    /// One verify step answers "mismatch" (once).
+    #[cfg(feature = "inject-imu2-verify")]
+    VerifyMismatch,
 }
 
 pub struct Inject<A> {
@@ -128,8 +134,31 @@ impl<A: ImuAdapter> ImuAdapter for Inject<A> {
         self.inner.status().await
     }
 
-    async fn verify(&mut self) -> Result<(), VerifyError> {
-        self.inner.verify().await
+    async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError> {
+        let result = self.inner.verify_step().await;
+        #[cfg(feature = "inject-imu2-verify")]
+        if self.mode == Mode::VerifyMismatch {
+            let now = crate::now_us();
+            if self.state == inject_state::ACTIVE {
+                self.set(inject_state::DONE, now);
+            } else if self.due(now) {
+                self.set(inject_state::ACTIVE, now);
+                return Err(VerifyError::Mismatch);
+            }
+        }
+        result
+    }
+
+    fn verify_every(&self) -> u32 {
+        self.inner.verify_every()
+    }
+
+    fn data_waiting(&mut self) -> bool {
+        #[cfg(feature = "inject-imu1-missed-edge")]
+        if self.mode == Mode::MissedEdge && self.state == inject_state::ACTIVE {
+            return false;
+        }
+        self.inner.data_waiting()
     }
 
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
@@ -158,7 +187,7 @@ impl<A: ImuAdapter> ImuAdapter for Inject<A> {
         (self.state, self.since_us)
     }
 
-    fn latency(&self) -> (u32, u32) {
+    fn latency(&self) -> Latency {
         self.inner.latency()
     }
 }
