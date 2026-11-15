@@ -98,16 +98,15 @@ Its values go to the station as SCALED_IMU2 (116) at 25 Hz: milli-g, milli-rad/s
 as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
-Measured with both IMUs on the flight core and the yield rule (2026-11-15, 10-minute clean run, log
-`marv-v2-firmware-20261115-112357.log`): five rows Ok throughout, 0 transitions after the start, 0 errors,
-timeouts, missed edges and recoveries, delay count after the start 0, watchdog stalls begun 0. IMU1 802.30
-samples/s, IMU2 800.65 samples/s (10 s to 600 s; the bench measured 800.664 Hz). NOT met: IMU1 had 623 gaps
-over 1.5 P at 600 s, 599 of them across its own `verify` (one per `verify`: with every wait and transaction
-yielding, its `verify` takes 2.2 to 5.3 ms, about 2 to 2.8 ms also while IMU2 is parked, longer than P, and
-the loop reads only one waiting sample after it), largest gap 6148 us; IMU2 103 (60 across its own `verify`,
-630 to 4290 us), largest 4433 us. Longest run without a yield: IMU1 859 us, IMU2 705 us (all-time maxima, not
-explained by one transaction). Before the yield rule: IMU1 87 gaps (48 across its `verify`), 2682 us, 803.52/s;
-IMU2 482 gaps, 4239 us, 800.42/s. Open for the lead.
+Measured with both IMUs and the incremental verify (2026-11-15, 10-minute clean run, log
+`marv-v2-firmware-20261115-114930.log`): five rows Ok throughout, 0 transitions after the start, 0 errors,
+timeouts, missed edges and recoveries, delay count after the start 0, watchdog stalls begun 0. IMU1 803.52
+samples/s (its own rate: nothing lost), largest gap 2442 us, 110 gaps over 1.5 P (10 across a step), steps 134
+to 946 us, 608 passes; IMU2 800.48 samples/s (bench 800.664 Hz), largest gap 3410 us, 1066 gaps over 1.5 P (79
+across a step), steps 84 to 489 us, 600 passes. NOT met: gaps over 1.5 P = 0. The longest poll without a
+yield is 1.06 to 2.56 ms (IMU1) and 0.63 to 1.36 ms (IMU2) in EVERY 10 s window, with single-register steps,
+so it is not `verify`; while IMU2 was parked IMU1 had no new gap but still polls of about 1 ms. Open for the
+lead (suspects in the report of the IMU2 packet).
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
