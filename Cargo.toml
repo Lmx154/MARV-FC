@@ -1,6 +1,6 @@
 [package]
 name = "marv-v2-firmware"
-description = "MARV V2 flight-controller firmware: today a skeleton that proves the device drivers link."
+description = "MARV V2 flight-controller firmware: today the two-core skeleton (a MAVLink node on USB on core 0, the liveness answer on core 1)."
 version = "0.1.0"
 edition = "2024"
 publish = false
@@ -26,6 +26,15 @@ pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "d078048
 qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "591ca04501144fa40b66ed17262df836f258c076", features = ["rp2350", "defmt"] }
 ws2812c = { git = "https://github.com/Lmx154/ws2812c-rs.git", rev = "831c70b527a87bba9e63969d3c5632cf8a7ac892", features = ["defmt", "embassy-rp"] }
 
+# The firmware's own crates: the hardware-free logic and the flight-core tasks.
+fw-core = { path = "crates/fw-core" }
+fw-flight = { path = "crates/fw-flight" }
+# The USB byte pipe and the MAVLink device layer, pinned to a commit of their `main` (change `rev`,
+# then `cargo update -p <crate>`). mavlink-device has the same `rev` as in crates/fw-core/Cargo.toml,
+# so there is one copy of it.
+usb-cdc = { git = "https://github.com/Lmx154/usb-cdc.git", rev = "47cb09087d517b6813e3211e742d9d7d5ff9e379", features = ["defmt"] }
+mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c", features = ["defmt"] }
+
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }
 embassy-rp = { version = "0.10.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl", "rp235xb", "binary-info"] }
@@ -35,8 +44,17 @@ defmt-rtt = "1.0.0"
 cortex-m = { version = "0.7", features = ["inline-asm"] }
 cortex-m-rt = "0.7"
 critical-section = "1.1"
+embassy-sync = "0.8.0"
+embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt"] }
+embedded-io-async = "0.7"
+embassy-futures = "0.1.2"
+static_cell = "2.1.1"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 semihosting = "0.1"
+
+[features]
+# NEGATIVE CONTROL: core 1 is started but its liveness task is not spawned, so PONG never follows PING.
+no-fbeat = []
 
 [profile.release]
 debug = true
