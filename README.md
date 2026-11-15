@@ -2,7 +2,8 @@
 
 Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
-Today this repository is a skeleton. Its single binary starts embassy, prints the name of one public
+Today the binary is a skeleton and the foundation's hardware-free logic is in `crates/fw-core`
+(see Workspace). The single binary starts embassy, prints the name of one public
 type from each device driver to prove the driver is linked, prints `alive`, and exits through
 semihosting with a pass verdict. It touches no bus and no sensor and has no flight functionality.
 
@@ -52,9 +53,23 @@ crates/fw-core      pure no_std logic and the lock-free cross-core cells, tested
 crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core only
 ```
 
-`fw-core` and `fw-flight` are empty skeletons for the foundation layer: they hold module files with
-doc comments only, and nothing is implemented yet. `fw-flight` must not depend on `embassy-time`,
-`embassy-sync` or `defmt`; check it with
+`fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
+the host (126 tests); nothing in it has run on the board yet, and the firmware binary does not use
+it yet. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+
+| Module | What it is |
+|---|---|
+| `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake). The only module with `unsafe`. Tested with two host threads over 10^7 writes; statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
+| `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
+| `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |
+| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. No real parameter table yet |
+| `record` | The settings record for the two 4 KB flash sectors of the `SETTINGS` region: "MRVS", sequence, 24-byte entries, CRC-32; the choice of the current sector at boot |
+| `scratch` | The watchdog's record in four scratch registers (layout version 2) |
+| `admission` | What happens to a MAVLink command: classification of 241, 245, 246 and the project's 42430, the admission order, and the books of the one long action with its progress and its single final acknowledgement |
+| `sys_status` | From the device rows to SYS_STATUS's three masks, the HEARTBEAT state and the `MARV_DEVICE_STATUS` row |
+
+`fw-flight` is still an empty skeleton (module files with doc comments only). It must not depend on
+`embassy-time`, `embassy-sync` or `defmt`; check it with
 `cargo tree -p fw-flight -e normal --depth 1 | grep -cE 'embassy-time|embassy-sync|defmt'` (prints 0).
 
 `.cargo/config.toml` sets the board target for the whole workspace, so the two commands are:
