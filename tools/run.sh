@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # Builds the firmware, flashes it through the debug probe, runs it, and prints its report lines.
-# The exit status is the firmware's verdict: 0 pass, 1 fail; a timeout or a crash gives another
-# status. The full log is kept under logs/.
+# The firmware runs until the timeout ends it: exit status 124 is the normal end; the verdict is in
+# the [PASS]/[FAIL] lines. A crash gives another status. The full log is kept under logs/.
 #
-# Usage: tools/run.sh [timeout_seconds, default 120]
+# Usage: [FEATURES=<cargo features>] tools/run.sh [timeout_seconds, default 120]
+#   FEATURES=no-fbeat tools/run.sh 30    # the negative control (see README)
 set -u
 tmo="${1:-120}"
 bin="marv-v2-firmware"
 cd "$(dirname "$0")/.." || exit 1
 
-cargo build --release --bin "$bin" || exit $?
+cargo build --release --bin "$bin" ${FEATURES:+--features "$FEATURES"} || exit $?
 
 mkdir -p logs
 log="logs/${bin}-$(date +%Y%m%d-%H%M%S).log"
