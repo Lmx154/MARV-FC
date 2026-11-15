@@ -8,6 +8,11 @@
 //!   action that may run at a time, firmware-wide. The firmware passes `armed`, `hil`, the link id and
 //!   `now_ms` as plain values, executes the action itself, and reports progress and the result back.
 //!
+//! The calibrations are `MAV_CMD_PREFLIGHT_CALIBRATION` (241): param1 = 1 the gyroscope, param5 = 4 the
+//! accelerometer (each ends FAILED after [`CALIBRATION_MAX_MS`]), param2 = 1 the compass (the user rotates
+//! the vehicle for 30 s; it ends FAILED after [`MAG_CALIBRATION_MAX_MS`]); each only with every other
+//! parameter zero. The all-zero 241 cancels the running calibration.
+//!
 //! The ACKs of a long action: the answer to the command is IN_PROGRESS (0 %); later
 //! [`ActionBook::next_ack`] hands out IN_PROGRESS with the percentage at 2 Hz, then the one final ACK,
 //! both only for the link the command came from.
@@ -15,8 +20,10 @@
 use mavlink_device::marv::{MarvDevice, MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
 
-/// Maximum duration of a calibration, in milliseconds.
+/// Maximum duration of a gyroscope or accelerometer calibration, in milliseconds.
 pub const CALIBRATION_MAX_MS: u64 = 15_000;
+/// Maximum duration of the compass calibration, in milliseconds (the user rotates the vehicle for 30 s).
+pub const MAG_CALIBRATION_MAX_MS: u64 = 40_000;
 /// Maximum duration of a storage action, in milliseconds.
 pub const STORAGE_MAX_MS: u64 = 3_000;
 /// Maximum duration of a device action (restart, self-test), in milliseconds.
@@ -36,6 +43,9 @@ pub enum Action {
     GyroCalibration,
     /// One-position accelerometer calibration (`PREFLIGHT_CALIBRATION` param5 = 4).
     AccelCalibration,
+    /// Compass (magnetometer) calibration (`PREFLIGHT_CALIBRATION` param2 = 1); at most
+    /// [`MAG_CALIBRATION_MAX_MS`].
+    MagCalibration,
     /// Reload the parameters from flash (`PREFLIGHT_STORAGE` param1 = 0).
     StorageReload,
     /// Save the parameters now (`PREFLIGHT_STORAGE` param1 = 1).
@@ -69,7 +79,9 @@ impl Action {
     /// The class of the action.
     pub const fn class(self) -> ActionClass {
         match self {
-            Self::GyroCalibration | Self::AccelCalibration => ActionClass::Calibration,
+            Self::GyroCalibration | Self::AccelCalibration | Self::MagCalibration => {
+                ActionClass::Calibration
+            }
             Self::StorageReload
             | Self::StorageSave
             | Self::StorageDefaultsAll
@@ -79,10 +91,14 @@ impl Action {
         }
     }
 
-    /// The time after which a running action ends FAILED by itself, in milliseconds.
+    /// The time after which a running action ends FAILED by itself, in milliseconds: the compass
+    /// calibration has [`MAG_CALIBRATION_MAX_MS`], the other calibrations [`CALIBRATION_MAX_MS`].
     pub const fn max_duration_ms(self) -> u64 {
         match self.class() {
-            ActionClass::Calibration => CALIBRATION_MAX_MS,
+            ActionClass::Calibration => match self {
+                Self::MagCalibration => MAG_CALIBRATION_MAX_MS,
+                _ => CALIBRATION_MAX_MS,
+            },
             ActionClass::Storage => STORAGE_MAX_MS,
             ActionClass::Reboot => REBOOT_MAX_MS,
             ActionClass::Device => DEVICE_MAX_MS,
@@ -131,6 +147,8 @@ fn classify_calibration(params: &[f32; 7]) -> Result<Classified, Refusal> {
         Ok(Classified::CancelCalibration)
     } else if only(params, 0, 1.0) {
         Ok(Classified::Long(Action::GyroCalibration))
+    } else if only(params, 1, 1.0) {
+        Ok(Classified::Long(Action::MagCalibration))
     } else if only(params, 4, 4.0) {
         Ok(Classified::Long(Action::AccelCalibration))
     } else {
@@ -516,6 +534,7 @@ mod tests {
         let table: Vec<(MavCmd, [f32; 7], Result<Classified, Refusal>)> = std::vec![
             (CAL, p(&[(0, 1.0)]), long(GyroCalibration)),
             (CAL, p(&[(4, 4.0)]), long(AccelCalibration)),
+            (CAL, p(&[(1, 1.0)]), long(MagCalibration)),
             (CAL, [0.0; 7], Ok(Classified::CancelCalibration)),
             (CAL, [-0.0; 7], Ok(Classified::CancelCalibration)),
             (STO, p(&[(0, 0.0)]), long(StorageReload)),
@@ -547,6 +566,11 @@ mod tests {
             (CAL, p(&[(0, 1.0), (4, 4.0)])),
             (CAL, p(&[(0, 1.0), (1, 1.0)])),
             (CAL, p(&[(4, 3.0)])),
+            (CAL, p(&[(1, 2.0)])),
+            (CAL, p(&[(1, 1.5)])),
+            (CAL, p(&[(1, nan)])),
+            (CAL, p(&[(0, 1.0), (1, 1.0)])),
+            (CAL, p(&[(1, 1.0), (4, 4.0)])),
             (CAL, p(&[(0, nan)])),
             (CAL, p(&[(6, 1.0)])),
             (STO, p(&[(0, 5.0)])),
@@ -580,6 +604,8 @@ mod tests {
             assert!(is_denied(classify(cmd, &params)), "{cmd:?} {params:?}");
         }
         assert_eq!(classify(CAL, &p(&[(0, 2.0)])), not_yet());
+        assert_eq!(classify(CAL, &p(&[(0, 1.0), (1, 1.0)])), not_yet());
+        assert_eq!(classify(CAL, &p(&[(1, 1.0), (4, 4.0)])), not_yet());
         assert_eq!(classify(DEV, &dev(7.0, 1.0)), not_yet());
         assert_eq!(classify(DEV, &dev(3.0, 2.0)), not_yet());
         assert_eq!(
@@ -594,6 +620,7 @@ mod tests {
 
     const GYRO: [f32; 7] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
     const SAVE: [f32; 7] = [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    const MAG: [f32; 7] = [0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0];
 
     fn admit(b: &mut ActionBook, r: &CommandRequest, armed: bool, hil: bool, now: u64) -> Decision {
         b.admit(r, 0, armed, hil, now)
@@ -630,6 +657,65 @@ mod tests {
         assert_eq!(b.running(), None);
         let d = admit(&mut b, &req(STO, SAVE, GCS), false, true, 0);
         assert_eq!(d.effect, Effect::Start(Action::StorageSave));
+    }
+
+    #[test]
+    fn mag_calibration_admission() {
+        // Idle and not armed: admitted.
+        let mut b = ActionBook::new();
+        let d = admit(&mut b, &req(CAL, MAG, GCS), false, false, 0);
+        assert_eq!(d.outcome, CommandOutcome::in_progress(0));
+        assert_eq!(d.effect, Effect::Start(Action::MagCalibration));
+        assert_eq!(b.running(), Some(Action::MagCalibration));
+        // Armed: TEMPORARILY_REJECTED, nothing starts.
+        let mut b = ActionBook::new();
+        let d = admit(&mut b, &req(CAL, MAG, GCS), true, false, 0);
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+        assert_eq!(d.effect, Effect::None);
+        assert_eq!(b.running(), None);
+        // Another action runs: TEMPORARILY_REJECTED.
+        admit(&mut b, &req(STO, SAVE, GCS), false, false, 0);
+        let d = admit(&mut b, &req(CAL, MAG, OTHER), false, false, 10);
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+        assert_eq!(b.running(), Some(Action::StorageSave));
+        // HIL: DENIED.
+        let mut b = ActionBook::new();
+        let d = admit(&mut b, &req(CAL, MAG, GCS), false, true, 0);
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
+        assert_eq!(d.text, Some("calibration not allowed in HIL"));
+        assert_eq!(d.effect, Effect::None);
+        assert_eq!(b.running(), None);
+        // A retransmission from the same sender is IN_PROGRESS; another sender is rejected.
+        let mut b = ActionBook::new();
+        let r = req(CAL, MAG, GCS);
+        admit(&mut b, &r, false, false, 0);
+        b.set_progress(100, 17);
+        let d = admit(&mut b, &r, false, false, 200);
+        assert_eq!(d.outcome, CommandOutcome::in_progress(17));
+        assert_eq!(d.effect, Effect::None);
+        let d = admit(&mut b, &req(CAL, MAG, OTHER), false, false, 200);
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+        // The all-zero 241 cancels it: one final CANCELLED, on the origin link only.
+        let mut b = ActionBook::new();
+        b.admit(&req(CAL, MAG, GCS), 1, false, false, 0);
+        let d = admit(&mut b, &req(CAL, [0.0; 7], OTHER), false, false, 5_000);
+        assert_eq!(
+            d.outcome,
+            CommandOutcome::new(MavResult::MAV_RESULT_ACCEPTED)
+        );
+        assert_eq!(d.effect, Effect::CancelCalibration);
+        assert_eq!(b.running(), None);
+        assert_eq!(b.next_ack(0, 5_001), None);
+        assert_eq!(
+            b.next_ack(1, 5_001),
+            Some(LateAck {
+                command: CAL,
+                target: GCS,
+                outcome: CommandOutcome::new(MavResult::MAV_RESULT_CANCELLED),
+            })
+        );
+        assert_eq!(b.next_ack(1, 5_002), None);
+        assert_eq!(b.next_ack(1, 60_000), None);
     }
 
     #[test]
@@ -737,9 +823,10 @@ mod tests {
 
     #[test]
     fn timeouts_are_exact() {
-        let cases: [(MavCmd, [f32; 7], u64); 7] = [
+        let cases: [(MavCmd, [f32; 7], u64); 8] = [
             (CAL, GYRO, 15_000),
             (CAL, p(&[(4, 4.0)]), 15_000),
+            (CAL, MAG, 40_000),
             (STO, SAVE, 3_000),
             (STO, p(&[(0, 2.0)]), 3_000),
             (DEV, dev(1.0, 1.0), 5_000),
@@ -936,8 +1023,9 @@ mod tests {
     fn run_sequence(src: &mut dyn Source, seed: u64) -> Result<u32, String> {
         let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
         let senders = [GCS, OTHER];
-        let cmds: [(MavCmd, [f32; 7]); 7] = [
+        let cmds: [(MavCmd, [f32; 7]); 8] = [
             (CAL, GYRO),
+            (CAL, MAG),
             (STO, SAVE),
             (REB, p(&[(0, 1.0)])),
             (CAL, [0.0; 7]),
@@ -989,7 +1077,7 @@ mod tests {
         for _ in 0..steps {
             match rng.below(8) {
                 0 | 1 => {
-                    let (cmd, params) = cmds[rng.below(7) as usize];
+                    let (cmd, params) = cmds[rng.below(8) as usize];
                     let sender = senders[rng.below(2) as usize];
                     let link = rng.below(2) as u8;
                     let (armed, hil) = (rng.below(8) == 0, rng.below(6) == 0);
