@@ -29,6 +29,7 @@ pub mod params;
 pub mod record;
 pub mod scratch;
 pub mod sys_status;
+pub mod watchdog;
 pub mod xcore;
 
 #[cfg(test)]
