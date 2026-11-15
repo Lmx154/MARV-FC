@@ -63,7 +63,7 @@ read) read with every sample so that the status read after a late CHECK sees a f
 the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
 temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the magnetometer's field in gauss (1 G = 100 uT) as `xmag`, `ymag`, `zmag` with their `fields_updated` bits
 set only while the latest MAG sample is younger than 1 s (the same rule for the IMU1 fields: NaN and clear bits when older; SCALED_PRESSURE is not sent when its sample is older than 1 s); the barometer's as SCALED_PRESSURE at 25 Hz. SYS_STATUS carries
-`voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample (65535 and -1, MAVLink's "unknown", while there is none);
+`voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample while it is younger than 1 s (65535 and -1, MAVLink's "unknown", while there is none or it is older);
 `battery_remaining` stays -1.
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
