@@ -52,7 +52,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into IMU1's registry row each tick and logs and texts its events; while IMU1 is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(9 tests).
+(10 tests).
 
 IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock (as `icm45686_smoke` ran
 it on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
@@ -372,7 +372,7 @@ board.
   and `SAVE_EPOCH`, and feeds while both heartbeats changed less than 200 ms ago. No device task feeds it.
 - At 200 ms of stall it writes the scratch record once (STALL_CORE0 or STALL_FLIGHT, the task that ran last
   on that core from `RUNNING0` / `RUNNING1`, the stall's age, the uptime) and stops feeding: the board resets
-  1.65 to 1.8 s after the stall began. A stall that ends first clears the record; the supervisor logs it
+  1.65 to 1.8 s after the stall began. A stall that ends first clears the record (not while a reboot is pending: that record is the REQUESTED one); the supervisor logs it
   afterwards and, when it reached 500 ms, sends one WARNING text "core 0 stalled 1.0 s (BARO)". The check
   after a flash save (`SAVE_EPOCH` changed) never starts a stall.
 - What resets the board: core 0's thread-mode executor held (a task that never yields), the flight core held,
@@ -381,7 +381,7 @@ board.
   that fails (its health goes to Failed, the executor runs on), a flash save (about 45 ms), a stall shorter
   than about 1.6 s.
 - Task ids (one table, `fw_core::watchdog::task`, used by the record and the boot report): core 0 MAIN, USB,
-  LINK, SUPERVISOR, BEAT, ACTION (a command's action inside the link task), SETTINGS, BARO, TEST (a check
+  LINK, SUPERVISOR, BEAT, ACTION (a command's action inside the link task, so a settings save or reload runs under it), BARO, TEST (a check
   feature's task); flight core FBEAT, IMU1. Each task stores its id when it resumes (`fw_flight::tagged`, a
   plain atomic store on every poll).
 - The boot report, read once at start (then the record's magic is cleared), one `[INFO] boot report` log line
@@ -442,7 +442,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (127 tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (141 tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
