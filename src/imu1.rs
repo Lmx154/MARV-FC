@@ -21,8 +21,15 @@ use icm45686::{
     AccelFullScale, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config, Odr,
 };
 
-bind_interrupts!(struct Irqs {
+#[cfg(not(feature = "f4-negative"))]
+bind_interrupts!(pub struct Irqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
+});
+// One `DMA_IRQ_0` binding per program: the negative control's channel 2 on core 0 is bound here too.
+#[cfg(feature = "f4-negative")]
+bind_interrupts!(pub struct Irqs {
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>,
+        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
 });
 
 /// The cells between core 0 and the IMU1 task.

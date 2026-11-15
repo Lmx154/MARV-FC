@@ -578,11 +578,6 @@ async fn stall() {
     );
 }
 
-#[cfg(feature = "f4-negative")]
-bind_interrupts!(struct Irqs0Dma {
-    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
-});
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -609,7 +604,7 @@ async fn main(spawner: Spawner) {
     // F4: all DMA channels share DMA_IRQ_0, which belongs to the flight core.
     interrupt::DMA_IRQ_0.disable();
     #[cfg(feature = "f4-negative")]
-    let _channel = embassy_rp::dma::Channel::new(p.DMA_CH2, Irqs0Dma);
+    let _channel = embassy_rp::dma::Channel::new(p.DMA_CH2, imu1::Irqs);
     let dma_irq0_on = interrupt::DMA_IRQ_0.is_enabled();
     check(
         !dma_irq0_on,
