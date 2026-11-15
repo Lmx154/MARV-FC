@@ -587,20 +587,28 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 
 ## Radio (ELRS receiver, `rc-port`)
 
-`src/rc.rs`, task `rc_link` (watchdog id RC = 13) on core 0's thread-mode executor: UART0 as `BufferedUart`
+`src/rc.rs`, task `rc_link` (watchdog id RC = 13) alone on core 0's `SWI_IRQ_0` interrupt executor at
+priority P3 (0xC0, embassy-rp's lowest level: below the hardware interrupts at P0 and the watchdog monitor's
+`SWI_IRQ_1` at P1, above thread mode): UART0 as `BufferedUart`
 (interrupt driven, `UART0_IRQ`, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pad's pull-up turned
 on after the UART is built (embassy-rp 0.10 leaves it without a pull; the start line logs pull-up, pull-down
 and the line level). `rc-port` (`5d5f6bd`) follows the receiver between CRSF (420000) and MAVLink (460800)
-by itself; it carries the radio's MAVLink node (system 1, component 1, link 1). The bench (`rc_link.rs`)
-ran the port on the `SWI_IRQ_0` interrupt executor so that no thread-mode task could delay its reads;
-here it runs in thread mode and the UART error counters (overrun included) are in the `[STAT] RC:` line:
-whether to move it is decided after a radio-on run.
+by itself; it carries the radio's MAVLink node (system 1, component 1, link 1). Everything the task
+shares with thread mode (the parameter store, the action book, the text ring, the rows, the settings
+storage) is a critical-section mutex or an atomic, none held across an await. Its watchdog id is stored
+at the start of each of its polls and the preempted task's id put back at the end (`rc::preempting`), so
+a stall inside its poll is recorded as RC and the interrupted thread-mode task keeps its own id.
+UART overruns (in `[STAT] RC:`): 5 in 300 s in thread mode, 7 in 300 s on `SWI_IRQ_0` (2026-11-15, radio
+on, MAVLink): the executor did not remove them (cause not found yet).
 
 The RC row (`MARV_DEVICE_STATUS` device 7, SYS_STATUS RC_RECEIVER) is REPORT ONLY: no health machine,
-no recovery (`rc-port` recovers by itself), `device restart RC` is DENIED. State: locked on CRSF or
-MAVLink = OK; searching = STARTING until the first lock since boot, DEGRADED after a lock was lost.
-`present` = locked at least once since boot; `enabled` = the state mapping of `fw_core::sys_status`;
-`health` = locked. `samples` = stick reports + RADIO_STATUS reports, `last_sample_age_ms` from the
+no recovery (`rc-port` recovers by itself), `device restart RC` is DENIED. The row means "the radio link
+is up" (`fw_core::rc::verdict`, host-tested table): CRSF lock with a stick report younger than 1 s = OK;
+MAVLink lock with a RADIO_STATUS younger than 1 s whose `rssi` is above 0 = OK (the receiver goes on
+sending RADIO_STATUS with `rssi` 0 while the transmitter is off); either lock otherwise = DEGRADED,
+last error TIMEOUT; searching = STARTING until the first lock since boot, DEGRADED after. `present` =
+locked at least once since boot; `enabled` = the state mapping of `fw_core::sys_status`; `health` = the
+radio link is up. `samples` = stick reports + RADIO_STATUS reports, `last_sample_age_ms` from the
 newer of the two, `errors` = CRC + UART errors, `timeouts` = lock losses. The row is in both links'
 device rotation; it is not in the supervised registry (`device::DEVICES`).
 
@@ -631,8 +639,17 @@ link took them; the worst case of all boot texts is about 14, so the skip and pe
 ordinary texts); a link that is down holds back nobody; the 300 ms "text before ACK" hold is per link.
 
 Not built: any use of the sticks, arming, failsafe, a rule about which link has authority or what a
-mode change means. Not yet run: anything with the transmitter switched off and on in each mode, the
-radio link seen from a ground station, UART overruns under traffic in each mode.
+mode change means.
+
+Seen on 2026-11-15, transmitter on in its MAVLink model, ground station on the transmitter backpack's
+WiFi (UDP 14550): the port locked on MAVLink at start and held 300 s (100 stick reports and 90
+RADIO_STATUS per second, `rssi` 254, `txbuf` 100, slowdown 0, row OK, link up, health bit set);
+`marv-link-test` over the air, 30 s: HEARTBEAT 30, SYS_STATUS 30, MARV_DEVICE_STATUS 30, GPS_RAW_INT 15,
+nothing else, 0 lost, 133.9 B/s; `devices --for 10` showed all 7 rows; `param set` over UDP refused by
+the station ("this link is operate-only", status 4, no write on the board); `param list` over UDP got all
+25 within 60 s; a text reached both links once; a USB gyro calibration with the radio up kept its text
+before its ACK. Not yet run: anything in CRSF mode, the transmitter switched off in either mode, a
+command over the radio.
 
 ## Device drivers
 
