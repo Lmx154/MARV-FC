@@ -5,7 +5,7 @@
 //! Built: restart of the barometer, parameters to defaults (all, calibration). Every other action
 //! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
-use core::cell::RefCell;
+use core::cell::{Cell, RefCell};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -14,7 +14,7 @@ use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::{MarvDevice, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck};
 
-use crate::device::{BARO, DEVICES, RESTART_FAILED, RESTART_OK, raise_apply};
+use crate::device::{BARO, raise_apply};
 use crate::store;
 
 /// The link id of USB in the books.
@@ -22,6 +22,10 @@ const USB: u8 = 0;
 
 static BOOK: Mutex<CriticalSectionRawMutex, RefCell<ActionBook>> =
     Mutex::new(RefCell::new(ActionBook::new()));
+
+/// The number of the restart request the running `DeviceRestart(BARO)` action raised: the action
+/// ends only on that request's outcome (`Device::restart_outcome`), never on an older one.
+static RESTART_NUMBER: Mutex<CriticalSectionRawMutex, Cell<u32>> = Mutex::new(Cell::new(0));
 
 fn result_name(result: MavResult) -> &'static str {
     match result {
@@ -101,7 +105,10 @@ pub fn link_lost() {
 
 fn start(action: Action, now_ms: u64) {
     match action {
-        Action::DeviceRestart(MarvDevice::MARV_DEVICE_BARO) => BARO.request_restart(),
+        Action::DeviceRestart(MarvDevice::MARV_DEVICE_BARO) => {
+            let number = BARO.request_restart();
+            RESTART_NUMBER.lock(|n| n.set(number));
+        }
         Action::StorageDefaultsAll => defaults(false, now_ms),
         Action::StorageDefaultsCalibration => defaults(true, now_ms),
         other => {
@@ -114,8 +121,9 @@ fn start(action: Action, now_ms: u64) {
     }
 }
 
-/// Parameters to their defaults; the devices whose values changed get their APPLY. Ends when every
-/// device has carried out its apply (the supervisor's `tick` sees that), at once if none is owed.
+/// Parameters to their defaults; the devices whose values changed get their APPLY request. Ends
+/// ACCEPTED as soon as the store is reset and the requests are raised: it does not wait for the
+/// applies (a device that is not Ok picks the values up when it is restarted).
 fn defaults(calibration_only: bool, now_ms: u64) {
     let action = if calibration_only {
         Action::StorageDefaultsCalibration
@@ -141,9 +149,7 @@ fn defaults(calibration_only: bool, now_ms: u64) {
         live
     );
     raise_apply(configure);
-    if configure == 0 {
-        end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
-    }
+    end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
 }
 
 fn end(now_ms: u64, action: Action, result: MavResult) {
@@ -156,7 +162,7 @@ fn end(now_ms: u64, action: Action, result: MavResult) {
     }
 }
 
-/// Every supervisor tick: the books' time limit, and the end of the running action.
+/// Every supervisor tick: the books' time limit, and the end of the running restart action.
 pub fn tick(now_ms: u64) {
     let (timed_out, running) = BOOK.lock(|b| {
         let mut book = b.borrow_mut();
@@ -169,21 +175,13 @@ pub fn tick(now_ms: u64) {
             action.max_duration_ms()
         );
     }
-    match running {
-        Some(action @ Action::DeviceRestart(MarvDevice::MARV_DEVICE_BARO)) => {
-            let result = match BARO.restart_state() {
-                RESTART_OK => MavResult::MAV_RESULT_ACCEPTED,
-                RESTART_FAILED => MavResult::MAV_RESULT_FAILED,
-                _ => return,
-            };
-            BARO.clear_restart_state();
-            end(now_ms, action, result);
-        }
-        Some(action @ (Action::StorageDefaultsAll | Action::StorageDefaultsCalibration))
-            if DEVICES.iter().all(|d| !d.apply_pending()) =>
-        {
-            end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
-        }
-        _ => {}
+    if let Some(action @ Action::DeviceRestart(MarvDevice::MARV_DEVICE_BARO)) = running {
+        let number = RESTART_NUMBER.lock(Cell::get);
+        let result = match BARO.restart_outcome(number) {
+            Some(true) => MavResult::MAV_RESULT_ACCEPTED,
+            Some(false) => MavResult::MAV_RESULT_FAILED,
+            None => return,
+        };
+        end(now_ms, action, result);
     }
 }

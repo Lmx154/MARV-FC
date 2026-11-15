@@ -7,7 +7,7 @@ publish = false
 license = "MIT"
 
 [workspace]
-members = ["crates/fw-core", "crates/fw-flight"]
+members = ["crates/fw-core", "crates/fw-flight", "crates/fw-settings"]
 resolver = "3"
 
 [dependencies]
@@ -29,6 +29,7 @@ ws2812c = { git = "https://github.com/Lmx154/ws2812c-rs.git", rev = "831c70b527a
 # The firmware's own crates: the hardware-free logic and the flight-core tasks.
 fw-core = { path = "crates/fw-core" }
 fw-flight = { path = "crates/fw-flight" }
+fw-settings = { path = "crates/fw-settings" }
 # The USB byte pipe and the MAVLink device layer, pinned to a commit of their `main` (change `rev`,
 # then `cargo update -p <crate>`). mavlink-device has the same `rev` as in crates/fw-core/Cargo.toml,
 # so there is one copy of it.

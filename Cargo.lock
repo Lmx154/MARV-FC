@@ -738,6 +738,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "fw-settings"
+version = "0.1.0"
+dependencies = [
+ "bmp581",
+ "fw-core",
+ "mavlink-device",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -971,6 +980,7 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "fw-core",
  "fw-flight",
+ "fw-settings",
  "icm45686",
  "lc76g",
  "lsm6dsk320x",

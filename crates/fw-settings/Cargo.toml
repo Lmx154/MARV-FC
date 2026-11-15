@@ -1,0 +1,15 @@
+[package]
+name = "fw-settings"
+version = "0.1.0"
+edition = "2024"
+publish = false
+license = "MIT"
+description = "MARV V2 firmware settings: per device, the parameter table and the pure rule that turns the parameters into the driver's configuration. No hardware, tested on the host."
+rust-version = "1.99"
+
+[dependencies]
+fw-core = { path = "../fw-core" }
+# The driver's `Config` types, at the same commit as the binary's (without its `defmt` feature).
+bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca9493e5dddd3d019a23b6d05395b" }
+# `MarvDevice` (the device ids of the parameter tables); the same commit as fw-core's.
+mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c" }

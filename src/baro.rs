@@ -10,7 +10,7 @@ use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::{Delay, Duration, block_for};
 use fw_core::health::{ErrorKind, Limits};
 
-pub mod settings;
+pub use fw_settings::baro as settings;
 
 use crate::device::{
     AdapterCounters, BARO, DeviceAdapter, Pending, Reading, StartFailure, VerifyError, run_device,

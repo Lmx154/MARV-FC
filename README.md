@@ -122,7 +122,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The first real parameter table (`src/baro/settings.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The first real parameter table (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -135,9 +135,9 @@ before:
 | `BARO_IIR_T` | 0 | 0 to 127 | temperature IIR filter coefficient, the same values |
 
 A write is checked before it is stored. The range check is the store's (`fw_core::params`: out of
-`[min, max]` is refused, not clamped). Then the validator (`baro::settings::validate`, installed with
+`[min, max]` is refused, not clamped). Then the validator (`fw_settings::baro::validate`, installed with
 `Params::set_validator`) builds the device's whole candidate `Config` with the pure
-`baro::settings::settings_to_config` (the candidate values: the stored ones with the proposed one in place of
+`fw_settings::baro::settings_to_config` (the candidate values: the stored ones with the proposed one in place of
 its own) and refuses the write if that fails: a value the chip does not offer (the rate not in the list,
 an oversampling that is not a power of two, a coefficient not in the list), or a combination the driver's own
 `Config::validate` refuses (the rate above what the oversampling allows in normal mode, the driver's
@@ -169,8 +169,8 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 
 | Command (`marv-cli`) | What it does today |
 |---|---|
-| `device restart BARO` | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); progress stays 0 |
-| `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY; ACCEPTED when the applies have been carried out, at once when nothing changed |
+| `device restart BARO` | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
+| `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
 | `device restart <other device>`, `param save`, `param reload`, `reboot --yes`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet", "save: not built yet"). No fake success |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
@@ -230,12 +230,13 @@ back on the board.
 
 ## Workspace
 
-The repository is a Cargo workspace with three members:
+The repository is a Cargo workspace with four members:
 
 ```
 .                   the firmware binary (package marv-v2-firmware, the workspace root package)
 crates/fw-core      pure no_std logic and the lock-free cross-core cells, tested on the host
 crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core only
+crates/fw-settings  per device, the parameter table and the pure settings-to-configuration rule; depends on fw-core and the driver crates
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
@@ -246,11 +247,20 @@ the host (127 tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `pa
 | `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake). The only module with `unsafe`. Tested with two host threads over 10^7 writes; statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
 | `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
 | `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |
-| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The table is the firmware's (`src/baro/settings.rs`) |
+| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The table is the firmware's (`crates/fw-settings/src/baro.rs`) |
 | `record` | The settings record for the two 4 KB flash sectors of the `SETTINGS` region: "MRVS", sequence, 24-byte entries, CRC-32; the choice of the current sector at boot |
 | `scratch` | The watchdog's record in four scratch registers (layout version 2) |
 | `admission` | What happens to a MAVLink command: classification of 241, 245, 246 and the project's 42430, the admission order, and the books of the one long action with its progress and its single final acknowledgement |
 | `sys_status` | From the device rows to SYS_STATUS's three masks, the HEARTBEAT state and the `MARV_DEVICE_STATUS` row |
+
+`fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
+`settings_to_config` with its validator (today `baro`, over the `bmp581` driver's `Config`, without the
+driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
+the host with `cargo host-test -p fw-settings` (6 tests: defaults equal `Config::new()` and P = 19 978 us,
+every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
+`Params::new` with every default passing the validator, every offered value of every parameter accepted or
+refused only by the rate-against-oversampling rule with the refused sets listed, and the real store
+refusing before storing); it also builds for the board (`cargo build -p fw-settings --release`).
 
 `fw-flight` holds the flight core's liveness answer (`liveness`: waits on a `Kick`, copies `PING` into
 `PONG`); its `imu` module is still empty. It must not depend on

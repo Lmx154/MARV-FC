@@ -172,27 +172,17 @@ pub struct Device {
     pub stuck: AtomicBool,
     /// The requests raised for the task (`REQ_APPLY`, `REQ_RESTART`); the task clears each as it takes it.
     request: AtomicU8,
-    /// The task's report on the last restart request: `RESTART_*`.
-    restart_state: AtomicU8,
-    /// Restart requests raised since boot.
+    /// Restart requests raised since boot: the number of the latest request.
     restarts: AtomicU32,
-    /// APPLY requests raised and carried out (successfully or not) since boot.
-    applies_raised: AtomicU32,
-    applies_done: AtomicU32,
+    /// The outcome of the latest restart the task has finished: request number << 1, bit 0 set when
+    /// the device reached Ok, clear when it reached Failed or Absent (0 = none yet; numbers start at 1).
+    restart_outcome: AtomicU32,
 }
 
 /// Request bit: apply the stored settings to the running device.
 const REQ_APPLY: u8 = 1;
 /// Request bit: restart the device, from any state.
 const REQ_RESTART: u8 = 2;
-/// `restart_state`: no restart request outstanding.
-pub const RESTART_IDLE: u8 = 0;
-/// A restart request is raised or running.
-pub const RESTART_RUNNING: u8 = 1;
-/// The restarted device reached Ok.
-pub const RESTART_OK: u8 = 2;
-/// The restarted device reached Failed or Absent.
-pub const RESTART_FAILED: u8 = 3;
 
 impl Device {
     pub const fn new(id: MarvDevice, name: &'static str, period_us: u32) -> Self {
@@ -206,10 +196,8 @@ impl Device {
             progress: AtomicU32::new(0),
             stuck: AtomicBool::new(false),
             request: AtomicU8::new(0),
-            restart_state: AtomicU8::new(RESTART_IDLE),
             restarts: AtomicU32::new(0),
-            applies_raised: AtomicU32::new(0),
-            applies_done: AtomicU32::new(0),
+            restart_outcome: AtomicU32::new(0),
         }
     }
 
@@ -224,51 +212,34 @@ impl Device {
 
     /// Raises the device's APPLY request and wakes its task.
     pub fn request_apply(&self) {
-        self.applies_raised.fetch_add(1, Ordering::Relaxed);
         self.request.fetch_or(REQ_APPLY, Ordering::AcqRel);
         self.wake.signal(());
     }
 
-    /// Raises the device's RESTART request and wakes its task.
-    pub fn request_restart(&self) {
-        self.restart_state.store(RESTART_RUNNING, Ordering::Release);
-        self.restarts.fetch_add(1, Ordering::Relaxed);
+    /// Raises the device's RESTART request and wakes its task. Returns the request's number
+    /// (1, 2, ...): [`restart_outcome`](Self::restart_outcome) reports the outcome of that request.
+    pub fn request_restart(&self) -> u32 {
+        let number = self.restarts.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
         self.request.fetch_or(REQ_RESTART, Ordering::AcqRel);
         self.wake.signal(());
+        number
     }
 
     /// Restart requests raised since boot.
     pub fn restarts(&self) -> u32 {
-        self.restarts.load(Ordering::Relaxed)
+        self.restarts.load(Ordering::Acquire)
     }
 
-    /// True while an APPLY request has been raised and not yet carried out.
-    pub fn apply_pending(&self) -> bool {
-        self.applies_done.load(Ordering::Relaxed) != self.applies_raised.load(Ordering::Relaxed)
-    }
-
-    /// `RESTART_*`, as the task last wrote it.
-    pub fn restart_state(&self) -> u8 {
-        self.restart_state.load(Ordering::Acquire)
-    }
-
-    /// The supervisor takes the finished restart's result: back to `RESTART_IDLE`.
-    pub fn clear_restart_state(&self) {
-        self.restart_state.store(RESTART_IDLE, Ordering::Release);
+    /// The outcome of restart request `number`, once its restart has finished: `Some(true)` the
+    /// device reached Ok, `Some(false)` Failed or Absent; `None` while it is not decided. The outcome
+    /// of any other request is never reported as this one's.
+    pub fn restart_outcome(&self, number: u32) -> Option<bool> {
+        let outcome = self.restart_outcome.load(Ordering::Acquire);
+        (outcome >> 1 == number).then_some(outcome & 1 == 1)
     }
 
     fn take_request(&self, bit: u8) -> bool {
         self.request.fetch_and(!bit, Ordering::AcqRel) & bit != 0
-    }
-
-    /// Takes the APPLY request: the number of applies raised so far, to hand to `finish_apply`.
-    fn take_apply(&self) -> Option<u32> {
-        self.take_request(REQ_APPLY)
-            .then(|| self.applies_raised.load(Ordering::Acquire))
-    }
-
-    fn finish_apply(&self, raised: u32) {
-        self.applies_done.store(raised, Ordering::Release);
     }
 
     fn requested(&self, bit: u8) -> bool {
@@ -401,10 +372,13 @@ pub async fn run_device<A: DeviceAdapter>(
     let mut seq: u32 = 0;
     let mut last_verify = Instant::now();
     let mut last_failure_ms: u64 = 0;
+    // The number of the restart request being carried out, until its outcome is published.
+    let mut restart_run: Option<u32> = None;
     let sender = dev.latest.sender();
     let mut step = health.step(Event::Tick, now_ms());
     loop {
         if dev.take_request(REQ_RESTART) {
+            restart_run = Some(dev.restarts());
             let (before, now) = (health.state(), now_ms());
             step = health.step(Event::Restart, now);
             defmt::info!(
@@ -420,11 +394,9 @@ pub async fn run_device<A: DeviceAdapter>(
             dev.set_status(status);
         }
         // A start or restart reads the stored settings itself: it carries out an APPLY request.
-        let taken = if matches!(step.action, Action::Start | Action::Restart) {
-            dev.take_apply()
-        } else {
-            None
-        };
+        if matches!(step.action, Action::Start | Action::Restart) {
+            dev.take_request(REQ_APPLY);
+        }
         let event = match step.action {
             Action::Start => match adapter.start().await {
                 Ok(()) if fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await => {
@@ -466,10 +438,8 @@ pub async fn run_device<A: DeviceAdapter>(
                 Event::Tick
             }
             Action::None if matches!(health.state(), State::Ok | State::Degraded) => {
-                if let Some(raised) = dev.take_apply() {
-                    let result = adapter.apply().await;
-                    dev.finish_apply(raised);
-                    match result {
+                if dev.take_request(REQ_APPLY) {
+                    match adapter.apply().await {
                         Ok(()) => Event::Tick,
                         Err(kind) => Event::Error(kind),
                     }
@@ -491,9 +461,6 @@ pub async fn run_device<A: DeviceAdapter>(
             }
         };
         dev.mark();
-        if let Some(raised) = taken {
-            dev.finish_apply(raised);
-        }
 
         let before = health.state();
         let now = now_ms();
@@ -526,13 +493,18 @@ pub async fn run_device<A: DeviceAdapter>(
                 now
             );
         }
-        if dev.restart_state() == RESTART_RUNNING && !dev.requested(REQ_RESTART) {
-            match after {
-                State::Ok => dev.restart_state.store(RESTART_OK, Ordering::Release),
-                State::Failed | State::Absent => {
-                    dev.restart_state.store(RESTART_FAILED, Ordering::Release);
-                }
-                _ => {}
+        if let Some(number) = restart_run
+            && !dev.requested(REQ_RESTART)
+        {
+            let ok = match after {
+                State::Ok => Some(1),
+                State::Failed | State::Absent => Some(0),
+                _ => None,
+            };
+            if let Some(ok) = ok {
+                dev.restart_outcome
+                    .store(number << 1 | ok, Ordering::Release);
+                restart_run = None;
             }
         }
         status.state = after;
