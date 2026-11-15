@@ -420,7 +420,7 @@ impl ActionBook {
     pub fn next_ack(&mut self, link: u8, now_ms: u64) -> Option<LateAck> {
         self.expire(now_ms);
         let run = self.slot.as_mut()?;
-        if run.link != link {
+        if run.link != link || run.orphan {
             return None;
         }
         let (command, target) = (run.command, run.sender);
@@ -974,10 +974,10 @@ mod tests {
             }
             if ack.outcome.result == MavResult::MAV_RESULT_IN_PROGRESS {
                 let slot = last_progress.get_mut(usize::from(link)).ok_or("link")?;
-                if let Some(t) = *slot {
-                    if now < t + PROGRESS_PERIOD_MS {
-                        return Err(format!("progress ACKs {} ms apart on link {link}", now - t));
-                    }
+                if let Some(t) = *slot
+                    && now < t + PROGRESS_PERIOD_MS
+                {
+                    return Err(format!("progress ACKs {} ms apart on link {link}", now - t));
                 }
                 *slot = Some(now);
             } else {
