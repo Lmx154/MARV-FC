@@ -5,8 +5,9 @@ Purpose: every device runs in ONE program at the same time, so each peripheral, 
 and executor is assigned once, here. The bench programs of the driver crates each chose their own and collide
 (the same DMA channels 0 and 1 in five of them, PIO2 in three); this table replaces those choices in the
 firmware. Status of each line: FIXED = dictated by the board; CHOSEN = decided here; OPEN = waits for the
-foundation design. Run as one program so far (2026-11-14): the two-core skeleton only (core 1 started with `spawn_core1`, USB with a
-MAVLink node on core 0, `DMA_IRQ_0` off on core 0); no device, PIO block or DMA channel of this plan has run in it yet.
+foundation design. Run as one program so far (2026-11-14): the two-core skeleton (core 1 started with `spawn_core1`, USB with a
+MAVLink node on core 0, `DMA_IRQ_0` off on core 0) and the BMP581 barometer on core 0 (I2C1 without DMA, `I2C1_IRQ`, the data-ready
+input GPIO21 through `IO_IRQ_BANK0`); no other device, PIO block or DMA channel of this plan has run in it yet.
 
 ## Fixed by the board (`docs/pinout.md`)
 
