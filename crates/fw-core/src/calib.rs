@@ -965,7 +965,10 @@ mod tests {
         assert_eq!(cal.outcome(), MagOutcome::Running);
         cal.push(3, 5_000_000 + MAG_DURATION_US, CENTRE);
         assert_eq!(cal.percent(), 100);
-        assert!(matches!(cal.outcome(), MagOutcome::Failed(Failure::NotRotated, _)));
+        assert!(matches!(
+            cal.outcome(),
+            MagOutcome::Failed(Failure::NotRotated, _)
+        ));
     }
 
     #[test]

@@ -265,17 +265,13 @@ pub fn tick(now_ms: u64) {
     }
     match running {
         Some(
-            action @ (Action::GyroCalibration
-            | Action::AccelCalibration
-            | Action::MagCalibration),
-        ) => {
-            match crate::calibration::step() {
-                Step::Progress(percent) => {
-                    BOOK.lock(|b| b.borrow_mut().set_progress(now_ms, percent));
-                }
-                Step::End(result) => end(now_ms, action, result),
+            action @ (Action::GyroCalibration | Action::AccelCalibration | Action::MagCalibration),
+        ) => match crate::calibration::step() {
+            Step::Progress(percent) => {
+                BOOK.lock(|b| b.borrow_mut().set_progress(now_ms, percent));
             }
-        }
+            Step::End(result) => end(now_ms, action, result),
+        },
         _ => crate::calibration::idle(),
     }
     if let Some(action @ Action::DeviceRestart(id)) = running
