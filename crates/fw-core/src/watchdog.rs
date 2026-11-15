@@ -5,8 +5,9 @@
 //! The monitor checks every [`CHECK_MS`]: it feeds only while core 0's beat and the flight core's
 //! `PONG` both changed less than [`STALL_MS`] ago. At [`STALL_MS`] of stall it asks for the
 //! scratch record once and stops feeding, so the hardware resets the board about
-//! [`PERIOD_MS`] after the last feed. A stall that ends before the reset clears the record; one
-//! that reached [`TEXT_MS`] earns one text. The check after a flash save (`SAVE_EPOCH` changed)
+//! [`PERIOD_MS`] after the last feed. A stall that ends before the reset clears the record, unless
+//! a reset is pending (the record is then the REQUESTED one); one that reached [`TEXT_MS`] earns
+//! one text. The check after a flash save (`SAVE_EPOCH` changed)
 //! never starts a stall.
 
 use core::fmt;
@@ -41,10 +42,8 @@ pub mod task {
     pub const SUPERVISOR: u8 = 4;
     /// Core 0's beat (`beat0`).
     pub const BEAT: u8 = 5;
-    /// A command's action (inside the link task).
+    /// A command's action (inside the link task), which includes a settings save or reload.
     pub const ACTION: u8 = 6;
-    /// The settings work of a check feature.
-    pub const SETTINGS: u8 = 7;
     /// The barometer's device task.
     pub const BARO: u8 = 8;
     /// A check feature's own task.
@@ -65,7 +64,6 @@ pub const fn task_name(id: u8) -> &'static str {
         task::SUPERVISOR => "SUPERVISOR",
         task::BEAT => "BEAT",
         task::ACTION => "ACTION",
-        task::SETTINGS => "SETTINGS",
         task::BARO => "BARO",
         task::TEST => "TEST",
         task::FBEAT => "FBEAT",
@@ -135,7 +133,7 @@ pub struct Step {
     pub began: Option<(Core, u32)>,
     /// Write the scratch record for the stall that began (not while a reboot is pending).
     pub record: bool,
-    /// The stall is over: clear the record's magic.
+    /// The stall is over: clear the record's magic (never while a reset is pending).
     pub clear: bool,
     /// The stall that ended at this check.
     pub ended: Option<Ended>,
@@ -213,7 +211,7 @@ impl Monitor {
             (None, _) => {
                 step.feed = true;
                 if let Some(s) = self.stall.take() {
-                    step.clear = s.recorded;
+                    step.clear = s.recorded && i.reboot_at_ms.is_none();
                     step.ended = Some(Ended {
                         core: s.core,
                         age_ms: s.age_ms,
@@ -391,6 +389,24 @@ mod tests {
                 epoch: 0,
                 reboot_at: None,
             }
+        }
+
+        /// Advances `ms`; each heartbeat moves only when told to, independently of the other.
+        fn advance(&mut self, ms: u32, beat0_moves: bool, pong_moves: bool) -> Step {
+            self.now = self.now.wrapping_add(ms);
+            if beat0_moves {
+                self.beat0 += 2;
+            }
+            if pong_moves {
+                self.pong += 1;
+            }
+            self.m.step(Inputs {
+                now_ms: self.now,
+                beat0: self.beat0,
+                pong: self.pong,
+                save_epoch: self.epoch,
+                reboot_at_ms: self.reboot_at,
+            })
         }
 
         /// Advances 100 ms; each heartbeat moves when its core runs.
@@ -576,6 +592,127 @@ mod tests {
         assert!(st.feed && !st.clear && st.ended.is_some());
     }
 
+    /// One heartbeat stops while the other keeps changing: the first check with an age of 200 ms
+    /// or more stops the feed and asks for one record naming the core whose heartbeat stopped.
+    fn one_heartbeat_stops(stopped: Core) {
+        let (task_id, want_reason, want_text) = match stopped {
+            Core::Core0 => (
+                task::BARO,
+                Reason::StallCore0,
+                "WDG reset: BARO stalled (core 0)",
+            ),
+            Core::Flight => (
+                task::IMU1,
+                Reason::StallFlight,
+                "WDG reset: IMU1 stalled (flight core)",
+            ),
+        };
+        let (beat0_moves, pong_moves) = (stopped != Core::Core0, stopped != Core::Flight);
+        let mut s = Sim::new(5_000);
+        assert!(s.advance(CHECK_MS, true, true).feed);
+        let st = s.advance(CHECK_MS, beat0_moves, pong_moves);
+        assert_eq!(
+            st,
+            Step {
+                feed: true,
+                ..Step::default()
+            },
+            "age 100 ms"
+        );
+        let st = s.advance(CHECK_MS, beat0_moves, pong_moves);
+        assert!(!st.feed && st.record && st.ended.is_none());
+        assert_eq!(st.began, Some((stopped, 200)));
+        let at = s.now;
+        assert_eq!(stopped.reason(), want_reason);
+        let record = decode(encode(stopped.reason(), task_id, 200, at)).unwrap();
+        assert_eq!(record.reason, want_reason);
+        assert_eq!(record.task_id, task_id);
+        let report = boot_report(Some(ResetKind::TimedOut), Some(record)).unwrap();
+        assert_eq!(report.to_string(), want_text);
+        for _ in 0..30 {
+            let st = s.advance(CHECK_MS, beat0_moves, pong_moves);
+            assert_eq!(st, Step::default(), "no feed, no second record");
+        }
+    }
+
+    #[test]
+    fn beat0_stops_while_pong_keeps_changing() {
+        one_heartbeat_stops(Core::Core0);
+    }
+
+    #[test]
+    fn pong_stops_while_beat0_keeps_changing() {
+        one_heartbeat_stops(Core::Flight);
+    }
+
+    #[test]
+    fn both_heartbeats_stop_at_once_records_core0() {
+        let mut s = Sim::new(0);
+        s.advance(CHECK_MS, true, true);
+        assert!(s.advance(CHECK_MS, false, false).feed);
+        let st = s.advance(CHECK_MS, false, false);
+        assert!(!st.feed && st.record);
+        assert_eq!(st.began, Some((Core::Core0, 200)));
+        for _ in 0..30 {
+            assert_eq!(s.advance(CHECK_MS, false, false), Step::default());
+        }
+    }
+
+    #[test]
+    fn one_heartbeat_stale_150_ms_then_fresh_is_fed_throughout() {
+        for (stale_beat0, stale_pong) in [(true, false), (false, true)] {
+            let mut s = Sim::new(u32::MAX - 100);
+            s.advance(50, true, true);
+            for _ in 0..3 {
+                let st = s.advance(50, !stale_beat0, !stale_pong);
+                assert_eq!(
+                    st,
+                    Step {
+                        feed: true,
+                        ..Step::default()
+                    }
+                );
+            }
+            for _ in 0..40 {
+                let st = s.advance(50, true, true);
+                assert_eq!(
+                    st,
+                    Step {
+                        feed: true,
+                        ..Step::default()
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_stall_ending_while_a_reboot_is_pending_keeps_the_requested_record() {
+        let mut s = Sim::new(0);
+        s.check(true, true);
+        s.check(true, false);
+        let st = s.check(true, false);
+        assert_eq!(st.began, Some((Core::Flight, 200)));
+        assert!(st.record);
+        // A reboot is requested (its REQUESTED record overwrites the stall record), due in 500 ms.
+        s.reboot_at = Some(s.now + 500);
+        let st = s.check(true, false);
+        assert!(!st.feed && !st.clear && !st.reset);
+        let st = s.check(true, true);
+        assert!(st.feed && !st.clear && !st.reset);
+        assert_eq!(st.ended.map(|e| e.core), Some(Core::Flight));
+        assert!(!s.check(true, true).clear);
+        assert!(!s.check(true, true).reset);
+        let st = s.check(true, true);
+        assert!(st.reset && !st.clear);
+        // Without a reboot the same stall still clears its record.
+        let mut s = Sim::new(0);
+        s.check(true, true);
+        s.check(true, false);
+        assert!(s.check(true, false).record);
+        assert!(s.check(true, true).clear);
+    }
+
     #[test]
     fn boot_report_table() {
         let stall0 = decode(encode(Reason::StallCore0, task::BARO, 200, 21_000));
@@ -653,6 +790,6 @@ mod tests {
                 names.push(n);
             }
         }
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 11);
     }
 }

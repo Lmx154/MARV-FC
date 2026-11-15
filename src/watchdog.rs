@@ -8,9 +8,13 @@
 //! heartbeats are younger than 200 ms; at 200 ms of stall it writes the scratch record once (the
 //! core and the task in `RUNNING0` / `RUNNING1`) and stops feeding, so the board resets about
 //! 1.7 s after the stall began; a stall that ends first clears the record and is logged by the
-//! supervisor ([`report`]), with one text when it reached 500 ms. The monitor uses atomics and the
-//! watchdog registers only. A requested reboot ([`request_reboot`]) is carried out by the monitor
+//! supervisor ([`report`]), with one text when it reached 500 ms; while a reboot is pending the
+//! monitor neither writes nor clears the record. The monitor uses atomics and the watchdog
+//! registers only. A requested reboot ([`request_reboot`]) is carried out by the monitor
 //! (`trigger_reset`) 100 ms after the final ACK was handed to the link. No device task feeds it.
+//! Known and accepted: a reboot request that races a stall's start within a few microseconds can
+//! leave a scratch record that decodes as none, so the boot report then says "reset: forced, no
+//! record".
 //!
 //! Features `hang-core0`, `spin-1s`, `hang-irqoff` ([`hang_point_core0`], in the barometer's
 //! `acquire`) and `hang-flight` ([`hang_point_flight`], in IMU1's `acquire`) act once, 20 s after
