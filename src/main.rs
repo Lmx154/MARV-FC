@@ -38,6 +38,7 @@ mod batt;
 mod busclear;
 mod device;
 mod flight_latency;
+mod gnss;
 mod imu1;
 mod imu2;
 #[cfg(feature = "inject-imu")]
@@ -55,7 +56,7 @@ use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use defmt_rtt as _;
 use device::{
-    BARO, BATT, DEVICE_COUNT, DEVICES, Device, IMU1, IMU2, MAG, Reading, Sample, Supervision,
+    BARO, BATT, DEVICE_COUNT, DEVICES, Device, GNSS, IMU1, IMU2, MAG, Reading, Sample, Supervision,
     TextLine,
 };
 use embassy_executor::{Executor, Spawner};
@@ -171,6 +172,12 @@ const SCALED_IMU2_ID: u32 = 116;
 const STANDARD_GRAVITY: f32 = 9.80665;
 const SCALED_PRESSURE_ID: u32 = 29;
 const VALUES_INTERVAL_US: i32 = 40_000;
+/// GPS_RAW_INT at the receiver's fix rate, 1 Hz.
+const GPS_RAW_INT_ID: u32 = 24;
+const GPS_INTERVAL_US: i32 = 1_000_000;
+/// The receiver's value is not sent once its latest sample is older than this (3 fix periods; the
+/// 1 s of the fast sensors would be one period of this one).
+const GPS_STALE_US: u64 = 3_000_000;
 /// A sensor value older than this is not sent as fresh.
 const STALE_US: u64 = 1_000_000;
 /// The boot text line; the reset cause follows (", reset: timeout|forced|power-on").
@@ -416,6 +423,16 @@ impl Telemetry for Board {
                 })
                 .is_ok();
         }
+        if message_id == GPS_RAW_INT_ID {
+            let Some(sample) = GNSS.latest.try_get() else {
+                return false;
+            };
+            if now_us.saturating_sub(sample.t_us) >= GPS_STALE_US {
+                return false;
+            }
+            return gnss::raw_int(&sample.reading, sample.t_us)
+                .is_some_and(|message| out.push(&message).is_ok());
+        }
         if message_id == DEVICE_STATUS_ID {
             let mut sent = false;
             for _ in 0..DEVICE_COUNT.min(MAX_BATCH) {
@@ -582,6 +599,11 @@ async fn link_loop(
             message_id: SCALED_PRESSURE_ID,
             default_interval_us: VALUES_INTERVAL_US,
             min_interval_us: 20_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: GPS_RAW_INT_ID,
+            default_interval_us: GPS_INTERVAL_US,
+            min_interval_us: 100_000,
         }),
     ];
     let mut node = Node::new(NodeConfig::new(1, 1), &mut slots);
@@ -905,6 +927,9 @@ async fn main(spawner: Spawner) {
     ))));
     spawner.spawn(defmt::unwrap!(mag::task(mag::adapter(
         p.I2C0, p.PIN_13, p.PIN_12, p.PIN_4
+    ))));
+    spawner.spawn(defmt::unwrap!(gnss::task(gnss::adapter(
+        p.UART1, p.PIN_24, p.PIN_25
     ))));
     spawner.spawn(defmt::unwrap!(batt::task(batt::adapter(
         p.ADC, p.PIN_41, p.PIN_42

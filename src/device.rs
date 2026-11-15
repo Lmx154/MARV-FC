@@ -67,6 +67,28 @@ pub enum Reading {
         accel_ms2: [f32; 3],
         temperature_c: f32,
     },
+    /// One fix of the receiver, in the driver's integer units. Position, speed and course are `None`
+    /// without a fix; the rest is whatever the receiver says (it talks without a fix too).
+    Gnss {
+        /// MAVLink `GPS_FIX_TYPE`: 1 no fix, 2 2D, 3 3D, 4 DGPS/SBAS.
+        fix_type: u8,
+        /// 1e-7 degree, south and west negative.
+        lat_e7: Option<i32>,
+        lon_e7: Option<i32>,
+        /// Above mean sea level, mm.
+        alt_mm: Option<i32>,
+        speed_mm_s: Option<u32>,
+        /// 0.01 degree.
+        course_cdeg: Option<u16>,
+        /// Satellites used.
+        sats_used: Option<u8>,
+        /// Dilution of precision times 100.
+        hdop_x100: Option<u16>,
+        vdop_x100: Option<u16>,
+        /// UTC time of the epoch and the date, when the receiver has them.
+        time: Option<lc76g::sentence::Time>,
+        date: Option<lc76g::sentence::Date>,
+    },
 }
 
 /// One published sample: values, board time of the read in us, `seq` (+1 per publish), source.
@@ -201,6 +223,8 @@ pub struct Device {
     restart_outcome: AtomicU32,
     /// The flight-core task's cells, for a row backed by the flight core.
     flight: Option<&'static ImuCells>,
+    /// The data-ready deadline T in microseconds when it is not 3 P (0: 3 P).
+    deadline_us: u32,
 }
 
 /// Request bit: apply the stored settings to the running device.
@@ -223,7 +247,14 @@ impl Device {
             restarts: AtomicU32::new(0),
             restart_outcome: AtomicU32::new(0),
             flight: None,
+            deadline_us: 0,
         }
+    }
+
+    /// The same row with its own data-ready deadline T (a slow sensor whose 3 P is too long).
+    pub const fn with_deadline_us(mut self, us: u32) -> Self {
+        self.deadline_us = us;
+        self
     }
 
     /// A row backed by a flight-core task's `cells`.
@@ -302,8 +333,11 @@ impl Device {
         Duration::from_micros(u64::from(self.period_us()))
     }
 
-    /// T = max(3 P, 10 ms).
+    /// T = max(3 P, 10 ms), or the row's own deadline.
     pub fn deadline(&self) -> Duration {
+        if self.deadline_us != 0 {
+            return Duration::from_micros(u64::from(self.deadline_us));
+        }
         (self.period() * 3).max(DEADLINE_FLOOR)
     }
 
@@ -347,7 +381,7 @@ impl Device {
 }
 
 /// The number of registry rows.
-pub const DEVICE_COUNT: usize = 5;
+pub const DEVICE_COUNT: usize = 6;
 /// IMU1's row, backed by the flight core.
 pub static IMU1: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU1,
@@ -366,10 +400,13 @@ pub static IMU2: Device = Device::flight(
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
 /// The magnetometer's row.
 pub static MAG: Device = Device::new(MarvDevice::MARV_DEVICE_MAG, "MAG", crate::mag::PERIOD_US);
+/// The GNSS receiver's row: P = 1 s, T = 2.5 s.
+pub static GNSS: Device = Device::new(MarvDevice::MARV_DEVICE_GNSS, "GNSS", crate::gnss::PERIOD_US)
+    .with_deadline_us(crate::gnss::DEADLINE_US);
 /// The battery monitor's row.
 pub static BATT: Device = Device::new(MarvDevice::MARV_DEVICE_BATT, "BATT", crate::batt::PERIOD_US);
 /// The registry.
-pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &IMU2, &BARO, &MAG, &BATT];
+pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &IMU2, &BARO, &MAG, &GNSS, &BATT];
 
 /// The row of device `id`.
 pub fn find(id: MarvDevice) -> Option<&'static Device> {
@@ -962,6 +999,9 @@ impl Supervision {
                     norm(field_ut),
                     field_ut
                 );
+            }
+            if core::ptr::eq(*dev, &GNSS) {
+                crate::gnss::stat(now, window_us, latest);
             }
             if let Some(f) = dev.flight.and_then(ImuCells::read) {
                 let (accel, gyro, temperature) = f.latest.map_or(([0.0; 3], [0.0; 3], 0.0), |l| {

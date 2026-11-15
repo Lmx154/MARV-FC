@@ -79,6 +79,9 @@ inject-baro-stuck = ["inject"]
 # The same around the magnetometer's adapter: 5 s after the first good sample every acquire, recover and
 # restart fails until a RESTART request (`device restart MAG`) has been raised, then everything works.
 inject-mag-fail-until-restart = ["inject-mag"]
+# The same around the GNSS receiver's adapter (src/gnss.rs): 10 s after the first good sample the
+# adapter stops seeing sentences (the wrapper swallows them) until a RESTART request (`device restart GNSS`).
+inject-gnss-silent = []
 # Internal: on when any injection feature is on.
 inject = []
 # Internal: on when a magnetometer injection feature is on.
