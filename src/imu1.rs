@@ -151,6 +151,8 @@ impl ImuAdapter for Icm45686Adapter {
     }
 
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
+        #[cfg(feature = "hang-flight")]
+        crate::watchdog::hang_point_flight();
         // INT1_STATUS0 is clear-on-read: reading it with every sample keeps the data-ready flag
         // that `status` sees after a late CHECK fresh.
         let int = self.call().interrupt_status().await.map_err(|e| kind(&e))?;
@@ -230,7 +232,14 @@ pub async fn task(adapter: Adapter) -> ! {
         PERIOD_US,
         Limits::DESIGN,
     ) {
-        Some(task) => task.run().await,
+        Some(task) => {
+            fw_flight::tagged(
+                &crate::watchdog::RUNNING1,
+                fw_core::watchdog::task::IMU1,
+                task.run(),
+            )
+            .await
+        }
         None => match core::future::pending::<Infallible>().await {},
     }
 }

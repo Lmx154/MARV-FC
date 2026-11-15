@@ -579,13 +579,29 @@ mod tests {
         let t = Some(ResetKind::TimedOut);
         let f = Some(ResetKind::Forced);
         let cases = [
-            (t, stall0, Some((Severity::Critical, "WDG reset: BARO stalled (core 0)"))),
-            (t, stall1, Some((Severity::Critical, "WDG reset: IMU1 stalled (flight core)"))),
+            (
+                t,
+                stall0,
+                Some((Severity::Critical, "WDG reset: BARO stalled (core 0)")),
+            ),
+            (
+                t,
+                stall1,
+                Some((Severity::Critical, "WDG reset: IMU1 stalled (flight core)")),
+            ),
             (t, None, Some((Severity::Critical, "WDG reset: no record"))),
             (t, req, Some((Severity::Critical, "WDG reset: no record"))),
             (f, req, Some((Severity::Info, "reboot: requested"))),
-            (f, None, Some((Severity::Warning, "reset: forced, no record"))),
-            (f, stall0, Some((Severity::Warning, "reset: forced, no record"))),
+            (
+                f,
+                None,
+                Some((Severity::Warning, "reset: forced, no record")),
+            ),
+            (
+                f,
+                stall0,
+                Some((Severity::Warning, "reset: forced, no record")),
+            ),
             (None, None, None),
             (None, stall0, None),
             (None, req, None),

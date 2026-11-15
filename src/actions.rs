@@ -3,16 +3,20 @@
 //! the arming code and the HIL source exist.
 //!
 //! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration), save to
-//! and reload from the flash settings region (`settings`). Every other action the book admits ends
-//! FAILED at once with one STATUSTEXT "<what>: not built yet".
+//! and reload from the flash settings region (`settings`), reboot (the watchdog monitor resets the
+//! board 100 ms after the final ACK was handed to the link; nothing is saved). Every other action
+//! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
 
+use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::admission::{Action, ActionBook, Effect};
+
+use fw_core::watchdog::task;
 use mavlink_device::dialect::MavSeverity;
-use mavlink_device::marv::{MarvDevice, MavResult};
+use mavlink_device::marv::{MarvDevice, MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck};
 
 use crate::device::{find, raise_apply};
@@ -95,6 +99,11 @@ pub fn next_ack(now_ms: u64) -> Option<LateAck> {
             ack.command as u32,
             result_name(ack.outcome.result)
         );
+        if ack.command == MavCmd::MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN
+            && ack.outcome.result == MavResult::MAV_RESULT_ACCEPTED
+        {
+            crate::watchdog::reboot_ack_handed(now_ms as u32);
+        }
     }
     Some(ack)
 }
@@ -105,6 +114,12 @@ pub fn link_lost() {
 }
 
 fn start(action: Action, now_ms: u64) {
+    let caller = crate::watchdog::RUNNING0.swap(task::ACTION, Ordering::Relaxed);
+    run(action, now_ms);
+    crate::watchdog::RUNNING0.store(caller, Ordering::Relaxed);
+}
+
+fn run(action: Action, now_ms: u64) {
     if let Action::DeviceRestart(id) = action
         && let Some(dev) = find(id)
     {
@@ -117,6 +132,10 @@ fn start(action: Action, now_ms: u64) {
         Action::StorageDefaultsCalibration => defaults(true, now_ms),
         Action::StorageSave => save(),
         Action::StorageReload => reload(),
+        Action::Reboot => {
+            crate::watchdog::request_reboot(now_ms as u32);
+            end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
+        }
         other => {
             crate::text_fmt(
                 MavSeverity::MAV_SEVERITY_WARNING,

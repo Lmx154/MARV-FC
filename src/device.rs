@@ -302,7 +302,6 @@ impl Device {
 
     fn mark(&self) {
         self.progress.fetch_add(1, Ordering::Relaxed);
-        RUNNING.store(self.id as u8, Ordering::Relaxed);
     }
 
     /// The row for SYS_STATUS and the HEARTBEAT state.
@@ -367,9 +366,6 @@ pub fn raise_apply(mask: u32) {
 pub static STATE_CHANGES: AtomicU32 = AtomicU32::new(0);
 /// Deadline misses and stuck windows discarded because a flash save overlapped them.
 pub static SAVE_DISCARDS: AtomicU32 = AtomicU32::new(0);
-
-/// The id (`MARV_DEVICE`) of the device task that ran last.
-pub static RUNNING: AtomicU8 = AtomicU8::new(0);
 
 /// What the supervisor turns into a text.
 #[derive(Clone, Copy)]

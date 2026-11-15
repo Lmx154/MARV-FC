@@ -189,6 +189,8 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn acquire(&mut self) -> Result<Reading, ErrorKind> {
+        #[cfg(any(feature = "hang-core0", feature = "spin-1s", feature = "hang-irqoff"))]
+        crate::watchdog::hang_point_core0();
         let chip = self.chip()?;
         // INT_STATUS is clear-on-read: reading it with every sample keeps the flag that `status` sees
         // after a data-ready timeout fresh (otherwise the first timeout of an outage finds a stale one).
@@ -299,5 +301,10 @@ fn wrap(adapter: Bmp581Adapter) -> Adapter {
 
 #[embassy_executor::task]
 pub async fn task(mut adapter: Adapter) -> ! {
-    run_device(&BARO, &mut adapter, Limits::DESIGN).await
+    fw_flight::tagged(
+        &crate::watchdog::RUNNING0,
+        fw_core::watchdog::task::BARO,
+        run_device(&BARO, &mut adapter, Limits::DESIGN),
+    )
+    .await
 }

@@ -10,8 +10,10 @@
 //! and below), in internal SRAM. Telemetry adds HIGHRES_IMU (id 0, IMU1) and SCALED_PRESSURE
 //! (BARO) at 25 Hz. The parameters
 //! (`store`, the barometer's five) and the commands (`actions`) are built; the parameters are read
-//! from the flash settings region at boot and written there only on an explicit save (`settings`);
-//! no watchdog. It runs until `tools/run.sh` ends it.
+//! from the flash settings region at boot and written there only on an explicit save (`settings`).
+//! The hardware watchdog (`watchdog`) is started first thing and fed by its monitor on `SWI_IRQ_1`
+//! only while `BEAT0` and `PONG` advance; the boot report says why the last reset happened. It
+//! runs until `tools/run.sh` ends it.
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
@@ -22,7 +24,8 @@
 //! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
 //! start-up check, then its line is disabled again before core 1 starts.
 //! Features `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign`: the
-//! settings checks (`settings`).
+//! settings checks (`settings`). Features `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`,
+//! `wdg-scratch-probe`: the watchdog checks (`watchdog`).
 #![no_std]
 #![no_main]
 
@@ -55,7 +58,9 @@ use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
+use fw_core::watchdog::task;
 use fw_core::xcore::Kick;
+use fw_flight::tagged;
 use mavlink_device::dialect::{
     HIGHRES_IMU_DATA, HighresImuUpdatedFlags, MavSeverity, MavState, MavSysStatusSensor,
     SCALED_PRESSURE_DATA, SYS_STATUS_DATA,
@@ -80,8 +85,8 @@ type UsbDriver = Driver<'static, USB>;
 
 /// Core 0 -> flight core: the liveness ping, bumped by the supervisor at 10 Hz.
 static PING: AtomicU32 = AtomicU32::new(0);
-/// Flight core -> core 0: the last `PING` the flight core copied.
-static PONG: AtomicU32 = AtomicU32::new(0);
+/// Flight core -> core 0: the last `PING` the flight core copied (the watchdog monitor reads it).
+pub static PONG: AtomicU32 = AtomicU32::new(0);
 /// Core 0: the supervisor's clock (ms, wrapping) when it last saw `PONG` equal to `PING`.
 static PONG_FRESH_MS: AtomicU32 = AtomicU32::new(0);
 /// The flight core's one wake.
@@ -101,8 +106,8 @@ static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 // Core 0 only.
 // ---------------------------------------------------------------------------------------------
 
-/// Core 0's executor beat, every 50 ms (the watchdog monitor will read it).
-static BEAT0: AtomicU32 = AtomicU32::new(0);
+/// Core 0's executor beat, every 50 ms (the watchdog monitor reads it).
+pub static BEAT0: AtomicU32 = AtomicU32::new(0);
 /// What the node wrote and read on USB: bytes, and frames written (one `write_all` per frame).
 static TX_BYTES: AtomicU32 = AtomicU32::new(0);
 static TX_FRAMES: AtomicU32 = AtomicU32::new(0);
@@ -127,6 +132,7 @@ const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / DEVICE_COUNT.div_ceil(MAX_BAT
 const HIGHRES_IMU_ID: u32 = 105;
 const SCALED_PRESSURE_ID: u32 = 29;
 const VALUES_INTERVAL_US: i32 = 40_000;
+/// The boot text line; the reset cause follows (", reset: timeout|forced|power-on").
 const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": flight core up");
 
 fn now_us() -> u64 {
@@ -154,7 +160,12 @@ fn check(pass: bool, what: &str, value: u32) {
 #[cfg(not(feature = "no-fbeat"))]
 #[embassy_executor::task]
 async fn fbeat() -> ! {
-    fw_flight::liveness(&KICK, &PING, &PONG).await
+    tagged(
+        &watchdog::RUNNING1,
+        task::FBEAT,
+        fw_flight::liveness(&KICK, &PING, &PONG),
+    )
+    .await
 }
 
 fn core1_main(imu1_parts: imu1::Parts) -> ! {
@@ -393,11 +404,19 @@ async fn start_gate(
 
 #[embassy_executor::task]
 async fn usb_device(mut device: UsbDevice<'static, UsbDriver>) -> ! {
-    device.run().await
+    tagged(&watchdog::RUNNING0, task::USB, device.run()).await
 }
 
 #[embassy_executor::task]
 async fn usb_link(
+    tx: usb_cdc::Tx<'static, UsbDriver>,
+    rx: usb_cdc::Rx<'static, UsbDriver>,
+    link: usb_cdc::Link<'static>,
+) -> ! {
+    tagged(&watchdog::RUNNING0, task::LINK, link_loop(tx, rx, link)).await
+}
+
+async fn link_loop(
     tx: usb_cdc::Tx<'static, UsbDriver>,
     rx: usb_cdc::Rx<'static, UsbDriver>,
     link: usb_cdc::Link<'static>,
@@ -469,6 +488,10 @@ async fn usb_link(
 /// devices' stuck check and transition texts; every 10 s a `[STAT]` line, and one per device.
 #[embassy_executor::task]
 async fn supervisor() -> ! {
+    tagged(&watchdog::RUNNING0, task::SUPERVISOR, supervise()).await
+}
+
+async fn supervise() -> ! {
     let mut ticker = Ticker::every(Duration::from_millis(10));
     let mut tick: u32 = 0;
     let mut fresh_at = Instant::now();
@@ -478,9 +501,11 @@ async fn supervisor() -> ! {
     let mut up_sent = false;
     let mut answering = true;
     let mut devices = Supervision::new(Instant::now());
+    let (mut stalls_begun, mut stalls_ended) = (0, 0);
     loop {
         ticker.next().await;
         let now = Instant::now();
+        watchdog::report(&mut stalls_begun, &mut stalls_ended);
         devices.tick(now);
         actions::tick(now.as_millis());
         let ping = PING.load(Ordering::Relaxed);
@@ -505,7 +530,10 @@ async fn supervisor() -> ! {
             }
             if !up_sent && pong == ping {
                 up_sent = true;
-                text(MavSeverity::MAV_SEVERITY_INFO, TEXT_UP);
+                text_fmt(
+                    MavSeverity::MAV_SEVERITY_INFO,
+                    format_args!("{}, reset: {}", TEXT_UP, watchdog::cause()),
+                );
             }
         }
         if answering && age > PONG_STALE {
@@ -553,19 +581,28 @@ async fn supervisor() -> ! {
 
 #[embassy_executor::task]
 async fn beat0() -> ! {
-    let mut ticker = Ticker::every(Duration::from_millis(50));
-    loop {
-        ticker.next().await;
-        BEAT0.fetch_add(1, Ordering::Relaxed);
-    }
+    tagged(&watchdog::RUNNING0, task::BEAT, async {
+        let mut ticker = Ticker::every(Duration::from_millis(50));
+        loop {
+            ticker.next().await;
+            BEAT0.fetch_add(1, Ordering::Relaxed);
+        }
+    })
+    .await
 }
 
 /// Feature `stall-core0` (invariant F1): 20 s after start, spins 3 s without yielding, once, and
-/// logs IMU1's samples and errors before and after.
+/// logs IMU1's samples and errors before and after. The watchdog resets the board about 1.7 s
+/// into the spin; it does not act after a watchdog reset (no reset loop).
 #[cfg(feature = "stall-core0")]
 #[embassy_executor::task]
 async fn stall() {
+    watchdog::RUNNING0.store(task::TEST, Ordering::Relaxed);
     Timer::after(Duration::from_secs(20)).await;
+    watchdog::RUNNING0.store(task::TEST, Ordering::Relaxed);
+    if !watchdog::HANG_ARMED.swap(false, Ordering::Relaxed) {
+        return;
+    }
     let before = imu1::CELLS.read();
     let begun = Instant::now();
     while begun.elapsed() < Duration::from_secs(3) {
@@ -590,12 +627,23 @@ async fn stall() {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+    watchdog::RUNNING0.store(task::MAIN, Ordering::Relaxed);
+    let mut wd = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
     #[cfg(feature = "wdg-scratch-probe")]
-    let probe = {
-        let mut wd = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
-        let next = watchdog::probe::boot(&mut wd);
-        (wd, next)
-    };
+    let probe = watchdog::probe::boot(&mut wd);
+    #[cfg(not(feature = "wdg-scratch-probe"))]
+    {
+        watchdog::boot(&mut wd);
+        wd.pause_on_debug(true);
+        wd.start(Duration::from_millis(u64::from(
+            fw_core::watchdog::PERIOD_MS,
+        )));
+        defmt::info!(
+            "[INFO] watchdog started: {=u32} ms, paused while a core is halted by the debugger; the monitor on SWI_IRQ_1 feeds it while BEAT0 and PONG are younger than {=u32} ms",
+            fw_core::watchdog::PERIOD_MS,
+            fw_core::watchdog::STALL_MS
+        );
+    }
     defmt::info!(
         "[INFO] MARV V2 fw {=str}: two-core skeleton",
         env!("CARGO_PKG_VERSION")
@@ -686,13 +734,22 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(baro::task(baro::adapter(
         p.I2C1, p.PIN_23, p.PIN_22, p.PIN_21
     ))));
+    #[cfg(not(feature = "wdg-scratch-probe"))]
+    watchdog::start_monitor(wd);
+    #[cfg(feature = "hang-flight")]
+    spawner.spawn(defmt::unwrap!(watchdog::hang_flight_arm()));
     #[cfg(feature = "stall-core0")]
     spawner.spawn(defmt::unwrap!(stall()));
     #[cfg(feature = "save-loop")]
     spawner.spawn(defmt::unwrap!(settings::save_loop()));
     #[cfg(feature = "wdg-scratch-probe")]
-    spawner.spawn(defmt::unwrap!(watchdog::probe::act(probe.0, probe.1)));
+    spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
+    tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
+}
+
+/// The start-up checks that wait for core 1, and the watchdog's first feeds.
+async fn startup_checks() {
     let started = Instant::now();
     while !CORE1_ACTLR_READ.load(Ordering::Acquire) && started.elapsed() < PONG_STALE {
         Timer::after(Duration::from_millis(1)).await;
@@ -719,4 +776,14 @@ async fn main(spawner: Spawner) {
         "DMA_IRQ_0 still not enabled on core 0 after core 1 started, enabled",
         u32::from(dma0_on),
     );
+    #[cfg(not(feature = "wdg-scratch-probe"))]
+    {
+        Timer::after(Duration::from_millis(500)).await;
+        let feeds = watchdog::FEEDS.load(Ordering::Relaxed);
+        check(
+            feeds >= 3,
+            "watchdog fed by its monitor (feeds by 500 ms after the checks above)",
+            feeds,
+        );
+    }
 }

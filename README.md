@@ -29,7 +29,7 @@ It has no flight functionality.
   enabled on core 0 after core 1 started.
 
 Not in it yet: IMU1's parameters and calibration (a fixed configuration for now), IMU2 and the devices
-other than IMU1 and the barometer, the watchdog, reboot, the calibrations and the self-test, the radio link
+other than IMU1 and the barometer, the calibrations and the self-test, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
 a ground station's node runs; when it is full, newer texts are dropped with a log line).
 
@@ -68,7 +68,9 @@ Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the firs
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`. `FEATURES=inject-imu1-missed-edge
 tools/run.sh 60`: 5 s after the first good sample the data-ready edges are swallowed for 200 ms. The
 injection state goes out through the cells and core 0 logs it. `FEATURES=stall-core0 tools/run.sh 60`: one
-core-0 task spins 3 s without yielding 20 s after start and logs IMU1's samples before and after (F1).
+core-0 task spins 3 s without yielding 20 s after start and logs IMU1's samples before and after (F1). With
+the watchdog the board is reset about 1.7 s into that spin (record "TEST stalled (core 0)"); the feature does
+not act after a watchdog reset, so it does not loop.
 `FEATURES=f4-negative tools/run.sh 20`: a DMA channel is built on core 0 before the start-up check
 (negative control of F4: `[FAIL] DMA_IRQ_0 not enabled on core 0`), its line disabled again before core 1
 starts.
@@ -161,7 +163,8 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   WARNING, a recovery, Ok, NOTICE.
 - `FEATURES=inject-baro-stuck tools/run.sh 60`: `acquire` never returns. Shows the supervisor's stuck
   check: after max(1 s, 20 P) `stuck` is set, the device's `MARV_DEVICE_STATUS` row reports FAILED with
-  STUCK, one ERROR text "BARO: stuck"; the board is not reset (no watchdog yet) and the rest of the
+  STUCK, one ERROR text "BARO: stuck"; the board is not reset (a device stuck in an await does not stop
+  core 0's executor, so the watchdog stays fed) and the rest of the
   firmware (HEARTBEAT, PING/PONG, `[STAT]` lines) keeps running.
 
 Run `tools/run.sh` again afterwards to put the normal build back on the board.
@@ -293,7 +296,8 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
 | `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
-| `device restart <other device>`, `reboot --yes`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet"). No fake success |
+| `reboot --yes` | MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN param1 = 1: the action writes the REQUESTED scratch record and ends ACCEPTED; when the final ACK is handed to the link the watchdog monitor resets the board (`trigger_reset`) 100 to 200 ms later (1 s after the action when no ACK could be handed). Nothing is saved: an unsaved parameter change is gone after the reboot. The boot report then says INFO "reboot: requested" |
+| `device restart <other device>`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet"). No fake success |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Device drivers
@@ -343,12 +347,61 @@ The node writes nothing until the station opens the port (DTR held 100 ms, or it
 example `marv-link-test --connect serial:/dev/ttyACM1 --count 0 --duration 60` (MARV-GCS) counts one
 HEARTBEAT, one SYS_STATUS and two `MARV_DEVICE_STATUS` (IMU1, BARO) per second, 25 HIGHRES_IMU and 25
 SCALED_PRESSURE per second from system 1 component 1, and the STATUSTEXT
-"MARV V2 fw 0.1.0: flight core up".
+"MARV V2 fw 0.1.0: flight core up, reset: power-on" (the last reset's cause: `timeout` or `forced` when the
+watchdog caused it, `power-on` otherwise, which includes a debugger reset by `tools/run.sh`).
 
 Negative control: `FEATURES=no-fbeat tools/run.sh 30` builds with the cargo feature `no-fbeat`: core 1
 starts but its liveness task is not spawned. Expected: `[FAIL] PONG follows PING`, the log line and the
-WARNING text "flight core not answering". Run `tools/run.sh` again afterwards to put the normal build
-back on the board.
+WARNING text "flight core not answering". With the watchdog this build also resets about 1.7 s after start
+and again after every reset (a reset loop, record "FBEAT stalled (flight core)" or the task that ran last):
+run `tools/run.sh` at once afterwards to put the normal build back on the board.
+
+## Watchdog
+
+`src/watchdog.rs` with the pure rules in `fw_core::watchdog` (design: two-core amendment, item 6).
+
+- Started first thing in `main` on core 0: 1600 ms, `pause_on_debug(true)` (paused while a core is halted by
+  the debugger or the debugger is on the bus). Fed ONLY by the monitor, a task alone on an `InterruptExecutor`
+  on `SWI_IRQ_1` (priority 1, above core 0's thread mode). Every 100 ms it reads `BEAT0` (bumped every 50 ms by
+  `beat0` on core 0's thread-mode executor), `PONG` (the flight core's copy of the supervisor's 10 Hz `PING`)
+  and `SAVE_EPOCH`, and feeds while both heartbeats changed less than 200 ms ago. No device task feeds it.
+- At 200 ms of stall it writes the scratch record once (STALL_CORE0 or STALL_FLIGHT, the task that ran last
+  on that core from `RUNNING0` / `RUNNING1`, the stall's age, the uptime) and stops feeding: the board resets
+  1.65 to 1.8 s after the stall began. A stall that ends first clears the record; the supervisor logs it
+  afterwards and, when it reached 500 ms, sends one WARNING text "core 0 stalled 1.0 s (BARO)". The check
+  after a flash save (`SAVE_EPOCH` changed) never starts a stall.
+- What resets the board: core 0's thread-mode executor held (a task that never yields), the flight core held,
+  core 0 with interrupts off or a hang inside a critical section (reset with no record), a panic (it spins
+  with the watchdog unfed: no record), `reboot --yes`. What does not: a device stuck in an await, a device
+  that fails (its health goes to Failed, the executor runs on), a flash save (about 45 ms), a stall shorter
+  than about 1.6 s.
+- Task ids (one table, `fw_core::watchdog::task`, used by the record and the boot report): core 0 MAIN, USB,
+  LINK, SUPERVISOR, BEAT, ACTION (a command's action inside the link task), SETTINGS, BARO, TEST (a check
+  feature's task); flight core FBEAT, IMU1. Each task stores its id when it resumes (`fw_flight::tagged`, a
+  plain atomic store on every poll).
+- The boot report, read once at start (then the record's magic is cleared), one `[INFO] boot report` log line
+  and a text held until a ground station's node runs: time-out + a stall record = CRITICAL "WDG reset: BARO
+  stalled (core 0)" or "WDG reset: IMU1 stalled (flight core)"; time-out + no record = CRITICAL "WDG reset: no
+  record"; forced + REQUESTED = INFO "reboot: requested"; forced + no record = WARNING "reset: forced, no
+  record"; power-on or a debugger reset = nothing. A station tells that a reset happened from the boot text
+  line ("..., reset: timeout"), from `time_boot_ms` of SCALED_PRESSURE (and `time_usec` of HIGHRES_IMU)
+  going back to near zero, and from the USB device re-enumerating. Nothing is kept in flash.
+- Under `probe-rs run` a watchdog reset ends the probe session ("Firmware exited unexpectedly: Exception"): the
+  firmware boots again from flash on its own and keeps running; its evidence is then read with `marv-cli`.
+  A flash by `tools/run.sh` leaves the scratch registers at 0 and the reset reason empty.
+
+Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
+it provokes; `tools/run.sh` puts the normal build back):
+
+- `FEATURES=wdg-scratch-probe`: at most two resets: writes a record, lets the watchdog time out, reads it
+  back (text "probe: kept after TimedOut reset"), writes another, forces a reset 30 s later, reads it back
+  ("probe: kept after Forced reset"). Result 2026-11-15: the scratch registers 0 to 3 survive both.
+- `FEATURES=hang-core0`: the barometer's task spins forever: reset, "WDG reset: BARO stalled (core 0)".
+- `FEATURES=hang-flight`: IMU1's task on the flight core spins forever: reset, "WDG reset: IMU1 stalled
+  (flight core)".
+- `FEATURES=spin-1s`: the barometer's task spins 1.0 s: no reset, one text "core 0 stalled 0.9 s (BARO)"
+  (the age the monitor saw, in 100 ms steps).
+- `FEATURES=hang-irqoff`: core 0 turns interrupts off and spins: reset, "WDG reset: no record".
 
 ## Workspace
 

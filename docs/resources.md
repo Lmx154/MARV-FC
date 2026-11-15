@@ -9,7 +9,8 @@ foundation design. Run as one program so far (2026-11-14): the two-core skeleton
 MAVLink node on core 0, `DMA_IRQ_0` off on core 0), the BMP581 barometer on core 0 (I2C1 without DMA, `I2C1_IRQ`, the data-ready
 input GPIO21 through `IO_IRQ_BANK0`) and IMU1, the ICM-45686, on core 1 (SPI0 at 8 MHz mode 0 with DMA channels 0 and 1 on
 `DMA_IRQ_0`, INT1 on GPIO15 through core 1's `IO_IRQ_BANK0`, all built inside core 1's entry closure; start-up checks:
-`DMA_IRQ_0` enabled on core 1, not on core 0); no other device, PIO block or DMA channel of this plan has run in it yet.
+`DMA_IRQ_0` enabled on core 1, not on core 0) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
+see the table below); no other device, PIO block or DMA channel of this plan has run in it yet.
 
 ## Fixed by the board (`docs/pinout.md`)
 
@@ -74,11 +75,11 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Item | Assignment | Status |
 |---|---|---|
 | Core 0, the I/O core: thread-mode executor | `embassy_rp::init`, the time driver; usb_link (`usb-cdc`'s futures are not `Send`: built here), rc_link, baro, mag, gnss, batt, supervisor, actions, settings and flash_saver, beat0; later led, sd_logger | DECIDED (design, two-core amendment) |
-| Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only | DECIDED |
+| Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only, priority 1 (BUILT: `src/watchdog.rs`) | DECIDED |
 | Core 0: `SWI_IRQ_0` | reserved (the receiver task, if UART overruns show it is needed) | DECIDED |
 | Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2, fbeat (liveness, BUILT); later the control loop, DShot, arming. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
 | Core 1 stack | a `static`, 16 KB default, set from stack painting | DECIDED |
-| Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, only while both cores' heartbeats advance | DECIDED |
+| Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, `pause_on_debug(true)`, only while `BEAT0` and `PONG` both changed less than 200 ms ago; scratch registers 0 to 3 hold the reset record (layout version 2; 4 to 7 are the boot ROM's). BUILT | DECIDED |
 
 ## Rules that follow
 
