@@ -20,6 +20,7 @@ use crate::device::{AdapterCounters, DeviceAdapter, Pending, Reading, StartFailu
 const AFTER: Duration = Duration::from_secs(5);
 const TRANSIENT_FAILURES: u8 = 4;
 const PERSISTENT: bool = cfg!(feature = "inject-baro-persistent");
+const TRANSIENT: bool = cfg!(feature = "inject-baro-transient");
 const MISSED_EDGE: bool = cfg!(feature = "inject-baro-missed-edge");
 const SILENT: bool = cfg!(feature = "inject-baro-silent");
 const VERIFY: bool = cfg!(feature = "inject-baro-verify");
@@ -117,7 +118,9 @@ impl<A: DeviceAdapter> Inject<A> {
     }
 
     fn fail(&mut self, what: &str) -> bool {
-        let fail = self.due() && (PERSISTENT || self.injected < TRANSIENT_FAILURES);
+        let fail = (PERSISTENT || TRANSIENT)
+            && self.due()
+            && (PERSISTENT || self.injected < TRANSIENT_FAILURES);
         if fail {
             self.injected = self.injected.saturating_add(1);
             defmt::info!(
