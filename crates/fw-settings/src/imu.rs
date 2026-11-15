@@ -102,8 +102,14 @@ mod tests {
         let g = p.find(&name("IMU2_GYR_OFFZ")).unwrap();
         let max = GYRO_OFFSET_MAX_RADS;
         assert_eq!(p.set(g, ParamValue::F32(max)), Ok(ParamValue::F32(max)));
-        assert_eq!(p.set(g, ParamValue::F32(-max * 1.01)), Err(ParamError::OutOfRange));
-        assert_eq!(p.set(g, ParamValue::F32(f32::NAN)), Err(ParamError::OutOfRange));
+        assert_eq!(
+            p.set(g, ParamValue::F32(-max * 1.01)),
+            Err(ParamError::OutOfRange)
+        );
+        assert_eq!(
+            p.set(g, ParamValue::F32(f32::NAN)),
+            Err(ParamError::OutOfRange)
+        );
         assert_eq!(p.take_live_mask(), 1 << IMU2);
         let a = p.find(&name("IMU1_ACC_OFFX")).unwrap();
         assert_eq!(p.set(a, ParamValue::F32(-9.8)), Ok(ParamValue::F32(-9.8)));

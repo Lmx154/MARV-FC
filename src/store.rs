@@ -160,6 +160,7 @@ impl ParamStore for Store {
                     }
                 );
                 raise_apply(configure);
+                crate::calibration::raise_push(live);
             }
             Err(error) => {
                 let reason = notice.map_or("refused", |n| n.kind.text());

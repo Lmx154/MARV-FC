@@ -95,10 +95,9 @@ impl Stats3 {
     }
 }
 
-/// The length of a vector (Newton's method: `core` has no `f32::sqrt`).
-pub fn norm3(v: [f32; 3]) -> f32 {
-    let s = v.iter().map(|x| x * x).sum::<f32>();
-    if s <= 0.0 {
+/// The square root by Newton's method (`core` has no `f32::sqrt`); 0 for `s <= 0`.
+pub fn sqrt(s: f32) -> f32 {
+    if s.is_nan() || s <= 0.0 {
         return 0.0;
     }
     let mut x = s.max(1.0);
@@ -106,6 +105,11 @@ pub fn norm3(v: [f32; 3]) -> f32 {
         x = 0.5 * (x + s / x);
     }
     x
+}
+
+/// The length of a vector.
+pub fn norm3(v: [f32; 3]) -> f32 {
+    sqrt(v.iter().map(|x| x * x).sum::<f32>())
 }
 
 fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
@@ -138,12 +142,18 @@ impl ImuOffsets {
 
     /// The calibrated sample: `raw - offsets` (gyro, accelerometer).
     pub fn remove(&self, gyro_rads: [f32; 3], accel_ms2: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-        (sub(gyro_rads, self.gyro_rads), sub(accel_ms2, self.accel_ms2))
+        (
+            sub(gyro_rads, self.gyro_rads),
+            sub(accel_ms2, self.accel_ms2),
+        )
     }
 
     /// The raw sample again from a calibrated one: `calibrated + offsets`.
     pub fn restore(&self, gyro_rads: [f32; 3], accel_ms2: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-        (add(gyro_rads, self.gyro_rads), add(accel_ms2, self.accel_ms2))
+        (
+            add(gyro_rads, self.gyro_rads),
+            add(accel_ms2, self.accel_ms2),
+        )
     }
 }
 
@@ -226,7 +236,10 @@ impl GyroCal {
         let mean = self.stats.mean();
         Some(if self.stats.variance().iter().any(|v| *v > limit) {
             Err(Failure::Moving)
-        } else if mean.iter().any(|m| !(m.abs() <= GYRO_OFFSET_MAX_RADS)) {
+        } else if mean
+            .iter()
+            .any(|m| m.is_nan() || m.abs() > GYRO_OFFSET_MAX_RADS)
+        {
             Err(Failure::OffsetTooLarge)
         } else {
             Ok(mean)
@@ -274,8 +287,7 @@ impl AccelCal {
         self.windows += 1;
         let diff = self.last.map(|last| sub(last, average));
         if let (Some(last), Some(d)) = (self.last, diff)
-            && d.iter().map(|x| x * x).sum::<f32>()
-                < ACCEL_CONVERGENCE_MSS * ACCEL_CONVERGENCE_MSS
+            && d.iter().map(|x| x * x).sum::<f32>() < ACCEL_CONVERGENCE_MSS * ACCEL_CONVERGENCE_MSS
         {
             let mean = add(last, average).map(|x| 0.5 * x);
             let offset = sub(mean, [0.0, 0.0, GRAVITY_MSS]);
@@ -507,7 +519,10 @@ mod tests {
             if expect_moving {
                 assert_eq!(out, Outcome::Failed(Failure::Moving, Some(0)), "{scale}");
             } else {
-                assert!(matches!(out, Outcome::Done([Some(_), None])), "{scale} {out:?}");
+                assert!(
+                    matches!(out, Outcome::Done([Some(_), None])),
+                    "{scale} {out:?}"
+                );
             }
         }
     }
@@ -519,7 +534,9 @@ mod tests {
         let out = feed(&mut run, |_| ([0.0, big, 0.0], [0.0; 3]));
         assert_eq!(out, Outcome::Failed(Failure::OffsetTooLarge, Some(0)));
         let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
-        let out = feed(&mut run, |_| ([0.0, GYRO_OFFSET_MAX_RADS * 0.99, 0.0], [0.0; 3]));
+        let out = feed(&mut run, |_| {
+            ([0.0, GYRO_OFFSET_MAX_RADS * 0.99, 0.0], [0.0; 3])
+        });
         assert!(matches!(out, Outcome::Done(_)));
     }
 
@@ -598,7 +615,11 @@ mod tests {
             if ok {
                 assert!(matches!(out, Outcome::Done([Some(_), None])), "{z} {out:?}");
             } else {
-                assert_eq!(out, Outcome::Failed(Failure::OffsetTooLarge, Some(0)), "{z}");
+                assert_eq!(
+                    out,
+                    Outcome::Failed(Failure::OffsetTooLarge, Some(0)),
+                    "{z}"
+                );
             }
         }
     }
@@ -666,5 +687,7 @@ mod tests {
         assert!((norm3([3.0, 4.0, 0.0]) - 5.0).abs() < 1e-6);
         assert!((norm3([0.003, 0.004, 0.0]) - 0.005).abs() < 1e-8);
         assert_eq!(norm3([0.0; 3]), 0.0);
+        assert!((sqrt(2.5e-5) - 0.005).abs() < 1e-8);
+        assert_eq!(sqrt(-1.0), 0.0);
     }
 }

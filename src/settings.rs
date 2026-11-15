@@ -354,6 +354,7 @@ pub fn boot() {
 pub fn reload() -> Result<(), &'static str> {
     let configure = with_storage(|st| load_from_flash(st, "reload")).ok_or("storage busy")??;
     crate::device::raise_apply(configure);
+    crate::calibration::raise_push(u32::MAX);
     Ok(())
 }
 

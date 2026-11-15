@@ -14,7 +14,9 @@ use embassy_rp::spi::{self, Spi};
 use embassy_time::{Delay, Duration, block_for};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
+use fw_core::calib::ImuOffsets;
 use fw_core::health::{ErrorKind, Limits};
+use fw_core::xcore::TripleReader;
 use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
@@ -64,6 +66,8 @@ pub struct Parts {
     pub int1: Peri<'static, PIN_15>,
     pub tx_dma: Peri<'static, DMA_CH0>,
     pub rx_dma: Peri<'static, DMA_CH1>,
+    /// The offsets core 0 publishes, subtracted from every sample.
+    pub offsets: TripleReader<'static, ImuOffsets>,
 }
 
 type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>;
@@ -91,6 +95,7 @@ pub struct Icm45686Adapter {
     /// The driver's `verify_steps()`, asked after every operation that can change it (the list of
     /// owned registers is rebuilt by the driver at every call).
     steps: usize,
+    offsets: TripleReader<'static, ImuOffsets>,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -127,6 +132,7 @@ impl Icm45686Adapter {
             calls: 0,
             step: 0,
             steps: 0,
+            offsets: p.offsets,
         }
     }
 
@@ -171,9 +177,12 @@ impl ImuAdapter for Icm45686Adapter {
             return Err(ErrorKind::Por);
         }
         let sample = self.call().read().await.map_err(|e| kind(&e))?;
+        let (offsets, _) = self.offsets.read();
+        let (gyro_rads, accel_ms2) =
+            offsets.remove(sample.gyro_rads(GYRO_FS), sample.accel_ms2(ACCEL_FS));
         Ok(ImuReading {
-            gyro_rads: sample.gyro_rads(GYRO_FS),
-            accel_ms2: sample.accel_ms2(ACCEL_FS),
+            gyro_rads,
+            accel_ms2,
             temperature_c: sample.temperature_c(),
         })
     }

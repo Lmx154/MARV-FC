@@ -36,6 +36,7 @@ mod actions;
 mod baro;
 mod batt;
 mod busclear;
+mod calibration;
 mod device;
 mod flight_latency;
 mod gnss;
@@ -117,6 +118,8 @@ static PING: AtomicU32 = AtomicU32::new(0);
 pub static PONG: AtomicU32 = AtomicU32::new(0);
 /// Core 0: the supervisor's clock (ms, wrapping) when it last saw `PONG` equal to `PING`.
 static PONG_FRESH_MS: AtomicU32 = AtomicU32::new(0);
+/// The HEARTBEAT `system_status` last sent, for the log line at each change (255: none yet).
+static HEARTBEAT_STATE: AtomicU8 = AtomicU8::new(u8::MAX);
 /// The flight core's one wake.
 static KICK: Kick = Kick::new();
 /// Core 1's ACTLR as it read it at the top of its entry; valid once `CORE1_ACTLR_READ` is true.
@@ -482,7 +485,18 @@ impl Telemetry for Board {
     }
 
     fn status(&mut self, now_us: u64) -> Option<MavState> {
-        Some(system_status(&rows(), now_us / 1000, false))
+        let state = system_status(&rows(), now_us / 1000, calibration::calibrating());
+        if HEARTBEAT_STATE.swap(state as u8, Ordering::Relaxed) != state as u8 {
+            defmt::info!(
+                "[INFO] HEARTBEAT system_status {=str}",
+                match state {
+                    MavState::MAV_STATE_CALIBRATING => "CALIBRATING",
+                    MavState::MAV_STATE_STANDBY => "STANDBY",
+                    _ => "other",
+                }
+            );
+        }
+        Some(state)
     }
 
     fn texts(&mut self, _now_us: u64, out: &mut Texts<'_>) {
@@ -740,6 +754,7 @@ async fn supervise() -> ! {
                 );
             }
             devices.stat(now);
+            calibration::stat();
             watchdog::stat();
         }
         tick = tick.wrapping_add(1);
@@ -863,6 +878,8 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "corrupt-newest")]
     settings::corrupt_newest();
     settings::boot();
+    calibration::init();
+    let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
     settings::fake_arm();
     let imu1_parts = imu1::Parts {
@@ -874,6 +891,7 @@ async fn main(spawner: Spawner) {
         int1: p.PIN_15,
         tx_dma: p.DMA_CH0,
         rx_dma: p.DMA_CH1,
+        offsets: imu1_offsets,
     };
     let imu2_parts = imu2::Parts {
         spi: p.SPI1,
@@ -884,6 +902,7 @@ async fn main(spawner: Spawner) {
         int1: p.PIN_7,
         tx_dma: p.DMA_CH2,
         rx_dma: p.DMA_CH3,
+        offsets: imu2_offsets,
     };
     spawn_core1(p.CORE1, CORE1_STACK.take(), move || {
         core1_main(imu1_parts, imu2_parts)

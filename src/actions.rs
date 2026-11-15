@@ -4,7 +4,8 @@
 //!
 //! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration), save to
 //! and reload from the flash settings region (`settings`), reboot (the watchdog monitor resets the
-//! board 100 ms after the final ACK was handed to the link; nothing is saved). Every other action
+//! board 100 ms after the final ACK was handed to the link; nothing is saved), the gyro and the
+//! one-position accelerometer calibrations (`calibration`). Every other action
 //! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
@@ -13,12 +14,14 @@ use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::admission::{Action, ActionBook, Effect};
+use fw_core::calib::Kind;
 
 use fw_core::watchdog::task;
 use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::{MarvDevice, MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck};
 
+use crate::calibration::Step;
 use crate::device::{find, raise_apply};
 use crate::store;
 
@@ -87,6 +90,9 @@ pub fn command(req: &CommandRequest, now_ms: u64) -> CommandOutcome {
         defmt::info!("[INFO] action {=str} starts", action_name(action));
         start(action, now_ms);
     }
+    if decision.effect == Effect::CancelCalibration {
+        crate::calibration::cancel();
+    }
     decision.outcome
 }
 
@@ -136,6 +142,16 @@ fn run(action: Action, now_ms: u64) {
             crate::watchdog::request_reboot(now_ms as u32);
             end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
         }
+        Action::GyroCalibration | Action::AccelCalibration => {
+            let kind = if action == Action::GyroCalibration {
+                Kind::Gyro
+            } else {
+                Kind::Accel
+            };
+            if !crate::calibration::start(kind) {
+                end(now_ms, action, MavResult::MAV_RESULT_FAILED);
+            }
+        }
         other => {
             crate::text_fmt(
                 MavSeverity::MAV_SEVERITY_WARNING,
@@ -174,6 +190,7 @@ fn defaults(calibration_only: bool, now_ms: u64) {
         live
     );
     raise_apply(configure);
+    crate::calibration::raise_push(live);
     end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
 }
 
@@ -222,7 +239,8 @@ fn end(now_ms: u64, action: Action, result: MavResult) {
     }
 }
 
-/// Every supervisor tick: the books' time limit, and the end of the running restart action.
+/// Every supervisor tick: the books' time limit, the running calibration, and the end of the
+/// running restart action.
 pub fn tick(now_ms: u64) {
     let (timed_out, running) = BOOK.lock(|b| {
         let mut book = b.borrow_mut();
@@ -234,6 +252,17 @@ pub fn tick(now_ms: u64) {
             action_name(action),
             action.max_duration_ms()
         );
+    }
+    match running {
+        Some(action @ (Action::GyroCalibration | Action::AccelCalibration)) => {
+            match crate::calibration::step() {
+                Step::Progress(percent) => {
+                    BOOK.lock(|b| b.borrow_mut().set_progress(now_ms, percent));
+                }
+                Step::End(result) => end(now_ms, action, result),
+            }
+        }
+        _ => crate::calibration::idle(),
     }
     if let Some(action @ Action::DeviceRestart(id)) = running
         && let Some(dev) = find(id)

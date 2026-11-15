@@ -14,7 +14,9 @@ use embassy_rp::spi::{self, Spi};
 use embassy_time::Delay;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
+use fw_core::calib::ImuOffsets;
 use fw_core::health::{ErrorKind, Limits};
+use fw_core::xcore::TripleReader;
 use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
@@ -66,6 +68,8 @@ pub struct Parts {
     pub int1: Peri<'static, PIN_7>,
     pub tx_dma: Peri<'static, DMA_CH2>,
     pub rx_dma: Peri<'static, DMA_CH3>,
+    /// The offsets core 0 publishes, subtracted from every sample.
+    pub offsets: TripleReader<'static, ImuOffsets>,
 }
 
 type Dev = ExclusiveDevice<Spi<'static, SPI1, spi::Async>, Output<'static>, NoDelay>;
@@ -76,6 +80,7 @@ pub struct Lsm6dsk320xAdapter {
     int1: Input<'static>,
     calls: u32,
     step: usize,
+    offsets: TripleReader<'static, ImuOffsets>,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -111,6 +116,7 @@ impl Lsm6dsk320xAdapter {
             int1: Input::new(p.int1, Pull::None),
             calls: 0,
             step: 0,
+            offsets: p.offsets,
         }
     }
 
@@ -145,9 +151,12 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     /// reset flag: a power-on reset shows as a timeout or a configuration mismatch.
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
         let all = self.call().read_all().await.map_err(|e| kind(&e))?;
+        let (offsets, _) = self.offsets.read();
+        let (gyro_rads, accel_ms2) =
+            offsets.remove(all.gyro.gyro_rads(GYRO_FS), all.accel.accel_ms2(ACCEL_FS));
         Ok(ImuReading {
-            gyro_rads: all.gyro.gyro_rads(GYRO_FS),
-            accel_ms2: all.accel.accel_ms2(ACCEL_FS),
+            gyro_rads,
+            accel_ms2,
             temperature_c: all.temperature_c(),
         })
     }
