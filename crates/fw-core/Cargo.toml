@@ -13,4 +13,4 @@ atomic-waker = "1.1.2"
 # The parameter protocol's `ParamStore` trait, `ParamName`, `ParamValue`, which `params` implements.
 # Pinned to a commit of mavlink-device `main`; to take a newer one change `rev` and run
 # `cargo update -p mavlink-device`.
-mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "7811580344ea0119917156b4e9dbd5e6acbb81a9" }
+mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c" }

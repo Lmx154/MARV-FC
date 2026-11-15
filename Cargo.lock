@@ -907,7 +907,7 @@ dependencies = [
 [[package]]
 name = "marv-dialect"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/marv-dialect.git?rev=61915e658105a5bb88ff239c560cd923f66a56f7#61915e658105a5bb88ff239c560cd923f66a56f7"
+source = "git+https://github.com/Lmx154/marv-dialect.git?rev=af6baa107046219dee49cd88c81f9809c134e761#af6baa107046219dee49cd88c81f9809c134e761"
 dependencies = [
  "bitflags 2.13.2",
  "mavlink-bindgen",
@@ -977,7 +977,7 @@ dependencies = [
 [[package]]
 name = "mavlink-device"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/mavlink-device.git?rev=7811580344ea0119917156b4e9dbd5e6acbb81a9#7811580344ea0119917156b4e9dbd5e6acbb81a9"
+source = "git+https://github.com/Lmx154/mavlink-device.git?rev=dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c#dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c"
 dependencies = [
  "embedded-hal-async",
  "embedded-io-async 0.7.0",
