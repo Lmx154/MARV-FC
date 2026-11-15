@@ -1,9 +1,10 @@
 //! The two IMUs' calibration offsets: gyro in rad/s and accelerometer in m/s^2 per axis, which the
 //! adapter on the flight core subtracts from every sample in software (the chips' offset registers
 //! stay zero). `Live`: no validator, no apply; written by the gyro and one-position accelerometer
-//! calibrations (`fw_core::calib`), whose limits are the ranges here.
+//! calibrations (`fw_core::calib`). The gyro range is the gyros' full scale (2000 dps); the
+//! accelerometer range is ArduPilot's largest accepted offset (one gravity).
 
-use fw_core::calib::{ACCEL_OFFSET_MAX_MSS, GYRO_OFFSET_MAX_RADS, IMUS};
+use fw_core::calib::{ACCEL_OFFSET_MAX_MSS, GYRO_FULL_SCALE_RADS, IMUS};
 use fw_core::params::{Apply, ParamDef};
 use mavlink_device::marv::MarvDevice;
 
@@ -31,8 +32,8 @@ const fn gyr(name: &'static str, device: u8) -> ParamDef {
         name,
         device,
         0.0,
-        -GYRO_OFFSET_MAX_RADS,
-        GYRO_OFFSET_MAX_RADS,
+        -GYRO_FULL_SCALE_RADS,
+        GYRO_FULL_SCALE_RADS,
         Apply::Live,
     )
     .with_calibration()
@@ -100,7 +101,7 @@ mod tests {
     fn ranges_are_the_calibration_limits_and_a_set_is_live() {
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         let g = p.find(&name("IMU2_GYR_OFFZ")).unwrap();
-        let max = GYRO_OFFSET_MAX_RADS;
+        let max = GYRO_FULL_SCALE_RADS;
         assert_eq!(p.set(g, ParamValue::F32(max)), Ok(ParamValue::F32(max)));
         assert_eq!(
             p.set(g, ParamValue::F32(-max * 1.01)),

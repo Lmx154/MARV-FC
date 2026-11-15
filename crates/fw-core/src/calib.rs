@@ -1,7 +1,9 @@
-//! Gyroscope and one-position accelerometer calibration: the accumulation and the decision, pure.
+//! Gyroscope, one-position accelerometer and compass calibration: the accumulation and the
+//! decision, pure.
 //!
 //! Samples go in (per IMU, with the sample's `seq`: a sample is counted once), a per-IMU offset or
-//! the reason for the failure comes out. No clock, no hardware, `f32` only.
+//! the reason for the failure comes out. No clock, no hardware, `f32` only (the compass takes the
+//! sample's own time stamp).
 //!
 //! - Gyroscope: Betaflight `performGyroCalibration` (`src/main/sensors/gyro.c`): the samples of a
 //!   fixed duration, `gyroCalibrationDuration` = 125 (1.25 s, `pgResetFn_gyroConfig`), their mean is
@@ -14,6 +16,13 @@
 //!   the difference) converge, the offset is their mean minus gravity; not converged within "up to
 //!   10 seconds": failed. The largest offset accepted is ArduPilot's `AccelCalibrator::accept_result`
 //!   (`GRAVITY_MSS` per axis): `simple_accel_cal` itself has no limit.
+//! - Compass, minimum and maximum: Betaflight `compassUpdate` (`src/main/sensors/compass.c`, tags up
+//!   to 4.4.3; master and 4.5 fit a bias estimator instead): for 30 s (`(currentTimeUs - tCal) <
+//!   30000000`) the minimum and maximum of every axis are tracked, and the offset is
+//!   `(min + max) / 2`. Betaflight accepts whatever comes out; here the radius seen on an axis,
+//!   `(max - min) / 2`, must lie strictly between ArduPilot's `FIELD_RADIUS_MIN` = 150 mG and
+//!   `FIELD_RADIUS_MAX` = 950 mG (`CompassCalibrator.cpp`, `fit_acceptable_status`:
+//!   `radius <= FIELD_RADIUS_MIN || radius >= FIELD_RADIUS_MAX` is `FAILED_RADIUS`) on every axis.
 
 use core::f32::consts::PI;
 
@@ -26,10 +35,10 @@ pub const GYRO_SAMPLES: u32 = 125;
 /// Betaflight's moving limit, 48 counts at 2000 / 2^15 dps per count, in rad/s (standard deviation).
 pub const GYRO_MOVING_SD_RADS: f32 = 48.0 * (2000.0 / 32768.0) * PI / 180.0;
 
-/// The largest gyro offset accepted per axis, rad/s: 10 dps, ten times the largest typical
-/// zero-rate level of the two chips (LSM6DSK320X `G_TyOff` +-1 dps; ICM-45686 +-0.4 dps board level,
-/// +-0.005 dps/C). Neither Betaflight nor ArduPilot limits it (`INS_GYROFFS_*` has no range).
-pub const GYRO_OFFSET_MAX_RADS: f32 = 10.0 * PI / 180.0;
+/// The gyros' full scale, rad/s: 2000 dps, the scale Betaflight runs every gyro at
+/// (`GYRO_SCALE_2000DPS`). The range of the gyro offset parameters: the store holds any rate a
+/// working gyro can report. Neither Betaflight nor ArduPilot limits the offset otherwise.
+pub const GYRO_FULL_SCALE_RADS: f32 = 2000.0 * PI / 180.0;
 
 /// Samples per accelerometer average (ArduPilot `simple_accel_cal`: 50 points).
 pub const ACCEL_WINDOW: u32 = 50;
@@ -45,6 +54,18 @@ pub const ACCEL_OFFSET_MAX_MSS: f32 = GRAVITY_MSS;
 
 /// The number of IMUs a run covers.
 pub const IMUS: usize = 2;
+
+/// The compass calibration's duration, microseconds (Betaflight: 30 s).
+pub const MAG_DURATION_US: u64 = 30_000_000;
+
+/// The smallest field radius accepted per axis, microtesla: ArduPilot `FIELD_RADIUS_MIN` = 150 mG.
+pub const MAG_RADIUS_MIN_UT: f32 = 15.0;
+
+/// The largest field radius accepted per axis, microtesla: ArduPilot `FIELD_RADIUS_MAX` = 950 mG.
+pub const MAG_RADIUS_MAX_UT: f32 = 95.0;
+
+/// The largest compass offset the parameters hold per axis, microtesla (`MAG_OFFX/Y/Z`).
+pub const MAG_OFFSET_MAX_UT: f32 = 200.0;
 
 /// Mean and variance per axis, Welford's update in `f32` (Betaflight `devPush`, `devVariance`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -166,6 +187,11 @@ pub enum Failure {
     Moving,
     /// An offset is beyond the accepted limit.
     OffsetTooLarge,
+    /// Compass: a radius is not between the two bounds (the vehicle was not rotated through all
+    /// orientations).
+    NotRotated,
+    /// Compass: the offsets would fall outside the parameters' range.
+    OffsetOutOfRange,
     /// Cancelled: nothing is written.
     Cancelled,
 }
@@ -177,6 +203,8 @@ impl Failure {
             Self::NoImu => "no IMU Ok",
             Self::Moving => "moving",
             Self::OffsetTooLarge => "offset too large",
+            Self::NotRotated => "not rotated",
+            Self::OffsetOutOfRange => "offset out of range",
             Self::Cancelled => "cancelled",
         }
     }
@@ -233,16 +261,10 @@ impl GyroCal {
             return None;
         }
         let limit = GYRO_MOVING_SD_RADS * GYRO_MOVING_SD_RADS;
-        let mean = self.stats.mean();
         Some(if self.stats.variance().iter().any(|v| *v > limit) {
             Err(Failure::Moving)
-        } else if mean
-            .iter()
-            .any(|m| m.is_nan() || m.abs() > GYRO_OFFSET_MAX_RADS)
-        {
-            Err(Failure::OffsetTooLarge)
         } else {
-            Ok(mean)
+            Ok(self.stats.mean())
         })
     }
 }
@@ -320,6 +342,133 @@ impl AccelCal {
     /// `None` until two averages converge or the averages run out; then the offset or the failure.
     pub const fn result(&self) -> Option<Result<[f32; 3], Failure>> {
         self.done
+    }
+}
+
+/// A compass calibration's measurement: the offsets (midpoints) and the radii seen, microtesla.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MagFit {
+    /// `(max + min) / 2` per axis.
+    pub offset_ut: [f32; 3],
+    /// `(max - min) / 2` per axis.
+    pub radius_ut: [f32; 3],
+}
+
+/// The raw field again from a published one: `published + offsets` (the adapter publishes
+/// `raw - offsets`), microtesla.
+pub fn mag_raw(published_ut: [f32; 3], offsets_ut: [f32; 3]) -> [f32; 3] {
+    add(published_ut, offsets_ut)
+}
+
+/// Where a compass calibration stands.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MagOutcome {
+    /// Still collecting.
+    Running,
+    /// Accepted: write these offsets.
+    Done(MagFit),
+    /// Nothing is written; the measurement the failure came from, when there is one.
+    Failed(Failure, Option<MagFit>),
+}
+
+/// The compass calibration, minimum and maximum of the raw field per axis over
+/// [`MAG_DURATION_US`] of the samples' own time (a sample is counted once by its `seq`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MagCal {
+    fresh: Fresh,
+    start_us: Option<u64>,
+    elapsed_us: u64,
+    min: [f32; 3],
+    max: [f32; 3],
+    cancelled: bool,
+}
+
+impl Default for MagCal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MagCal {
+    /// No sample yet.
+    pub const fn new() -> Self {
+        Self {
+            fresh: Fresh(None),
+            start_us: None,
+            elapsed_us: 0,
+            min: [f32::INFINITY; 3],
+            max: [f32::NEG_INFINITY; 3],
+            cancelled: false,
+        }
+    }
+
+    /// Adds a raw sample (microtesla, the offsets in force added back) taken at `t_us`, unless its
+    /// `seq` was the previous one, the time is up, or the run was cancelled. The first sample
+    /// starts the clock; a sample at or after the duration ends the run and is not counted
+    /// (Betaflight: `(currentTimeUs - tCal) < 30000000`).
+    pub fn push(&mut self, seq: u32, t_us: u64, field_ut: [f32; 3]) {
+        if self.cancelled || self.done() || !self.fresh.take(seq) {
+            return;
+        }
+        let start = *self.start_us.get_or_insert(t_us);
+        self.elapsed_us = t_us.saturating_sub(start);
+        if self.done() {
+            return;
+        }
+        for ((min, max), x) in self.min.iter_mut().zip(self.max.iter_mut()).zip(field_ut) {
+            if x < *min {
+                *min = x;
+            }
+            if x > *max {
+                *max = x;
+            }
+        }
+    }
+
+    fn done(&self) -> bool {
+        self.elapsed_us >= MAG_DURATION_US
+    }
+
+    /// 0 to 100: the share of the duration gone.
+    pub fn percent(&self) -> u8 {
+        (self.elapsed_us.min(MAG_DURATION_US) * 100 / MAG_DURATION_US) as u8
+    }
+
+    /// Stops the run: it ends [`Failure::Cancelled`] and gives no offset.
+    pub fn cancel(&mut self) {
+        self.cancelled = true;
+    }
+
+    /// Where the run stands. The radii are checked first (ArduPilot's bounds, strictly inside),
+    /// then the offsets against the parameters' range.
+    pub fn outcome(&self) -> MagOutcome {
+        if self.cancelled {
+            return MagOutcome::Failed(Failure::Cancelled, None);
+        }
+        if !self.done() {
+            return MagOutcome::Running;
+        }
+        let mut fit = MagFit {
+            offset_ut: [0.0; 3],
+            radius_ut: [0.0; 3],
+        };
+        for (i, (min, max)) in self.min.iter().zip(self.max.iter()).enumerate() {
+            if let (Some(o), Some(r)) = (fit.offset_ut.get_mut(i), fit.radius_ut.get_mut(i)) {
+                *o = 0.5 * (max + min);
+                *r = 0.5 * (max - min);
+            }
+        }
+        if !fit
+            .radius_ut
+            .iter()
+            .all(|r| *r > MAG_RADIUS_MIN_UT && *r < MAG_RADIUS_MAX_UT)
+        {
+            return MagOutcome::Failed(Failure::NotRotated, Some(fit));
+        }
+        if !fit.offset_ut.iter().all(|o| o.abs() <= MAG_OFFSET_MAX_UT) {
+            return MagOutcome::Failed(Failure::OffsetOutOfRange, Some(fit));
+        }
+        MagOutcome::Done(fit)
     }
 }
 
@@ -480,7 +629,11 @@ mod tests {
     fn constants_are_the_sources_numbers() {
         // 48 counts * 2000 / 32768 dps = 2.9296875 dps.
         assert!((GYRO_MOVING_SD_RADS * 180.0 / PI - 2.929_687_5).abs() < 1e-5);
-        assert!((GYRO_OFFSET_MAX_RADS - 0.174_532_9).abs() < 1e-6);
+        assert!((GYRO_FULL_SCALE_RADS - 34.906_585).abs() < 1e-4);
+        assert_eq!(MAG_DURATION_US, 30_000_000);
+        // ArduPilot FIELD_RADIUS_MIN 150 and FIELD_RADIUS_MAX 950 milligauss.
+        assert_eq!(MAG_RADIUS_MIN_UT, 15.0);
+        assert_eq!(MAG_RADIUS_MAX_UT, 95.0);
         assert_eq!(GYRO_SAMPLES, 125);
         assert_eq!(ACCEL_WINDOW * ACCEL_WINDOWS, 1000);
         assert_eq!(ACCEL_OFFSET_MAX_MSS, 9.806_65);
@@ -528,16 +681,14 @@ mod tests {
     }
 
     #[test]
-    fn a_gyro_offset_beyond_the_limit_fails() {
+    fn a_large_still_gyro_mean_is_the_offset_there_is_no_limit_but_the_stores() {
+        // 20 rad/s (1146 dps) steady: a working gyro at its scale; the store's range decides.
         let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
-        let big = GYRO_OFFSET_MAX_RADS * 1.01;
-        let out = feed(&mut run, |_| ([0.0, big, 0.0], [0.0; 3]));
-        assert_eq!(out, Outcome::Failed(Failure::OffsetTooLarge, Some(0)));
-        let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
-        let out = feed(&mut run, |_| {
-            ([0.0, GYRO_OFFSET_MAX_RADS * 0.99, 0.0], [0.0; 3])
-        });
-        assert!(matches!(out, Outcome::Done(_)));
+        let out = feed(&mut run, |_| ([0.0, 20.0, -20.0], [0.0; 3]));
+        let Outcome::Done([Some(a), Some(_)]) = out else {
+            panic!("{out:?}");
+        };
+        assert!(close(a, [0.0, 20.0, -20.0], 1e-4));
     }
 
     #[test]
@@ -689,5 +840,163 @@ mod tests {
         assert_eq!(norm3([0.0; 3]), 0.0);
         assert!((sqrt(2.5e-5) - 0.005).abs() < 1e-8);
         assert_eq!(sqrt(-1.0), 0.0);
+    }
+
+    const CENTRE: [f32; 3] = [10.0, -20.0, 30.0];
+
+    /// Sample `i` of `n` on the sphere of `radius` about `centre` (golden-angle spiral).
+    fn sphere(i: u32, n: u32, radius: f32, centre: [f32; 3]) -> [f32; 3] {
+        let z = 1.0 - 2.0 * (i as f32 + 0.5) / n as f32;
+        let r = (1.0 - z * z).sqrt();
+        let a = i as f32 * 2.399_963;
+        [
+            centre[0] + radius * r * a.cos(),
+            centre[1] + radius * r * a.sin(),
+            centre[2] + radius * z,
+        ]
+    }
+
+    /// 100 samples per second for 31 s (bounded), through `sample(i)`; the outcome at the end.
+    fn mag_run(sample: impl Fn(u32) -> [f32; 3]) -> MagOutcome {
+        let mut cal = MagCal::new();
+        for i in 0..3_100u32 {
+            cal.push(i, 1_000_000 + i as u64 * 10_000, sample(i));
+        }
+        cal.outcome()
+    }
+
+    #[test]
+    fn a_full_rotation_gives_the_centre_and_passes() {
+        let out = mag_run(|i| sphere(i, 3_000, 50.0, CENTRE));
+        let MagOutcome::Done(fit) = out else {
+            panic!("{out:?}");
+        };
+        assert!(close(fit.offset_ut, CENTRE, 0.5), "{fit:?}");
+        assert!(close(fit.radius_ut, [50.0; 3], 0.5), "{fit:?}");
+    }
+
+    #[test]
+    fn the_result_is_the_same_with_offsets_already_in_force() {
+        // What core 0 sees is `raw - offsets`; the measurement adds the offsets back.
+        let run = |off: [f32; 3]| {
+            mag_run(|i| {
+                let raw = sphere(i, 3_000, 50.0, CENTRE);
+                mag_raw(sub(raw, off), off)
+            })
+        };
+        let (MagOutcome::Done(none), MagOutcome::Done(some)) =
+            (run([0.0; 3]), run([3.0, -4.0, 5.0]))
+        else {
+            panic!();
+        };
+        assert!(close(none.offset_ut, some.offset_ut, 1e-4));
+        assert!(close(none.offset_ut, CENTRE, 0.5));
+    }
+
+    #[test]
+    fn a_vehicle_at_rest_is_not_rotated() {
+        let out = mag_run(|i| {
+            let n = if i % 2 == 0 { 0.5 } else { -0.5 };
+            [CENTRE[0] + n, CENTRE[1] - n, CENTRE[2] + n]
+        });
+        let MagOutcome::Failed(Failure::NotRotated, Some(fit)) = out else {
+            panic!("{out:?}");
+        };
+        assert!(fit.radius_ut.iter().all(|r| *r <= 1.0), "{fit:?}");
+    }
+
+    #[test]
+    fn a_rotation_about_one_axis_is_not_rotated() {
+        // A circle in X-Y about Z: Z stays put, its radius is 0.
+        let out = mag_run(|i| {
+            let a = i as f32 * 0.1;
+            [
+                CENTRE[0] + 50.0 * a.cos(),
+                CENTRE[1] + 50.0 * a.sin(),
+                CENTRE[2],
+            ]
+        });
+        let MagOutcome::Failed(Failure::NotRotated, Some(fit)) = out else {
+            panic!("{out:?}");
+        };
+        assert!(fit.radius_ut[2] < 1.0 && fit.radius_ut[0] > 40.0, "{fit:?}");
+    }
+
+    #[test]
+    fn the_radius_bounds_are_ardupilots_and_exclusive() {
+        // The X radius is `r` (min and max samples on X), Y and Z radius 50.
+        let run = |r: f32| {
+            mag_run(|i| match i % 4 {
+                0 => [CENTRE[0] - r, CENTRE[1], CENTRE[2]],
+                1 => [CENTRE[0] + r, CENTRE[1], CENTRE[2]],
+                2 => [CENTRE[0], CENTRE[1] + 50.0, CENTRE[2] - 50.0],
+                _ => [CENTRE[0], CENTRE[1] - 50.0, CENTRE[2] + 50.0],
+            })
+        };
+        assert!(matches!(run(15.2), MagOutcome::Done(_)));
+        assert!(matches!(run(94.8), MagOutcome::Done(_)));
+        for r in [14.8, 15.0, 95.0, 95.2] {
+            assert!(
+                matches!(run(r), MagOutcome::Failed(Failure::NotRotated, Some(_))),
+                "{r}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_offset_beyond_the_parameter_range_fails() {
+        let run = |x: f32| mag_run(|i| sphere(i, 3_000, 50.0, [x, 0.0, 0.0]));
+        assert!(matches!(run(199.0), MagOutcome::Done(_)));
+        assert!(matches!(
+            run(201.0),
+            MagOutcome::Failed(Failure::OffsetOutOfRange, Some(_))
+        ));
+    }
+
+    #[test]
+    fn the_clock_is_the_sample_time_and_the_first_sample_starts_it() {
+        let mut cal = MagCal::new();
+        cal.push(0, 5_000_000, CENTRE);
+        assert_eq!(cal.percent(), 0);
+        assert_eq!(cal.outcome(), MagOutcome::Running);
+        cal.push(1, 20_000_000, CENTRE);
+        assert_eq!(cal.percent(), 50);
+        cal.push(2, 5_000_000 + MAG_DURATION_US - 1, CENTRE);
+        assert_eq!(cal.outcome(), MagOutcome::Running);
+        cal.push(3, 5_000_000 + MAG_DURATION_US, CENTRE);
+        assert_eq!(cal.percent(), 100);
+        assert!(matches!(cal.outcome(), MagOutcome::Failed(Failure::NotRotated, _)));
+    }
+
+    #[test]
+    fn a_repeated_mag_seq_is_counted_once() {
+        let mut cal = MagCal::new();
+        cal.push(7, 0, [1.0, 1.0, 1.0]);
+        // Same seq, a different field and a later time: ignored.
+        cal.push(7, 29_000_000, [100.0, 100.0, 100.0]);
+        assert_eq!(cal.percent(), 0);
+        cal.push(8, 29_000_000, [-1.0, -1.0, -1.0]);
+        assert_eq!(cal.percent(), 96);
+        cal.push(8, MAG_DURATION_US + 1, [100.0, 100.0, 100.0]);
+        cal.push(9, MAG_DURATION_US + 1, [100.0, 100.0, 100.0]);
+        let MagOutcome::Failed(Failure::NotRotated, Some(fit)) = cal.outcome() else {
+            panic!();
+        };
+        // Only the two counted samples: radius 1 on every axis.
+        assert_eq!(fit.radius_ut, [1.0; 3]);
+        assert_eq!(fit.offset_ut, [0.0; 3]);
+    }
+
+    #[test]
+    fn a_cancelled_mag_run_gives_no_offset() {
+        let mut cal = MagCal::new();
+        for i in 0..1_000u32 {
+            cal.push(i, i as u64 * 10_000, sphere(i, 3_000, 50.0, CENTRE));
+        }
+        cal.cancel();
+        for i in 1_000..3_100u32 {
+            cal.push(i, i as u64 * 10_000, sphere(i, 3_000, 50.0, CENTRE));
+        }
+        assert_eq!(cal.outcome(), MagOutcome::Failed(Failure::Cancelled, None));
     }
 }
