@@ -260,7 +260,7 @@ stored settings itself, so it also carries out a waiting APPLY.
 
 The barometer's `restart` first does a bus clear (up to 9 SCL pulses while SDA is low, then START and
 STOP, as the driver's `bmp581_cancel` bench program; neither the driver nor embassy-rp 0.10 has one), then
-rebuilds I2C1 and runs `init`.
+rebuilds I2C1 and runs `init`. Both I2C buses (I2C1 BARO, I2C0 MAG) are also cleared the same way at every boot, before the first transaction, and each logs one line with the SDA and SCL levels before and after and the pulses given: a reset of the MCU in the middle of a transfer can leave the sensor holding SDA low (seen on I2C1 on 2026-11-15, where the barometer's first start then never ended), and the MCU's reset does not release it.
 
 How to see it: `tools/run.sh` prints one `[INFO]` line per health transition (with the board time in ms)
 and, every 10 s, a `[STAT] BARO:` line: state, samples and samples per second over the last 10 s, the

@@ -33,6 +33,8 @@ see the table below); no other device, PIO block or DMA channel of this plan has
 | USB | | USB | `usb-cdc`, `mavlink-device` |
 | Servo pads | 2-5 | PWM slices 1 and 2 | (none yet; 4 and 5 are used as inputs on the bench) |
 
+The firmware drives the I2C pins (GPIO22/23 and GPIO12/13) as plain GPIO for a bus clear (`src/busclear.rs`): at every boot before the first transaction on each bus, and before a restart; a reset of the MCU in the middle of a transfer can leave a sensor holding SDA low.
+
 Spare: GPIO1 (outside the upper PIO window), GPIO26, 27 (inside it, but see the note on pins below 32), GPIO35,
 44-47 (inside it; 44-47 are also ADC4-7).
 
