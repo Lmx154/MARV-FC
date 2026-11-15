@@ -465,7 +465,8 @@ pub fn stat(now: Instant) {
     let st = s.stats.unwrap_or_default();
     let now_us = now.as_micros();
     let (sticks0, radio0, at0) = LAST.lock(|l| l.replace((st.sticks, st.radio_status, now_us)));
-    let secs = (now_us.saturating_sub(at0) / 1_000_000).max(1) as u32;
+    let ms = (now_us.saturating_sub(at0) / 1000).max(1);
+    let per_s = |n: u32| (u64::from(n) * 1000 / ms) as u32;
     let fresh = |t: u64| now_us.saturating_sub(t) < FRESH_US;
     let (lq, rssi_dbm) = match s.crsf_link {
         Some((l, t)) if fresh(t) => (
@@ -487,8 +488,8 @@ pub fn stat(now: Instant) {
         },
         now_us.saturating_sub(st.mode_since_us) / 1000,
         crate::device::state_name(s.state()),
-        st.sticks.wrapping_sub(sticks0) / secs,
-        st.radio_status.wrapping_sub(radio0) / secs,
+        per_s(st.sticks.wrapping_sub(sticks0)),
+        per_s(st.radio_status.wrapping_sub(radio0)),
         lq,
         rssi_dbm,
         radio_rssi,
