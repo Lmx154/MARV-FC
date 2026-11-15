@@ -58,6 +58,10 @@ pub enum Reading {
         field_ut: [f32; 3],
         temperature_c: f32,
     },
+    Batt {
+        voltage_v: f32,
+        current_a: f32,
+    },
     Imu {
         gyro_rads: [f32; 3],
         accel_ms2: [f32; 3],
@@ -340,7 +344,7 @@ impl Device {
 }
 
 /// The number of registry rows.
-pub const DEVICE_COUNT: usize = 3;
+pub const DEVICE_COUNT: usize = 4;
 /// IMU1's row, backed by the flight core.
 pub static IMU1: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU1,
@@ -352,8 +356,10 @@ pub static IMU1: Device = Device::flight(
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
 /// The magnetometer's row.
 pub static MAG: Device = Device::new(MarvDevice::MARV_DEVICE_MAG, "MAG", crate::mag::PERIOD_US);
+/// The battery monitor's row.
+pub static BATT: Device = Device::new(MarvDevice::MARV_DEVICE_BATT, "BATT", crate::batt::PERIOD_US);
 /// The registry.
-pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &BARO, &MAG];
+pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &BARO, &MAG, &BATT];
 
 /// The row of device `id`.
 pub fn find(id: MarvDevice) -> Option<&'static Device> {

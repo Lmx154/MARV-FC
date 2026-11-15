@@ -21,6 +21,7 @@ icm45686 = { git = "https://github.com/Lmx154/icm45686-rs.git", rev = "867093eea
 lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "07a888901f29654faa6ec51394f3aa8e81481e51", features = ["defmt"] }
 bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca9493e5dddd3d019a23b6d05395b", features = ["defmt"] }
 bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac832582f3c67be3332e12baf9970d0d6a", features = ["defmt"] }
+adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }
 lc76g = { git = "https://github.com/Lmx154/lc76g-rs.git", rev = "2ee54f927bd0ffb7c4f7a4978c84cc2af962f405", features = ["defmt"] }
 pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "d07804875fedf32121bd48314ad975bbd9534f5f", features = ["defmt", "embassy-rp-0-10"] }
 qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "591ca04501144fa40b66ed17262df836f258c076", features = ["rp2350", "defmt"] }

@@ -32,6 +32,7 @@
 
 mod actions;
 mod baro;
+mod batt;
 mod busclear;
 mod device;
 mod imu1;
@@ -47,7 +48,9 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use defmt_rtt as _;
-use device::{BARO, DEVICE_COUNT, DEVICES, Device, IMU1, MAG, Reading, Supervision, TextLine};
+use device::{
+    BARO, BATT, DEVICE_COUNT, DEVICES, Device, IMU1, MAG, Reading, Supervision, TextLine,
+};
 use embassy_executor::{Executor, Spawner};
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
@@ -332,14 +335,25 @@ impl Telemetry for Board {
         if message_id != SYS_STATUS_ID {
             return false;
         }
+        // The latest BATT sample, or MAVLink's "not sent" values: millivolts, centiamps.
+        let (voltage_battery, current_battery) = match BATT.latest.try_get().map(|s| s.reading) {
+            Some(Reading::Batt {
+                voltage_v,
+                current_a,
+            }) => (
+                (voltage_v * 1000.0).clamp(0.0, 65_534.0) as u16,
+                (current_a * 100.0).clamp(-32_768.0, 32_767.0) as i16,
+            ),
+            _ => (u16::MAX, -1),
+        };
         let masks = sensor_masks(&rows());
         out.push(&SYS_STATUS_DATA {
             onboard_control_sensors_present: MavSysStatusSensor::from_bits_truncate(masks.present),
             onboard_control_sensors_enabled: MavSysStatusSensor::from_bits_truncate(masks.enabled),
             onboard_control_sensors_health: MavSysStatusSensor::from_bits_truncate(masks.health),
-            // MAVLink's "not sent" values.
-            voltage_battery: u16::MAX,
-            current_battery: -1,
+            voltage_battery,
+            current_battery,
+            // Not estimated: MAVLink's "not sent" value.
             battery_remaining: -1,
             ..SYS_STATUS_DATA::DEFAULT
         })
@@ -761,6 +775,9 @@ async fn main(spawner: Spawner) {
     ))));
     spawner.spawn(defmt::unwrap!(mag::task(mag::adapter(
         p.I2C0, p.PIN_13, p.PIN_12, p.PIN_4
+    ))));
+    spawner.spawn(defmt::unwrap!(batt::task(batt::adapter(
+        p.ADC, p.PIN_41, p.PIN_42
     ))));
     #[cfg(not(feature = "wdg-scratch-probe"))]
     watchdog::start_monitor(wd);

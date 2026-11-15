@@ -90,6 +90,31 @@ pub fn mag_offsets() -> [f32; 3] {
     .unwrap_or([0.0; 3])
 }
 
+/// The battery monitor's configuration for the next sample from the stored values (a value that
+/// cannot be read keeps its default).
+pub fn batt_config() -> adc_battery::BatteryConfig {
+    let read = |params: &Params<COUNT>| {
+        fw_settings::batt::settings_to_config(|name| match params.get_named(name) {
+            Some(ParamValue::F32(v)) => Some(v),
+            _ => None,
+        })
+    };
+    with(|params| read(params).ok())
+        .flatten()
+        .unwrap_or_else(|| {
+            fw_settings::batt::settings_to_config(|name| {
+                fw_settings::batt::TABLE
+                    .iter()
+                    .find(|d| d.name == name)
+                    .and_then(|d| match d.default {
+                        ParamValue::F32(v) => Some(v),
+                        ParamValue::I32(_) => None,
+                    })
+            })
+            .unwrap_or_default()
+        })
+}
+
 /// `ParamStore` for the node: the one store, behind the lock.
 pub struct Store;
 
