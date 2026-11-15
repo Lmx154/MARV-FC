@@ -6,7 +6,8 @@
 //!   fails (it wins when both features are on).
 //! - `inject-baro-missed-edge`: after 5 s of good samples, the data-ready edges are swallowed for
 //!   200 ms while the chip keeps producing data, once.
-//! - `inject-baro-silent`: the same for 1 s, and `status` answers "nothing pending" meanwhile.
+//! - `inject-baro-silent`: the same for 1 s, `status` answers "nothing pending" and `recover` and
+//!   `restart` fail meanwhile (a silent device is not brought back by them).
 //! - `inject-baro-verify`: after 5 s of good samples, one `verify` answers "mismatch", once.
 //! - `inject-baro-stuck`: after 5 s of good samples, `acquire` never returns.
 //!
@@ -201,6 +202,9 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.recover().await;
+        if SILENT && self.window_open() {
+            return Err(ErrorKind::Bus);
+        }
         if PERSISTENT && self.fail("recover") {
             return Err(ErrorKind::Bus);
         }
@@ -209,6 +213,9 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.restart().await;
+        if SILENT && self.window_open() {
+            return Err(ErrorKind::Bus);
+        }
         if PERSISTENT && self.fail("restart") {
             return Err(ErrorKind::Bus);
         }
