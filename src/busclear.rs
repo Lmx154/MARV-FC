@@ -12,6 +12,38 @@ pub fn bus_clear<SCL: Pin, SDA: Pin>(
     scl: &mut Peri<'static, SCL>,
     sda: &mut Peri<'static, SDA>,
 ) -> (bool, bool, u8) {
+    let (sda_low, scl_low, pulses, _, _) = clear(scl, sda);
+    (sda_low, scl_low, pulses)
+}
+
+/// The bus clear at boot, before the first transaction on the bus: one `[INFO]` line with the
+/// levels of SDA and SCL before and after it and the pulses given, a warning when the bus is
+/// still not idle (the device then reports its own failure).
+pub fn clear_at_boot<SCL: Pin, SDA: Pin>(
+    name: &'static str,
+    scl: &mut Peri<'static, SCL>,
+    sda: &mut Peri<'static, SDA>,
+) {
+    let (sda_low, scl_low, pulses, sda_low_after, scl_low_after) = clear(scl, sda);
+    defmt::info!(
+        "[INFO] {=str} bus at boot: SDA {=u8} SCL {=u8} before, {=u8} pulses, SDA {=u8} SCL {=u8} after",
+        name,
+        u8::from(!sda_low),
+        u8::from(!scl_low),
+        pulses,
+        u8::from(!sda_low_after),
+        u8::from(!scl_low_after)
+    );
+    if sda_low_after || scl_low_after {
+        defmt::warn!("[INFO] {=str} bus not idle after the clear at boot", name);
+    }
+}
+
+/// The clear: (SDA low, SCL low, pulses) as found, then (SDA low, SCL low) after it.
+fn clear<SCL: Pin, SDA: Pin>(
+    scl: &mut Peri<'static, SCL>,
+    sda: &mut Peri<'static, SDA>,
+) -> (bool, bool, u8, bool, bool) {
     // SAFETY: the bus was dropped before this call and these pins are released again when this
     // function returns, before the next bus is built (the caller's contract).
     let (scl, sda) = unsafe { (scl.clone_unchecked(), sda.clone_unchecked()) };
@@ -40,5 +72,5 @@ pub fn bus_clear<SCL: Pin, SDA: Pin>(
         sda.set_as_input();
         block_for(half);
     }
-    (sda_low, scl_low, pulses)
+    (sda_low, scl_low, pulses, sda.is_low(), scl.is_low())
 }

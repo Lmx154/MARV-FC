@@ -48,10 +48,11 @@ pub struct Bmp581Adapter {
 impl Bmp581Adapter {
     pub fn new(
         i2c: Peri<'static, I2C1>,
-        scl: Peri<'static, PIN_23>,
-        sda: Peri<'static, PIN_22>,
+        mut scl: Peri<'static, PIN_23>,
+        mut sda: Peri<'static, PIN_22>,
         int: Peri<'static, PIN_21>,
     ) -> Self {
+        crate::busclear::clear_at_boot("I2C1", &mut scl, &mut sda);
         let mut adapter = Self {
             i2c,
             scl,

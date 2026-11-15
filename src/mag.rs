@@ -51,10 +51,11 @@ pub struct Bmm350Adapter {
 impl Bmm350Adapter {
     pub fn new(
         i2c: Peri<'static, I2C0>,
-        scl: Peri<'static, PIN_13>,
-        sda: Peri<'static, PIN_12>,
+        mut scl: Peri<'static, PIN_13>,
+        mut sda: Peri<'static, PIN_12>,
         int: Peri<'static, PIN_4>,
     ) -> Self {
+        crate::busclear::clear_at_boot("I2C0", &mut scl, &mut sda);
         let mut adapter = Self {
             i2c,
             scl,
