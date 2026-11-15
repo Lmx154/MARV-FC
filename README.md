@@ -813,6 +813,7 @@ What each cargo feature does under the watchdog:
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
 | `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
+| `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
 it provokes; `tools/run.sh` puts the normal build back):

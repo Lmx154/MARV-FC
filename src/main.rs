@@ -56,6 +56,8 @@ mod sd_probe;
 mod settings;
 mod store;
 mod watchdog;
+#[cfg(feature = "xip-stat")]
+mod xip_probe;
 
 use core::any::type_name;
 use core::cell::RefCell;
@@ -833,6 +835,8 @@ async fn supervise() -> ! {
             rc::stat(now);
             calibration::stat();
             watchdog::stat();
+            #[cfg(feature = "xip-stat")]
+            xip_probe::stat(now);
         }
         tick = tick.wrapping_add(1);
     }
@@ -919,6 +923,8 @@ async fn main(spawner: Spawner) {
         "[INFO] MARV V2 fw {=str}: two-core skeleton",
         env!("CARGO_PKG_VERSION")
     );
+    #[cfg(feature = "xip-stat")]
+    xip_probe::run();
     defmt::info!("[INFO] icm45686: {}", type_name::<icm45686::Info>());
     defmt::info!("[INFO] lsm6dsk320x: {}", type_name::<lsm6dsk320x::Info>());
     defmt::info!("[INFO] bmp581: {}", type_name::<bmp581::Info>());

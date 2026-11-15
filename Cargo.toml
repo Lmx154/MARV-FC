@@ -170,6 +170,9 @@ quiet-stat = []
 # formats partition 1 FAT32 (32 KiB clusters, label MARV): it ERASES the card.
 sd-fat-probe = []
 sd-fat-format = ["sd-fat-probe"]
+# Measurement only (src/xip_probe.rs): at start the QMI flash read mode and the cost of one XIP cache
+# miss (three passes and a control), then an extra `[STAT]` line with the XIP accesses, hits and misses.
+xip-stat = []
 
 [profile.release]
 debug = true
