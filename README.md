@@ -11,11 +11,11 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over an empty table (count 0),
-  STATUSTEXTs from the supervisor; commands get the node's default answer, UNSUPPORTED. `supervisor`, a
-  10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of `PONG`, gives the
-  start-up verdicts, runs the devices' stuck check and transition texts, and writes `[STAT]` lines every
-  10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, the barometer's device task (see
+  second, the parameter protocol over the barometer's five parameters (see Parameters),
+  STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
+  `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
+  `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
+  action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, the barometer's device task (see
   Device layer).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): one task, `fw_flight::liveness`, which copies `PING` into `PONG` on each kick. No
@@ -23,15 +23,15 @@ It has no flight functionality.
 - Between the cores only atomics and `fw_core::xcore::Kick`, in internal SRAM. `DMA_IRQ_0` is disabled on
   core 0 before core 1 starts (all DMA belongs to the flight core).
 
-Not in it yet: the devices other than the barometer, parameters, settings on flash, the watchdog, command
-handling (so no RESTART or other device request), the radio link (UART), the SD card, the design's text
-ring of 8 (a fixed queue of 4 texts stands in).
+Not in it yet: the devices other than the barometer, settings on flash (parameters live in RAM and are lost
+at every reset; there is no save), the watchdog, reboot, the calibrations and the self-test, the radio link
+(UART), the SD card, the design's text ring of 8 (a fixed queue of 4 texts stands in).
 
 ## Device layer
 
 `src/device.rs` (design item 1, on core 0): each device has a task running the one generic `run_device`
 loop over a firmware-side `DeviceAdapter` (`data_ready`, `start`, `acquire`, `status`, `verify`, `apply`,
-`recover`, `restart`, `counters`; no `self_test` or `settings_to_config` yet). The loop steps the device's
+`recover`, `restart`, `counters`; no `self_test` yet). The loop steps the device's
 `fw_core::health::Health` and carries out its action. Sampling is `select(with_timeout(T, data ready),
 wake)` with T = max(3 P, 10 ms); a timeout makes ONE status read: data waiting = a missed edge, read it;
 nothing = a deadline miss. Every bus call is awaited to completion, never inside a `select` or a timeout.
@@ -48,9 +48,21 @@ task that ran last. The supervisor turns each health transition into one STATUST
 per device per second (later ones wait their turn). Adding a device is a new adapter, a new row and a new
 `Reading` variant.
 
-| Row | Device | Bus | Configuration (fixed until parameters arrive) | P | T | Stuck after |
+| Row | Device | Bus | Configuration | P | T | Stuck after |
 |---|---|---|---|---|---|---|
-| BARO | BMP581 (`src/baro.rs`) | I2C1 at 400 kHz, SDA GPIO22, SCL GPIO23, data-ready GPIO21 (rising edge), no DMA | the driver's default: pressure 16x, temperature 2x, normal mode, 50.056 Hz output data rate, no filter, no FIFO, data-ready pulsed | 19 978 us | 59.9 ms | 1 s |
+| BARO | BMP581 (`src/baro.rs`) | I2C1 at 400 kHz, SDA GPIO22, SCL GPIO23, data-ready GPIO21 (rising edge), no DMA | from the parameters (below); the defaults are the driver's default: pressure 16x, temperature 2x, normal mode, 50.056 Hz output data rate, no filter; always no FIFO, data-ready pulsed | 19 978 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 59.9 ms at the default | max(1 s, 20 P) |
+
+The row's period P is a value that changes: the adapter sets it from the configured rate (at every start
+and every apply, before the chip is configured), so T = max(3 P, 10 ms), the stuck threshold and the
+`[STAT]` rate follow the rate.
+
+Requests to a device task: the row has an APPLY request and a RESTART request (a flag byte, plus the row's
+`wake` signal). The task takes them at the top of its loop, never inside a bus call. RESTART is allowed in
+every state: the loop feeds `Event::Restart` to `Health` (Starting, from Ok, Degraded, Recovering, Failed
+and Absent alike) and starts the device again; a back-off wait is cut short by it. APPLY is carried out when
+the device is Ok or Degraded: the loop calls the adapter's `apply` (the driver's `configure` on the running
+chip), awaited to completion; if it fails that is an error event for `Health`. A start or restart reads the
+stored settings itself, so it also carries out a waiting APPLY.
 
 The barometer's `restart` first does a bus clear (up to 9 SCL pulses while SDA is low, then START and
 STOP, as the driver's `bmp581_cancel` bench program; neither the driver nor embassy-rp 0.10 has one), then
@@ -95,6 +107,9 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
 - `FEATURES=inject-baro-verify tools/run.sh 60`: one `verify` answers "mismatch". Shows the reconfigure
   path: one error event (`last_error` CONFIG_MISMATCH), the adapter's `apply` runs on the chip,
   `config_restored` 1, back to Ok without Recovering and without text.
+- `FEATURES=inject-baro-fail-until-restart tools/run.sh 120`: as `persistent` (after 5 s every `acquire`,
+  `recover` and `restart` fails; Recovering, 4 attempts, Failed), until a RESTART request has been raised
+  (`device restart BARO` from the ground station); from then on everything works and the device is Ok again.
 - `FEATURES=inject-baro-por tools/run.sh 60`: one `acquire` answers a power-on reset. Shows the
   power-on-reset path: Ok -> Recovering at once (no Degraded, `errors` not incremented, `last_error` POR),
   WARNING, a recovery, Ok, NOTICE.
@@ -104,6 +119,61 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   firmware (HEARTBEAT, PING/PONG, `[STAT]` lines) keeps running.
 
 Run `tools/run.sh` again afterwards to put the normal build back on the board.
+
+## Parameters
+
+The first real parameter table (`src/baro/settings.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
+before:
+
+| Name | Default | Range | Means |
+|---|---|---|---|
+| `BARO_ODR_HZ` | 50 | 1 to 240 | output data rate in Hz, one of 1, 2, 3, 4, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 100, 120, 130, 140, 160, 180, 200, 220, 240; the printed rate is the chip's code (50 is 50.056 Hz, 25 is 25.005 Hz, 100 is 100.299 Hz, 130 is 129.855 Hz, 180 is 179.2 Hz, 200 is 199.111 Hz, 220 is 218.537 Hz); the chip's other codes (sub-hertz, 89.6, 110.164, 149.333 Hz) have no whole-hertz name and are not offered |
+| `BARO_OSR_P` | 16 | 1 to 128 | pressure oversampling: 1, 2, 4, 8, 16, 32, 64 or 128 |
+| `BARO_OSR_T` | 2 | 1 to 128 | temperature oversampling, the same values |
+| `BARO_IIR_P` | 0 | 0 to 127 | pressure IIR filter coefficient: 0 (off), 1, 3, 7, 15, 31, 63 or 127 |
+| `BARO_IIR_T` | 0 | 0 to 127 | temperature IIR filter coefficient, the same values |
+
+A write is checked before it is stored. The range check is the store's (`fw_core::params`: out of
+`[min, max]` is refused, not clamped). Then the validator (`baro::settings::validate`, installed with
+`Params::set_validator`) builds the device's whole candidate `Config` with the pure
+`baro::settings::settings_to_config` (the candidate values: the stored ones with the proposed one in place of
+its own) and refuses the write if that fails: a value the chip does not offer (the rate not in the list,
+an oversampling that is not a power of two, a coefficient not in the list), or a combination the driver's own
+`Config::validate` refuses (the rate above what the oversampling allows in normal mode, the driver's
+`calc::max_odr`; no limit of this firmware's own). A refused write is answered with the OLD value and ONE
+STATUSTEXT (WARNING) per refused write, "<NAME>: <reason>", for example "BARO_OSR_P: rate too high for the
+oversampling", "BARO_ODR_HZ: rate not offered by the chip", "BARO_ODR_HZ: out of range". The ground
+station `marv-cli param set` repeats a write that is not echoed, so it makes three writes and the board
+sends three texts.
+
+How a write takes effect: an accepted write is stored in RAM (`src/store.rs`, one `Params` in a
+critical-section mutex that the node's `ParamStore`, the actions and the device task all reach through short
+accesses, never across an await), the store's `take_configure_mask` names the device, and the firmware raises
+that device's APPLY request. The barometer task then reads the stored values, builds the `Config` with
+`settings_to_config`, sets its period P, and calls the driver's `configure` on the running chip; it logs the
+configuration and "applied" (`[INFO] BARO: configuration: ...`). About 5 ms from the write to the applied chip.
+Every start and restart reads the stored values the same way. NOTHING IS SAVED TO FLASH: no automatic save,
+no save command (it answers "save: not built yet"); a reset or power cycle returns every parameter to its
+default. Every parameter write, accepted or refused, has an `[INFO] param <NAME> = <value>: ...` line.
+
+## Commands
+
+`Telemetry::command` and `Telemetry::acks` on the USB link, over ONE `fw_core::admission::ActionBook`
+(`src/actions.rs`; link id 0 = USB; `armed` and `hil` are false until the arming code and the HIL source
+exist; `ActionBook::tick` runs in the supervisor). The answer to an admitted command is IN_PROGRESS 0 %;
+the final ACK follows through `acks` (about 100 ms later, the node asks at least every 100 ms). Denied
+commands put the book's text out as a STATUSTEXT. Every decision logs
+`[INFO] command <number> from <sys>/<comp>: <result>`, every action `action <name> starts` and
+`action <name> ended: <result>`, then `final ACK of command <number>: <result>`.
+
+| Command (`marv-cli`) | What it does today |
+|---|---|
+| `device restart BARO` | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); progress stays 0 |
+| `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY; ACCEPTED when the applies have been carried out, at once when nothing changed |
+| `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
+| `device restart <other device>`, `param save`, `param reload`, `reboot --yes`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet", "save: not built yet"). No fake success |
+| `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Device drivers
 
@@ -169,15 +239,14 @@ crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core only
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (127 tests); the binary uses `xcore::Kick`, `health`, `sys_status` and `params` (over an empty
-table) so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (127 tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
 | `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake). The only module with `unsafe`. Tested with two host threads over 10^7 writes; statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
 | `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
 | `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |
-| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. No real parameter table yet |
+| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The table is the firmware's (`src/baro/settings.rs`) |
 | `record` | The settings record for the two 4 KB flash sectors of the `SETTINGS` region: "MRVS", sequence, 24-byte entries, CRC-32; the choice of the current sector at boot |
 | `scratch` | The watchdog's record in four scratch registers (layout version 2) |
 | `admission` | What happens to a MAVLink command: classification of 241, 245, 246 and the project's 42430, the admission order, and the books of the one long action with its progress and its single final acknowledgement |

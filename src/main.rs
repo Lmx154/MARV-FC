@@ -5,13 +5,14 @@
 //! (10 ms tick: the flight core's liveness ping at 10 Hz, the start-up checks, the devices' stuck
 //! check and transition texts, `[STAT]` lines every 10 s), `beat0`, and one task per device
 //! (`device`): the barometer (`baro`). Core 1, the flight core: only `fw_flight::liveness`. The
-//! cores share only the atomics and `fw_core::xcore` cells below, in internal SRAM. No settings, no
-//! watchdog, no commands yet. It runs until `tools/run.sh` ends it.
+//! cores share only the atomics and `fw_core::xcore` cells below, in internal SRAM. The parameters
+//! (`store`, the barometer's five, in RAM only) and the commands (`actions`) are built; no flash, no
+//! watchdog. It runs until `tools/run.sh` ends it.
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
-//! Features `inject-baro-transient`, `-persistent`, `-missed-edge`, `-silent`, `-verify`, `-stuck`, `-por`: fault
-//! injection (`inject`).
+//! Features `inject-baro-transient`, `-persistent`, `-fail-until-restart`, `-missed-edge`, `-silent`,
+//! `-verify`, `-stuck`, `-por`: fault injection (`inject`).
 #![no_std]
 #![no_main]
 
@@ -233,6 +234,7 @@ impl Telemetry for Board {
 
     fn texts(&mut self, _now_us: u64, out: &mut Texts<'_>) {
         if let Ok((severity, text)) = TEXTS.try_receive() {
+            defmt::info!("[INFO] text to the link: {=str}", text.as_str());
             let _ = out.push(severity, text.as_str());
         }
     }
