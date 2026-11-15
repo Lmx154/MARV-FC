@@ -43,15 +43,22 @@ woken task compares the clock with its last sample and, if late by more than T, 
 (sample waiting = missed edge, read it; nothing = deadline miss). RESTART comes with its request number
 through the same kick; APPLY is reserved. Start and recovery wait through the `DelayNs` passed in, wrapped in
 `CountingDelay` (count after the start: 0 in a clean run, invariant F2); `verify` between samples (about
-once per second) waits on a busy loop over the time driver's counter, no timer. Everything core 0 needs
+once per second, about 1.0 to 1.4 ms) waits on a busy loop over the time driver's counter, no timer, and
+is followed by one status read: a sample already waiting is read at once (a host test pins this rule).
+The board time is `embassy_time::Instant::now()`, lock-free on core 1 (embassy-rp 0.10.0
+`time_driver.rs:35-44` reads the timer's raw registers; only `schedule_wake`, `:46-47`, takes the critical
+section, and the sample loop never schedules). Everything core 0 needs
 (state, counters, the latest sample, the largest gap, missed edges, delay counts, restart outcome, the last
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
-into IMU1's registry row each tick and logs and texts its events. Host tests: `cargo host-test -p fw-flight`
+into IMU1's registry row each tick and logs and texts its events; while IMU1 is Failed or Absent it gets
+no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
 (8 tests).
 
-IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock, data-ready on INT1 (as
-`icm45686_smoke` ran it on this board); 800 Hz because the ICM-45686 has no 1 kHz rate. Single-sample mode
-(`read()` on every data-ready edge, the driver README's single-sample path), with INT1_STATUS0 (clear on
+IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock (as `icm45686_smoke` ran
+it on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
+showed), waited for by level, so a sample that arrives while the task is busy is not lost; 800 Hz because
+the ICM-45686 has no 1 kHz rate. Single-sample mode
+(`read()` on every data-ready signal, the driver README's single-sample path), with INT1_STATUS0 (clear on
 read) read with every sample so that the status read after a late CHECK sees a fresh flag; no FIFO, so
 the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
 temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the barometer's as

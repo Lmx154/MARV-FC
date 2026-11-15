@@ -714,6 +714,10 @@ impl Supervision {
         }
         for (dev, w) in DEVICES.iter().zip(self.watchers.iter_mut()) {
             mirror(dev, w, now);
+            // A parked flight-core row (Failed, Absent) makes no progress by design: it is not
+            // kicked and waits only for RESTART, so it is not stuck.
+            let parked =
+                dev.flight.is_some() && matches!(dev.status().state, State::Failed | State::Absent);
             let progress = dev.progress.load(Ordering::Relaxed);
             let stuck = dev.stuck.load(Ordering::Relaxed);
             if progress != w.progress {
@@ -727,6 +731,8 @@ impl Supervision {
                         now.as_millis()
                     );
                 }
+            } else if parked {
+                w.progress_at = now;
             } else if !stuck && now - w.progress_at >= dev.stuck_after() {
                 dev.stuck.store(true, Ordering::Relaxed);
                 defmt::error!(
@@ -830,7 +836,8 @@ fn norm(v: [f32; 3]) -> f32 {
 
 /// A flight-core row: copies the cells into the row, logs the flight core's events (it logs
 /// nothing itself), queues the transition texts, and kicks CHECK when the last sample is older
-/// than T.
+/// than T, except in Failed and Absent (parked: only RESTART wakes it). The delay count is logged
+/// when it changed and no start or recovery is under way (once per episode).
 fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     let Some(cells) = dev.flight else {
         return;
@@ -954,7 +961,9 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
             s.inject_since_us
         );
     }
-    if s.delays_after_start != w.flight.delays_after_start {
+    if s.delays_after_start != w.flight.delays_after_start
+        && !matches!(s.state, State::Recovering | State::Starting)
+    {
         w.flight.delays_after_start = s.delays_after_start;
         defmt::info!(
             "[INFO] {=str}: delay count after the start {=u32} at {=u64} ms",
@@ -967,7 +976,7 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     let late = s
         .last_sample_us
         .is_none_or(|t| now_us.saturating_sub(t) > dev.deadline().as_micros());
-    if late {
+    if late && !matches!(s.state, State::Failed | State::Absent) {
         cells.request_check();
     }
 }

@@ -647,15 +647,16 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         self.verified = true;
     }
 
-    /// After a `verify()` between samples: one status read. MEASURE ONLY: counts a sample
-    /// already waiting, then goes back to the edge wait.
+    /// After a `verify()` between samples: one status read, and a sample already waiting is read
+    /// at once (its data-ready signal may have come and gone while `verify` ran: waiting for the
+    /// next one would lose it).
     async fn after_verify(&mut self) -> Event {
         let pending = self.adapter.status().await;
         self.bump();
         match pending {
             Ok(Pending::Data) => {
                 self.status.verify_pending = self.status.verify_pending.wrapping_add(1);
-                Event::Tick
+                self.read().await
             }
             Ok(Pending::Nothing) => Event::Tick,
             Ok(Pending::PowerOnReset) => Event::PowerOnReset,
@@ -747,6 +748,7 @@ mod tests {
         acquire_fails: bool,
         recover_ok: bool,
         restart_ok: bool,
+        slow_verify: bool,
         calls: u32,
     }
 
@@ -779,6 +781,12 @@ mod tests {
 
         async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
             self.call();
+            let mut fake = self.0.borrow_mut();
+            if fake.slow_verify && fake.pending == Pending::Data {
+                fake.pending = Pending::Nothing;
+                fake.producing = true;
+            }
+            drop(fake);
             if self.0.borrow().acquire_fails {
                 Err(ErrorKind::Bus)
             } else {
@@ -796,6 +804,14 @@ mod tests {
 
         async fn verify(&mut self) -> Result<(), VerifyError> {
             self.call();
+            let mut fake = self.0.borrow_mut();
+            if fake.slow_verify {
+                // Longer than one period: the next sample's data-ready signal came and went
+                // while it ran; the sample is waiting in the device.
+                advance(P_US * 8 / 5);
+                fake.producing = false;
+                fake.pending = Pending::Data;
+            }
             Ok(())
         }
 
@@ -847,6 +863,7 @@ mod tests {
             acquire_fails: false,
             recover_ok: true,
             restart_ok: true,
+            slow_verify: false,
             calls: 0,
         }));
         let task = ImuTask::new(
@@ -921,6 +938,33 @@ mod tests {
         assert_eq!(s.max_gap_us, P_US);
         assert!(s.delays > 0, "the start waits through the delay");
         assert_eq!(s.delays_after_start, 0);
+    }
+
+    #[test]
+    fn a_sample_waiting_after_a_long_verify_is_read_at_once() {
+        let (cells, mut task, fake) = started();
+        fake.borrow_mut().slow_verify = true;
+        let mut last = status(cells);
+        for _ in 0..2500 {
+            assert!(
+                step(&mut task),
+                "the loop waited for a data-ready signal with a sample waiting"
+            );
+            let s = status(cells);
+            if let (Some(a), Some(b)) = (last.latest, s.latest) {
+                assert!(b.seq == a.seq || b.seq == a.seq + 1);
+            }
+            last = s;
+        }
+        let s = status(cells);
+        assert!(s.verifies >= 2);
+        assert_eq!(s.verify_pending, s.verifies);
+        assert_eq!(s.verify_last_us, 1600);
+        assert_eq!(s.latest.map(|l| l.seq + 1), Some(s.samples));
+        assert_eq!(s.missed_edges, 0);
+        assert_eq!(s.health.errors, 0);
+        assert_eq!(s.state, State::Ok);
+        assert!(s.max_gap_us < 2 * P_US);
     }
 
     #[test]

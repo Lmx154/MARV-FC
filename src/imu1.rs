@@ -18,7 +18,7 @@ use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Pending, StartFailure, VerifyError,
 };
 use icm45686::{
-    AccelFullScale, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config, Odr,
+    AccelFullScale, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config, Int1Mode, Odr,
 };
 
 #[cfg(not(feature = "f4-negative"))]
@@ -43,8 +43,10 @@ const ACCEL_FS: AccelFullScale = AccelFullScale::G4;
 const GYRO_FS: GyroFullScale = GyroFullScale::Dps250;
 
 /// As `icm45686_smoke` ran it on this board ("800 Hz internal clock"): 4 g, 250 dps, 800 Hz on
-/// both sensors, internal clock, data-ready on INT1 (8 us push-pull pulse, active high), the
-/// driver's default filters; no FIFO.
+/// both sensors, internal clock, the driver's default filters, no FIFO; data-ready on INT1 in
+/// LATCHED mode (push-pull, active high): asserted until INT1_STATUS0 is read, as
+/// `icm45686_int1` ("I3 latched") showed on this board. So `data_ready` waits for the level: a
+/// sample that arrived while the task was busy (for example in `verify`) is not lost.
 fn config() -> Config {
     Config::new()
         .with_accel_fs(ACCEL_FS)
@@ -52,7 +54,11 @@ fn config() -> Config {
         .with_accel_odr(Odr::Hz800)
         .with_gyro_odr(Odr::Hz800)
         .with_clock(ClockSource::Internal)
-        .with_int1(Int1Config::new().with_data_ready(true))
+        .with_int1(
+            Int1Config::new()
+                .with_data_ready(true)
+                .with_mode(Int1Mode::Latched),
+        )
 }
 
 /// The peripherals IMU1 owns, moved into core 1's entry.
@@ -132,8 +138,10 @@ impl Icm45686Adapter {
 }
 
 impl ImuAdapter for Icm45686Adapter {
+    /// INT1 is latched: high until the status is read, so the level (not an edge) says a sample
+    /// is waiting.
     async fn data_ready(&mut self) {
-        self.int1.wait_for_rising_edge().await;
+        self.int1.wait_for_high().await;
     }
 
     async fn start<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), StartFailure> {
@@ -303,23 +311,21 @@ impl Inject {
 #[cfg(feature = "inject-imu1")]
 impl ImuAdapter for Inject {
     async fn data_ready(&mut self) {
-        #[cfg(not(feature = "inject-imu1-missed-edge"))]
-        self.inner.data_ready().await;
         #[cfg(feature = "inject-imu1-missed-edge")]
-        loop {
-            self.inner.data_ready().await;
+        {
             let now = crate::now_us();
             if self.due(now) {
                 self.set(inject_state::ACTIVE, now);
             }
             if self.state == inject_state::ACTIVE {
                 if now.saturating_sub(self.since_us) < Self::SWALLOW_US {
-                    continue;
+                    // The signal is not seen: the wait never ends (core 0's CHECK kick drops it).
+                    return core::future::pending::<()>().await;
                 }
                 self.set(inject_state::DONE, now);
             }
-            return;
         }
+        self.inner.data_ready().await;
     }
 
     async fn start<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), StartFailure> {
