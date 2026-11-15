@@ -48,6 +48,13 @@ fn result_name(result: MavResult) -> &'static str {
     }
 }
 
+/// The longest an ACK is held back because of pending texts, in ms.
+const HOLD_MAX_MS: u64 = 300;
+
+/// When `next_ack` first saw the text queue non-empty and held back (core 0 only); `None` when
+/// no hold is running.
+static HOLD_SINCE: Mutex<CriticalSectionRawMutex, Cell<Option<u64>>> = Mutex::new(Cell::new(None));
+
 /// What the action is called in the log and in the "not built yet" text.
 fn action_name(action: Action) -> &'static str {
     match action {
@@ -99,11 +106,35 @@ pub fn command(req: &CommandRequest, now_ms: u64) -> CommandOutcome {
 /// `Telemetry::acks`: the next late ACK for USB.
 pub fn next_ack(now_ms: u64) -> Option<LateAck> {
     // The node sends ACKs before it takes texts from `Telemetry::texts`: hold the ACK until the
-    // queued text (a calibration's result or failure) has gone out, so the text precedes it.
+    // queued text (a calibration's result or failure) has gone out, so the text precedes it. The
+    // hold lasts at most `HOLD_MAX_MS` (a flood of texts must not hold ACKs for good): after that
+    // the ACK goes out even if texts are still waiting, so a text can then arrive after its ACK.
+    // The action's own time limit is not applied here but in `tick`, every supervisor tick.
+    let mut by_bound = false;
     if crate::texts_pending() {
-        return None;
+        let since = HOLD_SINCE.lock(|h| match h.get() {
+            Some(since) => since,
+            None => {
+                h.set(Some(now_ms));
+                now_ms
+            }
+        });
+        if now_ms.saturating_sub(since) < HOLD_MAX_MS {
+            return None;
+        }
+        by_bound = true;
+    } else {
+        HOLD_SINCE.lock(|h| h.set(None));
     }
     let ack = BOOK.lock(|b| b.borrow_mut().next_ack(USB, now_ms))?;
+    if by_bound {
+        HOLD_SINCE.lock(|h| h.set(None));
+        defmt::info!(
+            "[INFO] ACK of command {=u32} held for texts: hold ended by the {=u64} ms bound",
+            ack.command as u32,
+            HOLD_MAX_MS
+        );
+    }
     if ack.outcome.result != MavResult::MAV_RESULT_IN_PROGRESS {
         defmt::info!(
             "[INFO] final ACK of command {=u32}: {=str}",

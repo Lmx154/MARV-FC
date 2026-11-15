@@ -480,8 +480,10 @@ calibration at a time (the one `ActionBook`); progress 0 to 100 % goes out throu
 it is NOT saved to flash: only the user's Save (`param save`) stores it, and a reset or `param reload`
 loses it. Nothing is written by a failed or cancelled run. Every calibration queues its result or failure
 text BEFORE its action ends, and the final ACK is held until the text queue is empty (`actions::next_ack`,
-because the node sends ACKs before it takes texts), so the text always precedes the ACK on the link and
-the command-line tool prints it.
+because the node sends ACKs before it takes texts), but for at most 300 ms (then the ACK goes out even if
+texts are still waiting, and a text may arrive after its ACK; one `[INFO]` log line says so), so normally the
+text precedes the ACK on the link and the command-line tool prints it. The action's time limit is applied
+every supervisor tick (`actions::tick`), whether or not an ACK is held.
 
 **Cancel.** `calibrate cancel` drops the running calibration, nothing is written, the action ends CANCELLED
 (its final ACK; no text).
