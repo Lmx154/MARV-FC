@@ -34,6 +34,7 @@ mod imu1;
 mod inject;
 mod settings;
 mod store;
+mod watchdog;
 
 use core::any::type_name;
 use core::fmt;
@@ -589,6 +590,12 @@ async fn stall() {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
+    #[cfg(feature = "wdg-scratch-probe")]
+    let probe = {
+        let mut wd = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
+        let next = watchdog::probe::boot(&mut wd);
+        (wd, next)
+    };
     defmt::info!(
         "[INFO] MARV V2 fw {=str}: two-core skeleton",
         env!("CARGO_PKG_VERSION")
@@ -683,6 +690,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(stall()));
     #[cfg(feature = "save-loop")]
     spawner.spawn(defmt::unwrap!(settings::save_loop()));
+    #[cfg(feature = "wdg-scratch-probe")]
+    spawner.spawn(defmt::unwrap!(watchdog::probe::act(probe.0, probe.1)));
 
     let started = Instant::now();
     while !CORE1_ACTLR_READ.load(Ordering::Acquire) && started.elapsed() < PONG_STALE {

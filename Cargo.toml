@@ -103,6 +103,9 @@ corrupt-newest = []
 # firmware version might (save-foreign).
 guard-negative = []
 save-foreign = []
+# The watchdog checks (src/watchdog.rs): whether the scratch registers 0 to 3 survive a watchdog
+# time-out reset and then a forced reset, 5 s after each start, at most two resets; no monitor.
+wdg-scratch-probe = []
 
 [profile.release]
 debug = true
