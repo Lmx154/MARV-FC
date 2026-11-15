@@ -356,12 +356,18 @@ impl Telemetry for Board {
         if message_id != SYS_STATUS_ID {
             return false;
         }
-        // The latest BATT sample, or MAVLink's "not sent" values: millivolts, centiamps.
-        let (voltage_battery, current_battery) = match BATT.latest.try_get().map(|s| s.reading) {
-            Some(Reading::Batt {
-                voltage_v,
-                current_a,
-            }) => (
+        // The latest BATT sample while it is younger than 1 s, or MAVLink's "not sent" values:
+        // millivolts, centiamps.
+        let (voltage_battery, current_battery) = match BATT.latest.try_get() {
+            Some(Sample {
+                reading:
+                    Reading::Batt {
+                        voltage_v,
+                        current_a,
+                    },
+                t_us,
+                ..
+            }) if now_us.saturating_sub(t_us) < STALE_US => (
                 (voltage_v * 1000.0).clamp(0.0, 65_534.0) as u16,
                 (current_a * 100.0).clamp(-32_768.0, 32_767.0) as i16,
             ),

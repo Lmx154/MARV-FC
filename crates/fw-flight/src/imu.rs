@@ -95,7 +95,8 @@ pub enum VerifyError {
 pub trait ImuAdapter {
     /// Waits for the data-ready edge. No bus traffic: it may be dropped at any await.
     async fn data_ready(&mut self);
-    /// Init and configure.
+    /// Init and configure. Used for a boot and for the start retries; the first start attempt after an
+    /// operator RESTART request uses [`restart`](Self::restart) instead.
     async fn start<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), StartFailure>;
     /// Reads one sample. `Err(ErrorKind::Por)`: the device reported a power-on reset.
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind>;
@@ -107,7 +108,8 @@ pub trait ImuAdapter {
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind>;
     /// Brings the bus and the device back in step without a reset.
     async fn recover<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind>;
-    /// Bus clear where the bus has one, then init and configure.
+    /// Bus clear where the bus has one, then init and configure. Used by the automatic recovery and
+    /// for the first start attempt after an operator RESTART request.
     async fn restart<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind>;
     /// Adapter operations that went to the bus.
     fn calls(&self) -> u32;
@@ -368,6 +370,7 @@ pub struct ImuTask<'a, A, D> {
     last_verify_us: u64,
     last_status_us: u64,
     restart_run: Option<u32>,
+    strong_first: bool,
     delays_at_start: Option<u32>,
 }
 
@@ -403,6 +406,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             last_verify_us: now,
             last_status_us: 0,
             restart_run: None,
+            strong_first: false,
             delays_at_start: None,
         })
     }
@@ -421,6 +425,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         if self.take(REQ_RESTART) {
             let number = self.cells.restart_number();
             self.restart_run = Some(number);
+            self.strong_first = true;
             let (before, now) = (self.health.state(), self.now_ms());
             self.action = self.health.step(Event::Restart, now).action;
             self.status.restart_taken = number;
@@ -432,6 +437,13 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             self.take(REQ_APPLY);
         }
         let event = match self.action {
+            Action::Start if core::mem::take(&mut self.strong_first) => {
+                match self.adapter.restart(&mut self.delay).await {
+                    Ok(()) if self.fresh_sample().await => Event::StartOk,
+                    Ok(()) => Event::StartFailed { identified: true },
+                    Err(_) => Event::StartFailed { identified: false },
+                }
+            }
             Action::Start => match self.adapter.start(&mut self.delay).await {
                 Ok(()) if self.fresh_sample().await => Event::StartOk,
                 Ok(()) => Event::StartFailed { identified: true },
@@ -750,6 +762,8 @@ mod tests {
         restart_ok: bool,
         slow_verify: bool,
         calls: u32,
+        starts: u32,
+        restarts: u32,
     }
 
     struct FakeAdapter(Rc<RefCell<Fake>>);
@@ -775,6 +789,7 @@ mod tests {
 
         async fn start<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), StartFailure> {
             self.call();
+            self.0.borrow_mut().starts += 1;
             delay.delay_ms(2).await;
             Ok(())
         }
@@ -831,6 +846,7 @@ mod tests {
 
         async fn restart<D: DelayNs>(&mut self, _delay: &mut D) -> Result<(), ErrorKind> {
             self.call();
+            self.0.borrow_mut().restarts += 1;
             if self.0.borrow().restart_ok {
                 Ok(())
             } else {
@@ -865,6 +881,8 @@ mod tests {
             restart_ok: true,
             slow_verify: false,
             calls: 0,
+            starts: 0,
+            restarts: 0,
         }));
         let task = ImuTask::new(
             cells,
@@ -1095,5 +1113,45 @@ mod tests {
         assert_eq!(s.state, State::Ok);
         assert_eq!(s.restart_taken, 7);
         assert_eq!(s.restart_outcome, 7 << 1 | 1);
+    }
+
+    #[test]
+    fn a_boot_calls_start_and_an_operator_restart_calls_restart_for_its_first_attempt() {
+        let (cells, mut task, fake) = setup();
+        assert!(step(&mut task));
+        assert_eq!(status(cells).state, State::Ok);
+        assert_eq!((fake.borrow().starts, fake.borrow().restarts), (1, 0));
+        failed_after_four(cells, &mut task, &fake);
+        fake.borrow_mut().acquire_fails = false;
+        let (starts, restarts) = (fake.borrow().starts, fake.borrow().restarts);
+        cells.request_restart(1);
+        for _ in 0..8 {
+            assert!(step(&mut task));
+            if status(cells).state == State::Ok {
+                break;
+            }
+        }
+        assert_eq!(status(cells).state, State::Ok);
+        assert_eq!(fake.borrow().restarts, restarts + 1);
+        assert_eq!(fake.borrow().starts, starts);
+    }
+
+    #[test]
+    fn a_failed_operator_restart_goes_on_to_the_start_retries() {
+        let (cells, mut task, fake) = started();
+        failed_after_four(cells, &mut task, &fake);
+        fake.borrow_mut().acquire_fails = false;
+        fake.borrow_mut().restart_ok = false;
+        let (starts, restarts) = (fake.borrow().starts, fake.borrow().restarts);
+        cells.request_restart(1);
+        for _ in 0..40 {
+            assert!(step(&mut task));
+            if status(cells).state == State::Ok {
+                break;
+            }
+        }
+        assert_eq!(status(cells).state, State::Ok);
+        assert_eq!(fake.borrow().restarts, restarts + 1);
+        assert_eq!(fake.borrow().starts, starts + 1);
     }
 }

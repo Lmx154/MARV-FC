@@ -128,7 +128,11 @@ and every apply, before the chip is configured), so T = max(3 P, 10 ms), the stu
 Requests to a device task: the row has an APPLY request and a RESTART request (a flag byte, plus the row's
 `wake` signal). The task takes them at the top of its loop, never inside a bus call. RESTART is allowed in
 every state: the loop feeds `Event::Restart` to `Health` (Starting, from Ok, Degraded, Recovering, Failed
-and Absent alike) and starts the device again; a back-off wait is cut short by it. APPLY is carried out when
+and Absent alike) and starts the device again; a back-off wait is cut short by it. The first start attempt
+after an operator RESTART request goes through the adapter's `restart` (for BARO and MAG: bus clear, rebuild
+the bus, start), so a bus stuck low is cleared; if that attempt fails, the normal start retries follow (they use
+`start`). A boot, and every start without a RESTART request, uses `start`. The loop then waits for one fresh
+sample as after any start. The flight-core IMU loop does the same. APPLY is carried out when
 the device is Ok or Degraded: the loop calls the adapter's `apply` (the driver's `configure` on the running
 chip), awaited to completion; if it fails that is an error event for `Health`. A start or restart reads the
 stored settings itself, so it also carries out a waiting APPLY.

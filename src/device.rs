@@ -114,7 +114,8 @@ pub enum VerifyError {
 pub trait DeviceAdapter {
     /// Waits for the device's data-ready signal. No bus traffic: it may be dropped at any await.
     async fn data_ready(&mut self);
-    /// Init and configure.
+    /// Init and configure. Used for a boot and for the start retries; the first start attempt after an
+    /// operator RESTART request uses [`restart`](Self::restart) instead.
     ///
     /// The loop does not take `Ok` as "started": it then waits for one fresh sample (see
     /// [`recover`](Self::recover)); if none comes the start has failed, with `identified: true`.
@@ -136,7 +137,9 @@ pub trait DeviceAdapter {
     /// `acquire` counts as if the adapter had returned an error: a failed `recover` goes on to
     /// `restart`, a failed `restart` ends the attempt.
     async fn recover(&mut self) -> Result<(), ErrorKind>;
-    /// Bus clear where the bus has one, then init and configure.
+    /// Bus clear where the bus has one, then init and configure. Used by the automatic recovery and
+    /// for the first start attempt after an operator RESTART request; a failed attempt after a
+    /// RESTART request goes on to the normal start retries.
     async fn restart(&mut self) -> Result<(), ErrorKind>;
     /// The adapter's own counters.
     fn counters(&self) -> AdapterCounters;
@@ -432,11 +435,14 @@ pub async fn run_device<A: DeviceAdapter>(
     let mut last_failure_ms: u64 = 0;
     // The number of the restart request being carried out, until its outcome is published.
     let mut restart_run: Option<u32> = None;
+    // Set by an operator RESTART request: its first start attempt goes through `restart()`.
+    let mut strong_first = false;
     let sender = dev.latest.sender();
     let mut step = health.step(Event::Tick, now_ms());
     loop {
         if dev.take_request(REQ_RESTART) {
             restart_run = Some(dev.restarts());
+            strong_first = true;
             let (before, now) = (health.state(), now_ms());
             step = health.step(Event::Restart, now);
             defmt::info!(
@@ -456,6 +462,13 @@ pub async fn run_device<A: DeviceAdapter>(
             dev.take_request(REQ_APPLY);
         }
         let event = match step.action {
+            Action::Start if core::mem::take(&mut strong_first) => match adapter.restart().await {
+                Ok(()) if fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await => {
+                    Event::StartOk
+                }
+                Ok(()) => Event::StartFailed { identified: true },
+                Err(_) => Event::StartFailed { identified: false },
+            },
             Action::Start => match adapter.start().await {
                 Ok(()) if fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await => {
                     Event::StartOk
