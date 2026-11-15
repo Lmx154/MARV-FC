@@ -12,13 +12,22 @@
 //! 10 ms (about 100 per second per IMU), each counted once by its `seq`; the current offsets are
 //! added back, so the measurement is of the raw values. The decision is `fw_core::calib`. A result
 //! is written into the parameters and pushed; nothing is saved.
+//!
+//! The compass calibration is the same on the MAG row's latest sample (core 0's own device): the
+//! `MAG_OFF*` in force are added back to each sample, and the result is written to `MAG_OFF*`,
+//! which the adapter reads from the store for every sample (no push is needed). Its result or
+//! failure text is queued before the action ends, and the final ACK waits until the text queue is
+//! empty (`actions::next_ack`), so the text precedes the ACK on the link.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use fw_core::calib::{Failure, IMUS, ImuOffsets, Kind, Outcome, Run, Stats3, norm3, sqrt};
+use fw_core::calib::{
+    ACCEL_OFFSET_MAX_MSS, Failure, GYRO_FULL_SCALE_RADS, IMUS, ImuOffsets, Kind, MagCal, MagFit,
+    MagOutcome, Outcome, Run, Stats3, mag_raw, norm3, sqrt,
+};
 use fw_core::health::State;
 use fw_core::xcore::{TripleBuffer, TripleReader, TripleWriter};
 use fw_settings::imu::{ACC_OFF, DEVICES, GYR_OFF};
@@ -26,7 +35,7 @@ use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::MavResult;
 use mavlink_device::{ParamName, ParamStore, ParamValue};
 
-use crate::device::{Device, IMU1, IMU2, Reading, Sample};
+use crate::device::{Device, IMU1, IMU2, MAG, Reading, Sample};
 use crate::store;
 
 /// Per IMU (IMU1, IMU2) the offsets the adapter subtracts.
@@ -43,6 +52,7 @@ struct Core0 {
     writers: [TripleWriter<'static, ImuOffsets>; IMUS],
     in_force: [ImuOffsets; IMUS],
     run: Option<Run>,
+    mag: Option<MagCal>,
     seen: [Option<u32>; IMUS],
     gyro: [Stats3; IMUS],
     accel: [Stats3; IMUS],
@@ -59,6 +69,8 @@ pub enum Step {
     Progress(u8),
     End(MavResult),
 }
+
+const MAG_NAME: &str = "compass calibration";
 
 fn name(kind: Kind) -> &'static str {
     match kind {
@@ -89,6 +101,7 @@ pub fn init() {
             writers: [a, b],
             in_force: [ImuOffsets::ZERO; IMUS],
             run: None,
+            mag: None,
             seen: [None; IMUS],
             gyro: [Stats3::new(); IMUS],
             accel: [Stats3::new(); IMUS],
@@ -239,18 +252,15 @@ pub fn start(kind: Kind) -> bool {
 
 fn stop(why: &str) {
     let dropped = CORE0.lock(|c| {
-        c.borrow_mut()
-            .as_mut()
-            .and_then(|core| core.run.take())
-            .map(|r| r.kind())
+        c.borrow_mut().as_mut().and_then(|core| {
+            let imu = core.run.take().map(|r| name(r.kind()));
+            let mag = core.mag.take().map(|_| MAG_NAME);
+            imu.or(mag)
+        })
     });
     CALIBRATING.store(false, Ordering::Relaxed);
-    if let Some(kind) = dropped {
-        defmt::info!(
-            "[INFO] {=str} stopped ({=str}): nothing written",
-            name(kind),
-            why
-        );
+    if let Some(name) = dropped {
+        defmt::info!("[INFO] {=str} stopped ({=str}): nothing written", name, why);
     }
 }
 
@@ -261,6 +271,9 @@ pub fn cancel() {
 
 /// Every supervisor tick while the book runs a calibration: progress, or the end.
 pub fn step() -> Step {
+    if CORE0.lock(|c| c.borrow().as_ref().is_some_and(|core| core.mag.is_some())) {
+        return step_mag();
+    }
     let Some((kind, outcome, percent)) = observe() else {
         return Step::End(MavResult::MAV_RESULT_FAILED);
     };
@@ -291,7 +304,14 @@ pub fn step() -> Step {
                 }
             });
             CALIBRATING.store(false, Ordering::Relaxed);
-            let live = write(kind, offsets);
+            let Some(live) = write(kind, offsets) else {
+                defmt::warn!("[INFO] {=str}: offset refused by the store", name(kind));
+                crate::text_fmt(
+                    MavSeverity::MAV_SEVERITY_WARNING,
+                    format_args!("{}: offset out of range", name(kind)),
+                );
+                return Step::End(MavResult::MAV_RESULT_FAILED);
+            };
             raise_push(live);
             result_text(kind, offsets);
             Step::End(MavResult::MAV_RESULT_ACCEPTED)
@@ -313,13 +333,18 @@ pub fn idle() {
 }
 
 /// Writes the offsets into the parameters (the store is dirty; nothing is saved). Returns the
-/// Live mask.
-fn write(kind: Kind, offsets: [Option<[f32; 3]>; IMUS]) -> u32 {
-    let table = match kind {
-        Kind::Gyro => &GYR_OFF,
-        Kind::Accel => &ACC_OFF,
+/// Live mask, or `None` with nothing written when a value is outside the parameters' range
+/// (checked before the first write) or the store refuses one.
+fn write(kind: Kind, offsets: [Option<[f32; 3]>; IMUS]) -> Option<u32> {
+    let (table, limit) = match kind {
+        Kind::Gyro => (&GYR_OFF, GYRO_FULL_SCALE_RADS),
+        Kind::Accel => (&ACC_OFF, ACCEL_OFFSET_MAX_MSS),
     };
-    store::with(|p| {
+    if !offsets.iter().flatten().flatten().all(|v| v.abs() <= limit) {
+        return None;
+    }
+    let all_stored = store::with(|p| {
+        let mut all = true;
         for (names, off) in table.iter().zip(offsets) {
             let Some(off) = off else {
                 continue;
@@ -329,13 +354,14 @@ fn write(kind: Kind, offsets: [Option<[f32; 3]>; IMUS]) -> u32 {
                 let written = index.map(|i| p.set(i, ParamValue::F32(v)));
                 if !matches!(written, Some(Ok(_))) {
                     defmt::error!("[INFO] calibration: {=str} not written", *n);
+                    all = false;
                 }
             }
         }
         let _ = (p.take_notice(), p.take_configure_mask());
-        p.take_live_mask()
-    })
-    .unwrap_or(0)
+        (all, p.take_live_mask())
+    })?;
+    all_stored.0.then_some(all_stored.1)
 }
 
 fn result_text(kind: Kind, offsets: [Option<[f32; 3]>; IMUS]) {
@@ -371,6 +397,167 @@ fn result_text(kind: Kind, offsets: [Option<[f32; 3]>; IMUS]) {
         ),
         (None, None) => {}
     }
+}
+
+/// Starts the compass calibration. `false`: the MAG row is not Ok, the text is sent and the action
+/// ends FAILED.
+pub fn start_mag() -> bool {
+    if MAG.status().state != State::Ok {
+        defmt::warn!("[INFO] {=str}: MAG not ok", MAG_NAME);
+        crate::text(MavSeverity::MAV_SEVERITY_WARNING, "compass cal: MAG not ok");
+        return false;
+    }
+    CORE0.lock(|c| {
+        if let Some(core) = c.borrow_mut().as_mut() {
+            core.mag = Some(MagCal::new());
+        }
+    });
+    CALIBRATING.store(true, Ordering::Relaxed);
+    defmt::info!(
+        "[INFO] {=str} started: rotate the vehicle through all orientations for 30 s; HEARTBEAT system_status CALIBRATING",
+        MAG_NAME
+    );
+    true
+}
+
+/// The synthetic input of the test feature `inject-mag-rotation`: the six points of a sphere of
+/// radius 50 uT about (10, -20, 30) uT, each held for 100 samples, in a cycle.
+#[cfg(feature = "inject-mag-rotation")]
+fn injected(seq: u32) -> [f32; 3] {
+    let mut p = [10.0, -20.0, 30.0];
+    let i = (seq / 100 % 6) as usize;
+    if let Some(x) = p.get_mut(i / 2) {
+        *x += if i.is_multiple_of(2) { 50.0 } else { -50.0 };
+    }
+    p
+}
+
+/// Feeds the compass calibration the MAG row's latest sample (the `MAG_OFF*` in force added back).
+fn observe_mag() -> Option<(MagOutcome, u8)> {
+    let sample = MAG.latest.try_get();
+    let offsets = store::mag_offsets();
+    CORE0.lock(|c| {
+        let mut c = c.borrow_mut();
+        let cal = c.as_mut()?.mag.as_mut()?;
+        if let Some(Sample {
+            reading: Reading::Mag { field_ut, .. },
+            t_us,
+            seq,
+            ..
+        }) = sample
+        {
+            let raw = mag_raw(field_ut, offsets);
+            #[cfg(feature = "inject-mag-rotation")]
+            let raw = {
+                let _ = raw;
+                injected(seq)
+            };
+            cal.push(seq, t_us, raw);
+        }
+        Some((cal.outcome(), cal.percent()))
+    })
+}
+
+/// Integer microtesla, rounded to the nearest.
+fn ut(x: f32) -> i32 {
+    (x + if x < 0.0 { -0.5 } else { 0.5 }) as i32
+}
+
+fn step_mag() -> Step {
+    let Some((outcome, percent)) = observe_mag() else {
+        return Step::End(MavResult::MAV_RESULT_FAILED);
+    };
+    match outcome {
+        MagOutcome::Running => Step::Progress(percent),
+        MagOutcome::Failed(why, fit) => {
+            stop(why.text());
+            match (why, fit) {
+                (Failure::NotRotated, Some(f)) => crate::text_fmt(
+                    MavSeverity::MAV_SEVERITY_WARNING,
+                    format_args!(
+                        "compass cal: not rotated, radius {} {} {} uT",
+                        ut(f.radius_ut[0]),
+                        ut(f.radius_ut[1]),
+                        ut(f.radius_ut[2])
+                    ),
+                ),
+                (Failure::OffsetOutOfRange, Some(f)) => crate::text_fmt(
+                    MavSeverity::MAV_SEVERITY_WARNING,
+                    format_args!(
+                        "compass cal: offset out of range {} {} {} uT",
+                        ut(f.offset_ut[0]),
+                        ut(f.offset_ut[1]),
+                        ut(f.offset_ut[2])
+                    ),
+                ),
+                _ => crate::text_fmt(
+                    MavSeverity::MAV_SEVERITY_WARNING,
+                    format_args!("compass cal: {}", why.text()),
+                ),
+            }
+            Step::End(if why == Failure::Cancelled {
+                MavResult::MAV_RESULT_CANCELLED
+            } else {
+                MavResult::MAV_RESULT_FAILED
+            })
+        }
+        MagOutcome::Done(fit) => {
+            CORE0.lock(|c| {
+                if let Some(core) = c.borrow_mut().as_mut() {
+                    core.mag = None;
+                }
+            });
+            CALIBRATING.store(false, Ordering::Relaxed);
+            if !write_mag(&fit) {
+                crate::text(
+                    MavSeverity::MAV_SEVERITY_WARNING,
+                    "compass cal: offset out of range",
+                );
+                return Step::End(MavResult::MAV_RESULT_FAILED);
+            }
+            defmt::info!(
+                "[INFO] {=str} done: offsets {} uT, radii {} uT, written to the parameters, not saved",
+                MAG_NAME,
+                fit.offset_ut,
+                fit.radius_ut
+            );
+            crate::text_fmt(
+                MavSeverity::MAV_SEVERITY_INFO,
+                format_args!(
+                    "compass cal: off {} {} {} r {} {} {} uT",
+                    ut(fit.offset_ut[0]),
+                    ut(fit.offset_ut[1]),
+                    ut(fit.offset_ut[2]),
+                    ut(fit.radius_ut[0]),
+                    ut(fit.radius_ut[1]),
+                    ut(fit.radius_ut[2])
+                ),
+            );
+            Step::End(MavResult::MAV_RESULT_ACCEPTED)
+        }
+    }
+}
+
+/// Writes `MAG_OFFX/Y/Z` (the store is dirty; nothing is saved; the adapter reads them from the
+/// next sample on). `false` when the store refuses a value (the pure check keeps them inside the
+/// parameters' range, so it does not happen).
+fn write_mag(fit: &MagFit) -> bool {
+    store::with(|p| {
+        let names = [
+            fw_settings::mag::OFF_X,
+            fw_settings::mag::OFF_Y,
+            fw_settings::mag::OFF_Z,
+        ];
+        let mut all = true;
+        for (n, v) in names.iter().zip(fit.offset_ut) {
+            let index = ParamName::new(n).ok().and_then(|n| p.find(&n));
+            let written = index.map(|i| p.set(i, ParamValue::F32(v)));
+            all &= matches!(written, Some(Ok(_)));
+        }
+        let _ = (p.take_notice(), p.take_configure_mask(), p.take_live_mask());
+        all
+    })
+    .unwrap_or(false)
 }
 
 /// Every 10 s: per IMU the mean and standard deviation of the samples as published (offsets

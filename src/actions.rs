@@ -5,7 +5,7 @@
 //! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration), save to
 //! and reload from the flash settings region (`settings`), reboot (the watchdog monitor resets the
 //! board 100 ms after the final ACK was handed to the link; nothing is saved), the gyro and the
-//! one-position accelerometer calibrations (`calibration`). Every other action
+//! one-position accelerometer and the compass calibrations (`calibration`). Every other action
 //! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
@@ -98,6 +98,11 @@ pub fn command(req: &CommandRequest, now_ms: u64) -> CommandOutcome {
 
 /// `Telemetry::acks`: the next late ACK for USB.
 pub fn next_ack(now_ms: u64) -> Option<LateAck> {
+    // The node sends ACKs before it takes texts from `Telemetry::texts`: hold the ACK until the
+    // queued text (a calibration's result or failure) has gone out, so the text precedes it.
+    if crate::texts_pending() {
+        return None;
+    }
     let ack = BOOK.lock(|b| b.borrow_mut().next_ack(USB, now_ms))?;
     if ack.outcome.result != MavResult::MAV_RESULT_IN_PROGRESS {
         defmt::info!(
@@ -141,6 +146,11 @@ fn run(action: Action, now_ms: u64) {
         Action::Reboot => {
             crate::watchdog::request_reboot(now_ms as u32);
             end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
+        }
+        Action::MagCalibration => {
+            if !crate::calibration::start_mag() {
+                end(now_ms, action, MavResult::MAV_RESULT_FAILED);
+            }
         }
         Action::GyroCalibration | Action::AccelCalibration => {
             let kind = if action == Action::GyroCalibration {
@@ -254,7 +264,11 @@ pub fn tick(now_ms: u64) {
         );
     }
     match running {
-        Some(action @ (Action::GyroCalibration | Action::AccelCalibration)) => {
+        Some(
+            action @ (Action::GyroCalibration
+            | Action::AccelCalibration
+            | Action::MagCalibration),
+        ) => {
             match crate::calibration::step() {
                 Step::Progress(percent) => {
                     BOOK.lock(|b| b.borrow_mut().set_progress(now_ms, percent));

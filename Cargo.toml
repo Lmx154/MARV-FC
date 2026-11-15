@@ -82,6 +82,9 @@ inject-mag-fail-until-restart = ["inject-mag"]
 # The same around the GNSS receiver's adapter (src/gnss.rs): 10 s after the first good sample the
 # adapter stops seeing sentences (the wrapper swallows them) until a RESTART request (`device restart GNSS`).
 inject-gnss-silent = []
+# While a compass calibration runs, its input (not the published samples) is a synthetic rotation:
+# the six points of a sphere of radius 50 uT about (10, -20, 30) uT (src/calibration.rs).
+inject-mag-rotation = []
 # Internal: on when any injection feature is on.
 inject = []
 # Internal: on when a magnetometer injection feature is on.

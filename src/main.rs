@@ -515,6 +515,11 @@ impl Telemetry for Board {
     }
 }
 
+/// A STATUSTEXT waits for the node (see `actions::next_ack`).
+fn texts_pending() -> bool {
+    !TEXTS.is_empty()
+}
+
 fn text(severity: MavSeverity, text: &str) {
     text_fmt(severity, format_args!("{}", text));
 }
