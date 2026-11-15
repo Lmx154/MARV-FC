@@ -36,6 +36,9 @@ fw-settings = { path = "crates/fw-settings" }
 # so there is one copy of it.
 usb-cdc = { git = "https://github.com/Lmx154/usb-cdc.git", rev = "47cb09087d517b6813e3211e742d9d7d5ff9e379", features = ["defmt"] }
 mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c", features = ["defmt"] }
+# The ELRS receiver's UART (src/rc.rs): CRSF and MAVLink, following the receiver. Its crsf-codec and
+# mavlink-device are git dependencies at the commits used here (one copy of mavlink-device).
+rc-port = { git = "https://github.com/Lmx154/rc-port.git", rev = "5d5f6bdb6062ea454eee69fb1df484c79d8bcff6", features = ["embassy-rp-0-10"] }
 
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread", "executor-interrupt", "defmt"] }
 embassy-time = { version = "0.5.1", features = ["defmt", "defmt-timestamp-uptime"] }

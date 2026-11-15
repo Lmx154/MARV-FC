@@ -253,6 +253,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
+name = "crsf-codec"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/crsf-codec.git?rev=61a087889395e5c63bb73f80d2dde678f22f95a7#61a087889395e5c63bb73f80d2dde678f22f95a7"
+
+[[package]]
 name = "crunchy"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1013,6 +1018,7 @@ dependencies = [
  "panic-probe",
  "pio-sdmmc",
  "qmi-psram",
+ "rc-port",
  "semihosting",
  "static_cell",
  "usb-cdc",
@@ -1366,6 +1372,19 @@ name = "rand_core"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
+
+[[package]]
+name = "rc-port"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/rc-port.git?rev=5d5f6bdb6062ea454eee69fb1df484c79d8bcff6#5d5f6bdb6062ea454eee69fb1df484c79d8bcff6"
+dependencies = [
+ "crsf-codec",
+ "embassy-rp",
+ "embedded-hal-async",
+ "embedded-io-async 0.7.0",
+ "marv-dialect",
+ "mavlink-device",
+]
 
 [[package]]
 name = "redox_syscall"
