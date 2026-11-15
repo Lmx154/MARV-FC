@@ -141,6 +141,8 @@ pub struct Step {
     pub ended: Option<Ended>,
     /// Carry out the requested reset now.
     pub reset: bool,
+    /// This check saw `SAVE_EPOCH` changed: it may not start a stall.
+    pub save_check: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,6 +196,7 @@ impl Monitor {
         let skip = i.save_epoch != self.epoch;
         self.epoch = i.save_epoch;
         let mut step = Step {
+            save_check: skip,
             reset: i
                 .reboot_at_ms
                 .is_some_and(|at| since(i.now_ms, at) as i32 >= 0),
@@ -544,14 +547,16 @@ mod tests {
         s.check(false, true);
         s.epoch += 1;
         let st = s.check(false, true);
-        assert!(!st.feed && st.began.is_none() && !st.record);
+        assert!(!st.feed && st.began.is_none() && !st.record && st.save_check);
         // Only one check is skipped.
         let st = s.check(false, true);
         assert_eq!(st.began, Some((Core::Core0, 300)));
+        assert!(!st.save_check);
         // A healthy check after a save still feeds.
         let mut s = Sim::new(0);
         s.epoch += 1;
-        assert!(s.check(true, true).feed);
+        let st = s.check(true, true);
+        assert!(st.feed && st.save_check && st.began.is_none());
     }
 
     #[test]

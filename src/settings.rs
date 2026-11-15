@@ -605,6 +605,11 @@ pub async fn save_loop() {
 
     const SAVES: u32 = 100;
     Timer::after(Duration::from_secs(60)).await;
+    // Once per power-up or flash: never again after a reset the watchdog caused (no reset loop).
+    if !crate::watchdog::HANG_ARMED.load(Ordering::Relaxed) {
+        defmt::warn!("[INFO] save-loop: not run after a watchdog reset");
+        return;
+    }
     let mut params = store::Store;
     let Some(index) = ParamName::new("BARO_IIR_T")
         .ok()

@@ -16,7 +16,8 @@
 //! runs until `tools/run.sh` ends it.
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
-//! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
+//! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned; the
+//! hardware watchdog is not started in that build (it would reset the board in a loop).
 //! Features `inject-baro-transient`, `-persistent`, `-fail-until-restart`, `-missed-edge`, `-silent`,
 //! `-verify`, `-stuck`, `-por`: fault injection (`inject`). Features `inject-imu1-persistent`,
 //! `inject-imu1-missed-edge`: fault injection around IMU1's adapter (`imu1::Inject`). Feature
@@ -574,6 +575,7 @@ async fn supervise() -> ! {
                 }
             );
             devices.stat(now);
+            watchdog::stat();
         }
         tick = tick.wrapping_add(1);
     }
@@ -634,14 +636,21 @@ async fn main(spawner: Spawner) {
     #[cfg(not(feature = "wdg-scratch-probe"))]
     {
         watchdog::boot(&mut wd);
-        wd.pause_on_debug(true);
-        wd.start(Duration::from_millis(u64::from(
-            fw_core::watchdog::PERIOD_MS,
-        )));
+        #[cfg(not(feature = "no-fbeat"))]
+        {
+            wd.pause_on_debug(true);
+            wd.start(Duration::from_millis(u64::from(
+                fw_core::watchdog::PERIOD_MS,
+            )));
+            defmt::info!(
+                "[INFO] watchdog started: {=u32} ms, paused while a core is halted by the debugger; the monitor on SWI_IRQ_1 feeds it while BEAT0 and PONG are younger than {=u32} ms",
+                fw_core::watchdog::PERIOD_MS,
+                fw_core::watchdog::STALL_MS
+            );
+        }
+        #[cfg(feature = "no-fbeat")]
         defmt::info!(
-            "[INFO] watchdog started: {=u32} ms, paused while a core is halted by the debugger; the monitor on SWI_IRQ_1 feeds it while BEAT0 and PONG are younger than {=u32} ms",
-            fw_core::watchdog::PERIOD_MS,
-            fw_core::watchdog::STALL_MS
+            "[INFO] watchdog NOT started (no-fbeat: the flight core never answers, so it would reset the board in a loop); the monitor runs without effect and still carries out a reboot"
         );
     }
     defmt::info!(
@@ -776,7 +785,7 @@ async fn startup_checks() {
         "DMA_IRQ_0 still not enabled on core 0 after core 1 started, enabled",
         u32::from(dma0_on),
     );
-    #[cfg(not(feature = "wdg-scratch-probe"))]
+    #[cfg(not(any(feature = "wdg-scratch-probe", feature = "no-fbeat")))]
     {
         Timer::after(Duration::from_millis(500)).await;
         let feeds = watchdog::FEEDS.load(Ordering::Relaxed);

@@ -53,6 +53,8 @@ static BEGUN: AtomicU32 = AtomicU32::new(0);
 static BEGUN_INFO: AtomicU32 = AtomicU32::new(0);
 static ENDED: AtomicU32 = AtomicU32::new(0);
 static ENDED_INFO: AtomicU32 = AtomicU32::new(0);
+/// Checks that saw `SAVE_EPOCH` changed (a flash save since the check before).
+static SAVE_CHECKS: AtomicU32 = AtomicU32::new(0);
 
 static EXECUTOR_WDG: InterruptExecutor = InterruptExecutor::new();
 
@@ -205,6 +207,9 @@ async fn monitor(mut wd: Watchdog) -> ! {
         ticker.next().await;
         let i = inputs();
         let step = m.step(i);
+        if step.save_check {
+            SAVE_CHECKS.fetch_add(1, Ordering::Relaxed);
+        }
         if step.reset {
             wd.trigger_reset();
         }
@@ -285,6 +290,17 @@ pub fn report(begun_seen: &mut u32, ended_seen: &mut u32) {
             crate::text(MavSeverity::MAV_SEVERITY_WARNING, line.as_str());
         }
     }
+}
+
+/// The supervisor, every 10 s: the monitor's counters.
+pub fn stat() {
+    defmt::info!(
+        "[STAT] watchdog: feeds {=u32}, stalls begun {=u32}, ended {=u32}, checks after a save {=u32}",
+        FEEDS.load(Ordering::Relaxed),
+        BEGUN.load(Ordering::Relaxed),
+        ENDED.load(Ordering::Relaxed),
+        SAVE_CHECKS.load(Ordering::Relaxed)
+    );
 }
 
 /// The REBOOT action: writes the REQUESTED record and asks the monitor to reset; the reset comes
