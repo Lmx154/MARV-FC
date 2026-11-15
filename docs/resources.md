@@ -6,8 +6,10 @@ and executor is assigned once, here. The bench programs of the driver crates eac
 (the same DMA channels 0 and 1 in five of them, PIO2 in three); this table replaces those choices in the
 firmware. Status of each line: FIXED = dictated by the board; CHOSEN = decided here; OPEN = waits for the
 foundation design. Run as one program so far (2026-11-14): the two-core skeleton (core 1 started with `spawn_core1`, USB with a
-MAVLink node on core 0, `DMA_IRQ_0` off on core 0) and the BMP581 barometer on core 0 (I2C1 without DMA, `I2C1_IRQ`, the data-ready
-input GPIO21 through `IO_IRQ_BANK0`); no other device, PIO block or DMA channel of this plan has run in it yet.
+MAVLink node on core 0, `DMA_IRQ_0` off on core 0), the BMP581 barometer on core 0 (I2C1 without DMA, `I2C1_IRQ`, the data-ready
+input GPIO21 through `IO_IRQ_BANK0`) and IMU1, the ICM-45686, on core 1 (SPI0 at 8 MHz mode 0 with DMA channels 0 and 1 on
+`DMA_IRQ_0`, INT1 on GPIO15 through core 1's `IO_IRQ_BANK0`, all built inside core 1's entry closure; start-up checks:
+`DMA_IRQ_0` enabled on core 1, not on core 0); no other device, PIO block or DMA channel of this plan has run in it yet.
 
 ## Fixed by the board (`docs/pinout.md`)
 
@@ -54,7 +56,7 @@ unless the HAL is given an explicit base.
 
 | Channel | User | Notes |
 |---|---|---|
-| 0, 1 | SPI0 (ICM-45686) | Core 1. The HAL's async SPI takes two channels (as every bench does; not checked in `spi.rs`) |
+| 0, 1 | SPI0 (ICM-45686) | Core 1, BUILT (`src/imu1.rs`, inside core 1's entry). The HAL's async SPI takes two channels (as every bench does; not checked in `spi.rs`) |
 | 2, 3 | SPI1 (LSM6DSK320X) | Core 1 |
 | 4 | microSD | BLOCKED: the driver requires one, the SD belongs on core 0, and DMA is flight-core-only for now (rule 6) |
 | 5 | DShot reply capture | Core 1. The driver requires one |
@@ -74,7 +76,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Core 0, the I/O core: thread-mode executor | `embassy_rp::init`, the time driver; usb_link (`usb-cdc`'s futures are not `Send`: built here), rc_link, baro, mag, gnss, batt, supervisor, actions, settings and flash_saver, beat0; later led, sd_logger | DECIDED (design, two-core amendment) |
 | Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only | DECIDED |
 | Core 0: `SWI_IRQ_0` | reserved (the receiver task, if UART overruns show it is needed) | DECIDED |
-| Core 1, the FLIGHT core: thread-mode executor | imu1, imu2, fbeat (liveness); later the control loop, DShot, arming. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
+| Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2, fbeat (liveness, BUILT); later the control loop, DShot, arming. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
 | Core 1 stack | a `static`, 16 KB default, set from stack painting | DECIDED |
 | Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, only while both cores' heartbeats advance | DECIDED |
 

@@ -18,14 +18,53 @@ It has no flight functionality.
   action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, the barometer's device task (see
   Device layer).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
-  thread-mode executor): one task, `fw_flight::liveness`, which copies `PING` into `PONG` on each kick. No
-  timer, no log, no critical-section primitive, no peripheral there.
-- Between the cores only atomics and `fw_core::xcore::Kick`, in internal SRAM. `DMA_IRQ_0` is disabled on
-  core 0 before core 1 starts (all DMA belongs to the flight core).
+  thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, and IMU1
+  (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, all built inside
+  core 1's entry closure so their interrupts land on core 1, running the flight-core device loop
+  `fw_flight::imu` (see Flight-core device loop). No log, no critical-section primitive of its own, and no
+  timer in the sample loop there.
+- Between the cores only atomics and `fw_core::xcore` cells (`Kick`, and IMU1's `Seqlock` and `Kick` in
+  `fw_flight::imu::ImuCells`), in internal SRAM. `DMA_IRQ_0` is disabled on core 0 before core 1 starts (all
+  DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
+  enabled on core 0 after core 1 started.
 
-Not in it yet: the devices other than the barometer, settings on flash (parameters live in RAM and are lost
+Not in it yet: IMU1's parameters and calibration (a fixed configuration for now), IMU2 and the devices
+other than IMU1 and the barometer, settings on flash (parameters live in RAM and are lost
 at every reset; there is no save), the watchdog, reboot, the calibrations and the self-test, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 4 texts stands in).
+
+## Flight-core device loop
+
+`crates/fw-flight/src/imu.rs` (design: two-core amendment): `ImuTask` runs one IMU over an `ImuAdapter`
+(the core-0 adapter contract: `start`, `acquire`, `status`, `verify`, `apply`, `recover`, `restart`, success
+only after a fresh sample). It waits on `select(data-ready edge, kick)` and never on a timer; core 0's
+supervisor kicks CHECK every 10 ms tick while the row's last sample is older than T = max(3 P, 10 ms); the
+woken task compares the clock with its last sample and, if late by more than T, makes the one status read
+(sample waiting = missed edge, read it; nothing = deadline miss). RESTART comes with its request number
+through the same kick; APPLY is reserved. Start and recovery wait through the `DelayNs` passed in, wrapped in
+`CountingDelay` (count after the start: 0 in a clean run, invariant F2); `verify` between samples (about
+once per second) waits on a busy loop over the time driver's counter, no timer. Everything core 0 needs
+(state, counters, the latest sample, the largest gap, missed edges, delay counts, restart outcome, the last
+four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
+into IMU1's registry row each tick and logs and texts its events. Host tests: `cargo host-test -p fw-flight`
+(8 tests).
+
+IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock, data-ready on INT1 (as
+`icm45686_smoke` ran it on this board); 800 Hz because the ICM-45686 has no 1 kHz rate. Single-sample mode
+(`read()` on every data-ready edge, the driver README's single-sample path), with INT1_STATUS0 (clear on
+read) read with every sample so that the status read after a late CHECK sees a fresh flag; no FIFO, so
+the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
+temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the barometer's as
+SCALED_PRESSURE at 25 Hz.
+
+Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
+`acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`. `FEATURES=inject-imu1-missed-edge
+tools/run.sh 60`: 5 s after the first good sample the data-ready edges are swallowed for 200 ms. The
+injection state goes out through the cells and core 0 logs it. `FEATURES=stall-core0 tools/run.sh 60`: one
+core-0 task spins 3 s without yielding 20 s after start and logs IMU1's samples before and after (F1).
+`FEATURES=f4-negative tools/run.sh 20`: a DMA channel is built on core 0 before the start-up check
+(negative control of F4: `[FAIL] DMA_IRQ_0 not enabled on core 0`), its line disabled again before core 1
+starts.
 
 ## Device layer
 
@@ -210,9 +249,9 @@ tools/run.sh 90           # build, flash, run for 90 s, print the report lines
 `tools/run.sh` takes the probe lock (`marv-v2-probe.lock` in `XDG_RUNTIME_DIR`), so it waits if another
 test is using the probe. Its full log is kept under `logs/` (git-ignored). The firmware runs until the
 script's timeout ends it, so exit status 124 is the normal end. Expected output: one `[INFO]` line per
-driver (proof that it is linked), four start-up checks, each `[PASS]` or `[FAIL]`: EXTEXCLALL set on
-core 0, `DMA_IRQ_0` not enabled on core 0, EXTEXCLALL set on core 1, `PONG` follows `PING` within
-200 ms; then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
+driver (proof that it is linked), six start-up checks, each `[PASS]` or `[FAIL]`: EXTEXCLALL set on
+core 0, `DMA_IRQ_0` not enabled on core 0, EXTEXCLALL set on core 1, `DMA_IRQ_0` enabled on core 1,
+`DMA_IRQ_0` still not enabled on core 0, `PONG` follows `PING` within 200 ms; then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
 200 ms), `PING` and `PONG`, the bytes and frames the node wrote and the bytes it read on USB, the link
 state; and a `[STAT]` line per device (see Device layer).
 
@@ -220,7 +259,8 @@ From the ground station: the flight controller's own USB port enumerates as a CD
 PID 0xcafe, product "MARV V2 firmware"; on Linux the second `/dev/ttyACM*` besides the debug probe's).
 The node writes nothing until the station opens the port (DTR held 100 ms, or its HEARTBEAT). Then for
 example `marv-link-test --connect serial:/dev/ttyACM1 --count 0 --duration 60` (MARV-GCS) counts one
-HEARTBEAT, one SYS_STATUS and one `MARV_DEVICE_STATUS` per second from system 1 component 1, and the STATUSTEXT
+HEARTBEAT, one SYS_STATUS and two `MARV_DEVICE_STATUS` (IMU1, BARO) per second, 25 HIGHRES_IMU and 25
+SCALED_PRESSURE per second from system 1 component 1, and the STATUSTEXT
 "MARV V2 fw 0.1.0: flight core up".
 
 Negative control: `FEATURES=no-fbeat tools/run.sh 30` builds with the cargo feature `no-fbeat`: core 1
@@ -235,7 +275,7 @@ The repository is a Cargo workspace with four members:
 ```
 .                   the firmware binary (package marv-v2-firmware, the workspace root package)
 crates/fw-core      pure no_std logic and the lock-free cross-core cells, tested on the host
-crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core only
+crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core and embedded-hal-async only
 crates/fw-settings  per device, the parameter table and the pure settings-to-configuration rule; depends on fw-core and the driver crates
 ```
 
@@ -263,7 +303,7 @@ refused only by the rate-against-oversampling rule with the refused sets listed,
 refusing before storing); it also builds for the board (`cargo build -p fw-settings --release`).
 
 `fw-flight` holds the flight core's liveness answer (`liveness`: waits on a `Kick`, copies `PING` into
-`PONG`); its `imu` module is still empty. It must not depend on
+`PONG`) and the IMU device loop (`imu`, see Flight-core device loop). It must not depend on
 `embassy-time`, `embassy-sync` or `defmt`; check it with
 `cargo tree -p fw-flight -e normal --depth 1 | grep -cE 'embassy-time|embassy-sync|defmt'` (prints 0).
 
