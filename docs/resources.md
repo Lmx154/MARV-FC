@@ -84,7 +84,11 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 
 1. A write or erase of the in-package flash runs with ALL interrupts off, from RAM, with core 1 paused
    (`embassy_rp::flash`, `in_ram`), and afterwards the PSRAM mapping must be redone (`qmi-psram` `remap()`). While
-   it runs no device is sampled, no DShot frame is sent, and the watchdog is not fed. Duration not measured.
+   it runs no device is sampled, no DShot frame is sent, and the watchdog is not fed. Measured (2026-11-15,
+   100 saves of one 4 KB sector: erase, then program of one 256-byte page): 30.6 to 44.8 ms, mean 40.2 ms,
+   almost all of it the erase. Today the save runs inside the `245` command's action on the link task
+   (`src/settings.rs`, ONLY on an explicit save), not in a separate `flash_saver` task; no PSRAM is mapped
+   yet, so no `remap()`.
 2. A bus call of a sensor driver is never cancelled (embassy-rp 0.10): the timeout goes around the data-ready
    wait, then the driver's `recover()` is called.
 3. DShot and ESC passthrough never hold PIO2 together; passthrough is only entered with the motors stopped.
@@ -104,5 +108,5 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 
 ## Not yet decided or measured
 
-Whether the two IMUs' SPI really need DMA at the rates used; the length of a flash erase; stack and static RAM
+Whether the two IMUs' SPI really need DMA at the rates used; stack and static RAM
 per task; what the loaded I/O core does to the flight core (milestone FD4); how the microSD gets its DMA channel.

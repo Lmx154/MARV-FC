@@ -29,9 +29,9 @@ It has no flight functionality.
   enabled on core 0 after core 1 started.
 
 Not in it yet: IMU1's parameters and calibration (a fixed configuration for now), IMU2 and the devices
-other than IMU1 and the barometer, settings on flash (parameters live in RAM and are lost
-at every reset; there is no save), the watchdog, reboot, the calibrations and the self-test, the radio link
-(UART), the SD card, the design's text ring of 8 (a fixed queue of 4 texts stands in).
+other than IMU1 and the barometer, the watchdog, reboot, the calibrations and the self-test, the radio link
+(UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
+a ground station's node runs; when it is full, newer texts are dropped with a log line).
 
 ## Flight-core device loop
 
@@ -199,9 +199,67 @@ accesses, never across an await), the store's `take_configure_mask` names the de
 that device's APPLY request. The barometer task then reads the stored values, builds the `Config` with
 `settings_to_config`, sets its period P, and calls the driver's `configure` on the running chip; it logs the
 configuration and "applied" (`[INFO] BARO: configuration: ...`). About 5 ms from the write to the applied chip.
-Every start and restart reads the stored values the same way. NOTHING IS SAVED TO FLASH: no automatic save,
-no save command (it answers "save: not built yet"); a reset or power cycle returns every parameter to its
-default. Every parameter write, accepted or refused, has an `[INFO] param <NAME> = <value>: ...` line.
+Every start and restart reads the stored values the same way. A write is NOT saved to flash: it is lost at
+a reset unless the station's "Save to flash" (`marv-cli param save`) follows it (see Settings in flash).
+Every parameter write, accepted or refused, has an `[INFO] param <NAME> = <value>: ...` line.
+
+## Settings in flash
+
+`src/settings.rs` (design: decision-foundation item 3, the two-core amendment "Item 3, changes", and the
+owner's answers of 2026-11-15). The parameters persist in the `SETTINGS` region, two 4096-byte sectors
+A (0x101FE000) and B (0x101FF000), one `fw_core::record` record each: only the values that differ from
+their default.
+
+- NOTHING IS SAVED WITHOUT SAVE. A write takes effect in RAM only. The flash is written only by
+  MAV_CMD_PREFLIGHT_STORAGE param1 = 1 (`param save`); no automatic save, no save before a reboot or after a
+  reset or a calibration. `param reset-all` resets RAM only; `param save` afterwards stores a record with 0
+  entries.
+- Boot, before the devices start (so they start with the stored values): both sectors are read and
+  `record::choose` decides. A current record (the valid one with the highest sequence): the store is reset
+  to defaults and each entry loaded; an entry that fails (unknown name, wrong type, out of range, read
+  only) is skipped with one WARNING text, at most 4 named, then one "settings: ... and N more skipped".
+  Both sectors erased: defaults and one INFO text "settings: none stored, defaults". Otherwise no valid
+  record: defaults and one WARNING "settings: stored record invalid, defaults"; NOTHING is erased. One log
+  line `[INFO] settings boot: <class>, sector, sequence, loaded, skipped; sector A <state>, sector B <state>;
+  next save to sector <X> with sequence <N>`. The texts are queued before anything else and wait in the
+  text queue until a ground station connects (if nobody ever connects they stay queued; nothing is lost
+  unless the queue of 8 fills first).
+- Save (`param save`): FAILED with the text "save failed: flight core not answering" unless the flight
+  core's `PONG` was seen fresh within 100 ms (the HAL pauses core 1 through its FIFO interrupt and waits for
+  it without a time limit); FAILED "save failed: armed" when the arm/save handshake
+  (`fw_core::handshake`, `begin_save`) refuses. Otherwise the record (`record::encode`, `non_default()`,
+  the next sequence) is written to the sector that does NOT hold the current record (erase, then program
+  only the record's bytes), read back and compared byte for byte and decoded; a mismatch ends FAILED
+  "save failed: verify failed" and the previous record stays the current one. Then `end_save`, the
+  store's dirty flag is cleared, ACCEPTED. The store's lock is never held across the flash operation.
+  One log line per save: sector, sequence, entries, bytes, the stall (erase and program), verify.
+- Reload (`param reload`, param1 = 0): the boot rule again; the devices whose values changed get their
+  APPLY request; ACCEPTED (also with no valid record: defaults, with the boot's text).
+- The range guard: every erase and program passes ONE function (`settings::guarded`) that refuses any
+  range outside offsets 0x1FE000 to 0x200000 with a `[FAIL]` log line and an error, never a write.
+- The stall: an erase or program runs with interrupts off on core 0 and core 1 paused. Measured on the
+  board over 100 saves (feature `save-loop`): 30.6 ms min, 44.8 ms max, 40.2 ms mean (erase 30 to 44 ms,
+  program of one page about 0.6 ms); the design's bound is 533 ms. Each stall is published (`SAVE_EPOCH`,
+  the last window); a core-0 device's deadline miss or stuck window that a save overlapped is discarded
+  (logged, `discarded, a flash save overlapped it`), never a health event. IMU1 (flight core): the samples
+  due during the stall are not read; after it, one long gap (largest 47 ms) and no error, timeout or
+  recovery. Over the 100 saves: 0 device transitions, 0 errors, 0 timeouts on IMU1 and BARO.
+- `tools/run.sh` re-flashes only the program (`FLASH`, below 0x101FE000): the settings survive it
+  (checked 3 of 3); the power-cycle half of I3.5 is not checked yet.
+
+Features for the checks (off by default):
+
+- `FEATURES=save-loop tools/run.sh 200`: 60 s after start, 100 saves one second apart, `BARO_IIR_T`
+  alternating 1 and 3, each stall logged, then `[INFO] save-loop summary: ...` (count, verified,
+  min/max/mean stall, device transitions, IMU1 missed edges, long gaps and largest gap, BARO timeouts,
+  discarded windows, guard refusals, the last value saved). Flash wear: 100 erases per run.
+- `FEATURES=fake-armed tools/run.sh 60`: the handshake's armed flag is set at boot; `param save` ends
+  FAILED "save failed: armed" and writes nothing.
+- `FEATURES=corrupt-newest tools/run.sh 60`: at boot, before the settings are read, one byte of the newest
+  valid record (the first entry's value byte, else the CRC's, else the magic's) is programmed to 0x00
+  through the guard; the boot then chooses the other sector (invariant I3.2) and the next save goes to the
+  corrupted sector's place.
+- The existing `no-fbeat`: `param save` ends FAILED "save failed: flight core not answering".
 
 ## Commands
 
@@ -218,7 +276,9 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 | `device restart BARO` | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
-| `device restart <other device>`, `param save`, `param reload`, `reboot --yes`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet", "save: not built yet"). No fake success |
+| `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
+| `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
+| `device restart <other device>`, `reboot --yes`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet"). No fake success |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Device drivers
@@ -327,7 +387,10 @@ assumes an x86_64 Linux host; on another host, pass your own `--target`.
 ## Flash layout
 
 `memory.x` gives the program `FLASH` 2040K (0x10000000 to 0x101FE000) and reserves the last 8 KB of the
-2 MiB flash, 0x101FE000 to 0x10200000, as the `SETTINGS` region for the settings record.
+2 MiB flash, 0x101FE000 to 0x10200000, as the `SETTINGS` region for the settings record (`src/settings.rs`;
+the only range the firmware erases or programs). Use (normal build, 2026-11-15): program 171.7 KB of 2040 KB
+(.text 154424 B, .rodata 15768 B, .data 1172 B); static RAM 41.3 KB of 512 KB (.data 1172 B, .bss 39080 B,
+.uninit 1024 B), of which 12 KB are the settings module's three sector buffers.
 
 ## Board documentation
 
