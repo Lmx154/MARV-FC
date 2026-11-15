@@ -673,6 +673,7 @@ struct FlightSeen {
     restart_taken: u32,
     attempt_ms: u64,
     attempt_failed_ms: u64,
+    failure_ms: u64,
     missed_edges: u32,
     inject: u32,
     delays_after_start: u32,
@@ -899,12 +900,19 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     }
     if s.attempt_ms != w.flight.attempt_ms {
         w.flight.attempt_ms = s.attempt_ms;
+        // The attempt may have failed within the same tick: then its back-off counted from the
+        // failure seen before.
+        let previous = if s.failure_ms >= s.attempt_ms {
+            w.flight.failure_ms
+        } else {
+            s.failure_ms
+        };
         defmt::info!(
             "[INFO] {=str}: recovery attempt {=u8} starts at {=u64} ms, {=u64} ms after the previous failure",
             dev.name,
             s.health.attempts,
             s.attempt_ms,
-            s.attempt_ms.saturating_sub(s.failure_ms)
+            s.attempt_ms.saturating_sub(previous)
         );
     }
     if s.attempt_failed_ms != w.flight.attempt_failed_ms {
@@ -916,6 +924,7 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
             s.attempt_failed_ms
         );
     }
+    w.flight.failure_ms = s.failure_ms;
     if s.missed_edges != w.flight.missed_edges {
         defmt::info!(
             "[INFO] {=str}: missed edges {=u32} (+{=u32}), the latest found at {=u64} us with the last sample {=u64} us old; injection state {=u32} since {=u64} us",
