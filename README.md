@@ -77,8 +77,9 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
 `[INFO] inject:` line when it starts and ends acting):
 
 - `FEATURES=inject-baro-transient tools/run.sh 60`: after 5 s of good samples `acquire` fails 4 times in a
-  row, once. Expected: Ok -> Degraded -> Recovering (WARNING) -> Ok (NOTICE, `recoveries` 1); the 4th
-  failure comes after the recovery and gives Ok -> Degraded -> Ok, with no text.
+  row, once. Expected: Ok -> Degraded -> Recovering (WARNING); the 4th
+  failure lands in the confirming `acquire` of recovery attempt 1, so its `recover` counts as failed and
+  the same attempt goes on to `restart`, which succeeds -> Ok (NOTICE, `recoveries` 1, `errors` 3).
 - `FEATURES=inject-baro-persistent tools/run.sh 60`: after 5 s every `acquire`, `recover` and `restart`
   fails. Expected: Recovering, 4 attempts at 100, 300, 1000, 3000 ms after the previous failure (logged),
   then Failed (ERROR) and no bus traffic (the adapter's call counter stands still).
