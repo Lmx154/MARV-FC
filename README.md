@@ -444,8 +444,12 @@ board.
 - Every 10 s: `[STAT] watchdog: feeds N, stalls begun B, ended E, checks after a save S`.
 - A save under the watchdog (2026-11-15, normal build, `param set BARO_IIR_T 3`, `param save`,
   `param reset-all --yes`, `param save`): both ACCEPTED, stalls 42.1 ms and 40.7 ms, `checks after a save
-  2`, `stalls begun 0`, feeds 100 per 10 s (no check went unfed), no reset. The 100-save `save-loop` run
-  under the watchdog has not been done yet.
+  2`, `stalls begun 0`, feeds 100 per 10 s (no check went unfed), no reset.
+- 100 saves in a row under the watchdog (2026-11-15, `save-loop`, run by the owner): 100 saves, 100 verified,
+  stall 38.7 to 45.5 ms (mean 41.8 ms), 0 device transitions, `feeds 1900` at 190 s (100 per 10 s throughout),
+  `stalls begun 0`, `checks after a save 100`, no reset; IMU1 and BARO 0 errors (invariant I6.3 on the board).
+- A power cycle (2026-11-15, the owner unplugged and replugged the board): the saved record was loaded
+  (`BARO_ODR_HZ` 25 from the start), the boot text ends "reset: power-on" and there is no watchdog or reset text.
 - A stuck device (2026-11-15, `inject-baro-stuck`, 75 s): "BARO: stuck" (ERROR), the row FAILED/STUCK, no
   stall, no reset; IMU1 Ok with 0 errors at 803.5 samples/s throughout.
 
@@ -458,7 +462,7 @@ What each cargo feature does under the watchdog:
 | `inject-imu1-persistent`, `inject-imu1-missed-edge` | IMU1 faults on the flight core; `fbeat` still answers, no reset |
 | `stall-core0` | 3 s spin: reset about 1.7 s in, record "TEST stalled (core 0)"; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
-| `save-loop` | 100 saves; must not reset (not yet run under the watchdog); once per power-up or flash |
+| `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |
 | `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
