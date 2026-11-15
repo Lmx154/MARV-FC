@@ -48,9 +48,10 @@
 //! the registered waker, or wakes the waker being registered.
 //!
 //! Read-modify-writes on ARMv8-M Mainline (`swap`, `fetch_or`, `TripleBuffer` and `Kick`) compile
-//! to an `ldrex`/`strex` pair that retries only when the exclusive monitor was cleared between the
-//! two (the other core wrote the same word, or an exception was taken): no algorithmic loop, and
-//! retries bounded by the other side's writes to that one word in a window of a few cycles. The
+//! to a load/store-exclusive pair (`ldaexb`/`stlexb`) that retries only when the exclusive monitor
+//! was cleared between the two (the other core wrote the same word, or an exception was taken):
+//! no algorithmic loop, and retries bounded by the other side's writes to that one word in a
+//! window of a few cycles. The
 //! [`Seqlock`] writer uses no read-modify-write at all. The handle takes (`take_writer`,
 //! `take_reader`) use `swap(true, Relaxed)`: only the uniqueness of the winner matters, no data
 //! is published through those flags.
