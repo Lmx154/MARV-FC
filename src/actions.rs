@@ -2,8 +2,9 @@
 //! command starts, and how each action ends. Link id 0 is USB; `armed` and `hil` are false until
 //! the arming code and the HIL source exist.
 //!
-//! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration). Every other action
-//! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
+//! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration), save to
+//! and reload from the flash settings region (`settings`). Every other action the book admits ends
+//! FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
 
@@ -114,6 +115,8 @@ fn start(action: Action, now_ms: u64) {
     match action {
         Action::StorageDefaultsAll => defaults(false, now_ms),
         Action::StorageDefaultsCalibration => defaults(true, now_ms),
+        Action::StorageSave => save(),
+        Action::StorageReload => reload(),
         other => {
             crate::text_fmt(
                 MavSeverity::MAV_SEVERITY_WARNING,
@@ -153,6 +156,41 @@ fn defaults(calibration_only: bool, now_ms: u64) {
     );
     raise_apply(configure);
     end(now_ms, action, MavResult::MAV_RESULT_ACCEPTED);
+}
+
+/// Writes the store's values that differ from their defaults to flash (blocking; the flash stall
+/// stops both cores). FAILED with one text when it is refused or does not verify.
+fn save() {
+    let result = match crate::settings::save() {
+        Ok(_) => MavResult::MAV_RESULT_ACCEPTED,
+        Err(why) => {
+            crate::text_fmt(
+                MavSeverity::MAV_SEVERITY_WARNING,
+                format_args!("save failed: {}", why),
+            );
+            MavResult::MAV_RESULT_FAILED
+        }
+    };
+    end(now(), Action::StorageSave, result);
+}
+
+/// The boot rule again; ACCEPTED also when no valid record exists (defaults, with the boot's text).
+fn reload() {
+    let result = match crate::settings::reload() {
+        Ok(()) => MavResult::MAV_RESULT_ACCEPTED,
+        Err(why) => {
+            crate::text_fmt(
+                MavSeverity::MAV_SEVERITY_WARNING,
+                format_args!("reload failed: {}", why),
+            );
+            MavResult::MAV_RESULT_FAILED
+        }
+    };
+    end(now(), Action::StorageReload, result);
+}
+
+fn now() -> u64 {
+    embassy_time::Instant::now().as_millis()
 }
 
 fn end(now_ms: u64, action: Action, result: MavResult) {

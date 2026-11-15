@@ -9,8 +9,9 @@
 //! `fw_flight::imu`). The cores share only the atomics and `fw_core::xcore` cells (in `imu1::CELLS`
 //! and below), in internal SRAM. Telemetry adds HIGHRES_IMU (id 0, IMU1) and SCALED_PRESSURE
 //! (BARO) at 25 Hz. The parameters
-//! (`store`, the barometer's five, in RAM only) and the commands (`actions`) are built; no flash, no
-//! watchdog. It runs until `tools/run.sh` ends it.
+//! (`store`, the barometer's five) and the commands (`actions`) are built; the parameters are read
+//! from the flash settings region at boot and written there only on an explicit save (`settings`);
+//! no watchdog. It runs until `tools/run.sh` ends it.
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
@@ -20,6 +21,7 @@
 //! `stall-core0`: one core-0 task spins 3 s without yielding, 20 s after start (invariant F1).
 //! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
 //! start-up check, then its line is disabled again before core 1 starts.
+//! Features `save-loop`, `fake-armed`, `corrupt-newest`: the settings checks (`settings`).
 #![no_std]
 #![no_main]
 
@@ -29,6 +31,7 @@ mod device;
 mod imu1;
 #[cfg(feature = "inject")]
 mod inject;
+mod settings;
 mod store;
 
 use core::any::type_name;
@@ -77,6 +80,8 @@ type UsbDriver = Driver<'static, USB>;
 static PING: AtomicU32 = AtomicU32::new(0);
 /// Flight core -> core 0: the last `PING` the flight core copied.
 static PONG: AtomicU32 = AtomicU32::new(0);
+/// Core 0: the supervisor's clock (ms, wrapping) when it last saw `PONG` equal to `PING`.
+static PONG_FRESH_MS: AtomicU32 = AtomicU32::new(0);
 /// The flight core's one wake.
 static KICK: Kick = Kick::new();
 /// Core 1's ACTLR as it read it at the top of its entry; valid once `CORE1_ACTLR_READ` is true.
@@ -105,8 +110,9 @@ static LINK_STATE: AtomicU8 = AtomicU8::new(LINK_DOWN);
 const LINK_DOWN: u8 = 0;
 const LINK_GATE: u8 = 1;
 const LINK_RUN: u8 = 2;
-/// The supervisor's STATUSTEXTs for the node's text hook (the design's ring of 8 is a later packet).
-static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), 4> = Channel::new();
+/// The STATUSTEXTs for the node's text hook (the design's ring of 8 is a later packet). Held until
+/// a ground station's node runs, so the boot's settings texts (queued first) reach a later link.
+static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), 8> = Channel::new();
 
 const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
@@ -479,6 +485,7 @@ async fn supervisor() -> ! {
         let pong = PONG.load(Ordering::Acquire);
         if pong == ping {
             fresh_at = now;
+            PONG_FRESH_MS.store(now.as_millis() as u32, Ordering::Release);
         }
         let age = now - fresh_at;
         max_age_us = max_age_us.max(age.as_micros());
@@ -615,6 +622,12 @@ async fn main(spawner: Spawner) {
     interrupt::DMA_IRQ_0.disable();
 
     store::init();
+    settings::init(p.FLASH);
+    #[cfg(feature = "corrupt-newest")]
+    settings::corrupt_newest();
+    settings::boot();
+    #[cfg(feature = "fake-armed")]
+    settings::fake_arm();
     let imu1_parts = imu1::Parts {
         spi: p.SPI0,
         sck: p.PIN_18,
@@ -665,6 +678,8 @@ async fn main(spawner: Spawner) {
     ))));
     #[cfg(feature = "stall-core0")]
     spawner.spawn(defmt::unwrap!(stall()));
+    #[cfg(feature = "save-loop")]
+    spawner.spawn(defmt::unwrap!(settings::save_loop()));
 
     let started = Instant::now();
     while !CORE1_ACTLR_READ.load(Ordering::Acquire) && started.elapsed() < PONG_STALE {

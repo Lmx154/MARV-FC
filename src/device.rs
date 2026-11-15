@@ -363,6 +363,11 @@ pub fn raise_apply(mask: u32) {
     }
 }
 
+/// Device state changes since boot (core-0 rows and flight rows), for the `save-loop` summary.
+pub static STATE_CHANGES: AtomicU32 = AtomicU32::new(0);
+/// Deadline misses and stuck windows discarded because a flash save overlapped them.
+pub static SAVE_DISCARDS: AtomicU32 = AtomicU32::new(0);
+
 /// The id (`MARV_DEVICE`) of the device task that ran last.
 pub static RUNNING: AtomicU8 = AtomicU8::new(0);
 
@@ -511,6 +516,7 @@ pub async fn run_device<A: DeviceAdapter>(
         step = health.step(event, now);
         let after = health.state();
         if after != before {
+            STATE_CHANGES.fetch_add(1, Ordering::Relaxed);
             defmt::info!(
                 "[INFO] {=str}: {=str} -> {=str} at {=u64} ms (last error {=str})",
                 dev.name,
@@ -566,6 +572,7 @@ async fn sample<A: DeviceAdapter>(
     seq: &mut u32,
     sender: &Sender<'static, CriticalSectionRawMutex, Sample, READERS>,
 ) -> Event {
+    let waited_from = Instant::now();
     match select(
         with_timeout(dev.deadline(), adapter.data_ready()),
         dev.wake.wait(),
@@ -584,6 +591,12 @@ async fn sample<A: DeviceAdapter>(
                 Ok(Pending::Data) => {
                     status.missed_edges = status.missed_edges.wrapping_add(1);
                     read(adapter, status, seq, sender).await
+                }
+                Ok(Pending::Nothing)
+                    if crate::settings::overlaps_save(waited_from, Instant::now()) =>
+                {
+                    discard_for_save(dev, "deadline miss");
+                    Event::Tick
                 }
                 Ok(Pending::Nothing) => Event::Error(ErrorKind::Timeout),
                 Ok(Pending::PowerOnReset) => Event::PowerOnReset,
@@ -604,11 +617,28 @@ async fn fresh_sample<A: DeviceAdapter>(
     seq: &mut u32,
     sender: &Sender<'static, CriticalSectionRawMutex, Sample, READERS>,
 ) -> bool {
-    let ready = with_timeout(dev.deadline(), adapter.data_ready())
+    let waited_from = Instant::now();
+    let mut ready = with_timeout(dev.deadline(), adapter.data_ready())
         .await
         .is_ok();
+    if !ready && crate::settings::overlaps_save(waited_from, Instant::now()) {
+        discard_for_save(dev, "deadline miss after a start");
+        ready = with_timeout(dev.deadline(), adapter.data_ready())
+            .await
+            .is_ok();
+    }
     dev.mark();
     ready && matches!(read(adapter, status, seq, sender).await, Event::Good)
+}
+
+/// A timeout or stuck window that a flash save overlapped: not a health event.
+fn discard_for_save(dev: &Device, what: &str) {
+    SAVE_DISCARDS.fetch_add(1, Ordering::Relaxed);
+    defmt::info!(
+        "[INFO] {=str}: {=str} discarded, a flash save overlapped it",
+        dev.name,
+        what
+    );
 }
 
 /// Reads and publishes one sample.
@@ -733,6 +763,13 @@ impl Supervision {
                 }
             } else if parked {
                 w.progress_at = now;
+            } else if !stuck
+                && dev.flight.is_none()
+                && now - w.progress_at >= dev.stuck_after()
+                && crate::settings::overlaps_save(w.progress_at, now)
+            {
+                w.progress_at = now;
+                discard_for_save(dev, "stuck window");
             } else if !stuck && now - w.progress_at >= dev.stuck_after() {
                 dev.stuck.store(true, Ordering::Relaxed);
                 defmt::error!(
@@ -875,6 +912,7 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     }
 
     let new = s.transitions.wrapping_sub(w.flight.transitions);
+    STATE_CHANGES.fetch_add(new, Ordering::Relaxed);
     if new as usize > TRANSITIONS {
         defmt::warn!(
             "[INFO] {=str}: {=u32} transitions since the last tick, the oldest {=u32} not seen",

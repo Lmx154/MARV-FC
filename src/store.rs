@@ -1,5 +1,6 @@
 //! The firmware's one parameter store (`fw_core::params::Params` over the barometer's table), in
-//! RAM only: nothing is saved to flash. It sits in a critical-section mutex so the link task (the
+//! RAM; `settings` loads it from flash at boot and writes it there only on an explicit save (a
+//! write takes effect here and is lost at reset unless saved). It sits in a critical-section mutex so the link task (the
 //! parameter protocol, through [`Store`]), the action code and the device tasks can all reach it;
 //! every access is short and none is held across an await.
 
@@ -31,7 +32,10 @@ pub fn init() {
         defmt::panic!("[FAIL] validator not installed");
     }
     PARAMS.lock(|cell| *cell.borrow_mut() = Some(params));
-    defmt::info!("[INFO] params: {=usize} parameters, in RAM only", COUNT);
+    defmt::info!(
+        "[INFO] params: {=usize} parameters, in RAM; flash only on save",
+        COUNT
+    );
 }
 
 /// Runs `f` on the store (a short critical section; `f` must not call `with` again).

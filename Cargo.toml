@@ -90,6 +90,13 @@ stall-core0 = []
 # NEGATIVE CONTROL of F4: a DMA channel built on core 0 before the start-up check (no transfer;
 # its line is disabled again before core 1 starts).
 f4-negative = []
+# The settings checks (src/settings.rs): 60 s after start, 100 saves one second apart with BARO_IIR_T
+# alternating 1 and 3, then a summary line (save-loop); the handshake's armed flag set at boot, so a
+# save must end FAILED "armed" (fake-armed); at boot, before the settings are read, one byte of the
+# newest valid record programmed to 0x00 (corrupt-newest).
+save-loop = []
+fake-armed = []
+corrupt-newest = []
 
 [profile.release]
 debug = true
