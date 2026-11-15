@@ -33,7 +33,7 @@ use fw_core::xcore::Kick;
 use mavlink_device::dialect::{MavSeverity, MavState, MavSysStatusSensor, SYS_STATUS_DATA};
 use mavlink_device::{
     Config as NodeConfig, Node, Outgoing, ParamStore, RunError, Stream, StreamSlot, Telemetry,
-    Texts, marv,
+    Texts,
 };
 use panic_probe as _;
 use static_cell::{ConstStaticCell, StaticCell};
@@ -193,28 +193,13 @@ impl Telemetry for Board {
     }
 
     fn status(&mut self, now_us: u64) -> Option<MavState> {
-        Some(common_state(system_status(&[], now_us / 1000, false)))
+        Some(system_status(&[], now_us / 1000, false))
     }
 
     fn texts(&mut self, _now_us: u64, out: &mut Texts<'_>) {
         if let Ok((severity, text)) = TEXTS.try_receive() {
             let _ = out.push(severity, text);
         }
-    }
-}
-
-/// `fw_core::sys_status` answers in the `marv` dialect's own `MavState`; the node takes `common`'s.
-fn common_state(state: marv::MavState) -> MavState {
-    match state {
-        marv::MavState::MAV_STATE_UNINIT => MavState::MAV_STATE_UNINIT,
-        marv::MavState::MAV_STATE_BOOT => MavState::MAV_STATE_BOOT,
-        marv::MavState::MAV_STATE_CALIBRATING => MavState::MAV_STATE_CALIBRATING,
-        marv::MavState::MAV_STATE_STANDBY => MavState::MAV_STATE_STANDBY,
-        marv::MavState::MAV_STATE_ACTIVE => MavState::MAV_STATE_ACTIVE,
-        marv::MavState::MAV_STATE_CRITICAL => MavState::MAV_STATE_CRITICAL,
-        marv::MavState::MAV_STATE_EMERGENCY => MavState::MAV_STATE_EMERGENCY,
-        marv::MavState::MAV_STATE_POWEROFF => MavState::MAV_STATE_POWEROFF,
-        marv::MavState::MAV_STATE_FLIGHT_TERMINATION => MavState::MAV_STATE_FLIGHT_TERMINATION,
     }
 }
 

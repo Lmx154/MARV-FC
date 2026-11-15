@@ -22,9 +22,9 @@
 //! A device with no row in the slice sets no bit; two rows of one device are ORed.
 
 use crate::health::{Counters, ErrorKind, State};
+use mavlink_device::dialect::MavState;
 use mavlink_device::marv::{
-    MARV_DEVICE_STATUS_DATA, MarvDevice, MarvDeviceError, MarvDeviceState, MavState,
-    MavSysStatusSensor,
+    MARV_DEVICE_STATUS_DATA, MarvDevice, MarvDeviceError, MarvDeviceState, MavSysStatusSensor,
 };
 
 /// Time since boot after which the HEARTBEAT no longer says BOOT, whatever the rows say.
@@ -134,7 +134,8 @@ pub fn sensor_masks(rows: &[DeviceRow]) -> SensorMasks {
 
 /// The HEARTBEAT `system_status`. The order of the rules: BOOT while some row is still Starting
 /// and `now_ms` is below [`BOOT_WINDOW_MS`] (at exactly 3 000 ms the window is over); else
-/// CALIBRATING while `calibrating`; else STANDBY. Never ACTIVE or CRITICAL.
+/// CALIBRATING while `calibrating`; else STANDBY. Never ACTIVE or CRITICAL. The state is the common
+/// dialect's, which the node's HEARTBEAT takes.
 pub fn system_status(rows: &[DeviceRow], now_ms: u64, calibrating: bool) -> MavState {
     let starting = rows.iter().any(|row| row.state == State::Starting);
     if starting && now_ms < BOOT_WINDOW_MS {
