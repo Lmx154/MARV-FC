@@ -182,7 +182,7 @@ fn run(action: Action, now_ms: u64) {
         RESTART_NUMBER.lock(|n| n.set(number));
         return;
     }
-    if let Action::DeviceSelfTest(id @ MarvDevice::MARV_DEVICE_MAG) = action
+    if let Action::DeviceSelfTest(id) = action
         && let Some(dev) = find(id)
     {
         let number = dev.request_self_test();

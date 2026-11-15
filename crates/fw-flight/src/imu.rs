@@ -16,6 +16,7 @@ use core::task::Poll;
 
 use embedded_hal_async::delay::DelayNs;
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
+use fw_core::selftest::{Outcome as SelfTestOutcome, Verdict};
 use fw_core::xcore::{Kick, Seqlock, SeqlockWriter};
 
 /// Kick bit: core 0 sees the last sample older than T.
@@ -24,6 +25,9 @@ pub const REQ_CHECK: u8 = 1;
 pub const REQ_RESTART: u8 = 2;
 /// Kick bit: apply a new configuration. Reserved: taken and ignored (not built).
 pub const REQ_APPLY: u8 = 4;
+/// Kick bit: self-test the device, then restart it as for [`REQ_RESTART`] under the same number;
+/// the request's number is in [`ImuCells`].
+pub const REQ_SELF_TEST: u8 = 8;
 /// Transitions kept in [`ImuStatus::ring`].
 pub const TRANSITIONS: usize = 4;
 
@@ -137,6 +141,9 @@ pub trait ImuAdapter {
     /// Bus clear where the bus has one, then init and configure. Used by the automatic recovery and
     /// for the first start attempt after an operator RESTART request.
     async fn restart<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind>;
+    /// The device's built-in self-test with the driver's default settings (the device must lie
+    /// still). The loop then restarts the device as for a RESTART request, whatever this returned.
+    async fn self_test<D: DelayNs>(&mut self, delay: &mut D) -> Verdict;
     /// Adapter operations that went to the bus.
     fn calls(&self) -> u32;
     /// A fault injection's state word and the time it last changed (us); `(0, 0)` without one.
@@ -233,6 +240,9 @@ pub struct ImuStatus {
     /// The latest finished restart request: number << 1, bit 0 set when the device reached Ok,
     /// clear when Failed or Absent (0: none yet; numbers start at 1).
     pub restart_outcome: u32,
+    /// The latest finished self-test (`None` before the first); the restart that follows it
+    /// publishes its outcome in `restart_outcome` under the same number.
+    pub self_test: Option<SelfTestOutcome>,
     /// Number of the latest restart request taken.
     pub restart_taken: u32,
     /// Board time the restart request was taken, ms.
@@ -299,6 +309,7 @@ impl ImuStatus {
         delays: 0,
         delays_after_start: 0,
         restart_outcome: 0,
+        self_test: None,
         restart_taken: 0,
         restart_taken_ms: 0,
         attempt_ms: 0,
@@ -329,6 +340,7 @@ impl ImuStatus {
 pub struct ImuCells {
     kick: Kick,
     restart_number: AtomicU32,
+    self_test_number: AtomicU32,
     status: Seqlock<ImuStatus>,
 }
 
@@ -338,8 +350,20 @@ impl ImuCells {
         Self {
             kick: Kick::new(),
             restart_number: AtomicU32::new(0),
+            self_test_number: AtomicU32::new(0),
             status: Seqlock::new(ImuStatus::INITIAL),
         }
+    }
+
+    /// Core 0: self-test request `number` (stored before the kick, which publishes it).
+    pub fn request_self_test(&self, number: u32) {
+        self.self_test_number.store(number, Ordering::Release);
+        self.kick.kick(REQ_SELF_TEST);
+    }
+
+    /// The number of the latest self-test request.
+    pub fn self_test_number(&self) -> u32 {
+        self.self_test_number.load(Ordering::Acquire)
     }
 
     /// Core 0: the last sample is older than T.
@@ -462,8 +486,18 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
     /// publishes.
     pub async fn once(&mut self) {
         self.pending |= self.cells.kick.take();
+        // A self-test request: the test, then the operator restart under the test's number, in
+        // this step, so no sample or CHECK is taken between the two.
+        let mut restart = None;
+        if self.take(REQ_SELF_TEST) {
+            let number = self.cells.self_test_number();
+            self.self_test(number).await;
+            restart = Some(number);
+        }
         if self.take(REQ_RESTART) {
-            let number = self.cells.restart_number();
+            restart = Some(self.cells.restart_number());
+        }
+        if let Some(number) = restart {
             self.restart_run = Some(number);
             self.strong_first = true;
             let (before, now) = (self.health.state(), self.now_ms());
@@ -695,6 +729,21 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         }
     }
 
+    /// A SELF-TEST request: the adapter's test (no sample is read meanwhile), its outcome published
+    /// under request `number`.
+    async fn self_test(&mut self, number: u32) {
+        let begun = (self.now_us)();
+        let verdict = self.adapter.self_test(&mut self.delay).await;
+        self.bump();
+        let took_us = u32::try_from((self.now_us)().saturating_sub(begun)).unwrap_or(u32::MAX);
+        self.status.self_test = Some(SelfTestOutcome {
+            number,
+            verdict,
+            took_us,
+        });
+        self.publish();
+    }
+
     /// Records the duration of the verify step that began at `begun` (us).
     fn note_verify(&mut self, begun: u64) {
         let took = u32::try_from((self.now_us)().saturating_sub(begun)).unwrap_or(u32::MAX);
@@ -756,7 +805,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             self.delay.delay_ms(slice).await;
             self.bump();
             self.pending |= self.cells.kick.take();
-            if self.pending & REQ_RESTART != 0 {
+            if self.pending & (REQ_RESTART | REQ_SELF_TEST) != 0 {
                 return;
             }
             self.publish();
@@ -814,6 +863,15 @@ mod tests {
         calls: u32,
         starts: u32,
         restarts: u32,
+        /// What the self-test answers and how long it takes (us); like the ICM-45686's test it
+        /// leaves the device stopped (no data-ready) until a start or a restart.
+        self_test_verdict: Verdict,
+        self_test_us: u64,
+        self_tests: u32,
+        stopped: bool,
+        /// Core 0's CHECK kick while the test runs.
+        check_during_test: Option<&'static ImuCells>,
+        status_calls: u32,
     }
 
     struct FakeAdapter(Rc<RefCell<Fake>>);
@@ -827,7 +885,9 @@ mod tests {
     impl ImuAdapter for FakeAdapter {
         async fn data_ready(&mut self) {
             poll_fn(|_| {
-                if self.0.borrow().waiting {
+                if self.0.borrow().stopped {
+                    Poll::Pending
+                } else if self.0.borrow().waiting {
                     Poll::Ready(())
                 } else if self.0.borrow().producing {
                     advance(P_US);
@@ -842,6 +902,7 @@ mod tests {
         async fn start<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), StartFailure> {
             self.call();
             self.0.borrow_mut().starts += 1;
+            self.0.borrow_mut().stopped = false;
             delay.delay_ms(2).await;
             Ok(())
         }
@@ -862,6 +923,7 @@ mod tests {
 
         async fn status(&mut self) -> Result<Pending, ErrorKind> {
             self.call();
+            self.0.borrow_mut().status_calls += 1;
             Ok(self.0.borrow().pending)
         }
 
@@ -922,10 +984,26 @@ mod tests {
             self.call();
             self.0.borrow_mut().restarts += 1;
             if self.0.borrow().restart_ok {
+                self.0.borrow_mut().stopped = false;
                 Ok(())
             } else {
                 Err(ErrorKind::Bus)
             }
+        }
+
+        async fn self_test<D: DelayNs>(&mut self, delay: &mut D) -> Verdict {
+            self.call();
+            let (us, cells) = {
+                let mut fake = self.0.borrow_mut();
+                fake.self_tests += 1;
+                fake.stopped = true;
+                (fake.self_test_us, fake.check_during_test)
+            };
+            delay.delay_us(us as u32).await;
+            if let Some(cells) = cells {
+                cells.request_check();
+            }
+            self.0.borrow().self_test_verdict
         }
 
         fn calls(&self) -> u32 {
@@ -967,6 +1045,12 @@ mod tests {
             calls: 0,
             starts: 0,
             restarts: 0,
+            self_test_verdict: Verdict::Pass,
+            self_test_us: 800_000,
+            self_tests: 0,
+            stopped: false,
+            check_during_test: None,
+            status_calls: 0,
         }));
         let task = ImuTask::new(
             cells,
@@ -1330,5 +1414,123 @@ mod tests {
         assert_eq!(status(cells).state, State::Ok);
         assert_eq!(fake.borrow().restarts, restarts + 1);
         assert_eq!(fake.borrow().starts, starts + 1);
+    }
+
+    use fw_core::selftest::axes;
+
+    /// The action's final result is FAILED (as for a pass whose device did not come back) and the
+    /// device came back Ok. fw-flight does not name the dialect's result type; fw-core's tests pin
+    /// `Outcome::result` and the texts for the same verdicts.
+    fn ends_failed_with_the_device_ok(done: &ImuStatus, number: u32) {
+        let outcome = done.self_test.expect("the test's outcome");
+        assert_eq!(
+            done.restart_outcome,
+            number << 1 | 1,
+            "the device came back Ok"
+        );
+        let pass = SelfTestOutcome {
+            verdict: Verdict::Pass,
+            ..outcome
+        };
+        assert_eq!(outcome.result(true), pass.result(false));
+        assert_ne!(outcome.result(true), pass.result(true));
+    }
+
+    /// Self-test request `number` on a running device, stepped (bounded) until the restart that
+    /// follows it has published its outcome; then 20 more steps. Returns the status after the
+    /// outcome and the status at the end.
+    fn self_test_run(
+        cells: &ImuCells,
+        task: &mut Task,
+        fake: &Rc<RefCell<Fake>>,
+        number: u32,
+    ) -> (ImuStatus, ImuStatus) {
+        let before = status(cells);
+        let restarts = fake.borrow().restarts;
+        cells.request_self_test(number);
+        let mut done = None;
+        for _ in 0..10 {
+            assert!(step(task));
+            let s = status(cells);
+            if s.restart_outcome >> 1 == number {
+                done = Some(s);
+                break;
+            }
+        }
+        let done = done.expect("the restart after the test published its outcome");
+        assert_eq!(fake.borrow().self_tests, 1);
+        assert_eq!(
+            fake.borrow().restarts,
+            restarts + 1,
+            "the strong restart path"
+        );
+        assert_eq!(done.restart_taken, number);
+        assert_eq!(done.state, State::Ok);
+        assert_eq!(done.self_test.map(|o| o.number), Some(number));
+        for _ in 0..20 {
+            assert!(step(task));
+        }
+        let end = status(cells);
+        assert_eq!(end.state, State::Ok);
+        assert!(end.samples > done.samples, "samples flow again");
+        assert_eq!(end.health.errors, before.health.errors);
+        assert_eq!(end.health.timeouts, before.health.timeouts);
+        (done, end)
+    }
+
+    #[test]
+    fn a_passing_self_test_restarts_the_device_and_is_accepted() {
+        let (cells, mut task, fake) = started();
+        let (done, _) = self_test_run(cells, &mut task, &fake, 5);
+        let outcome = done.self_test.expect("the test's outcome");
+        assert_eq!(outcome.verdict, Verdict::Pass);
+        assert_eq!(outcome.took_us, 800_000);
+        assert_eq!(done.restart_outcome, 5 << 1 | 1);
+        assert_ne!(outcome.result(true), outcome.result(false), "ACCEPTED");
+    }
+
+    #[test]
+    fn a_failed_self_test_still_restarts_the_device_and_ends_failed_with_its_axes() {
+        let (cells, mut task, fake) = started();
+        // fw-core's text for this mask: "IMU2 self-test FAIL: lowg X gyro YZ".
+        let mask = axes(0, true, false, false) | axes(1, false, true, true);
+        fake.borrow_mut().self_test_verdict = Verdict::Fail(mask);
+        let (done, _) = self_test_run(cells, &mut task, &fake, 2);
+        assert_eq!(done.self_test.map(|o| o.verdict), Some(Verdict::Fail(mask)));
+        ends_failed_with_the_device_ok(&done, 2);
+    }
+
+    #[test]
+    fn a_self_test_error_still_restarts_the_device_and_ends_failed() {
+        let (cells, mut task, fake) = started();
+        fake.borrow_mut().self_test_verdict = Verdict::Error(ErrorKind::Bus);
+        let (done, _) = self_test_run(cells, &mut task, &fake, 9);
+        assert_eq!(
+            done.self_test.map(|o| o.verdict),
+            Some(Verdict::Error(ErrorKind::Bus))
+        );
+        ends_failed_with_the_device_ok(&done, 9);
+    }
+
+    #[test]
+    fn a_check_kicked_during_the_self_test_does_not_score() {
+        let (cells, mut task, fake) = started();
+        // The test lasts far longer than T and core 0 kicks CHECK meanwhile, and once more just
+        // before the request is taken.
+        fake.borrow_mut().check_during_test = Some(cells);
+        cells.request_check();
+        let (done, end) = self_test_run(cells, &mut task, &fake, 4);
+        assert_eq!(done.self_test.map(|o| o.verdict), Some(Verdict::Pass));
+        assert_eq!(end.health.timeouts, 0);
+        assert_eq!(end.health.errors, 0);
+        assert_eq!(
+            fake.borrow().status_calls,
+            0,
+            "no status read: nothing was late"
+        );
+        assert!(
+            end.checks >= 1,
+            "the stale CHECK was taken after the restart"
+        );
     }
 }

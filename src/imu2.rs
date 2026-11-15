@@ -16,14 +16,15 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::calib::ImuOffsets;
 use fw_core::health::{ErrorKind, Limits};
+use fw_core::selftest::{Verdict, axes};
 use fw_core::xcore::TripleReader;
 use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
 };
 use lsm6dsk320x::{
-    AccelFullScale, Config, DataReady, DataReadyMode, Error, GyroFullScale, HaodrSet, IntRouting,
-    Lsm6dsk320x, Odr, OperatingMode,
+    AccelFullScale, ChannelResult, Config, DataReady, DataReadyMode, Error, GyroFullScale,
+    HaodrSet, IntRouting, Lsm6dsk320x, Odr, OperatingMode, SelfTestConfig,
 };
 
 /// The cells between core 0 and the IMU2 task.
@@ -218,6 +219,25 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     /// SPI has no bus clear: init and configure again.
     async fn restart<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
         self.init(delay).await.map_err(|e| kind(&e))
+    }
+
+    /// The driver's self-test with its defaults (low-g, gyroscope and high-g, positive stimulus,
+    /// 100 ms settle); it restores the configuration only on success, and the restart that follows
+    /// configures the device in any case.
+    async fn self_test<D: DelayNs>(&mut self, delay: &mut D) -> Verdict {
+        self.step = 0;
+        let result = self.call().self_test(delay, &SelfTestConfig::new()).await;
+        let failed = |c: Option<ChannelResult>| c.map_or([false; 3], |c| c.axes.map(|a| !a.pass));
+        match result {
+            Ok(report) if report.passed() => Verdict::Pass,
+            Ok(report) => {
+                let [lx, ly, lz] = failed(report.low_g);
+                let [gx, gy, gz] = failed(report.gyro);
+                let [hx, hy, hz] = failed(report.high_g);
+                Verdict::Fail(axes(0, lx, ly, lz) | axes(1, gx, gy, gz) | axes(2, hx, hy, hz))
+            }
+            Err(e) => Verdict::Error(kind(&e)),
+        }
     }
 
     fn calls(&self) -> u32 {

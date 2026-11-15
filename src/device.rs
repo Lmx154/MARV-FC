@@ -337,6 +337,10 @@ impl Device {
     pub fn request_self_test(&self) -> u32 {
         self.self_testing.store(true, Ordering::Relaxed);
         let number = self.restarts.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if let Some(cells) = self.flight {
+            cells.request_self_test(number);
+            return number;
+        }
         self.request.fetch_or(REQ_SELF_TEST, Ordering::AcqRel);
         self.wake.signal(());
         number
@@ -1149,6 +1153,7 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     dev.progress.store(s.progress, Ordering::Relaxed);
     dev.restart_outcome
         .store(s.restart_outcome, Ordering::Release);
+    dev.self_test.lock(|cell| cell.set(s.self_test));
     if let Some(l) = s.latest
         && w.flight.seq != Some(l.seq)
     {

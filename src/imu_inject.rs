@@ -7,6 +7,7 @@
 
 use embedded_hal_async::delay::DelayNs;
 use fw_core::health::ErrorKind;
+use fw_core::selftest::Verdict;
 use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, Latency, Pending, StartFailure, VerifyError, VerifyStep,
 };
@@ -177,6 +178,10 @@ impl<A: ImuAdapter> ImuAdapter for Inject<A> {
             return Err(ErrorKind::Bus);
         }
         self.inner.restart(delay).await
+    }
+
+    async fn self_test<D: DelayNs>(&mut self, delay: &mut D) -> Verdict {
+        self.inner.self_test(delay).await
     }
 
     fn calls(&self) -> u32 {

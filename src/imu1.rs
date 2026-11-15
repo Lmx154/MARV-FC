@@ -16,13 +16,15 @@ use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::calib::ImuOffsets;
 use fw_core::health::{ErrorKind, Limits};
+use fw_core::selftest::{Verdict, axes};
 use fw_core::xcore::TripleReader;
 use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
 };
 use icm45686::{
-    AccelFullScale, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config, Int1Mode, Odr,
+    AccelFullScale, AxisVerdict, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config,
+    Int1Mode, Odr, SelfTestConfig,
 };
 
 /// The cells between core 0 and the IMU1 task.
@@ -241,6 +243,25 @@ impl ImuAdapter for Icm45686Adapter {
     /// SPI has no bus clear: init and configure again.
     async fn restart<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
         self.init(delay).await.map_err(|e| kind(&e))
+    }
+
+    /// The driver's self-test with the vendor's defaults (both sensors, 320 ms, 50 %). It begins and
+    /// ends with a soft reset and leaves the driver unconfigured: the restart that follows
+    /// configures it.
+    async fn self_test<D: DelayNs>(&mut self, delay: &mut D) -> Verdict {
+        self.step = 0;
+        let result = self.call().self_test(delay, &SelfTestConfig::new()).await;
+        self.steps = self.chip.verify_steps();
+        let failed = |v: Option<AxisVerdict>| v.map_or([false; 3], |a| [!a.x, !a.y, !a.z]);
+        match result {
+            Ok(report) if report.passed() => Verdict::Pass,
+            Ok(report) => {
+                let [ax, ay, az] = failed(report.accel);
+                let [gx, gy, gz] = failed(report.gyro);
+                Verdict::Fail(axes(0, ax, ay, az) | axes(1, gx, gy, gz))
+            }
+            Err(e) => Verdict::Error(kind(&e)),
+        }
     }
 
     fn calls(&self) -> u32 {
