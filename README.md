@@ -58,8 +58,20 @@ latest `seq`, errors, timeouts, missed edges, recoveries, attempts, the largest 
 adapter's bus-call counter and the latest sample. On USB, `marv-link-test` (MARV-GCS) counts one
 `MARV_DEVICE_STATUS` per second; the ground station's Devices view shows the row.
 
+Each sample read (`acquire`) is two I2C transactions: `INT_STATUS`, then the data registers.
+`INT_STATUS` is clear-on-read, and the loop reads it (through the adapter's `status`) only after a
+data-ready timeout; if `acquire` did not read it too, the data-ready flag would never be cleared in normal
+running, the first timeout of an outage would find that stale flag, count a "missed edge" and publish old
+data as a new sample, and only the second timeout would be a real deadline miss. With the read in every
+`acquire` the flag the timeout path sees is fresh: it is set only by a sample that has not been read. About
+one extra short transaction per sample (50 Hz). If that read shows the power-on-reset flag (also
+clear-on-read) `acquire` returns the error `Por` and remembers the flag, and the next `status` answers
+`PowerOnReset` from it (the loop turns a power-on reset into an `Event` only on the status path; the first
+`Por` result counts as one error event).
+
 Fault injection (cargo features, off by default; `src/inject.rs`, a wrapper around the adapter that calls
-the real adapter and then replaces its result with a bus error):
+the real adapter and then replaces its result; each acts once, 5 s after the first good sample, and logs an
+`[INFO] inject:` line when it starts and ends acting):
 
 - `FEATURES=inject-baro-transient tools/run.sh 60`: after 5 s of good samples `acquire` fails 4 times in a
   row, once. Expected: Ok -> Degraded -> Recovering (WARNING) -> Ok (NOTICE, `recoveries` 1); the 4th
@@ -67,6 +79,21 @@ the real adapter and then replaces its result with a bus error):
 - `FEATURES=inject-baro-persistent tools/run.sh 60`: after 5 s every `acquire`, `recover` and `restart`
   fails. Expected: Recovering, 4 attempts at 100, 300, 1000, 3000 ms after the previous failure (logged),
   then Failed (ERROR) and no bus traffic (the adapter's call counter stands still).
+- `FEATURES=inject-baro-missed-edge tools/run.sh 60`: the data-ready edges are swallowed for 200 ms while
+  the chip keeps producing data. Shows the missed-edge path: the wait times out, the status read finds data,
+  `missed edges` goes up (at least 1) and the sample is read; no health event (state Ok, errors 0,
+  timeouts 0, recoveries 0, no text).
+- `FEATURES=inject-baro-silent tools/run.sh 60`: for 1 s the edges are swallowed and `status` answers
+  "nothing pending". Shows the deadline-miss path: `timeouts` > 0, `last_error` TIMEOUT, Ok -> Degraded ->
+  Recovering (WARNING; 3 misses, so about 3 T = 180 ms after the last good sample), then a recovery attempt
+  that succeeds -> Ok (NOTICE, `recoveries` 1).
+- `FEATURES=inject-baro-verify tools/run.sh 60`: one `verify` answers "mismatch". Shows the reconfigure
+  path: one error event (`last_error` CONFIG_MISMATCH), the adapter's `apply` runs on the chip,
+  `config_restored` 1, back to Ok without Recovering and without text.
+- `FEATURES=inject-baro-stuck tools/run.sh 60`: `acquire` never returns. Shows the supervisor's stuck
+  check: after max(1 s, 20 P) `stuck` is set, the device's `MARV_DEVICE_STATUS` row reports FAILED with
+  STUCK, one ERROR text "BARO: stuck"; the board is not reset (no watchdog yet) and the rest of the
+  firmware (HEARTBEAT, PING/PONG, `[STAT]` lines) keeps running.
 
 Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
