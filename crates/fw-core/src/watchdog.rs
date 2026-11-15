@@ -46,6 +46,10 @@ pub mod task {
     pub const ACTION: u8 = 6;
     /// The barometer's device task.
     pub const BARO: u8 = 8;
+    /// The magnetometer's device task.
+    pub const MAG: u8 = 10;
+    /// The battery monitor's device task.
+    pub const BATT: u8 = 11;
     /// A check feature's own task.
     pub const TEST: u8 = 9;
     /// The flight core's liveness task (`fbeat`).
@@ -65,6 +69,8 @@ pub const fn task_name(id: u8) -> &'static str {
         task::BEAT => "BEAT",
         task::ACTION => "ACTION",
         task::BARO => "BARO",
+        task::MAG => "MAG",
+        task::BATT => "BATT",
         task::TEST => "TEST",
         task::FBEAT => "FBEAT",
         task::IMU1 => "IMU1",
@@ -790,6 +796,7 @@ mod tests {
                 names.push(n);
             }
         }
-        assert_eq!(names.len(), 11);
+        assert_eq!(names.len(), 13);
+        assert_eq!((task_name(task::MAG), task_name(task::BATT)), ("MAG", "BATT"));
     }
 }

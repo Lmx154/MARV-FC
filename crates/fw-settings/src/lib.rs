@@ -22,3 +22,4 @@
 extern crate std;
 
 pub mod baro;
+pub mod mag;
