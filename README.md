@@ -92,16 +92,16 @@ Its values go to the station as SCALED_IMU2 (116) at 25 Hz: milli-g, milli-rad/s
 as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
-Measured with both IMUs on the flight core (2026-11-15, 10-minute clean run, log
-`marv-v2-firmware-20261115-110318.log`): five rows Ok throughout, 0 transitions after the start, 0 errors,
-timeouts, missed edges and recoveries on both IMUs, delay count after the start 0, watchdog stalls begun 0.
-IMU1 803.52 samples/s, IMU2 800.42 samples/s (10 s to 600 s). NOT met: the samples of one IMU are no longer
-always read within P: at 600 s IMU1 had 87 gaps over 1.5 P (48 across its own `verify`), largest gap 2682 us
-(over 2 P, so at least one sample lost; the single-IMU run had 0 and 1594 us), its `verify` 1105 to 2506 us
-(was 1.0 to 1.4 ms); IMU2 482 gaps over 1.5 P (2 across its own `verify`), largest 4239 us, `verify` 435 to
-1683 us. While IMU2 was parked (Failed) in the `inject-imu2-persistent` run, IMU1 was back to the single-IMU
-figures (`verify` from 1001 us, no new gap). Open: how two IMUs share core 1 around `verify` (see the
-report of the IMU2 packet).
+Measured with both IMUs on the flight core and the yield rule (2026-11-15, 10-minute clean run, log
+`marv-v2-firmware-20261115-112357.log`): five rows Ok throughout, 0 transitions after the start, 0 errors,
+timeouts, missed edges and recoveries, delay count after the start 0, watchdog stalls begun 0. IMU1 802.30
+samples/s, IMU2 800.65 samples/s (10 s to 600 s; the bench measured 800.664 Hz). NOT met: IMU1 had 623 gaps
+over 1.5 P at 600 s, 599 of them across its own `verify` (one per `verify`: with every wait and transaction
+yielding, its `verify` takes 2.2 to 5.3 ms, about 2 to 2.8 ms also while IMU2 is parked, longer than P, and
+the loop reads only one waiting sample after it), largest gap 6148 us; IMU2 103 (60 across its own `verify`,
+630 to 4290 us), largest 4433 us. Longest run without a yield: IMU1 859 us, IMU2 705 us (all-time maxima, not
+explained by one transaction). Before the yield rule: IMU1 87 gaps (48 across its `verify`), 2682 us, 803.52/s;
+IMU2 482 gaps, 4239 us, 800.42/s. Open for the lead.
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
