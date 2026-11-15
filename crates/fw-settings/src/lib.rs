@@ -23,14 +23,15 @@ extern crate std;
 
 pub mod baro;
 pub mod batt;
+pub mod imu;
 pub mod mag;
 
 use fw_core::params::ParamDef;
 
 /// The number of parameters of the whole firmware.
-pub const COUNT: usize = baro::COUNT + mag::COUNT + batt::COUNT;
+pub const COUNT: usize = baro::COUNT + mag::COUNT + batt::COUNT + imu::COUNT;
 
-/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT.
+/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU.
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 #[allow(clippy::indexing_slicing)] // the loops run exactly over each source table's length
@@ -55,6 +56,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < imu::COUNT {
+        out[n] = imu::TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -73,7 +80,8 @@ mod tests {
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
-            .chain(batt::TABLE.iter());
+            .chain(batt::TABLE.iter())
+            .chain(imu::TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
