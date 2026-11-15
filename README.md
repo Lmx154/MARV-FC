@@ -45,7 +45,7 @@ It has no flight functionality.
   enabled on core 0 after core 1 started.
 
 Not in it yet: the IMUs' parameters, calibration offsets and self-test (fixed configurations for now), IMU2's
-high-g accelerometer (off; nothing of it on the link), the receiver row (the radio link), GNSS's PPS and time synchronisation (the pin is not read), the compass
+high-g accelerometer (off; nothing of it on the link), the RC receiver row and the radio link (the ELRS receiver on UART0), GNSS's PPS and time synchronisation (the pin is not read), the compass
 calibration command (only the `MAG_OFF*` parameters it will write exist), the calibrations and the self-test, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
 a ground station's node runs; when it is full, newer texts are dropped with a log line).
