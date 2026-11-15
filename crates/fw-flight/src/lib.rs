@@ -1,5 +1,5 @@
 //! Flight-core (core 1) tasks of the MARV V2 firmware.
-//! Today: the liveness answer [`liveness`]; the IMU tasks come with the device milestones.
+//! Today: the liveness answer [`liveness`] and the IMU device loop [`imu`] (IMU1 runs it).
 //! Rule: no dependency on `embassy-time`, `embassy-sync` or `defmt`.
 #![no_std]
 #![forbid(unsafe_code)]

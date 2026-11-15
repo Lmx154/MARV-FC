@@ -734,6 +734,7 @@ dependencies = [
 name = "fw-flight"
 version = "0.1.0"
 dependencies = [
+ "embedded-hal-async",
  "fw-core",
 ]
 

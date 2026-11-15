@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "MIT"
-description = "MARV V2 flight-core tasks (core 1). No embassy-time, embassy-sync or defmt by rule. Today: the liveness answer."
+description = "MARV V2 flight-core tasks (core 1). No embassy-time, embassy-sync or defmt by rule. Today: the liveness answer and the IMU device loop."
 rust-version = "1.99"
 
 [dependencies]
 fw-core = { path = "../fw-core" }
+# The `DelayNs` trait the IMU loop receives for its start and recovery waits (the trait the
+# icm45686 driver takes; already in the lock through it).
+embedded-hal-async = "1.0"
