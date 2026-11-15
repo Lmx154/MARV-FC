@@ -1,20 +1,30 @@
-//! MARV V2 firmware, the two-core skeleton (design: decision-foundation, two-core amendment).
+//! MARV V2 firmware, the two-core skeleton with the device layer (design: decision-foundation,
+//! two-core amendment).
 //!
 //! Core 0, the I/O core: `usb_link` (a MAVLink node, system 1 component 1, on USB), `supervisor`
-//! (10 ms tick: the flight core's liveness ping at 10 Hz, the start-up checks, a `[STAT]` line
-//! every 10 s) and `beat0`. Core 1, the flight core: only `fw_flight::liveness`. The cores share
-//! only the atomics and `fw_core::xcore` cells below, in internal SRAM. No device, no settings, no
+//! (10 ms tick: the flight core's liveness ping at 10 Hz, the start-up checks, the devices' stuck
+//! check and transition texts, `[STAT]` lines every 10 s), `beat0`, and one task per device
+//! (`device`): the barometer (`baro`). Core 1, the flight core: only `fw_flight::liveness`. The
+//! cores share only the atomics and `fw_core::xcore` cells below, in internal SRAM. No settings, no
 //! watchdog, no commands yet. It runs until `tools/run.sh` ends it.
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
+//! Features `inject-baro-transient`, `inject-baro-persistent`: fault injection (`inject`).
 #![no_std]
 #![no_main]
 
+mod baro;
+mod device;
+#[cfg(any(feature = "inject-baro-transient", feature = "inject-baro-persistent"))]
+mod inject;
+
 use core::any::type_name;
+use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use defmt_rtt as _;
+use device::{DEVICE_COUNT, DEVICES, Device, Supervision, TextLine};
 use embassy_executor::{Executor, Spawner};
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
@@ -28,12 +38,12 @@ use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::params::{ParamDef, Params};
-use fw_core::sys_status::{sensor_masks, system_status};
+use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
 use fw_core::xcore::Kick;
 use mavlink_device::dialect::{MavSeverity, MavState, MavSysStatusSensor, SYS_STATUS_DATA};
 use mavlink_device::{
-    Config as NodeConfig, Node, Outgoing, ParamStore, RunError, Stream, StreamSlot, Telemetry,
-    Texts,
+    Config as NodeConfig, MAX_BATCH, Node, Outgoing, ParamStore, RunError, Stream, StreamSlot,
+    Telemetry, Texts,
 };
 use panic_probe as _;
 use static_cell::{ConstStaticCell, StaticCell};
@@ -80,7 +90,7 @@ const LINK_DOWN: u8 = 0;
 const LINK_GATE: u8 = 1;
 const LINK_RUN: u8 = 2;
 /// The supervisor's STATUSTEXTs for the node's text hook (the design's ring of 8 is a later packet).
-static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, &'static str), 4> = Channel::new();
+static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), 4> = Channel::new();
 /// The parameter table: empty until the devices bring theirs.
 static PARAM_TABLE: [ParamDef; 0] = [];
 
@@ -88,6 +98,9 @@ const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
 const PONG_STALE: Duration = Duration::from_millis(200);
 const SYS_STATUS_ID: u32 = 1;
+/// The project dialect's MARV_DEVICE_STATUS; every registry row at least once per second.
+const DEVICE_STATUS_ID: u32 = 42421;
+const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / DEVICE_COUNT.div_ceil(MAX_BATCH) as i32;
 const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": flight core up");
 
 fn now_us() -> u64 {
@@ -170,15 +183,37 @@ impl<T: Write> Write for Counted<T> {
     }
 }
 
-/// The node's hooks: HEARTBEAT status, SYS_STATUS, and the supervisor's texts. No device rows yet.
-struct Board;
+/// The node's hooks: HEARTBEAT status, SYS_STATUS and MARV_DEVICE_STATUS from the registry rows,
+/// and the supervisor's texts.
+struct Board {
+    /// The next registry row to send.
+    cursor: usize,
+}
+
+fn rows() -> [DeviceRow; DEVICE_COUNT] {
+    DEVICES.map(Device::row)
+}
 
 impl Telemetry for Board {
-    fn sample(&mut self, message_id: u32, _now_us: u64, out: &mut Outgoing<'_>) -> bool {
+    fn sample(&mut self, message_id: u32, now_us: u64, out: &mut Outgoing<'_>) -> bool {
+        if message_id == DEVICE_STATUS_ID {
+            let mut sent = false;
+            for _ in 0..DEVICE_COUNT.min(MAX_BATCH) {
+                if self.cursor >= DEVICE_COUNT {
+                    self.cursor = 0;
+                }
+                let Some(dev) = DEVICES.get(self.cursor) else {
+                    break;
+                };
+                self.cursor += 1;
+                sent |= out.push(&dev.message(now_us)).is_ok();
+            }
+            return sent;
+        }
         if message_id != SYS_STATUS_ID {
             return false;
         }
-        let masks = sensor_masks(&[]);
+        let masks = sensor_masks(&rows());
         out.push(&SYS_STATUS_DATA {
             onboard_control_sensors_present: MavSysStatusSensor::from_bits_truncate(masks.present),
             onboard_control_sensors_enabled: MavSysStatusSensor::from_bits_truncate(masks.enabled),
@@ -193,19 +228,25 @@ impl Telemetry for Board {
     }
 
     fn status(&mut self, now_us: u64) -> Option<MavState> {
-        Some(system_status(&[], now_us / 1000, false))
+        Some(system_status(&rows(), now_us / 1000, false))
     }
 
     fn texts(&mut self, _now_us: u64, out: &mut Texts<'_>) {
         if let Ok((severity, text)) = TEXTS.try_receive() {
-            let _ = out.push(severity, text);
+            let _ = out.push(severity, text.as_str());
         }
     }
 }
 
-fn text(severity: MavSeverity, text: &'static str) {
-    if TEXTS.try_send((severity, text)).is_err() {
-        defmt::warn!("[INFO] text queue full, dropped: {=str}", text);
+fn text(severity: MavSeverity, text: &str) {
+    text_fmt(severity, format_args!("{}", text));
+}
+
+/// Queues one STATUSTEXT for the node (at most 50 bytes; longer text is cut).
+fn text_fmt(severity: MavSeverity, args: fmt::Arguments<'_>) {
+    let line = TextLine::new(args);
+    if TEXTS.try_send((severity, line)).is_err() {
+        defmt::warn!("[INFO] text queue full, dropped: {=str}", line.as_str());
     }
 }
 
@@ -262,16 +303,23 @@ async fn usb_link(
     link: usb_cdc::Link<'static>,
 ) -> ! {
     let (mut tx, mut rx) = (Counted(tx), Counted(rx));
-    let mut slots = [StreamSlot::new(Stream {
-        message_id: SYS_STATUS_ID,
-        default_interval_us: 1_000_000,
-        min_interval_us: 100_000,
-    })];
+    let mut slots = [
+        StreamSlot::new(Stream {
+            message_id: SYS_STATUS_ID,
+            default_interval_us: 1_000_000,
+            min_interval_us: 100_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: DEVICE_STATUS_ID,
+            default_interval_us: DEVICE_STATUS_INTERVAL_US,
+            min_interval_us: 100_000,
+        }),
+    ];
     let mut node = Node::new(NodeConfig::new(1, 1), &mut slots);
     let Ok(mut params) = Params::<0>::new(&PARAM_TABLE) else {
         defmt::panic!("[FAIL] parameter table rejected");
     };
-    let mut board = Board;
+    let mut board = Board { cursor: 0 };
     let mut delay = Delay;
     loop {
         LINK_STATE.store(LINK_DOWN, Ordering::Relaxed);
@@ -307,8 +355,8 @@ async fn usb_link(
 }
 
 /// Every 10 ms: the age of `PONG` (time since it last equalled `PING`); at 10 Hz a new `PING` and a
-/// kick of the flight core; the start-up check "PONG follows PING"; the liveness texts; every 10 s
-/// a `[STAT]` line.
+/// kick of the flight core; the start-up check "PONG follows PING"; the liveness texts; the
+/// devices' stuck check and transition texts; every 10 s a `[STAT]` line, and one per device.
 #[embassy_executor::task]
 async fn supervisor() -> ! {
     let mut ticker = Ticker::every(Duration::from_millis(10));
@@ -319,9 +367,11 @@ async fn supervisor() -> ! {
     let mut checked = false;
     let mut up_sent = false;
     let mut answering = true;
+    let mut devices = Supervision::new(Instant::now());
     loop {
         ticker.next().await;
         let now = Instant::now();
+        devices.tick(now);
         let ping = PING.load(Ordering::Relaxed);
         let pong = PONG.load(Ordering::Acquire);
         if pong == ping {
@@ -383,6 +433,7 @@ async fn supervisor() -> ! {
                     _ => "down",
                 }
             );
+            devices.stat(now);
         }
         tick = tick.wrapping_add(1);
     }
@@ -464,6 +515,9 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(usb_link(tx, rx, link)));
     spawner.spawn(defmt::unwrap!(supervisor()));
     spawner.spawn(defmt::unwrap!(beat0()));
+    spawner.spawn(defmt::unwrap!(baro::task(baro::adapter(
+        p.I2C1, p.PIN_23, p.PIN_22, p.PIN_21
+    ))));
 
     let started = Instant::now();
     while !CORE1_ACTLR_READ.load(Ordering::Acquire) && started.elapsed() < PONG_STALE {

@@ -55,6 +55,11 @@ semihosting = "0.1"
 [features]
 # NEGATIVE CONTROL: core 1 is started but its liveness task is not spawned, so PONG never follows PING.
 no-fbeat = []
+# Fault injection around the barometer's adapter (src/inject.rs): after 5 s of good samples,
+# `acquire` fails 4 times in a row, once (transient), or every `acquire`, `recover` and `restart`
+# fails (persistent).
+inject-baro-transient = []
+inject-baro-persistent = []
 
 [profile.release]
 debug = true
