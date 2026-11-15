@@ -27,6 +27,7 @@ pub mod calib;
 pub mod handshake;
 pub mod health;
 pub mod params;
+pub mod rc;
 pub mod record;
 pub mod scratch;
 pub mod sys_status;

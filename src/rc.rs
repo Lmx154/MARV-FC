@@ -6,12 +6,18 @@
 //!
 //! UART0 as the bench (`rc-port/hil/src/bin/rc_link.rs`) set it up: `BufferedUart` (interrupt
 //! driven, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART
-//! is built (embassy-rp 0.10 leaves the pad without a pull). The task runs on core 0's thread-mode
-//! executor; the bench ran the port on the `SWI_IRQ_0` interrupt executor so that no thread-mode
-//! task could delay its reads (decided after a radio-on run, from the UART overrun counter).
+//! is built (embassy-rp 0.10 leaves the pad without a pull). The task runs alone on core 0's
+//! `SWI_IRQ_0` interrupt executor (priority P3 = 0xC0, embassy-rp's lowest: below the hardware
+//! interrupts at P0 and the watchdog monitor's `SWI_IRQ_1` at P1 = 0x40, above thread mode), as the bench did, so that no thread-mode task delays its reads (thread mode gave 5
+//! UART overruns in 300 s). Everything it shares with thread mode is a critical-section mutex or an
+//! atomic, none held across an await. The row's rule is `fw_core::rc`.
 use core::cell::RefCell;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::future::{Future, poll_fn};
+use core::pin::pin;
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use embassy_executor::InterruptExecutor;
 use embassy_rp::bind_interrupts;
+use embassy_rp::interrupt::{self, InterruptExt, Priority};
 use embassy_rp::peripherals::{PIN_14, PIN_17, UART0};
 use embassy_rp::uart::{self, BufferedInterruptHandler, BufferedUart};
 use embassy_rp::{Peri, pac};
@@ -19,10 +25,10 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
-use fw_core::health::{Counters, ErrorKind, State};
+use fw_core::health::Counters;
+use fw_core::rc::{PortMode, RcInput, RcVerdict, verdict};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
-use fw_flight::tagged;
 use mavlink_device::dialect::{MavState, RC_CHANNELS_DATA};
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
 use mavlink_device::{
@@ -102,15 +108,19 @@ impl Shared {
         self.stats.map(|s| s.mode)
     }
 
-    /// Locked = Ok; searching = Starting until the first lock since boot, then Degraded.
-    fn state(&self) -> State {
-        if locked(self.mode()) {
-            State::Ok
-        } else if self.ever_locked {
-            State::Degraded
-        } else {
-            State::Starting
-        }
+    /// The row's state, link up (the health bit) and last error: `fw_core::rc::verdict`.
+    fn verdict(&self, now_us: u64) -> RcVerdict {
+        verdict(&RcInput {
+            mode: match self.mode() {
+                Some(Mode::Crsf) => PortMode::Crsf,
+                Some(Mode::Mavlink) => PortMode::Mavlink,
+                _ => PortMode::Searching,
+            },
+            ever_locked: self.ever_locked,
+            now_us,
+            last_sticks_us: self.sticks.map(|(_, t)| t),
+            radio_status: self.radio.map(|(r, t)| (r.rssi, t)),
+        })
     }
 
     fn errors(&self) -> u32 {
@@ -125,15 +135,16 @@ impl Shared {
     }
 }
 
-/// The RC row for SYS_STATUS (health = locked) and the HEARTBEAT state.
+/// The RC row for SYS_STATUS (health = the radio link is up) and the HEARTBEAT state.
 pub fn row() -> DeviceRow {
     let s = shared();
+    let v = s.verdict(crate::now_us());
     DeviceRow {
         device: MarvDevice::MARV_DEVICE_RC,
         present: s.ever_locked,
-        state: s.state(),
+        state: v.state,
         stuck: false,
-        locked: locked(s.mode()),
+        locked: v.link_up,
     }
 }
 
@@ -141,6 +152,7 @@ pub fn row() -> DeviceRow {
 /// CRC + UART errors, timeouts = lock losses.
 pub fn message(now_us: u64) -> MARV_DEVICE_STATUS_DATA {
     let s = shared();
+    let v = s.verdict(now_us);
     let ms = |us: u64| u32::try_from(us / 1000).unwrap_or(u32::MAX);
     let (samples, last) = s.stats.map_or((0, None), |st| {
         (
@@ -150,7 +162,7 @@ pub fn message(now_us: u64) -> MARV_DEVICE_STATUS_DATA {
     });
     device_status(&StatusInput {
         device: MarvDevice::MARV_DEVICE_RC,
-        state: s.state(),
+        state: v.state,
         counters: Counters {
             errors: s.errors(),
             timeouts: s.lock_losses,
@@ -158,7 +170,7 @@ pub fn message(now_us: u64) -> MARV_DEVICE_STATUS_DATA {
             attempts: 0,
             config_restored: 0,
             overflows: 0,
-            last_error: ErrorKind::None,
+            last_error: v.last_error,
             present: s.ever_locked,
         },
         stuck: false,
@@ -375,13 +387,44 @@ impl Telemetry for RadioBoard {
     }
 }
 
+static EXECUTOR_RC: InterruptExecutor = InterruptExecutor::new();
+
+#[cortex_m_rt::interrupt]
+unsafe fn SWI_IRQ_0() {
+    // SAFETY: the one handler of the interrupt `EXECUTOR_RC` was started on.
+    unsafe { EXECUTOR_RC.on_interrupt() }
+}
+
+/// Starts the port's task alone on `SWI_IRQ_0` at priority P3 (0xC0; below the watchdog monitor's
+/// P1, above thread mode). Call on core 0.
+pub fn start(uart0: Peri<'static, UART0>, tx: Peri<'static, PIN_14>, rx: Peri<'static, PIN_17>) {
+    interrupt::SWI_IRQ_0.set_priority(Priority::P3);
+    let spawner = EXECUTOR_RC.start(interrupt::SWI_IRQ_0);
+    spawner.spawn(defmt::unwrap!(task(uart0, tx, rx)));
+}
+
 #[embassy_executor::task]
-pub async fn task(
+async fn task(
     uart0: Peri<'static, UART0>,
     tx: Peri<'static, PIN_14>,
     rx: Peri<'static, PIN_17>,
 ) -> ! {
-    tagged(&crate::watchdog::RUNNING0, task::RC, rc_link(uart0, tx, rx)).await
+    preempting(&crate::watchdog::RUNNING0, task::RC, rc_link(uart0, tx, rx)).await
+}
+
+/// `fw_flight::tagged` for a task that preempts thread mode: `id` is stored at the start of each
+/// poll and the preempted task's id put back at its end, so `running` names RC exactly while RC
+/// runs (a stall inside its poll is recorded as RC; the thread-mode task it interrupted keeps its
+/// own id afterwards).
+async fn preempting<F: Future>(running: &AtomicU8, id: u8, fut: F) -> F::Output {
+    let mut fut = pin!(fut);
+    poll_fn(|cx| {
+        let before = running.swap(id, Ordering::Relaxed);
+        let poll = fut.as_mut().poll(cx);
+        running.store(before, Ordering::Relaxed);
+        poll
+    })
+    .await
 }
 
 async fn rc_link(
@@ -406,7 +449,7 @@ async fn rc_link(
     let pad = pac::PADS_BANK0.gpio(RX_GPIO).read();
     let level = (pac::SIO.gpio_in(0).read() >> RX_GPIO) & 1;
     defmt::info!(
-        "[INFO] rc_link: UART0 BufferedUart (no DMA), TX GPIO14, RX GPIO17 pull-up {=bool} pull-down {=bool} level {=u32}; rings {=usize} B; thread-mode executor; radio node system 1 component 1, link 1",
+        "[INFO] rc_link: UART0 BufferedUart (no DMA), TX GPIO14, RX GPIO17 pull-up {=bool} pull-down {=bool} level {=u32}; rings {=usize} B; SWI_IRQ_0 executor at priority P3 (0xC0); radio node system 1 component 1, link 1",
         pad.pue(),
         pad.pde(),
         level,
@@ -464,6 +507,7 @@ pub fn stat(now: Instant) {
     let s = shared();
     let st = s.stats.unwrap_or_default();
     let now_us = now.as_micros();
+    let v = s.verdict(now_us);
     let (sticks0, radio0, at0) = LAST.lock(|l| l.replace((st.sticks, st.radio_status, now_us)));
     let ms = (now_us.saturating_sub(at0) / 1000).max(1);
     let per_s = |n: u32| (u64::from(n) * 1000 / ms) as u32;
@@ -480,14 +524,15 @@ pub fn stat(now: Instant) {
         _ => (-1, -1),
     };
     defmt::info!(
-        "[STAT] RC: {=str} for {=u64} ms, state {=str}, {=u32} stick/s, {=u32} radio-status/s, LQ {=i16} RSSI {=i16} dBm, radio rssi {=i16} txbuf {=i16}, slowdown {=u32} ms; CRC {=u32}, UART framing {=u32} parity {=u32} break {=u32} overrun {=u32} other {=u32}, garbage {=u32} B; locks lost {=u32}, mode changes {=u32}, baud changes {=u32}, run restarts {=u32}; sent CRSF {=u32} B MAVLink {=u32} B",
+        "[STAT] RC: {=str} for {=u64} ms, state {=str}, radio link {=str}, {=u32} stick/s, {=u32} radio-status/s, LQ {=i16} RSSI {=i16} dBm, radio rssi {=i16} txbuf {=i16}, slowdown {=u32} ms; CRC {=u32}, UART framing {=u32} parity {=u32} break {=u32} overrun {=u32} other {=u32}, garbage {=u32} B; locks lost {=u32}, mode changes {=u32}, baud changes {=u32}, run restarts {=u32}; sent CRSF {=u32} B MAVLink {=u32} B",
         match st.mode {
             Mode::Crsf => "Crsf",
             Mode::Mavlink => "Mavlink",
             _ => "Searching",
         },
         now_us.saturating_sub(st.mode_since_us) / 1000,
-        crate::device::state_name(s.state()),
+        crate::device::state_name(v.state),
+        if v.link_up { "up" } else { "down" },
         per_s(st.sticks.wrapping_sub(sticks0)),
         per_s(st.radio_status.wrapping_sub(radio0)),
         lq,

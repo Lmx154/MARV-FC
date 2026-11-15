@@ -1020,7 +1020,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(batt::task(batt::adapter(
         p.ADC, p.PIN_41, p.PIN_42
     ))));
-    spawner.spawn(defmt::unwrap!(rc::task(p.UART0, p.PIN_14, p.PIN_17)));
+    rc::start(p.UART0, p.PIN_14, p.PIN_17);
     #[cfg(not(feature = "wdg-scratch-probe"))]
     watchdog::start_monitor(wd);
     #[cfg(feature = "hang-flight")]
