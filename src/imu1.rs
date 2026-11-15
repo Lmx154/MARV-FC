@@ -88,6 +88,9 @@ pub struct Icm45686Adapter {
     int1: Input<'static>,
     calls: u32,
     step: usize,
+    /// The driver's `verify_steps()`, asked after every operation that can change it (the list of
+    /// owned registers is rebuilt by the driver at every call).
+    steps: usize,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -123,6 +126,7 @@ impl Icm45686Adapter {
             int1: Input::new(p.int1, Pull::None),
             calls: 0,
             step: 0,
+            steps: 0,
         }
     }
 
@@ -136,7 +140,9 @@ impl Icm45686Adapter {
     async fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<DevError>> {
         let config = config();
         self.step = 0;
-        self.call().init(delay, &config).await?;
+        let init = self.call().init(delay, &config).await;
+        self.steps = self.chip.verify_steps();
+        init?;
         self.call().interrupt_status().await?;
         Ok(())
     }
@@ -187,7 +193,7 @@ impl ImuAdapter for Icm45686Adapter {
         let index = self.step;
         let result = self.call().verify_step(&mut SpinDelay, index).await;
         self.step = index + 1;
-        if self.step >= self.chip.verify_steps() {
+        if self.step >= self.steps {
             self.step = 0;
         }
         match result {
@@ -200,7 +206,7 @@ impl ImuAdapter for Icm45686Adapter {
 
     /// K = samples per second / registers per pass: one pass in about 1 s.
     fn verify_every(&self) -> u32 {
-        let steps = u32::try_from(self.chip.verify_steps()).unwrap_or(u32::MAX);
+        let steps = u32::try_from(self.steps).unwrap_or(u32::MAX);
         (1_000_000 / PERIOD_US / steps.max(1)).max(1)
     }
 
@@ -212,15 +218,15 @@ impl ImuAdapter for Icm45686Adapter {
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
         let config = config();
         self.step = 0;
-        self.call()
-            .configure(delay, &config)
-            .await
-            .map(|_| ())
-            .map_err(|e| kind(&e))
+        let configured = self.call().configure(delay, &config).await;
+        self.steps = self.chip.verify_steps();
+        configured.map(|_| ()).map_err(|e| kind(&e))
     }
 
     async fn recover<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
-        self.call().recover(delay).await.map_err(|e| kind(&e))
+        let recovered = self.call().recover(delay).await;
+        self.steps = self.chip.verify_steps();
+        recovered.map_err(|e| kind(&e))
     }
 
     /// SPI has no bus clear: init and configure again.

@@ -146,7 +146,15 @@ const LINK_GATE: u8 = 1;
 const LINK_RUN: u8 = 2;
 /// The STATUSTEXTs for the node's text hook (the design's ring of 8 is a later packet). Held until
 /// a ground station's node runs, so the boot's settings texts (queued first) reach a later link.
-static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), 8> = Channel::new();
+static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), TEXTS_DEPTH> =
+    Channel::new();
+/// 8; with `latency-text` 32, so that the boot's texts and the two sets of latency texts (4 each)
+/// all wait for a station that connects after 590 s.
+const TEXTS_DEPTH: usize = if cfg!(feature = "latency-text") {
+    32
+} else {
+    8
+};
 
 const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
@@ -639,6 +647,8 @@ async fn supervise() -> ! {
         let now = Instant::now();
         watchdog::report(&mut stalls_begun, &mut stalls_ended);
         devices.tick(now);
+        #[cfg(feature = "latency-text")]
+        devices.latency_text(now);
         actions::tick(now.as_millis());
         let ping = PING.load(Ordering::Relaxed);
         let pong = PONG.load(Ordering::Acquire);
@@ -690,21 +700,23 @@ async fn supervise() -> ! {
             first_ping_at.get_or_insert(now);
         }
         if tick.is_multiple_of(1000) && tick > 0 {
-            defmt::info!(
-                "[STAT] uptime {=u64} s, PONG age max {=u64} us, PING {=u32} PONG {=u32}, usb wrote {=u32} B {=u32} frames, read {=u32} B, link {=str}",
-                now.as_secs(),
-                max_age_us,
-                PING.load(Ordering::Relaxed),
-                pong,
-                TX_BYTES.load(Ordering::Relaxed),
-                TX_FRAMES.load(Ordering::Relaxed),
-                RX_BYTES.load(Ordering::Relaxed),
-                match LINK_STATE.load(Ordering::Relaxed) {
-                    LINK_RUN => "up, node running",
-                    LINK_GATE => "up, start gate closed",
-                    _ => "down",
-                }
-            );
+            if !cfg!(feature = "quiet-stat") {
+                defmt::info!(
+                    "[STAT] uptime {=u64} s, PONG age max {=u64} us, PING {=u32} PONG {=u32}, usb wrote {=u32} B {=u32} frames, read {=u32} B, link {=str}",
+                    now.as_secs(),
+                    max_age_us,
+                    PING.load(Ordering::Relaxed),
+                    pong,
+                    TX_BYTES.load(Ordering::Relaxed),
+                    TX_FRAMES.load(Ordering::Relaxed),
+                    RX_BYTES.load(Ordering::Relaxed),
+                    match LINK_STATE.load(Ordering::Relaxed) {
+                        LINK_RUN => "up, node running",
+                        LINK_GATE => "up, start gate closed",
+                        _ => "down",
+                    }
+                );
+            }
             devices.stat(now);
             watchdog::stat();
         }

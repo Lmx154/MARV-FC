@@ -743,7 +743,30 @@ struct FlightSeen {
 pub struct Supervision {
     watchers: [Watcher; DEVICE_COUNT],
     stat_at: Instant,
+    #[cfg(feature = "latency-text")]
+    latency: [LatencyMark; DEVICE_COUNT],
 }
+
+/// Feature `latency-text`: one flight-core row's figures at the baseline (60 s) and what was seen
+/// since.
+#[cfg(feature = "latency-text")]
+#[derive(Clone, Copy, Default)]
+struct LatencyMark {
+    based: bool,
+    sent: [bool; 2],
+    samples: u32,
+    long_gaps: u32,
+    max_gap_us: u64,
+    window_seen: u32,
+    window_max: u32,
+}
+
+/// Feature `latency-text`: the baseline is taken at this uptime, s.
+#[cfg(feature = "latency-text")]
+const LATENCY_BASE_S: u64 = 60;
+/// Feature `latency-text`: the figures are sent at these uptimes, s.
+#[cfg(feature = "latency-text")]
+const LATENCY_AT_S: [u64; 2] = [300, 590];
 
 impl Supervision {
     pub fn new(now: Instant) -> Self {
@@ -757,6 +780,76 @@ impl Supervision {
                 flight: FlightSeen::default(),
             }),
             stat_at: now,
+            #[cfg(feature = "latency-text")]
+            latency: [LatencyMark::default(); DEVICE_COUNT],
+        }
+    }
+
+    /// Feature `latency-text`: every supervisor tick. At 60 s the baseline of each flight-core
+    /// row; at 300 s and 590 s, for the interval since it, two STATUSTEXTs and one log line per
+    /// row: samples, gaps over 1.5 P, the largest gap (`max=` when it grew after the baseline,
+    /// `max<=` the baseline's all-time figure when it did not), the longest poll all-time, and the
+    /// largest 10 s window maximum seen since the baseline.
+    #[cfg(feature = "latency-text")]
+    pub fn latency_text(&mut self, now: Instant) {
+        let secs = now.as_secs();
+        for (dev, m) in DEVICES.iter().zip(self.latency.iter_mut()) {
+            let Some(f) = dev.flight.and_then(ImuCells::read) else {
+                continue;
+            };
+            if !m.based {
+                if secs >= LATENCY_BASE_S {
+                    *m = LatencyMark {
+                        based: true,
+                        samples: f.samples,
+                        long_gaps: f.long_gaps,
+                        max_gap_us: f.max_gap_us,
+                        window_seen: f.latency.window_us,
+                        ..LatencyMark::default()
+                    };
+                }
+                continue;
+            }
+            if f.latency.window_us != m.window_seen {
+                m.window_seen = f.latency.window_us;
+                m.window_max = m.window_max.max(f.latency.window_us);
+            }
+            for (sent, at) in m.sent.iter_mut().zip(LATENCY_AT_S) {
+                if *sent || secs < at {
+                    continue;
+                }
+                *sent = true;
+                let n = f.samples.wrapping_sub(m.samples);
+                let g = f.long_gaps.wrapping_sub(m.long_gaps);
+                let (bound, gap) = if f.max_gap_us > m.max_gap_us {
+                    ("=", f.max_gap_us)
+                } else {
+                    ("<=", m.max_gap_us)
+                };
+                defmt::info!(
+                    "[INFO] latency-text {=str} {=u64}s since {=u64}s: samples {=u32}, gaps over 1.5 P {=u32}, largest gap {=str}{=u64} us, longest poll all-time {=u32} us, largest 10 s window max seen {=u32} us",
+                    dev.name,
+                    at,
+                    LATENCY_BASE_S,
+                    n,
+                    g,
+                    bound,
+                    gap,
+                    f.latency.max_us,
+                    m.window_max
+                );
+                crate::text_fmt(
+                    MavSeverity::MAV_SEVERITY_INFO,
+                    format_args!("{} {}s n={} g={} max{}{}", dev.name, at, n, g, bound, gap),
+                );
+                crate::text_fmt(
+                    MavSeverity::MAV_SEVERITY_INFO,
+                    format_args!(
+                        "{} {}s poll={} w={}",
+                        dev.name, at, f.latency.max_us, m.window_max
+                    ),
+                );
+            }
         }
     }
 
@@ -827,6 +920,9 @@ impl Supervision {
             let s = dev.status();
             let rate = s.samples.wrapping_sub(w.stat_samples) as f32 * 1e6 / window_us as f32;
             w.stat_samples = s.samples;
+            if cfg!(feature = "quiet-stat") {
+                continue;
+            }
             let latest = dev.latest.try_get();
             let (seq, age_ms) = latest.map_or((u32::MAX, u64::MAX), |l| {
                 (l.seq, now.as_micros().saturating_sub(l.t_us) / 1000)

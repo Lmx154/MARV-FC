@@ -298,6 +298,9 @@ pub fn report(begun_seen: &mut u32, ended_seen: &mut u32) {
 
 /// The supervisor, every 10 s: the monitor's counters.
 pub fn stat() {
+    if cfg!(feature = "quiet-stat") {
+        return;
+    }
     defmt::info!(
         "[STAT] watchdog: feeds {=u32}, stalls begun {=u32}, ended {=u32}, checks after a save {=u32}",
         FEEDS.load(Ordering::Relaxed),
