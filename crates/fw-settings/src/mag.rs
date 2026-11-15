@@ -250,10 +250,7 @@ mod tests {
         assert_eq!(p.take_notice().unwrap().kind.text(), TOO_AVERAGED);
         assert_eq!(p.get(avg), Some(ParamValue::I32(2)));
         let odr = p.find(&name(ODR_HZ)).unwrap();
-        assert_eq!(
-            p.set(odr, ParamValue::F32(33.0)),
-            Err(ParamError::Rejected)
-        );
+        assert_eq!(p.set(odr, ParamValue::F32(33.0)), Err(ParamError::Rejected));
         assert_eq!(
             p.set(odr, ParamValue::F32(500.0)),
             Err(ParamError::OutOfRange)
@@ -269,7 +266,10 @@ mod tests {
         assert_eq!(p.set(off, ParamValue::F32(10.0)), Ok(ParamValue::F32(10.0)));
         assert_eq!(p.take_configure_mask(), 1 << DEVICE);
         assert_eq!(p.take_live_mask(), 1 << DEVICE);
-        assert_eq!(p.set(off, ParamValue::F32(250.0)), Err(ParamError::OutOfRange));
+        assert_eq!(
+            p.set(off, ParamValue::F32(250.0)),
+            Err(ParamError::OutOfRange)
+        );
         assert_eq!(p.reset_calibration(), 1);
         assert_eq!(p.get(off), Some(ParamValue::F32(0.0)));
     }

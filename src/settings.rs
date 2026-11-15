@@ -28,7 +28,6 @@ use mavlink_device::marv::MarvDevice;
 use mavlink_device::{ParamName, ParamStore, ParamValue};
 use static_cell::ConstStaticCell;
 
-use crate::baro::settings;
 use crate::store;
 
 /// The flash size the HAL's `Flash` type checks against (RP2350B with 2 MiB in the package).
@@ -191,25 +190,45 @@ fn reason(error: LoadError) -> &'static str {
 }
 
 /// After a load: each device's stored values through its validator (`settings_to_config`, what
-/// `settings::validate` runs). A refused set goes back to the device's defaults in RAM (the flash
-/// is not touched) and the reason is returned, so the device starts on valid values.
-fn check_devices() -> Option<&'static str> {
-    let Err(reason) = store::baro_config() else {
-        return None;
-    };
-    let baro = MarvDevice::MARV_DEVICE_BARO as u8;
+/// the device's `validate` runs). A refused set goes back to the device's defaults in RAM (the
+/// flash is not touched) and the device's name and the reason are returned, so the device starts
+/// on valid values.
+fn check_devices() -> [Option<(&'static str, &'static str)>; 2] {
+    [
+        reset_if_refused(
+            MarvDevice::MARV_DEVICE_BARO,
+            "BARO",
+            store::baro_config().err(),
+        ),
+        reset_if_refused(
+            MarvDevice::MARV_DEVICE_MAG,
+            "MAG",
+            store::mag_config().err(),
+        ),
+    ]
+}
+
+fn reset_if_refused(
+    device: MarvDevice,
+    name: &'static str,
+    refused: Option<&'static str>,
+) -> Option<(&'static str, &'static str)> {
+    let reason = refused?;
+    let id = device as u8;
     store::with(|p| {
-        for def in settings::TABLE.iter().filter(|d| d.device == baro) {
-            if let Ok(name) = ParamName::new(def.name) {
-                let _ = p.load(&name, def.default);
+        for def in fw_settings::TABLE.iter().filter(|d| d.device == id) {
+            if let Ok(param) = ParamName::new(def.name) {
+                let _ = p.load(&param, def.default);
             }
         }
     });
     defmt::warn!(
-        "[INFO] settings: BARO stored settings refused ({=str}): BARO parameters to their defaults in RAM, flash unchanged",
-        reason
+        "[INFO] settings: {=str} stored settings refused ({=str}): {=str} parameters to their defaults in RAM, flash unchanged",
+        name,
+        reason,
+        name
     );
-    Some(reason)
+    Some((name, reason))
 }
 
 fn values() -> [Option<ParamValue>; store::COUNT] {
@@ -259,7 +278,7 @@ fn load_from_flash(st: &mut Storage, what: &str) -> Result<u32, &'static str> {
     let refused = check_devices();
     let after = values();
     let mut configure = 0u32;
-    for ((def, old), new) in settings::TABLE.iter().zip(before).zip(after) {
+    for ((def, old), new) in fw_settings::TABLE.iter().zip(before).zip(after) {
         if old != new && matches!(def.apply, Apply::Configure) {
             configure |= 1u32.checked_shl(u32::from(def.device)).unwrap_or(0);
         }
@@ -298,10 +317,10 @@ fn load_from_flash(st: &mut Storage, what: &str) -> Result<u32, &'static str> {
             ("stored record invalid, defaults (nothing erased)", "-", 0)
         }
     };
-    if refused.is_some() {
-        crate::text(
+    for (name, _) in refused.iter().flatten() {
+        crate::text_fmt(
             MavSeverity::MAV_SEVERITY_WARNING,
-            "BARO: stored settings invalid, defaults",
+            format_args!("{}: stored settings invalid, defaults", name),
         );
     }
     defmt::info!(

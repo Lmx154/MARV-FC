@@ -53,6 +53,11 @@ pub enum Reading {
         pressure_pa: f32,
         temperature_c: f32,
     },
+    Mag {
+        /// The field in microtesla, the calibration offsets already subtracted.
+        field_ut: [f32; 3],
+        temperature_c: f32,
+    },
     Imu {
         gyro_rads: [f32; 3],
         accel_ms2: [f32; 3],
@@ -335,7 +340,7 @@ impl Device {
 }
 
 /// The number of registry rows.
-pub const DEVICE_COUNT: usize = 2;
+pub const DEVICE_COUNT: usize = 3;
 /// IMU1's row, backed by the flight core.
 pub static IMU1: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU1,
@@ -345,8 +350,10 @@ pub static IMU1: Device = Device::flight(
 );
 /// The barometer's row.
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
+/// The magnetometer's row.
+pub static MAG: Device = Device::new(MarvDevice::MARV_DEVICE_MAG, "MAG", crate::mag::PERIOD_US);
 /// The registry.
-pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &BARO];
+pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &BARO, &MAG];
 
 /// The row of device `id`.
 pub fn find(id: MarvDevice) -> Option<&'static Device> {
@@ -822,6 +829,18 @@ impl Supervision {
                 latest.map(|l| l.reading),
                 age_ms
             );
+            if let Some(Sample {
+                reading: Reading::Mag { field_ut, .. },
+                ..
+            }) = latest
+            {
+                defmt::info!(
+                    "[STAT] {=str}: |B| {=f32} uT, B {} uT",
+                    dev.name,
+                    norm(field_ut),
+                    field_ut
+                );
+            }
             if let Some(f) = dev.flight.and_then(ImuCells::read) {
                 let (accel, gyro, temperature) = f.latest.map_or(([0.0; 3], [0.0; 3], 0.0), |l| {
                     (

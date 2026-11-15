@@ -797,6 +797,9 @@ mod tests {
             }
         }
         assert_eq!(names.len(), 13);
-        assert_eq!((task_name(task::MAG), task_name(task::BATT)), ("MAG", "BATT"));
+        assert_eq!(
+            (task_name(task::MAG), task_name(task::BATT)),
+            ("MAG", "BATT")
+        );
     }
 }

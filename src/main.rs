@@ -32,10 +32,12 @@
 
 mod actions;
 mod baro;
+mod busclear;
 mod device;
 mod imu1;
-#[cfg(feature = "inject")]
+#[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
+mod mag;
 mod settings;
 mod store;
 mod watchdog;
@@ -45,7 +47,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use defmt_rtt as _;
-use device::{BARO, DEVICE_COUNT, DEVICES, Device, IMU1, Reading, Supervision, TextLine};
+use device::{BARO, DEVICE_COUNT, DEVICES, Device, IMU1, MAG, Reading, Supervision, TextLine};
 use embassy_executor::{Executor, Spawner};
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
@@ -251,6 +253,19 @@ impl Telemetry for Board {
             else {
                 return false;
             };
+            // The magnetometer's latest sample, in gauss (1 G = 100 uT); its bits only when one exists.
+            let (mag, mag_flags) = match MAG.latest.try_get().map(|s| s.reading) {
+                Some(Reading::Mag {
+                    field_ut: [x, y, z],
+                    ..
+                }) => (
+                    [x / 100.0, y / 100.0, z / 100.0],
+                    HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XMAG
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YMAG
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZMAG,
+                ),
+                _ => ([f32::NAN; 3], HighresImuUpdatedFlags::empty()),
+            };
             return out
                 .push(&HIGHRES_IMU_DATA {
                     time_usec: sample.t_us,
@@ -260,9 +275,9 @@ impl Telemetry for Board {
                     xgyro,
                     ygyro,
                     zgyro,
-                    xmag: f32::NAN,
-                    ymag: f32::NAN,
-                    zmag: f32::NAN,
+                    xmag: mag[0],
+                    ymag: mag[1],
+                    zmag: mag[2],
                     abs_pressure: f32::NAN,
                     diff_pressure: f32::NAN,
                     pressure_alt: f32::NAN,
@@ -273,7 +288,8 @@ impl Telemetry for Board {
                         | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XGYRO
                         | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YGYRO
                         | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE,
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE
+                        | mag_flags,
                     id: 0,
                 })
                 .is_ok();
@@ -742,6 +758,9 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(beat0()));
     spawner.spawn(defmt::unwrap!(baro::task(baro::adapter(
         p.I2C1, p.PIN_23, p.PIN_22, p.PIN_21
+    ))));
+    spawner.spawn(defmt::unwrap!(mag::task(mag::adapter(
+        p.I2C0, p.PIN_13, p.PIN_12, p.PIN_4
     ))));
     #[cfg(not(feature = "wdg-scratch-probe"))]
     watchdog::start_monitor(wd);

@@ -1,13 +1,13 @@
 //! The barometer: BMP581 on I2C1 (SDA GPIO22, SCL GPIO23, 400 kHz, the board's 4.7k pull-ups),
 //! data-ready on GPIO21; a core-0 device, async I2C without DMA. The `bmp581` driver is used as it
-//! is; the bus clear before a restart is this adapter's (the driver and embassy-rp 0.10 have none).
+//! is; the bus clear before a restart is the firmware's (`busclear`; the driver and embassy-rp 0.10 have none).
 
 use bmp581::{Bmp581, Config, DEFAULT_ADDRESS, Error};
-use embassy_rp::gpio::{Flex, Input, Pull};
+use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::i2c::{self, I2c};
 use embassy_rp::peripherals::{I2C1, PIN_21, PIN_22, PIN_23};
 use embassy_rp::{Peri, bind_interrupts};
-use embassy_time::{Delay, Duration, block_for};
+use embassy_time::Delay;
 use fw_core::health::{ErrorKind, Limits};
 
 pub use fw_settings::baro as settings;
@@ -88,40 +88,6 @@ impl Bmp581Adapter {
             )
         };
         I2c::new_async(i2c, scl, sda, Irqs, cfg)
-    }
-
-    /// Up to 9 SCL pulses while SDA is held low, then a START and a STOP (as `bmp581_cancel`'s
-    /// `bus_clear`). Called only while no bus object exists. Returns (SDA low, SCL low, pulses).
-    fn bus_clear(&mut self) -> (bool, bool, u8) {
-        // SAFETY: as in `bus`: the bus was dropped before this call and these pins are released
-        // again when this function returns, before the next bus is built.
-        let (scl, sda) = unsafe { (self.scl.clone_unchecked(), self.sda.clone_unchecked()) };
-        let mut scl = Flex::new(scl);
-        let mut sda = Flex::new(sda);
-        let half = Duration::from_micros(5);
-        scl.set_pull(Pull::None);
-        sda.set_pull(Pull::None);
-        scl.set_low();
-        sda.set_low();
-        scl.set_as_input();
-        sda.set_as_input();
-        block_for(half);
-        let (sda_low, scl_low) = (sda.is_low(), scl.is_low());
-        let mut pulses = 0u8;
-        while sda.is_low() && pulses < 9 {
-            scl.set_as_output();
-            block_for(half);
-            scl.set_as_input();
-            block_for(half);
-            pulses += 1;
-        }
-        if sda.is_high() && scl.is_high() {
-            sda.set_as_output();
-            block_for(half);
-            sda.set_as_input();
-            block_for(half);
-        }
-        (sda_low, scl_low, pulses)
     }
 
     /// Takes the configuration from the stored parameters and sets the device's nominal period P
@@ -259,7 +225,7 @@ impl DeviceAdapter for Bmp581Adapter {
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         self.calls = self.calls.wrapping_add(1);
         self.chip = None;
-        let (sda_low, scl_low, pulses) = self.bus_clear();
+        let (sda_low, scl_low, pulses) = crate::busclear::bus_clear(&mut self.scl, &mut self.sda);
         defmt::info!(
             "[INFO] BARO: bus clear: SDA low {=bool}, SCL low {=bool}, {=u8} pulses",
             sda_low,

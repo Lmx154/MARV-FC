@@ -753,6 +753,7 @@ dependencies = [
 name = "fw-settings"
 version = "0.1.0"
 dependencies = [
+ "bmm350",
  "bmp581",
  "fw-core",
  "mavlink-device",

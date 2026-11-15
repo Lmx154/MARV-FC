@@ -1,4 +1,4 @@
-//! The firmware's one parameter store (`fw_core::params::Params` over the barometer's table), in
+//! The firmware's one parameter store (`fw_core::params::Params` over the devices' tables), in
 //! RAM; `settings` loads it from flash at boot and writes it there only on an explicit save (a
 //! write takes effect here and is lost at reset unless saved). It sits in a critical-section mutex so the link task (the
 //! parameter protocol, through [`Store`]), the action code and the device tasks can all reach it;
@@ -6,7 +6,6 @@
 
 use core::cell::RefCell;
 
-use bmp581::Config;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::params::Params;
@@ -14,21 +13,26 @@ use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::MarvDevice;
 use mavlink_device::{ParamError, ParamName, ParamStore, ParamValue};
 
-use crate::baro::settings;
 use crate::device::raise_apply;
 
 /// The number of parameters.
-pub const COUNT: usize = settings::COUNT;
+pub const COUNT: usize = fw_settings::COUNT;
 
 static PARAMS: Mutex<CriticalSectionRawMutex, RefCell<Option<Params<COUNT>>>> =
     Mutex::new(RefCell::new(None));
 
 /// Builds the store from the table and installs the validators. Called once, before any task.
 pub fn init() {
-    let Ok(mut params) = Params::<COUNT>::new(&settings::TABLE) else {
+    let Ok(mut params) = Params::<COUNT>::new(&fw_settings::TABLE) else {
         defmt::panic!("[FAIL] parameter table rejected");
     };
-    if !params.set_validator(MarvDevice::MARV_DEVICE_BARO as u8, settings::validate) {
+    if !params.set_validator(
+        MarvDevice::MARV_DEVICE_BARO as u8,
+        fw_settings::baro::validate,
+    ) || !params.set_validator(
+        MarvDevice::MARV_DEVICE_MAG as u8,
+        fw_settings::mag::validate,
+    ) {
         defmt::panic!("[FAIL] validator not installed");
     }
     PARAMS.lock(|cell| *cell.borrow_mut() = Some(params));
@@ -44,14 +48,46 @@ pub fn with<R>(f: impl FnOnce(&mut Params<COUNT>) -> R) -> Option<R> {
 }
 
 /// The barometer's whole `Config` from the stored values.
-pub fn baro_config() -> Result<Config, &'static str> {
+pub fn baro_config() -> Result<bmp581::Config, &'static str> {
     with(|params| {
-        settings::settings_to_config(|name| match params.get_named(name) {
+        fw_settings::baro::settings_to_config(|name| match params.get_named(name) {
             Some(ParamValue::I32(v)) => Some(v),
             _ => None,
         })
     })
     .unwrap_or(Err("store not ready"))
+}
+
+/// The magnetometer's whole `Config` from the stored values.
+pub fn mag_config() -> Result<bmm350::Config, &'static str> {
+    with(|params| {
+        let rate = match params.get_named(fw_settings::mag::ODR_HZ) {
+            Some(ParamValue::F32(v)) => Some(v),
+            _ => None,
+        };
+        let avg = match params.get_named(fw_settings::mag::AVG) {
+            Some(ParamValue::I32(v)) => Some(v),
+            _ => None,
+        };
+        fw_settings::mag::settings_to_config(rate, avg)
+    })
+    .unwrap_or(Err("store not ready"))
+}
+
+/// The magnetometer's calibration offsets in microtesla (X, Y, Z), read for every sample.
+pub fn mag_offsets() -> [f32; 3] {
+    with(|params| {
+        [
+            fw_settings::mag::OFF_X,
+            fw_settings::mag::OFF_Y,
+            fw_settings::mag::OFF_Z,
+        ]
+        .map(|name| match params.get_named(name) {
+            Some(ParamValue::F32(v)) => v,
+            _ => 0.0,
+        })
+    })
+    .unwrap_or([0.0; 3])
 }
 
 /// `ParamStore` for the node: the one store, behind the lock.

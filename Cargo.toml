@@ -75,8 +75,13 @@ inject-baro-por = ["inject"]
 # Also: as persistent until a RESTART request (`device restart BARO`) has been raised, then everything works again.
 inject-baro-fail-until-restart = ["inject"]
 inject-baro-stuck = ["inject"]
+# The same around the magnetometer's adapter: 5 s after the first good sample every acquire, recover and
+# restart fails until a RESTART request (`device restart MAG`) has been raised, then everything works.
+inject-mag-fail-until-restart = ["inject-mag"]
 # Internal: on when any injection feature is on.
 inject = []
+# Internal: on when a magnetometer injection feature is on.
+inject-mag = []
 # Fault injection around IMU1's adapter (src/imu1.rs, flight core, no log there), 5 s after the
 # first good sample: every acquire, recover and restart fails until a RESTART request
 # (`device restart IMU1`) has been raised (persistent); the data-ready edges swallowed for 200 ms

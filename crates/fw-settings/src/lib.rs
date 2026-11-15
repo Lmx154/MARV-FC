@@ -55,6 +55,7 @@ const fn concat() -> [ParamDef; COUNT] {
 mod tests {
     use super::*;
     use fw_core::params::Params;
+    use mavlink_device::ParamStore;
 
     #[test]
     fn the_whole_table_is_accepted_with_every_validator() {

@@ -19,12 +19,13 @@ use embassy_time::{Duration, Instant};
 use fw_core::health::ErrorKind;
 
 use crate::device::{
-    AdapterCounters, BARO, DeviceAdapter, Pending, Reading, StartFailure, VerifyError,
+    AdapterCounters, BARO, Device, DeviceAdapter, MAG, Pending, Reading, StartFailure, VerifyError,
 };
 
 const AFTER: Duration = Duration::from_secs(5);
 const TRANSIENT_FAILURES: u8 = 4;
 const PERSISTENT: bool = cfg!(feature = "inject-baro-persistent");
+#[allow(dead_code)] // unused when only the magnetometer's injection is on
 const UNTIL_RESTART: bool = cfg!(feature = "inject-baro-fail-until-restart");
 const TRANSIENT: bool = cfg!(feature = "inject-baro-transient");
 const MISSED_EDGE: bool = cfg!(feature = "inject-baro-missed-edge");
@@ -50,6 +51,11 @@ enum Phase {
 
 pub struct Inject<A> {
     inner: A,
+    /// The device whose restart requests end `fail-until-restart`.
+    dev: &'static Device,
+    /// Fails until a restart request, as `inject-baro-fail-until-restart` (the magnetometer's
+    /// `inject-mag-fail-until-restart` is this and nothing else).
+    until_restart: bool,
     first_good: Option<Instant>,
     injected: u8,
     phase: Phase,
@@ -59,12 +65,24 @@ pub struct Inject<A> {
 }
 
 impl<A: DeviceAdapter> Inject<A> {
+    #[allow(dead_code)] // unused when only the magnetometer's injection is on
     pub fn new(inner: A) -> Self {
+        Self::build(inner, &BARO, UNTIL_RESTART)
+    }
+
+    /// The magnetometer's wrapper: fail-until-restart only.
+    #[allow(dead_code)] // unused when only the barometer's injection is on
+    pub fn new_mag(inner: A) -> Self {
+        Self::build(inner, &MAG, true)
+    }
+
+    fn build(inner: A, dev: &'static Device, until_restart: bool) -> Self {
         defmt::info!(
-            "[INFO] inject: {=str} armed",
+            "[INFO] inject: {=str} {=str} armed",
+            dev.name,
             if PERSISTENT {
                 "persistent"
-            } else if UNTIL_RESTART {
+            } else if until_restart {
                 "fail-until-restart"
             } else if SILENT {
                 "silent"
@@ -82,6 +100,8 @@ impl<A: DeviceAdapter> Inject<A> {
         );
         Self {
             inner,
+            dev,
+            until_restart,
             first_good: None,
             injected: 0,
             phase: Phase::Idle,
@@ -131,8 +151,8 @@ impl<A: DeviceAdapter> Inject<A> {
     }
 
     fn fail(&mut self, what: &str) -> bool {
-        let always = PERSISTENT || UNTIL_RESTART;
-        let restarted = UNTIL_RESTART && !PERSISTENT && BARO.restarts() > 0;
+        let always = PERSISTENT || self.until_restart;
+        let restarted = self.until_restart && !PERSISTENT && self.dev.restarts() > 0;
         let fail = (always || TRANSIENT)
             && !restarted
             && self.due()
@@ -225,7 +245,7 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.recover().await;
-        if (PERSISTENT || UNTIL_RESTART) && self.fail("recover") {
+        if (PERSISTENT || self.until_restart) && self.fail("recover") {
             return Err(ErrorKind::Bus);
         }
         result
@@ -233,7 +253,7 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.restart().await;
-        if (PERSISTENT || UNTIL_RESTART) && self.fail("restart") {
+        if (PERSISTENT || self.until_restart) && self.fail("restart") {
             return Err(ErrorKind::Bus);
         }
         result
