@@ -109,7 +109,9 @@ pub mod probe {
 
     #[embassy_executor::task]
     pub async fn act(mut wd: Watchdog, next: Next) {
-        Timer::after(Duration::from_secs(5)).await;
+        // 30 s before the forced reset: time to read the texts of the boot after the time-out.
+        let wait = if matches!(next, Next::Force) { 30 } else { 5 };
+        Timer::after(Duration::from_secs(wait)).await;
         match next {
             Next::TimeOut => {
                 wd.pause_on_debug(true);
