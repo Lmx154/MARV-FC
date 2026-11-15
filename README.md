@@ -83,8 +83,9 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   the chip keeps producing data. Shows the missed-edge path: the wait times out, the status read finds data,
   `missed edges` goes up (at least 1) and the sample is read; no health event (state Ok, errors 0,
   timeouts 0, recoveries 0, no text).
-- `FEATURES=inject-baro-silent tools/run.sh 60`: for 1 s the edges are swallowed and `status` answers
-  "nothing pending". Shows the deadline-miss path: `timeouts` > 0, `last_error` TIMEOUT, Ok -> Degraded ->
+- `FEATURES=inject-baro-silent tools/run.sh 60`: for 1 s the edges are swallowed, `status` answers
+  "nothing pending" and `recover` and `restart` fail (without that, `recover`, which checks the bus and not
+  the data flow, succeeds at once and the device flaps Ok - Recovering inside the window). Shows the deadline-miss path: `timeouts` > 0, `last_error` TIMEOUT, Ok -> Degraded ->
   Recovering (WARNING; 3 misses, so about 3 T = 180 ms after the last good sample), then a recovery attempt
   that succeeds -> Ok (NOTICE, `recoveries` 1).
 - `FEATURES=inject-baro-verify tools/run.sh 60`: one `verify` answers "mismatch". Shows the reconfigure
