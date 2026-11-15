@@ -4,7 +4,7 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG) and the battery monitor on the ADC (BATT), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
@@ -15,7 +15,7 @@ It has no flight functionality.
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
-  action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag` and `batt`, the three core-0 device tasks (see
+  action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag`, `gnss` and `batt`, the four core-0 device tasks (see
   Device layer).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, IMU1
@@ -45,7 +45,7 @@ It has no flight functionality.
   enabled on core 0 after core 1 started.
 
 Not in it yet: the IMUs' parameters, calibration offsets and self-test (fixed configurations for now), IMU2's
-high-g accelerometer (off; nothing of it on the link), GNSS and the receiver row, the compass
+high-g accelerometer (off; nothing of it on the link), the receiver row (the radio link), GNSS's PPS and time synchronisation (the pin is not read), the compass
 calibration command (only the `MAG_OFF*` parameters it will write exist), the calibrations and the self-test, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
 a ground station's node runs; when it is full, newer texts are dropped with a log line).
@@ -80,7 +80,7 @@ the ICM-45686 has no 1 kHz rate. Single-sample mode
 read) read with every sample so that the status read after a late CHECK sees a fresh flag; no FIFO, so
 the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
 temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the magnetometer's field in gauss (1 G = 100 uT) as `xmag`, `ymag`, `zmag` with their `fields_updated` bits
-set only while the latest MAG sample is younger than 1 s (the same rule for the IMU1 fields: NaN and clear bits when older; SCALED_PRESSURE is not sent when its sample is older than 1 s); the barometer's as SCALED_PRESSURE at 25 Hz. SYS_STATUS carries
+set only while the latest MAG sample is younger than 1 s (the same rule for the IMU1 fields: NaN and clear bits when older; SCALED_PRESSURE is not sent when its sample is older than 1 s); the barometer's as SCALED_PRESSURE at 25 Hz; the receiver's as GPS_RAW_INT (id 24) at 1 Hz (see GNSS below). SYS_STATUS carries
 `voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample while it is younger than 1 s (65535 and -1, MAVLink's "unknown", while there is none or it is older);
 `battery_remaining` stays -1.
 
@@ -134,7 +134,7 @@ starts.
 loop over a firmware-side `DeviceAdapter` (`data_ready`, `start`, `acquire`, `status`, `verify`, `apply`,
 `recover`, `restart`, `counters`; no `self_test` yet). The loop steps the device's
 `fw_core::health::Health` and carries out its action. Sampling is `select(with_timeout(T, data ready),
-wake)` with T = max(3 P, 10 ms); a timeout makes ONE status read: data waiting = a missed edge, read it;
+wake)` with T = max(3 P, 10 ms) (GNSS: its own 2.5 s); a timeout makes ONE status read: data waiting = a missed edge, read it;
 nothing = a deadline miss. Every bus call is awaited to completion, never inside a `select` or a timeout.
 A start, `recover` or `restart` that returns `Ok` only says the bus and the device answer: the loop then
 waits for ONE fresh sample (`with_timeout(T, data ready)`, then one `acquire` awaited to completion) before
@@ -153,6 +153,7 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 |---|---|---|---|---|---|---|
 | BARO | BMP581 (`src/baro.rs`) | I2C1 at 400 kHz, SDA GPIO22, SCL GPIO23, data-ready GPIO21 (rising edge), no DMA | from the parameters (below); the defaults are the driver's default: pressure 16x, temperature 2x, normal mode, 50.056 Hz output data rate, no filter; always no FIFO, data-ready pulsed | 19 978 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 59.9 ms at the default | max(1 s, 20 P) |
 | MAG | BMM350 (`src/mag.rs`) | I2C0 at 400 kHz, SDA GPIO12, SCL GPIO13, data-ready GPIO4 (rising edge), no DMA | from `MAG_ODR_HZ` and `MAG_AVG`; defaults = the driver's bench config: 100 Hz, averaging 2, all axes, normal mode, data-ready pulsed, active high, push-pull | 10 000 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 30 ms at the default | max(1 s, 20 P) |
+| GNSS | LC76G (`src/gnss.rs`) | UART1 (`BufferedUart`, interrupt driven on core 0, no DMA) 115200 8N1, board TX GPIO24, RX GPIO25, RX buffer 4096 B; PPS GPIO5 not read | none: receive only, nothing is sent to the receiver; it is read as it comes (default stream, 1 fix per second) | 1 000 000 us (1 Hz) | 2.5 s (own deadline, not 3 P) | 20 s |
 | BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
 
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
@@ -162,6 +163,61 @@ used). `Reading::Mag { field_ut, temperature_c }`. The BMM350 has no power-on-re
 `verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and
 rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
 The field at rest on the driver's bench was about 66 to 67 uT.
+
+**GNSS.** A row for the receiver, `src/gnss.rs`, the `lc76g` driver as it is (rev 2ee54f9), UART1 read in thread mode through the driver's
+`read`. **The firmware only listens**: no `init`, no setting, no query, no save, no baud change is ever sent (the TX pin is driven idle-high so the
+receiver's input does not float), so the receiver's stored configuration cannot change; the row sees the receiver's default stream
+(GGA, GLL, GSA, GSV, RMC, VTG, 19 sentences per second at 1 fix per second on the bench). PPS (GPIO5) is not configured or read: neither the driver
+nor its bench program does anything with it beyond counting edges, and there is no time synchronisation here.
+- **Cancel answer (the design's "GNSS only after the `lc76g` cancel check").** Dropping the driver's `read`, `read_fix` or `read_sentence` future is
+  SAFE: nothing is lost, no sentence is corrupted, and `recover` is not needed afterwards. Evidence: the driver README, "Dropped reads"
+  (`lc76g/README.md:111`, "dropping a `read*` or `command` future loses nothing the driver already read"), the host test
+  `dropping_a_read_future_loses_nothing` (`src/tests.rs:1013`: a fix cut in the middle, the future dropped, the rest fed, the next `read_fix`
+  returns the right fix and 6 sentences are counted), the code (`Lc76g::next_sentence`, `src/lib.rs`: the driver's own buffer, position and
+  framer hold everything; the only await is one `uart.read`, and `BufferedUart::read` copies its bytes in the poll that completes it, so a drop
+  can only come before bytes were taken), and the board (`lc76g_resync`, README line 172: 10 Hz fixes read under 20 ms timeouts, 100 of 100 fixes
+  kept over 444 dropped calls). A half sentence stays in the framer and is finished by the next read. Only a `command` write is not droppable
+  (a partial line on the wire; the module discards it by its checksum), and this firmware sends none. **Shape that follows**: the data-ready wait
+  IS the read of the next fix (`data_ready` reads sentences, counts them, and returns when the driver has completed a fix, that is a GGA and an RMC
+  of one epoch; the fix waits in the adapter), so the loop's `select(with_timeout(T, data_ready()), wake)` may drop it at any await; `acquire`
+  turns the waiting fix into the reading and never blocks.
+- **Ok means**: valid sentences keep arriving, WITH OR WITHOUT a position. One sample is one complete fix epoch (GGA + RMC of the same UTC time);
+  the position fields can be empty. 2.5 s without one is ONE error event (TIMEOUT; the row's own deadline T = 2.5 s, Betaflight's figure, instead of
+  3 P = 3 s): the score is 3 per event and 9 enters Recovering, so Degraded after 2.5 s, Recovering after 7.5 s of silence (measured from the last
+  good sample, see the injection run), as the design says. A checksum error, a malformed sentence, a sentence over the length limit and a UART
+  error (overrun, framing, break, parity) are counted (`[STAT] GNSS:`) and are NOT error events: the driver has no "stream broken" signal, and a
+  stream that is broken shows as silence. `status` answers "nothing pending" (a deadline miss); `verify` and `apply` have nothing to do.
+- **`start`** waits up to 5 s for the first valid sentence of any type (bench: 367 to 424 ms after the start of the task); no identity query
+  (that would need a command). The README of the driver gives no start time of the module, so 5 s is this firmware's own bound. **How the long
+  start fits the health machine**: the machine's start retries wait 100, 300 and 1000 ms, too short for a receiver that is still booting, so the
+  waiting is INSIDE `start` (it is awaited to completion, and its 5 s are below the stuck threshold of 20 s); with three retries a receiver that
+  never talks is Absent after 4 x 5 s + 1.4 s. `fw-core` is unchanged. The loop then waits for one fresh fix (at most T) as after any start.
+- **`recover`** = flush and resynchronise: the UART's receive buffer is read empty (reads until one finds nothing for 5 ms, at most 128), and the driver
+  is rebuilt over the same UART (`release` then `new`: no half sentence, no held fix). **`restart`** (the first attempt after an operator request, and
+  the automatic recovery's second step) is the same: a UART has no bus clear, and nothing is configured, so there is nothing stronger to do
+  (noticed: the UART block is not re-initialised). The driver's counts restart at 0 with the new driver; the row's totals add them up.
+- `Reading::Gnss { fix_type, lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used, hdop_x100, vdop_x100, time, date }`, the driver's integer
+  units (1e-7 degree, mm, mm/s, 0.01 degree, DOP x 100; no `f64` anywhere: the build has 0 `__aeabi_d` symbols). `fix_type` is MAVLink's
+  `GPS_FIX_TYPE`: 1 (NO_FIX) unless the RMC status, the GGA quality and the GSA fix mode all say there is a position, then 2 (2D), 3 (3D) or 4
+  (the GGA quality says differential or SBAS-aided, 3D). Position, altitude, speed and course are `None` while `fix_type` is 1.
+- **GPS_RAW_INT (id 24), 1 Hz** (the fix rate; the slot's minimum interval is 100 ms). With a fix: `lat`, `lon` in 1e-7 degree, `alt` the altitude above
+  mean sea level in mm, `eph`/`epv` HDOP/VDOP x 100, `vel` in cm/s, `cog` in 0.01 degree, `satellites_visible` the satellites USED (the GGA's count;
+  the GSV's count of visible satellites is not read), `time_usec` the board time of the sample (not UTC; UTC is in the reading and the `[STAT]` line).
+  Without a fix: `fix_type` NO_FIX, `lat`, `lon` and `alt` 0 (the dialect defines no other convention: it says nothing about a missing position),
+  `vel` and `cog` UINT16_MAX, `eph`/`epv` whatever the receiver says about its DOP or UINT16_MAX, `satellites_visible` its count or 255. The
+  1 s age rule of the other values is replaced by a 3 s rule: no message is sent while the latest sample is older than 3 s (3 fix periods; at
+  1 Hz a sample is up to 1 s old when it is read, so 1 s would drop every message). The same sample can go out twice when the stream's tick comes
+  before the next fix.
+- **Parameters: none.** Nothing of the receiver is configured and there is nothing the driver's README shows as a proven run-time setting that
+  the owner would plausibly change, so `fw-settings` has no GNSS module.
+- A settings save (`param save`) runs with all interrupts off for about 40 ms (rule 1 of `docs/resources.md`); the UART's 32-byte FIFO holds 2.8 ms
+  of line, so a save loses a piece of the stream (counted as a UART overrun and a checksum error, not an error event, and well under T). Not
+  exercised on the board in this packet (no save was run).
+- With nobody reading (the row Failed, or between recovery attempts) the 4096-byte buffer fills in about 3 s and the UART overruns; the first read
+  afterwards reports it (counted) and `recover`/`restart` throw the old bytes away (4128 bytes in the injection run).
+- `[STAT] GNSS:` (after the row's generic line): sentences and sentences per second, fixes, checksum errors, malformed, overflows, epochs dropped,
+  the four UART error counters, resyncs and the bytes they threw away, the fix type, satellites used, HDOP x 100, the UTC time of the latest fix and
+  the age of the last valid sentence.
 
 **BATT.** One sample every 100 ms from a period timer (the "data ready" of this device; a period wait is no bus call). `acquire`
 converts the voltage and the current channel with interrupt-driven single conversions, each awaited (one discarded after the channel
@@ -244,6 +300,11 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   STUCK, one ERROR text "BARO: stuck"; the board is not reset (a device stuck in an await does not stop
   core 0's executor, so the watchdog stays fed) and the rest of the
   firmware (HEARTBEAT, PING/PONG, `[STAT]` lines) keeps running.
+
+- `FEATURES=inject-gnss-silent tools/run.sh 100`: 10 s after GNSS's first good sample the adapter stops seeing sentences (the wrapper swallows the
+  fixes; the receiver keeps talking) until a RESTART request (`device restart GNSS`). Shows the long path of a device that stays silent:
+  one TIMEOUT error event per 2.5 s (Degraded after the first, Recovering after the third), 4 recovery attempts (each a `recover` then a `restart`, each
+  waiting one deadline for a fix), Failed, ONE ERROR text; then `device restart GNSS` -> Ok. Times in the "GNSS on the board" paragraph.
 
 Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
@@ -394,13 +455,13 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 
 | Command (`marv-cli`) | What it does today |
 |---|---|
-| `device restart BARO`, `MAG`, `BATT` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
+| `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
 | `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
 | `reboot --yes` | MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN param1 = 1: the action writes the REQUESTED scratch record and ends ACCEPTED; when the final ACK is handed to the link the watchdog monitor resets the board (`trigger_reset`) 100 to 200 ms later (1 s after the action when no ACK could be handed). Nothing is saved: an unsaved parameter change is gone after the reboot. The boot report then says INFO "reboot: requested" |
-| `device restart <other device>`, `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "restart GNSS: not built yet"). No fake success |
+| `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "gyro calibration: not built yet"). No fake success |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Device drivers
