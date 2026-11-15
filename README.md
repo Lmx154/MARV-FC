@@ -52,7 +52,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into IMU1's registry row each tick and logs and texts its events; while IMU1 is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(8 tests).
+(9 tests).
 
 IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock (as `icm45686_smoke` ran
 it on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
