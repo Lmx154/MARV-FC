@@ -49,8 +49,8 @@ critical-section = "1.1"
 embassy-sync = "0.8.0"
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt"] }
 embedded-io-async = "0.7"
-# IMU1 (src/imu1.rs): the SPI device over embassy-rp's bus and the `DelayNs` trait, as the
-# icm45686 bench programs use them.
+# IMU1 and IMU2 (src/imu1.rs, src/imu2.rs): the SPI device over embassy-rp's bus and the `DelayNs`
+# trait, as the icm45686 and lsm6dsk320x bench programs use them.
 embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-futures = "0.1.2"
@@ -83,14 +83,21 @@ inject-mag-fail-until-restart = ["inject-mag"]
 inject = []
 # Internal: on when a magnetometer injection feature is on.
 inject-mag = []
-# Fault injection around IMU1's adapter (src/imu1.rs, flight core, no log there), 5 s after the
+# Fault injection around IMU1's adapter (src/imu1.rs, src/imu_inject.rs, flight core, no log there), 5 s after the
 # first good sample: every acquire, recover and restart fails until a RESTART request
 # (`device restart IMU1`) has been raised (persistent); the data-ready edges swallowed for 200 ms
 # while the chip keeps producing (missed-edge).
 inject-imu1-persistent = ["inject-imu1"]
 inject-imu1-missed-edge = ["inject-imu1"]
 # Internal: on when an IMU1 injection feature is on.
-inject-imu1 = []
+inject-imu1 = ["inject-imu"]
+# The same around IMU2's adapter (src/imu2.rs): every acquire, recover and restart fails 5 s after the
+# first good sample until a RESTART request (`device restart IMU2`) has been raised (persistent).
+inject-imu2-persistent = ["inject-imu2"]
+# Internal: on when an IMU2 injection feature is on.
+inject-imu2 = ["inject-imu"]
+# Internal: on when an IMU injection feature is on (src/imu_inject.rs, the wrapper both IMUs use).
+inject-imu = []
 # Invariant F1 on the board: one core-0 task spins 3 s without yielding, once, 20 s after start.
 stall-core0 = []
 # NEGATIVE CONTROL of F4: a DMA channel built on core 0 before the start-up check (no transfer;

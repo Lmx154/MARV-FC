@@ -6,10 +6,10 @@
 
 use core::convert::Infallible;
 
+use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_15, PIN_16, PIN_18, PIN_19, PIN_20, SPI0};
 use embassy_rp::spi::{self, Spi};
-use embassy_rp::{Peri, bind_interrupts, dma};
 use embassy_time::{Delay, Duration, block_for};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
@@ -20,17 +20,6 @@ use fw_flight::imu::{
 use icm45686::{
     AccelFullScale, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config, Int1Mode, Odr,
 };
-
-#[cfg(not(feature = "f4-negative"))]
-bind_interrupts!(pub struct Irqs {
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>;
-});
-// One `DMA_IRQ_0` binding per program: the negative control's channel 2 on core 0 is bound here too.
-#[cfg(feature = "f4-negative")]
-bind_interrupts!(pub struct Irqs {
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>,
-        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
-});
 
 /// The cells between core 0 and the IMU1 task.
 pub static CELLS: ImuCells = ImuCells::new();
@@ -109,7 +98,16 @@ impl Icm45686Adapter {
     fn new(p: Parts) -> Self {
         let mut cfg = spi::Config::default();
         cfg.frequency = SPI_HZ;
-        let bus = Spi::new(p.spi, p.sck, p.mosi, p.miso, p.tx_dma, p.rx_dma, Irqs, cfg);
+        let bus = Spi::new(
+            p.spi,
+            p.sck,
+            p.mosi,
+            p.miso,
+            p.tx_dma,
+            p.rx_dma,
+            crate::DmaIrqs,
+            cfg,
+        );
         let cs = Output::new(p.cs, Level::High);
         let device = match ExclusiveDevice::new_no_delay(bus, cs) {
             Ok(device) => device,
@@ -212,15 +210,23 @@ impl ImuAdapter for Icm45686Adapter {
 #[cfg(not(feature = "inject-imu1"))]
 pub type Adapter = Icm45686Adapter;
 #[cfg(feature = "inject-imu1")]
-pub type Adapter = Inject;
+pub type Adapter = crate::imu_inject::Inject<Icm45686Adapter>;
 
 /// The adapter for this build: call on core 1.
 pub fn adapter(parts: Parts) -> Adapter {
     #[cfg(not(feature = "inject-imu1"))]
     return Icm45686Adapter::new(parts);
     #[cfg(feature = "inject-imu1")]
-    return Inject::new(Icm45686Adapter::new(parts));
+    return crate::imu_inject::Inject::new(Icm45686Adapter::new(parts), &CELLS, INJECT);
 }
+
+#[cfg(feature = "inject-imu1-persistent")]
+const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::Persistent;
+#[cfg(all(
+    feature = "inject-imu1-missed-edge",
+    not(feature = "inject-imu1-persistent")
+))]
+const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::MissedEdge;
 
 #[embassy_executor::task]
 pub async fn task(adapter: Adapter) -> ! {
@@ -241,146 +247,5 @@ pub async fn task(adapter: Adapter) -> ! {
             .await
         }
         None => match core::future::pending::<Infallible>().await {},
-    }
-}
-
-/// Injection state words published through the cells (`ImuStatus::inject`).
-#[cfg(feature = "inject-imu1")]
-pub mod inject_state {
-    /// Armed, waiting for 5 s of good samples.
-    pub const ARMED: u32 = 1;
-    /// Active: failing (persistent) or swallowing edges (missed-edge).
-    pub const ACTIVE: u32 = 2;
-    /// Over.
-    pub const DONE: u32 = 3;
-}
-
-/// Fault injection around the ICM-45686 adapter (features `inject-imu1-persistent`,
-/// `inject-imu1-missed-edge`), 5 s after the first good sample. No log: its state goes out through
-/// `injection()` and core 0 logs it.
-#[cfg(feature = "inject-imu1")]
-pub struct Inject {
-    inner: Icm45686Adapter,
-    first_good_us: Option<u64>,
-    state: u32,
-    since_us: u64,
-    restarts_at_start: u32,
-}
-
-#[cfg(feature = "inject-imu1")]
-impl Inject {
-    const AFTER_US: u64 = 5_000_000;
-    #[cfg(feature = "inject-imu1-missed-edge")]
-    const SWALLOW_US: u64 = 200_000;
-
-    fn new(inner: Icm45686Adapter) -> Self {
-        Self {
-            inner,
-            first_good_us: None,
-            state: inject_state::ARMED,
-            since_us: 0,
-            restarts_at_start: 0,
-        }
-    }
-
-    fn set(&mut self, state: u32, now: u64) {
-        self.state = state;
-        self.since_us = now;
-    }
-
-    fn due(&self, now: u64) -> bool {
-        self.state == inject_state::ARMED
-            && self
-                .first_good_us
-                .is_some_and(|t| now.saturating_sub(t) >= Self::AFTER_US)
-    }
-
-    /// Persistent: true while every acquire, recover and restart must fail (until a RESTART
-    /// request has been raised after the failure began).
-    #[cfg(feature = "inject-imu1-persistent")]
-    fn failing(&mut self) -> bool {
-        let now = crate::now_us();
-        if self.due(now) {
-            self.restarts_at_start = CELLS.restart_number();
-            self.set(inject_state::ACTIVE, now);
-        }
-        if self.state == inject_state::ACTIVE && CELLS.restart_number() != self.restarts_at_start {
-            self.set(inject_state::DONE, now);
-        }
-        self.state == inject_state::ACTIVE
-    }
-
-    #[cfg(not(feature = "inject-imu1-persistent"))]
-    fn failing(&mut self) -> bool {
-        let _ = self.restarts_at_start;
-        false
-    }
-}
-
-#[cfg(feature = "inject-imu1")]
-impl ImuAdapter for Inject {
-    async fn data_ready(&mut self) {
-        #[cfg(feature = "inject-imu1-missed-edge")]
-        {
-            let now = crate::now_us();
-            if self.due(now) {
-                self.set(inject_state::ACTIVE, now);
-            }
-            if self.state == inject_state::ACTIVE {
-                if now.saturating_sub(self.since_us) < Self::SWALLOW_US {
-                    // The signal is not seen: the wait never ends (core 0's CHECK kick drops it).
-                    return core::future::pending::<()>().await;
-                }
-                self.set(inject_state::DONE, now);
-            }
-        }
-        self.inner.data_ready().await;
-    }
-
-    async fn start<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), StartFailure> {
-        self.inner.start(delay).await
-    }
-
-    async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
-        if self.failing() {
-            return Err(ErrorKind::Bus);
-        }
-        let reading = self.inner.acquire().await?;
-        self.first_good_us.get_or_insert_with(crate::now_us);
-        Ok(reading)
-    }
-
-    async fn status(&mut self) -> Result<Pending, ErrorKind> {
-        self.inner.status().await
-    }
-
-    async fn verify(&mut self) -> Result<(), VerifyError> {
-        self.inner.verify().await
-    }
-
-    async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
-        self.inner.apply(delay).await
-    }
-
-    async fn recover<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
-        if self.failing() {
-            return Err(ErrorKind::Bus);
-        }
-        self.inner.recover(delay).await
-    }
-
-    async fn restart<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
-        if self.failing() {
-            return Err(ErrorKind::Bus);
-        }
-        self.inner.restart(delay).await
-    }
-
-    fn calls(&self) -> u32 {
-        self.inner.calls()
-    }
-
-    fn injection(&self) -> (u32, u64) {
-        (self.state, self.since_us)
     }
 }

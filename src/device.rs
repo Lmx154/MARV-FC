@@ -1,7 +1,7 @@
 //! The device layer (design: decision-foundation, item 1; core 0): one task per device runs
 //! [`run_device`] over its [`DeviceAdapter`]; one static registry row per device ([`Device`]) is
 //! what the supervisor, the telemetry and SYS_STATUS read. A row is backed either by a core-0 task
-//! ([`BARO`]) or by a flight-core task's cells ([`IMU1`], `fw_flight::imu`): the supervisor copies
+//! ([`BARO`]) or by a flight-core task's cells ([`IMU1`], [`IMU2`], `fw_flight::imu`): the supervisor copies
 //! those into the row every tick, kicks CHECK when the row's last sample is older than T, and logs
 //! the flight core's events, so the rows look the same to every reader.
 
@@ -347,13 +347,20 @@ impl Device {
 }
 
 /// The number of registry rows.
-pub const DEVICE_COUNT: usize = 4;
+pub const DEVICE_COUNT: usize = 5;
 /// IMU1's row, backed by the flight core.
 pub static IMU1: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU1,
     "IMU1",
     crate::imu1::PERIOD_US,
     &crate::imu1::CELLS,
+);
+/// IMU2's row, backed by the flight core.
+pub static IMU2: Device = Device::flight(
+    MarvDevice::MARV_DEVICE_IMU2,
+    "IMU2",
+    crate::imu2::PERIOD_US,
+    &crate::imu2::CELLS,
 );
 /// The barometer's row.
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
@@ -362,7 +369,7 @@ pub static MAG: Device = Device::new(MarvDevice::MARV_DEVICE_MAG, "MAG", crate::
 /// The battery monitor's row.
 pub static BATT: Device = Device::new(MarvDevice::MARV_DEVICE_BATT, "BATT", crate::batt::PERIOD_US);
 /// The registry.
-pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &BARO, &MAG, &BATT];
+pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &IMU2, &BARO, &MAG, &BATT];
 
 /// The row of device `id`.
 pub fn find(id: MarvDevice) -> Option<&'static Device> {

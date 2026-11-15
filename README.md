@@ -4,7 +4,7 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG) and the battery monitor on the ADC (BATT), and IMU1 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG) and the battery monitor on the ADC (BATT), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
@@ -18,17 +18,20 @@ It has no flight functionality.
   action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag` and `batt`, the three core-0 device tasks (see
   Device layer).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
-  thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, and IMU1
-  (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, all built inside
-  core 1's entry closure so their interrupts land on core 1, running the flight-core device loop
-  `fw_flight::imu` (see Flight-core device loop). No log, no critical-section primitive of its own, and no
+  thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, IMU1
+  (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, and IMU2
+  (`src/imu2.rs`): the LSM6DSK320X on SPI1 (SCK GPIO10, MOSI 11, MISO 8, CS 9) with DMA channels 2 and 3 and
+  its INT1 on GPIO7 (INT2, GPIO6, unused), all built inside core 1's entry closure so their interrupts land on
+  core 1, each running the flight-core device loop `fw_flight::imu` in its own task (see Flight-core device
+  loop). The program's one `DMA_IRQ_0` binding (`DmaIrqs` in `src/main.rs`) lists the four channels. No log, no critical-section primitive of its own, and no
   timer in the sample loop there.
-- Between the cores only atomics and `fw_core::xcore` cells (`Kick`, and IMU1's `Seqlock` and `Kick` in
+- Between the cores only atomics and `fw_core::xcore` cells (`Kick`, and each IMU's `Seqlock` and `Kick` in
   `fw_flight::imu::ImuCells`), in internal SRAM. `DMA_IRQ_0` is disabled on core 0 before core 1 starts (all
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
   enabled on core 0 after core 1 started.
 
-Not in it yet: IMU1's parameters and calibration (a fixed configuration for now), IMU2, GNSS and the receiver row, the compass
+Not in it yet: the IMUs' parameters, calibration offsets and self-test (fixed configurations for now), IMU2's
+high-g accelerometer (off; nothing of it on the link), GNSS and the receiver row, the compass
 calibration command (only the `MAG_OFF*` parameters it will write exist), the calibrations and the self-test, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
 a ground station's node runs; when it is full, newer texts are dropped with a log line).
@@ -50,7 +53,7 @@ The board time is `embassy_time::Instant::now()`, lock-free on core 1 (embassy-r
 section, and the sample loop never schedules). Everything core 0 needs
 (state, counters, the latest sample, the largest gap, missed edges, delay counts, restart outcome, the last
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
-into IMU1's registry row each tick and logs and texts its events; while IMU1 is Failed or Absent it gets
+into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
 (10 tests).
 
@@ -66,14 +69,29 @@ set only while the latest MAG sample is younger than 1 s (the same rule for the 
 `voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample while it is younger than 1 s (65535 and -1, MAVLink's "unknown", while there is none or it is older);
 `battery_remaining` stays -1.
 
+IMU2's fixed configuration (`src/imu2.rs`): 4 g, 500 dps, both sensors at 800 Hz: the high-accuracy ODR set
+"800" with the ODR code that is 960 Hz in the normal mode, as `lsm6dsk320x_modes` (check 4) ran it on this
+board (800.664 Hz there; the datasheet gives +-1 % over temperature and supply with the gyroscope on). The
+normal mode offers 480 or 960 Hz, and its 960 Hz ran at 942.66 Hz on this unit. The driver's default filters
+(gyroscope LPF1 and low-g LPF2 off, data-ready mask on), high-g accelerometer off, no FIFO, SPI mode 0 at
+8 MHz. Data-ready: the low-g accelerometer's on INT1 only, LATCHED (high until the output registers are read,
+as `lsm6dsk320x_modes` check 5 showed), waited for by level, so a sample that arrives while the task is busy
+is not lost. One `read_all()` per sample (temperature, gyroscope, low-g; the high-g registers are read and
+dropped). STATUS_REG is not clear-on-read (its flags clear when the data is read), so no status read goes
+with the sample; the chip has no reset flag, so a power-on reset shows as a timeout or a `verify` mismatch.
+Its values go to the station as SCALED_IMU2 (116) at 25 Hz: milli-g, milli-rad/s, centi-degrees (0.00 C sent
+as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
+latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
+
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
-`acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`. `FEATURES=inject-imu1-missed-edge
+`acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
+same for IMU2 (`device restart IMU2`); one wrapper serves both IMUs (`src/imu_inject.rs`). `FEATURES=inject-imu1-missed-edge
 tools/run.sh 60`: 5 s after the first good sample the data-ready edges are swallowed for 200 ms. The
 injection state goes out through the cells and core 0 logs it. `FEATURES=stall-core0 tools/run.sh 60`: one
-core-0 task spins 3 s without yielding 20 s after start and logs IMU1's samples before and after (F1). With
+core-0 task spins 3 s without yielding 20 s after start and logs IMU1's and IMU2's samples before and after (F1). With
 the watchdog the board is reset about 1.7 s into that spin (record "TEST stalled (core 0)"); the feature does
 not act after a watchdog reset, so it does not loop.
-`FEATURES=f4-negative tools/run.sh 20`: a DMA channel is built on core 0 before the start-up check
+`FEATURES=f4-negative tools/run.sh 20`: a DMA channel (6, since 2 and 3 are IMU2's) is built on core 0 before the start-up check
 (negative control of F4: `[FAIL] DMA_IRQ_0 not enabled on core 0`), its line disabled again before core 1
 starts.
 
@@ -433,7 +451,7 @@ board.
   than about 1.6 s.
 - Task ids (one table, `fw_core::watchdog::task`, used by the record and the boot report): core 0 MAIN, USB,
   LINK, SUPERVISOR, BEAT, ACTION (a command's action inside the link task, so a settings save or reload runs under it), BARO, TEST (a check
-  feature's task); flight core FBEAT, IMU1. Each task stores its id when it resumes (`fw_flight::tagged`, a
+  feature's task); flight core FBEAT, IMU1, IMU2. Each task stores its id when it resumes (`fw_flight::tagged`, a
   plain atomic store on every poll).
 - The boot report, read once at start (then the record's magic is cleared), one `[INFO] boot report` log line
   and a text held until a ground station's node runs: time-out + a stall record = CRITICAL "WDG reset: BARO
@@ -463,14 +481,14 @@ What each cargo feature does under the watchdog:
 |---|---|
 | `no-fbeat` | the watchdog is not started (a pre-watchdog negative control); no reset |
 | `inject-baro-*` (transient, persistent, missed-edge, silent, verify, por, fail-until-restart, stuck) | device faults inside awaits: the executor runs on, the watchdog stays fed, no reset (stuck: measured) |
-| `inject-imu1-persistent`, `inject-imu1-missed-edge` | IMU1 faults on the flight core; `fbeat` still answers, no reset |
+| `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent` | IMU faults on the flight core; `fbeat` still answers, no reset |
 | `stall-core0` | 3 s spin: reset about 1.7 s in, record "TEST stalled (core 0)"; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
 | `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |
 | `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
-| `inject`, `inject-imu1` | internal, switched on by the features above |
+| `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
 it provokes; `tools/run.sh` puts the normal build back):
