@@ -83,6 +83,17 @@ Its values go to the station as SCALED_IMU2 (116) at 25 Hz: milli-g, milli-rad/s
 as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
+Measured with both IMUs on the flight core (2026-11-15, 10-minute clean run, log
+`marv-v2-firmware-20261115-110318.log`): five rows Ok throughout, 0 transitions after the start, 0 errors,
+timeouts, missed edges and recoveries on both IMUs, delay count after the start 0, watchdog stalls begun 0.
+IMU1 803.52 samples/s, IMU2 800.42 samples/s (10 s to 600 s). NOT met: the samples of one IMU are no longer
+always read within P: at 600 s IMU1 had 87 gaps over 1.5 P (48 across its own `verify`), largest gap 2682 us
+(over 2 P, so at least one sample lost; the single-IMU run had 0 and 1594 us), its `verify` 1105 to 2506 us
+(was 1.0 to 1.4 ms); IMU2 482 gaps over 1.5 P (2 across its own `verify`), largest 4239 us, `verify` 435 to
+1683 us. While IMU2 was parked (Failed) in the `inject-imu2-persistent` run, IMU1 was back to the single-IMU
+figures (`verify` from 1001 us, no new gap). Open: how two IMUs share core 1 around `verify` (see the
+report of the IMU2 packet).
+
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
 same for IMU2 (`device restart IMU2`); one wrapper serves both IMUs (`src/imu_inject.rs`). `FEATURES=inject-imu1-missed-edge
