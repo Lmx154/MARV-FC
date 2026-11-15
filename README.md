@@ -103,10 +103,17 @@ Measured with both IMUs and the incremental verify (2026-11-15, 10-minute clean 
 timeouts, missed edges and recoveries, delay count after the start 0, watchdog stalls begun 0. IMU1 803.52
 samples/s (its own rate: nothing lost), largest gap 2442 us, 110 gaps over 1.5 P (10 across a step), steps 134
 to 946 us, 608 passes; IMU2 800.48 samples/s (bench 800.664 Hz), largest gap 3410 us, 1066 gaps over 1.5 P (79
-across a step), steps 84 to 489 us, 600 passes. NOT met: gaps over 1.5 P = 0. The longest poll without a
-yield is 1.06 to 2.56 ms (IMU1) and 0.63 to 1.36 ms (IMU2) in EVERY 10 s window, with single-register steps,
-so it is not `verify`; while IMU2 was parked IMU1 had no new gap but still polls of about 1 ms. Open for the
-lead (suspects in the report of the IMU2 packet).
+across a step), steps 84 to 489 us, 600 passes. Gaps and long polls are REPORTED, not a pass criterion: the
+data-ready, one-read-per-sample scheme is Betaflight's, which loses a sample when the reader is late and does
+not count it; ArduPilot and PX4 avoid the loss with the chip's FIFO (kept in reserve here). An IMU row is
+accepted when it is Ok with 0 errors, timeouts and recoveries and its rate is within 1 % of the chip's own.
+The longest poll is 1.06 to 2.56 ms (IMU1) and 0.63 to 1.36 ms (IMU2) in every 10 s window, with
+single-register steps, so it is not `verify`; while IMU2 was parked IMU1 had no new gap but still polls of
+about 1 ms. Three 620 s runs (logging as usual, `DEFMT_LOG=off`, `quiet-stat`) gave IMU1 63 / 37 / 42 gaps and
+IMU2 379 / 279 / 199: logging on core 0 is NOT the main cause. The cause is not found; it belongs to the
+measurement of what disturbs the flight core, to be done before any control loop runs there (the features
+`latency-text` and `quiet-stat` and the per-poll latency figure exist for it). Facts and suspects:
+`~/Documents/MARV-V2-drivers/_plan/facts-foundation.md`, "Two IMUs on the flight core".
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
@@ -133,7 +140,7 @@ A start, `recover` or `restart` that returns `Ok` only says the bus and the devi
 waits for ONE fresh sample (`with_timeout(T, data ready)`, then one `acquire` awaited to completion) before
 it tells `Health` the step worked; a timeout or a failed `acquire` counts as a failure (a failed `recover`
 goes on to `restart`, a failed `restart` ends the attempt, a failed start is a failed start), so "recovered"
-and "started" mean data flows. `verify()` runs about once per second between reads. Each device has a static registry row (`DEVICES`): id,
+and "started" mean data flows. On core 0 `verify()` runs about once per second between reads; the flight-core IMUs verify one register per step instead (see the flight core's rules). Each device has a static registry row (`DEVICES`): id,
 name, nominal period P, the latest-sample `Watch` (Pa, degC, board time in us, `seq` +1 per publish,
 source), a status cell its task alone writes, `progress` (bumped after every await) and `stuck` (written
 by the supervisor when `progress` stands still for max(1 s, 20 P)); `RUNNING` holds the id of the device

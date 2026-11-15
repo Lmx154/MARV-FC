@@ -18,7 +18,7 @@ resolver = "3"
 #   [patch."https://github.com/Lmx154/icm45686-rs.git"]
 #   icm45686 = { path = "../MARV-V2-drivers/icm45686" }
 icm45686 = { git = "https://github.com/Lmx154/icm45686-rs.git", rev = "78b13c709acc2464194c08731434750b85799927", features = ["defmt"] }
-lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "6762ec64767ea52fca49748be260e4c932629a32", features = ["defmt"] }
+lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "447e881bbfa43ad216563f6ed751c1936b771952", features = ["defmt"] }
 bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca9493e5dddd3d019a23b6d05395b", features = ["defmt"] }
 bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac832582f3c67be3332e12baf9970d0d6a", features = ["defmt"] }
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }

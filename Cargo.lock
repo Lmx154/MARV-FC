@@ -963,7 +963,7 @@ dependencies = [
 [[package]]
 name = "lsm6dsk320x"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/lsm6dsk320x-rs.git?rev=6762ec64767ea52fca49748be260e4c932629a32#6762ec64767ea52fca49748be260e4c932629a32"
+source = "git+https://github.com/Lmx154/lsm6dsk320x-rs.git?rev=447e881bbfa43ad216563f6ed751c1936b771952#447e881bbfa43ad216563f6ed751c1936b771952"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
