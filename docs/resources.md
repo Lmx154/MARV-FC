@@ -105,9 +105,14 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 7. A driver is constructed on the core that owns its interrupt (the HAL enables the NVIC line in the
    constructor, on the calling core). The timer interrupt is always on core 0; a flash write must come from
    core 0 and pauses core 1.
-8. The flight core schedules no timer in its sample loops, takes no critical-section primitive of its own and
+8. The flight core schedules no timer at all, takes no critical-section primitive of its own and
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
-   buffer into it, atomic flags with a lock-free waker for requests).
+   buffer into it, atomic flags with a lock-free waker for requests). Its IMU tasks wait through `SpinDelay`
+   (`src/imu1.rs`): under 1 ms a busy wait, from 1 ms on clock polls with a yield between them. With
+   `embassy_time::Delay` (the timer queue) the IMU1 self-test's ~7000 short waits ended twice in a watchdog
+   reset with no record (2026-11-15, `logs/marv-v2-firmware-20261115-153508.log`); probable cause, not
+   proven: a wake scheduled on core 1 expires core-0 timers and wakes core-0 interrupt-executor tasks (the
+   watchdog monitor) through a pender that pends the interrupt in core 1's NVIC.
 9. The flight core verifies incrementally (lead's ruling, 2026-11-15): the sample loop never runs a
    whole-configuration `verify`; after every K-th sample, never while a sample is waiting, it checks ONE
    register (`verify_step`: one or two SPI transactions, the ICM's indirect registers with their 10 us

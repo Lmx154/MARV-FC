@@ -44,7 +44,7 @@ It has no flight functionality.
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
   enabled on core 0 after core 1 started.
 
-Not in it yet: IMU configuration parameters and the self-test (fixed configurations for now; the IMU calibration
+Not in it yet: IMU configuration parameters (fixed configurations for now; the IMU calibration
 offsets and the gyro, accelerometer and compass calibrations exist, see Calibrations), IMU2's
 high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit, the SD card.
 
@@ -68,7 +68,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(16 tests).
+(20 tests).
 
 IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock (as `icm45686_smoke` ran
 it on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
@@ -582,7 +582,7 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 | `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
 | `reboot --yes` | MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN param1 = 1: the action writes the REQUESTED scratch record and ends ACCEPTED; when the final ACK is handed to the link the watchdog monitor resets the board (`trigger_reset`) 100 to 200 ms later (1 s after the action when no ACK could be handed). Nothing is saved: an unsaved parameter change is gone after the reboot. The boot report then says INFO "reboot: requested" |
 | `calibrate gyro`, `accel`, `compass`, `calibrate cancel` | see Calibrations |
-| `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "self-test: not built yet"). No fake success |
+| `device selftest MAG`, `IMU1`, `IMU2` (others DENIED "not supported yet") | THE DEVICE MUST LIE STILL (no motion check: a moved device just reports FAIL). The device's task runs the driver's self-test with the driver's defaults (bmm350 X and Y both polarities; icm45686 the vendor's eDMP test, both sensors, 320 ms, 50 %; lsm6dsk320x low-g, gyroscope and high-g, positive stimulus), then the operator restart path under the same request number (the adapter's `restart`, then a fresh sample) whatever the test gave. MAG on core 0 (`REQ_SELF_TEST` in `run_device`), IMU1/IMU2 on the flight core (Kick bit `REQ_SELF_TEST` = 8, the test and the restart in the same loop step so no CHECK is taken between them). The outcome crosses as `fw_core::selftest::Outcome` (number, verdict Pass / Fail(failed-axis mask: IMU1 accel XYZ gyro XYZ, IMU2 low-g/gyro/high-g XYZ, MAG X+ X- Y+ Y-) / Error(kind), duration; IMU outcome in `ImuStatus`), the device's return through the restart outcome of the same number. ACCEPTED only on a pass with the device back Ok, otherwise FAILED; ONE STATUSTEXT before the final ACK: "MAG self-test: PASS", "IMU2 self-test FAIL: lowg X gyro YZ", "IMU1 self-test: error bus". The row's flag bit 1 (self-test) is set from the request until the action ends. On the board (2026-11-15, logs `marv-v2-firmware-20261115-152811.log`, `-153906.log`): MAG 7 runs PASS in 133-164 ms, IMU1 4 runs PASS in 749-751 ms, IMU2 4 runs PASS in 875-881 ms, each device back Ok with samples at its rate, the calibration offsets still applied afterwards; 1 to 2 status rows went out with the flag per IMU run, 0 or 1 per MAG run (the flag is not visible in `marv-cli devices`, which prints no flags). KNOWN DEFECT: each IMU1 self-test holds the flight core about 0.74 s (the ICM's 100 us result polls are busy waits and its short SPI reads do not yield): a watchdog "flight core stalled" text (no reset), IMU2 gets no sample for up to 0.96 s (0 errors, 0 timeouts). The IMU2 and MAG tests do not stall it. Not seen on the board: a FAIL or an error verdict (host tests only, `fw_core::selftest`, `fw_flight::imu`) |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Radio (ELRS receiver, `rc-port`)
