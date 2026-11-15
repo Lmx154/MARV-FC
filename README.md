@@ -54,7 +54,7 @@ rebuilds I2C1 and runs `init`.
 
 How to see it: `tools/run.sh` prints one `[INFO]` line per health transition (with the board time in ms)
 and, every 10 s, a `[STAT] BARO:` line: state, samples and samples per second over the last 10 s, the
-latest `seq`, errors, timeouts, missed edges, recoveries, attempts, the largest gap between samples, the
+latest `seq`, errors, timeouts, missed edges, recoveries, config restored, attempts, the largest gap between samples, the
 adapter's bus-call counter and the latest sample. On USB, `marv-link-test` (MARV-GCS) counts one
 `MARV_DEVICE_STATUS` per second; the ground station's Devices view shows the row.
 

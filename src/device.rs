@@ -553,7 +553,7 @@ impl Supervision {
                 (l.seq, now.as_micros().saturating_sub(l.t_us) / 1000)
             });
             defmt::info!(
-                "[STAT] {=str}: {=str}{=str}, samples {=u32} ({=f32}/s over the last 10 s), seq {=u32}, errors {=u32}, timeouts {=u32}, missed edges {=u32}, recoveries {=u32}, attempts {=u8}, largest gap {=u64} us, adapter calls {=u32}, last {} age {=u64} ms",
+                "[STAT] {=str}: {=str}{=str}, samples {=u32} ({=f32}/s over the last 10 s), seq {=u32}, errors {=u32}, timeouts {=u32}, missed edges {=u32}, recoveries {=u32}, config restored {=u32}, attempts {=u8}, largest gap {=u64} us, adapter calls {=u32}, last {} age {=u64} ms",
                 dev.name,
                 state_name(s.state),
                 if dev.stuck.load(Ordering::Relaxed) {
@@ -568,6 +568,7 @@ impl Supervision {
                 s.health.timeouts,
                 s.missed_edges,
                 s.health.recoveries,
+                s.health.config_restored,
                 s.health.attempts,
                 s.max_gap_us,
                 s.adapter.calls,
