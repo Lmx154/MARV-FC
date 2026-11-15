@@ -1,6 +1,9 @@
 //! The device layer (design: decision-foundation, item 1; core 0): one task per device runs
 //! [`run_device`] over its [`DeviceAdapter`]; one static registry row per device ([`Device`]) is
-//! what the supervisor, the telemetry and SYS_STATUS read. One row so far: [`BARO`].
+//! what the supervisor, the telemetry and SYS_STATUS read. A row is backed either by a core-0 task
+//! ([`BARO`]) or by a flight-core task's cells ([`IMU1`], `fw_flight::imu`): the supervisor copies
+//! those into the row every tick, kicks CHECK when the row's last sample is older than T, and logs
+//! the flight core's events, so the rows look the same to every reader.
 
 use core::cell::Cell;
 use core::fmt;
@@ -15,6 +18,7 @@ use embassy_sync::watch::{Sender, Watch};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
+use fw_flight::imu::{ImuCells, TRANSITIONS};
 use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
 
@@ -47,6 +51,11 @@ pub enum Source {
 pub enum Reading {
     Baro {
         pressure_pa: f32,
+        temperature_c: f32,
+    },
+    Imu {
+        gyro_rads: [f32; 3],
+        accel_ms2: [f32; 3],
         temperature_c: f32,
     },
 }
@@ -157,8 +166,9 @@ impl DeviceStatus {
     };
 }
 
-/// One registry row. `status` and `latest` are written only by the device's own task, `stuck` only
-/// by the supervisor; `progress` is bumped by the task after every await.
+/// One registry row. `status` and `latest` are written only by the device's own task (by the
+/// supervisor from the cells for a flight-core row), `stuck` only by the supervisor; `progress` is
+/// bumped by the task after every await.
 pub struct Device {
     pub id: MarvDevice,
     pub name: &'static str,
@@ -177,6 +187,8 @@ pub struct Device {
     /// The outcome of the latest restart the task has finished: request number << 1, bit 0 set when
     /// the device reached Ok, clear when it reached Failed or Absent (0 = none yet; numbers start at 1).
     restart_outcome: AtomicU32,
+    /// The flight-core task's cells, for a row backed by the flight core.
+    flight: Option<&'static ImuCells>,
 }
 
 /// Request bit: apply the stored settings to the running device.
@@ -198,7 +210,20 @@ impl Device {
             request: AtomicU8::new(0),
             restarts: AtomicU32::new(0),
             restart_outcome: AtomicU32::new(0),
+            flight: None,
         }
+    }
+
+    /// A row backed by a flight-core task's `cells`.
+    pub const fn flight(
+        id: MarvDevice,
+        name: &'static str,
+        period_us: u32,
+        cells: &'static ImuCells,
+    ) -> Self {
+        let mut row = Self::new(id, name, period_us);
+        row.flight = Some(cells);
+        row
     }
 
     /// Sets the nominal period P (the task does, when it applies a configuration).
@@ -210,8 +235,11 @@ impl Device {
         self.period_us.load(Ordering::Relaxed)
     }
 
-    /// Raises the device's APPLY request and wakes its task.
+    /// Raises the device's APPLY request and wakes its task (a flight-core row has no APPLY yet).
     pub fn request_apply(&self) {
+        if self.flight.is_some() {
+            return;
+        }
         self.request.fetch_or(REQ_APPLY, Ordering::AcqRel);
         self.wake.signal(());
     }
@@ -220,6 +248,10 @@ impl Device {
     /// (1, 2, ...): [`restart_outcome`](Self::restart_outcome) reports the outcome of that request.
     pub fn request_restart(&self) -> u32 {
         let number = self.restarts.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        if let Some(cells) = self.flight {
+            cells.request_restart(number);
+            return number;
+        }
         self.request.fetch_or(REQ_RESTART, Ordering::AcqRel);
         self.wake.signal(());
         number
@@ -304,11 +336,23 @@ impl Device {
 }
 
 /// The number of registry rows.
-pub const DEVICE_COUNT: usize = 1;
+pub const DEVICE_COUNT: usize = 2;
+/// IMU1's row, backed by the flight core.
+pub static IMU1: Device = Device::flight(
+    MarvDevice::MARV_DEVICE_IMU1,
+    "IMU1",
+    crate::imu1::PERIOD_US,
+    &crate::imu1::CELLS,
+);
 /// The barometer's row.
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
 /// The registry.
-pub static DEVICES: [&Device; DEVICE_COUNT] = [&BARO];
+pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &BARO];
+
+/// The row of device `id`.
+pub fn find(id: MarvDevice) -> Option<&'static Device> {
+    DEVICES.iter().copied().find(|d| d.id == id)
+}
 
 /// Raises the APPLY request of every device whose bit (bit = `MARV_DEVICE` id) is set in `mask`.
 pub fn raise_apply(mask: u32) {
@@ -618,6 +662,20 @@ struct Watcher {
     notices: [Option<Notice>; NOTICE_DEPTH],
     last_text: Option<Instant>,
     stat_samples: u32,
+    flight: FlightSeen,
+}
+
+/// What the supervisor last saw in a flight-core row's cells.
+#[derive(Clone, Copy, Default)]
+struct FlightSeen {
+    seq: Option<u32>,
+    transitions: u32,
+    restart_taken: u32,
+    attempt_ms: u64,
+    attempt_failed_ms: u64,
+    missed_edges: u32,
+    inject: u32,
+    delays_after_start: u32,
 }
 
 /// The device part of the supervisor: stuck detection, the transition texts (at most one per
@@ -636,6 +694,7 @@ impl Supervision {
                 notices: [None; NOTICE_DEPTH],
                 last_text: None,
                 stat_samples: 0,
+                flight: FlightSeen::default(),
             }),
             stat_at: now,
         }
@@ -653,6 +712,7 @@ impl Supervision {
             }
         }
         for (dev, w) in DEVICES.iter().zip(self.watchers.iter_mut()) {
+            mirror(dev, w, now);
             let progress = dev.progress.load(Ordering::Relaxed);
             let stuck = dev.stuck.load(Ordering::Relaxed);
             if progress != w.progress {
@@ -699,7 +759,7 @@ impl Supervision {
                 (l.seq, now.as_micros().saturating_sub(l.t_us) / 1000)
             });
             defmt::info!(
-                "[STAT] {=str}: {=str}{=str}, samples {=u32} ({=f32}/s over the last 10 s), seq {=u32}, errors {=u32}, timeouts {=u32}, missed edges {=u32}, recoveries {=u32}, config restored {=u32}, attempts {=u8}, largest gap {=u64} us, adapter calls {=u32}, last {} age {=u64} ms",
+                "[STAT] {=str}: {=str}{=str}, samples {=u32} ({=f32}/s over the last 10 s), seq {=u32}, errors {=u32}, timeouts {=u32}, missed edges {=u32}, overflows {=u32}, recoveries {=u32}, config restored {=u32}, attempts {=u8}, largest gap {=u64} us, adapter calls {=u32}, last {} age {=u64} ms",
                 dev.name,
                 state_name(s.state),
                 if dev.stuck.load(Ordering::Relaxed) {
@@ -713,6 +773,7 @@ impl Supervision {
                 s.health.errors,
                 s.health.timeouts,
                 s.missed_edges,
+                s.health.overflows,
                 s.health.recoveries,
                 s.health.config_restored,
                 s.health.attempts,
@@ -721,7 +782,177 @@ impl Supervision {
                 latest.map(|l| l.reading),
                 age_ms
             );
+            if let Some(f) = dev.flight.and_then(ImuCells::read) {
+                let (accel, gyro, temperature) = f.latest.map_or(([0.0; 3], [0.0; 3], 0.0), |l| {
+                    (
+                        l.reading.accel_ms2,
+                        l.reading.gyro_rads,
+                        l.reading.temperature_c,
+                    )
+                });
+                defmt::info!(
+                    "[STAT] {=str} flight core: delay count {=u32} ({=u32} after the start), CHECK kicks taken {=u32}, |accel| {=f32} m/s^2, accel {} m/s^2, gyro {} rad/s, temperature {=f32} C, progress {=u32}",
+                    dev.name,
+                    f.delays,
+                    f.delays_after_start,
+                    f.checks,
+                    norm(accel),
+                    accel,
+                    gyro,
+                    temperature,
+                    f.progress
+                );
+            }
         }
+    }
+}
+
+/// The length of a vector (Newton's method: `core` has no `f32::sqrt`).
+fn norm(v: [f32; 3]) -> f32 {
+    let s = v.iter().map(|x| x * x).sum::<f32>();
+    if s <= 0.0 {
+        return 0.0;
+    }
+    let mut x = s.max(1.0);
+    for _ in 0..24 {
+        x = 0.5 * (x + s / x);
+    }
+    x
+}
+
+/// A flight-core row: copies the cells into the row, logs the flight core's events (it logs
+/// nothing itself), queues the transition texts, and kicks CHECK when the last sample is older
+/// than T.
+fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
+    let Some(cells) = dev.flight else {
+        return;
+    };
+    let Some(s) = cells.read() else {
+        return;
+    };
+    let now_us = now.as_micros();
+    let mut status = dev.status();
+    status.state = s.state;
+    status.health = s.health;
+    status.adapter = AdapterCounters { calls: s.calls };
+    status.samples = s.samples;
+    status.missed_edges = s.missed_edges;
+    status.last_sample_us = s.last_sample_us;
+    status.max_gap_us = s.max_gap_us;
+    dev.set_status(status);
+    dev.progress.store(s.progress, Ordering::Relaxed);
+    dev.restart_outcome
+        .store(s.restart_outcome, Ordering::Release);
+    if let Some(l) = s.latest
+        && w.flight.seq != Some(l.seq)
+    {
+        w.flight.seq = Some(l.seq);
+        dev.latest.sender().send(Sample {
+            reading: Reading::Imu {
+                gyro_rads: l.reading.gyro_rads,
+                accel_ms2: l.reading.accel_ms2,
+                temperature_c: l.reading.temperature_c,
+            },
+            t_us: l.t_us,
+            seq: l.seq,
+            source: Source::Hardware,
+        });
+    }
+
+    let new = s.transitions.wrapping_sub(w.flight.transitions);
+    if new as usize > TRANSITIONS {
+        defmt::warn!(
+            "[INFO] {=str}: {=u32} transitions since the last tick, the oldest {=u32} not seen",
+            dev.name,
+            new,
+            new - TRANSITIONS as u32
+        );
+    }
+    for n in s.transitions.wrapping_sub(new.min(TRANSITIONS as u32))..s.transitions {
+        let Some(Some(t)) = s.ring.get(n as usize % TRANSITIONS).copied() else {
+            continue;
+        };
+        if t.before != t.after {
+            defmt::info!(
+                "[INFO] {=str}: {=str} -> {=str} at {=u64} ms (last error {=str})",
+                dev.name,
+                state_name(t.before),
+                state_name(t.after),
+                t.at_ms,
+                error_name(t.error)
+            );
+        }
+        if let Some(report) = t.report {
+            queue(w, dev, Notice::Report(report));
+        }
+    }
+    w.flight.transitions = s.transitions;
+
+    if s.restart_taken != w.flight.restart_taken {
+        w.flight.restart_taken = s.restart_taken;
+        defmt::info!(
+            "[INFO] {=str}: restart request {=u32} taken at {=u64} ms",
+            dev.name,
+            s.restart_taken,
+            s.restart_taken_ms
+        );
+    }
+    if s.attempt_ms != w.flight.attempt_ms {
+        w.flight.attempt_ms = s.attempt_ms;
+        defmt::info!(
+            "[INFO] {=str}: recovery attempt {=u8} starts at {=u64} ms, {=u64} ms after the previous failure",
+            dev.name,
+            s.health.attempts,
+            s.attempt_ms,
+            s.attempt_ms.saturating_sub(s.failure_ms)
+        );
+    }
+    if s.attempt_failed_ms != w.flight.attempt_failed_ms {
+        w.flight.attempt_failed_ms = s.attempt_failed_ms;
+        defmt::info!(
+            "[INFO] {=str}: recovery attempt {=u8} failed at {=u64} ms",
+            dev.name,
+            s.health.attempts,
+            s.attempt_failed_ms
+        );
+    }
+    if s.missed_edges != w.flight.missed_edges {
+        defmt::info!(
+            "[INFO] {=str}: missed edges {=u32} (+{=u32}), the latest found at {=u64} us with the last sample {=u64} us old; injection state {=u32} since {=u64} us",
+            dev.name,
+            s.missed_edges,
+            s.missed_edges.wrapping_sub(w.flight.missed_edges),
+            s.missed_at_us,
+            s.missed_late_us,
+            s.inject,
+            s.inject_since_us
+        );
+        w.flight.missed_edges = s.missed_edges;
+    }
+    if s.inject != w.flight.inject {
+        w.flight.inject = s.inject;
+        defmt::info!(
+            "[INFO] {=str}: injection state {=u32} since {=u64} us",
+            dev.name,
+            s.inject,
+            s.inject_since_us
+        );
+    }
+    if s.delays_after_start != w.flight.delays_after_start {
+        w.flight.delays_after_start = s.delays_after_start;
+        defmt::info!(
+            "[INFO] {=str}: delay count after the start {=u32} at {=u64} ms",
+            dev.name,
+            s.delays_after_start,
+            now.as_millis()
+        );
+    }
+
+    let late = s
+        .last_sample_us
+        .is_none_or(|t| now_us.saturating_sub(t) > dev.deadline().as_micros());
+    if late {
+        cells.request_check();
     }
 }
 

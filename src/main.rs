@@ -3,22 +3,30 @@
 //!
 //! Core 0, the I/O core: `usb_link` (a MAVLink node, system 1 component 1, on USB), `supervisor`
 //! (10 ms tick: the flight core's liveness ping at 10 Hz, the start-up checks, the devices' stuck
-//! check and transition texts, `[STAT]` lines every 10 s), `beat0`, and one task per device
-//! (`device`): the barometer (`baro`). Core 1, the flight core: only `fw_flight::liveness`. The
-//! cores share only the atomics and `fw_core::xcore` cells below, in internal SRAM. The parameters
+//! check and transition texts, `[STAT]` lines every 10 s), `beat0`, and one task per core-0 device
+//! (`device`): the barometer (`baro`). Core 1, the flight core: `fw_flight::liveness` and IMU1
+//! (`imu1`: the ICM-45686 on SPI0 with DMA channels 0 and 1, built inside core 1's entry, running
+//! `fw_flight::imu`). The cores share only the atomics and `fw_core::xcore` cells (in `imu1::CELLS`
+//! and below), in internal SRAM. Telemetry adds HIGHRES_IMU (id 0, IMU1) and SCALED_PRESSURE
+//! (BARO) at 25 Hz. The parameters
 //! (`store`, the barometer's five, in RAM only) and the commands (`actions`) are built; no flash, no
 //! watchdog. It runs until `tools/run.sh` ends it.
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
 //! Features `inject-baro-transient`, `-persistent`, `-fail-until-restart`, `-missed-edge`, `-silent`,
-//! `-verify`, `-stuck`, `-por`: fault injection (`inject`).
+//! `-verify`, `-stuck`, `-por`: fault injection (`inject`). Features `inject-imu1-persistent`,
+//! `inject-imu1-missed-edge`: fault injection around IMU1's adapter (`imu1::Inject`). Feature
+//! `stall-core0`: one core-0 task spins 3 s without yielding, 20 s after start (invariant F1).
+//! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
+//! start-up check, then its line is disabled again before core 1 starts.
 #![no_std]
 #![no_main]
 
 mod actions;
 mod baro;
 mod device;
+mod imu1;
 #[cfg(feature = "inject")]
 mod inject;
 mod store;
@@ -28,7 +36,7 @@ use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use defmt_rtt as _;
-use device::{DEVICE_COUNT, DEVICES, Device, Supervision, TextLine};
+use device::{BARO, DEVICE_COUNT, DEVICES, Device, IMU1, Reading, Supervision, TextLine};
 use embassy_executor::{Executor, Spawner};
 use embassy_futures::select::{Either, select};
 use embassy_rp::bind_interrupts;
@@ -43,7 +51,10 @@ use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
 use fw_core::xcore::Kick;
-use mavlink_device::dialect::{MavSeverity, MavState, MavSysStatusSensor, SYS_STATUS_DATA};
+use mavlink_device::dialect::{
+    HIGHRES_IMU_DATA, HighresImuUpdatedFlags, MavSeverity, MavState, MavSysStatusSensor,
+    SCALED_PRESSURE_DATA, SYS_STATUS_DATA,
+};
 use mavlink_device::{
     CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, MAX_BATCH, Node, Outgoing,
     ParamStore, RunError, Stream, StreamSlot, Telemetry, Texts,
@@ -71,6 +82,8 @@ static KICK: Kick = Kick::new();
 /// Core 1's ACTLR as it read it at the top of its entry; valid once `CORE1_ACTLR_READ` is true.
 static CORE1_ACTLR: AtomicU32 = AtomicU32::new(0);
 static CORE1_ACTLR_READ: AtomicBool = AtomicBool::new(false);
+/// Core 1's `DMA_IRQ_0` after it built IMU1's SPI: 0 not read yet, 1 disabled, 2 enabled.
+static CORE1_DMA_IRQ0: AtomicU8 = AtomicU8::new(0);
 
 /// Core 1's stack and executor.
 const CORE1_STACK_BYTES: usize = 16 * 1024;
@@ -102,6 +115,10 @@ const SYS_STATUS_ID: u32 = 1;
 /// The project dialect's MARV_DEVICE_STATUS; every registry row at least once per second.
 const DEVICE_STATUS_ID: u32 = 42421;
 const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / DEVICE_COUNT.div_ceil(MAX_BATCH) as i32;
+/// The sensor values: HIGHRES_IMU (IMU1 as id 0) and SCALED_PRESSURE (BARO), 25 Hz each.
+const HIGHRES_IMU_ID: u32 = 105;
+const SCALED_PRESSURE_ID: u32 = 29;
+const VALUES_INTERVAL_US: i32 = 40_000;
 const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": flight core up");
 
 fn now_us() -> u64 {
@@ -132,17 +149,22 @@ async fn fbeat() -> ! {
     fw_flight::liveness(&KICK, &PING, &PONG).await
 }
 
-fn core1_main() -> ! {
+fn core1_main(imu1_parts: imu1::Parts) -> ! {
     CORE1_ACTLR.store(read_actlr(), Ordering::Relaxed);
     CORE1_ACTLR_READ.store(true, Ordering::Release);
+    // Built here so that the DMA and GPIO interrupts are enabled on this core's NVIC.
+    let imu1 = imu1::adapter(imu1_parts);
+    let dma_on = interrupt::DMA_IRQ_0.is_enabled();
+    CORE1_DMA_IRQ0.store(1 + u8::from(dma_on), Ordering::Release);
     let executor = EXECUTOR1.init(Executor::new());
     executor.run(|spawner| {
         #[cfg(not(feature = "no-fbeat"))]
         if let Ok(token) = fbeat() {
             spawner.spawn(token);
         }
-        #[cfg(feature = "no-fbeat")]
-        let _ = spawner;
+        if let Ok(token) = imu1::task(imu1) {
+            spawner.spawn(token);
+        }
     })
 }
 
@@ -197,6 +219,66 @@ fn rows() -> [DeviceRow; DEVICE_COUNT] {
 
 impl Telemetry for Board {
     fn sample(&mut self, message_id: u32, now_us: u64, out: &mut Outgoing<'_>) -> bool {
+        if message_id == HIGHRES_IMU_ID {
+            let Some(sample) = IMU1.latest.try_get() else {
+                return false;
+            };
+            let Reading::Imu {
+                gyro_rads: [xgyro, ygyro, zgyro],
+                accel_ms2: [xacc, yacc, zacc],
+                temperature_c,
+            } = sample.reading
+            else {
+                return false;
+            };
+            return out
+                .push(&HIGHRES_IMU_DATA {
+                    time_usec: sample.t_us,
+                    xacc,
+                    yacc,
+                    zacc,
+                    xgyro,
+                    ygyro,
+                    zgyro,
+                    xmag: f32::NAN,
+                    ymag: f32::NAN,
+                    zmag: f32::NAN,
+                    abs_pressure: f32::NAN,
+                    diff_pressure: f32::NAN,
+                    pressure_alt: f32::NAN,
+                    temperature: temperature_c,
+                    fields_updated: HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XACC
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YACC
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZACC
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XGYRO
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YGYRO
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZGYRO
+                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE,
+                    id: 0,
+                })
+                .is_ok();
+        }
+        if message_id == SCALED_PRESSURE_ID {
+            let Some(sample) = BARO.latest.try_get() else {
+                return false;
+            };
+            let Reading::Baro {
+                pressure_pa,
+                temperature_c,
+            } = sample.reading
+            else {
+                return false;
+            };
+            return out
+                .push(&SCALED_PRESSURE_DATA {
+                    time_boot_ms: u32::try_from(sample.t_us / 1000).unwrap_or(u32::MAX),
+                    press_abs: pressure_pa / 100.0,
+                    press_diff: 0.0,
+                    temperature: (temperature_c * 100.0) as i16,
+                    temperature_press_diff: 0,
+                })
+                .is_ok();
+        }
         if message_id == DEVICE_STATUS_ID {
             let mut sent = false;
             for _ in 0..DEVICE_COUNT.min(MAX_BATCH) {
@@ -323,6 +405,16 @@ async fn usb_link(
             message_id: DEVICE_STATUS_ID,
             default_interval_us: DEVICE_STATUS_INTERVAL_US,
             min_interval_us: 100_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: HIGHRES_IMU_ID,
+            default_interval_us: VALUES_INTERVAL_US,
+            min_interval_us: 5_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: SCALED_PRESSURE_ID,
+            default_interval_us: VALUES_INTERVAL_US,
+            min_interval_us: 20_000,
         }),
     ];
     let mut node = Node::new(NodeConfig::new(1, 1), &mut slots);
@@ -459,6 +551,38 @@ async fn beat0() -> ! {
     }
 }
 
+/// Feature `stall-core0` (invariant F1): 20 s after start, spins 3 s without yielding, once, and
+/// logs IMU1's samples and errors before and after.
+#[cfg(feature = "stall-core0")]
+#[embassy_executor::task]
+async fn stall() {
+    Timer::after(Duration::from_secs(20)).await;
+    let before = imu1::CELLS.read();
+    let begun = Instant::now();
+    while begun.elapsed() < Duration::from_secs(3) {
+        core::hint::spin_loop();
+    }
+    let ended = Instant::now();
+    let after = imu1::CELLS.read();
+    let (s0, e0) = before.map_or((0, 0), |s| (s.samples, s.health.errors));
+    let (s1, e1) = after.map_or((0, 0), |s| (s.samples, s.health.errors));
+    defmt::info!(
+        "[INFO] stall-core0: spun from {=u64} to {=u64} ms; IMU1 samples {=u32} -> {=u32} (+{=u32}), errors {=u32} -> {=u32}",
+        begun.as_millis(),
+        ended.as_millis(),
+        s0,
+        s1,
+        s1.wrapping_sub(s0),
+        e0,
+        e1
+    );
+}
+
+#[cfg(feature = "f4-negative")]
+bind_interrupts!(struct Irqs0Dma {
+    DMA_IRQ_0 => embassy_rp::dma::InterruptHandler<embassy_rp::peripherals::DMA_CH2>;
+});
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -484,15 +608,29 @@ async fn main(spawner: Spawner) {
 
     // F4: all DMA channels share DMA_IRQ_0, which belongs to the flight core.
     interrupt::DMA_IRQ_0.disable();
+    #[cfg(feature = "f4-negative")]
+    let _channel = embassy_rp::dma::Channel::new(p.DMA_CH2, Irqs0Dma);
     let dma_irq0_on = interrupt::DMA_IRQ_0.is_enabled();
     check(
         !dma_irq0_on,
         "DMA_IRQ_0 not enabled on core 0, enabled",
         u32::from(dma_irq0_on),
     );
+    #[cfg(feature = "f4-negative")]
+    interrupt::DMA_IRQ_0.disable();
 
     store::init();
-    spawn_core1(p.CORE1, CORE1_STACK.take(), core1_main);
+    let imu1_parts = imu1::Parts {
+        spi: p.SPI0,
+        sck: p.PIN_18,
+        mosi: p.PIN_19,
+        miso: p.PIN_16,
+        cs: p.PIN_20,
+        int1: p.PIN_15,
+        tx_dma: p.DMA_CH0,
+        rx_dma: p.DMA_CH1,
+    };
+    spawn_core1(p.CORE1, CORE1_STACK.take(), move || core1_main(imu1_parts));
 
     let mut config = UsbConfig::new(0xc0de, 0xcafe);
     config.manufacturer = Some("MARV");
@@ -530,6 +668,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(baro::task(baro::adapter(
         p.I2C1, p.PIN_23, p.PIN_22, p.PIN_21
     ))));
+    #[cfg(feature = "stall-core0")]
+    spawner.spawn(defmt::unwrap!(stall()));
 
     let started = Instant::now();
     while !CORE1_ACTLR_READ.load(Ordering::Acquire) && started.elapsed() < PONG_STALE {
@@ -540,5 +680,21 @@ async fn main(spawner: Spawner) {
         CORE1_ACTLR_READ.load(Ordering::Acquire) && actlr1 & EXTEXCLALL != 0,
         "EXTEXCLALL set on core 1, ACTLR",
         actlr1,
+    );
+    let started = Instant::now();
+    while CORE1_DMA_IRQ0.load(Ordering::Acquire) == 0 && started.elapsed() < PONG_STALE {
+        Timer::after(Duration::from_millis(1)).await;
+    }
+    let dma1 = CORE1_DMA_IRQ0.load(Ordering::Acquire);
+    check(
+        dma1 == 2,
+        "DMA_IRQ_0 enabled on core 1 after IMU1's SPI was built there (0 not read, 1 off, 2 on)",
+        u32::from(dma1),
+    );
+    let dma0_on = interrupt::DMA_IRQ_0.is_enabled();
+    check(
+        !dma0_on,
+        "DMA_IRQ_0 still not enabled on core 0 after core 1 started, enabled",
+        u32::from(dma0_on),
     );
 }

@@ -48,6 +48,10 @@ critical-section = "1.1"
 embassy-sync = "0.8.0"
 embassy-usb = { version = "0.6.0", default-features = false, features = ["defmt"] }
 embedded-io-async = "0.7"
+# IMU1 (src/imu1.rs): the SPI device over embassy-rp's bus and the `DelayNs` trait, as the
+# icm45686 bench programs use them.
+embedded-hal-async = "1.0"
+embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-futures = "0.1.2"
 static_cell = "2.1.1"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
@@ -73,6 +77,19 @@ inject-baro-fail-until-restart = ["inject"]
 inject-baro-stuck = ["inject"]
 # Internal: on when any injection feature is on.
 inject = []
+# Fault injection around IMU1's adapter (src/imu1.rs, flight core, no log there), 5 s after the
+# first good sample: every acquire, recover and restart fails until a RESTART request
+# (`device restart IMU1`) has been raised (persistent); the data-ready edges swallowed for 200 ms
+# while the chip keeps producing (missed-edge).
+inject-imu1-persistent = ["inject-imu1"]
+inject-imu1-missed-edge = ["inject-imu1"]
+# Internal: on when an IMU1 injection feature is on.
+inject-imu1 = []
+# Invariant F1 on the board: one core-0 task spins 3 s without yielding, once, 20 s after start.
+stall-core0 = []
+# NEGATIVE CONTROL of F4: a DMA channel built on core 0 before the start-up check (no transfer;
+# its line is disabled again before core 1 starts).
+f4-negative = []
 
 [profile.release]
 debug = true

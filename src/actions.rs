@@ -2,7 +2,7 @@
 //! command starts, and how each action ends. Link id 0 is USB; `armed` and `hil` are false until
 //! the arming code and the HIL source exist.
 //!
-//! Built: restart of the barometer, parameters to defaults (all, calibration). Every other action
+//! Built: restart of the barometer and of IMU1, parameters to defaults (all, calibration). Every other action
 //! the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
@@ -14,7 +14,7 @@ use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::{MarvDevice, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck};
 
-use crate::device::{BARO, raise_apply};
+use crate::device::{find, raise_apply};
 use crate::store;
 
 /// The link id of USB in the books.
@@ -23,7 +23,7 @@ const USB: u8 = 0;
 static BOOK: Mutex<CriticalSectionRawMutex, RefCell<ActionBook>> =
     Mutex::new(RefCell::new(ActionBook::new()));
 
-/// The number of the restart request the running `DeviceRestart(BARO)` action raised: the action
+/// The number of the restart request the running `DeviceRestart` action raised: the action
 /// ends only on that request's outcome (`Device::restart_outcome`), never on an older one.
 static RESTART_NUMBER: Mutex<CriticalSectionRawMutex, Cell<u32>> = Mutex::new(Cell::new(0));
 
@@ -104,11 +104,14 @@ pub fn link_lost() {
 }
 
 fn start(action: Action, now_ms: u64) {
+    if let Action::DeviceRestart(id) = action
+        && let Some(dev) = find(id)
+    {
+        let number = dev.request_restart();
+        RESTART_NUMBER.lock(|n| n.set(number));
+        return;
+    }
     match action {
-        Action::DeviceRestart(MarvDevice::MARV_DEVICE_BARO) => {
-            let number = BARO.request_restart();
-            RESTART_NUMBER.lock(|n| n.set(number));
-        }
         Action::StorageDefaultsAll => defaults(false, now_ms),
         Action::StorageDefaultsCalibration => defaults(true, now_ms),
         other => {
@@ -175,9 +178,11 @@ pub fn tick(now_ms: u64) {
             action.max_duration_ms()
         );
     }
-    if let Some(action @ Action::DeviceRestart(MarvDevice::MARV_DEVICE_BARO)) = running {
+    if let Some(action @ Action::DeviceRestart(id)) = running
+        && let Some(dev) = find(id)
+    {
         let number = RESTART_NUMBER.lock(Cell::get);
-        let result = match BARO.restart_outcome(number) {
+        let result = match dev.restart_outcome(number) {
             Some(true) => MavResult::MAV_RESULT_ACCEPTED,
             Some(false) => MavResult::MAV_RESULT_FAILED,
             None => return,
