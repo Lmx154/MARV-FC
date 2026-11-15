@@ -220,6 +220,20 @@ pub struct ImuStatus {
     pub inject: u32,
     /// Board time the injection state last changed, us.
     pub inject_since_us: u64,
+    /// `verify()` calls between samples.
+    pub verifies: u32,
+    /// Duration of the latest, shortest and longest `verify()`, us.
+    pub verify_last_us: u32,
+    /// Shortest `verify()`, us.
+    pub verify_min_us: u32,
+    /// Longest `verify()`, us.
+    pub verify_max_us: u32,
+    /// Verifies after which a sample was already waiting (the status read right after).
+    pub verify_pending: u32,
+    /// Intervals between two samples longer than 1.5 P, counted in Ok and Degraded.
+    pub long_gaps: u32,
+    /// Of those, intervals that contained a `verify()`.
+    pub long_gaps_after_verify: u32,
 }
 
 impl ImuStatus {
@@ -258,6 +272,13 @@ impl ImuStatus {
         ring: [None; TRANSITIONS],
         inject: 0,
         inject_since_us: 0,
+        verifies: 0,
+        verify_last_us: 0,
+        verify_min_us: 0,
+        verify_max_us: 0,
+        verify_pending: 0,
+        long_gaps: 0,
+        long_gaps_after_verify: 0,
     };
 }
 
@@ -337,6 +358,8 @@ pub struct ImuTask<'a, A, D> {
     delay: CountingDelay<D>,
     now_us: fn() -> u64,
     deadline_us: u64,
+    long_gap_us: u64,
+    verified: bool,
     health: Health,
     action: Action,
     status: ImuStatus,
@@ -370,6 +393,8 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             delay: CountingDelay::new(delay),
             now_us,
             deadline_us: (3 * u64::from(period_us)).max(DEADLINE_FLOOR_US),
+            long_gap_us: 3 * u64::from(period_us) / 2,
+            verified: false,
             health,
             action,
             status: ImuStatus::INITIAL,
@@ -439,8 +464,11 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
                     Event::Tick
                 } else if now.saturating_sub(self.last_verify_us) >= VERIFY_EVERY_US {
                     self.last_verify_us = now;
-                    match self.adapter.verify().await {
-                        Ok(()) => Event::Tick,
+                    let result = self.adapter.verify().await;
+                    self.bump();
+                    self.note_verify(now);
+                    match result {
+                        Ok(()) => self.after_verify().await,
                         Err(VerifyError::Mismatch) => Event::VerifyMismatch,
                         Err(VerifyError::Failed(kind)) => Event::Error(kind),
                     }
@@ -604,14 +632,56 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         }
     }
 
+    /// Records the duration of the `verify()` that began at `begun` (us).
+    fn note_verify(&mut self, begun: u64) {
+        let took = u32::try_from((self.now_us)().saturating_sub(begun)).unwrap_or(u32::MAX);
+        let s = &mut self.status;
+        s.verify_min_us = if s.verifies == 0 {
+            took
+        } else {
+            s.verify_min_us.min(took)
+        };
+        s.verify_max_us = s.verify_max_us.max(took);
+        s.verify_last_us = took;
+        s.verifies = s.verifies.wrapping_add(1);
+        self.verified = true;
+    }
+
+    /// After a `verify()` between samples: one status read. MEASURE ONLY: counts a sample
+    /// already waiting, then goes back to the edge wait.
+    async fn after_verify(&mut self) -> Event {
+        let pending = self.adapter.status().await;
+        self.bump();
+        match pending {
+            Ok(Pending::Data) => {
+                self.status.verify_pending = self.status.verify_pending.wrapping_add(1);
+                Event::Tick
+            }
+            Ok(Pending::Nothing) => Event::Tick,
+            Ok(Pending::PowerOnReset) => Event::PowerOnReset,
+            Err(kind) => Event::Error(kind),
+        }
+    }
+
     /// Reads and publishes one sample.
     async fn read(&mut self) -> Event {
         let t_us = (self.now_us)();
         match self.adapter.acquire().await {
             Ok(reading) => {
                 if let Some(last) = self.status.last_sample_us {
-                    self.status.max_gap_us = self.status.max_gap_us.max(t_us.saturating_sub(last));
+                    let gap = t_us.saturating_sub(last);
+                    self.status.max_gap_us = self.status.max_gap_us.max(gap);
+                    if gap > self.long_gap_us
+                        && matches!(self.health.state(), State::Ok | State::Degraded)
+                    {
+                        self.status.long_gaps = self.status.long_gaps.wrapping_add(1);
+                        if self.verified {
+                            self.status.long_gaps_after_verify =
+                                self.status.long_gaps_after_verify.wrapping_add(1);
+                        }
+                    }
                 }
+                self.verified = false;
                 self.status.last_sample_us = Some(t_us);
                 self.status.latest = Some(ImuSample {
                     reading,
