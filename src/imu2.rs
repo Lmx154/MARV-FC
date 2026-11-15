@@ -7,11 +7,11 @@
 use core::convert::Infallible;
 
 use crate::flight_latency::{Stretch, measured};
+use crate::imu1::SpinDelay;
 use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH2, DMA_CH3, PIN_7, PIN_8, PIN_9, PIN_10, PIN_11, SPI1};
 use embassy_rp::spi::{self, Spi};
-use embassy_time::Delay;
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::calib::ImuOffsets;
@@ -275,7 +275,7 @@ pub async fn task(adapter: Adapter) -> ! {
     match ImuTask::new(
         &CELLS,
         adapter,
-        Delay,
+        SpinDelay,
         crate::now_us,
         PERIOD_US,
         Limits::DESIGN,

@@ -5,13 +5,15 @@
 //! The `icm45686` driver is used as it is.
 
 use core::convert::Infallible;
+use core::future::poll_fn;
+use core::task::Poll;
 
 use crate::flight_latency::{Stretch, measured};
 use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_15, PIN_16, PIN_18, PIN_19, PIN_20, SPI0};
 use embassy_rp::spi::{self, Spi};
-use embassy_time::{Delay, Duration, block_for};
+use embassy_time::{Duration, Instant, block_for};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::calib::ImuOffsets;
@@ -75,17 +77,43 @@ pub struct Parts {
 type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>;
 type DevError = DeviceError<spi::Error, Infallible>;
 
-/// A busy wait on the time driver's counter: no timer, no lock (a verify step on an indirect
-/// register waits 10 us twice).
-struct SpinDelay;
+/// The flight core's delay, on the time driver's counter: no timer queue, no lock. A wait shorter
+/// than 1 ms is a busy wait (a verify step on an indirect register waits 10 us twice); a wait of
+/// 1 ms or longer polls the clock and yields to the executor between polls (`wake_by_ref`), so the
+/// other tasks of the flight core run meanwhile. Both IMU tasks wait through it (start, recover,
+/// restart, self-test).
+pub struct SpinDelay;
+
+impl SpinDelay {
+    async fn wait(time: Duration) {
+        if time < Duration::from_millis(1) {
+            block_for(time);
+            return;
+        }
+        let until = Instant::now() + time;
+        poll_fn(|cx| {
+            if Instant::now() >= until {
+                Poll::Ready(())
+            } else {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
+        .await
+    }
+}
 
 impl DelayNs for SpinDelay {
     async fn delay_ns(&mut self, ns: u32) {
-        block_for(Duration::from_micros(u64::from(ns.div_ceil(1000))));
+        Self::wait(Duration::from_micros(u64::from(ns.div_ceil(1000)))).await
     }
 
     async fn delay_us(&mut self, us: u32) {
-        block_for(Duration::from_micros(u64::from(us)));
+        Self::wait(Duration::from_micros(u64::from(us))).await
+    }
+
+    async fn delay_ms(&mut self, ms: u32) {
+        Self::wait(Duration::from_millis(u64::from(ms))).await
     }
 }
 
@@ -299,7 +327,7 @@ pub async fn task(adapter: Adapter) -> ! {
     match ImuTask::new(
         &CELLS,
         adapter,
-        Delay,
+        SpinDelay,
         crate::now_us,
         PERIOD_US,
         Limits::DESIGN,
