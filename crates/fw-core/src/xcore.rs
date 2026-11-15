@@ -365,7 +365,7 @@ mod tests {
     use super::*;
     use core::future::Future;
     use core::pin::pin;
-    use core::task::{Context, Waker};
+    use core::task::{Context, RawWaker, RawWakerVTable, Waker};
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::task::Wake;
@@ -563,6 +563,49 @@ mod tests {
         kick.kick(0b1000);
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
         assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(0b1000));
+    }
+
+    /// The cell under test plus a waker whose first `clone` kicks it. `AtomicWaker::register`
+    /// clones the waker while its state is `REGISTERING`, so the kick lands after `wait`'s first
+    /// `take` and before its second. `register` then wakes the clone itself (it sees `WAKING`),
+    /// so only the same poll returning `Ready` shows that the second `take` caught the kick.
+    struct KickOnClone {
+        kick: Kick,
+        bits: u8,
+        fired: AtomicBool,
+    }
+
+    static KICK_ON_CLONE: RawWakerVTable =
+        RawWakerVTable::new(kick_on_clone, ignore_waker, ignore_waker, ignore_waker);
+
+    fn kick_on_clone(data: *const ()) -> RawWaker {
+        // SAFETY: `data` comes from the `&KickOnClone` the test built the waker from, which
+        // outlives the waker and every clone of it.
+        let hook = unsafe { &*data.cast::<KickOnClone>() };
+        if !hook.fired.swap(true, Ordering::SeqCst) {
+            hook.kick.kick(hook.bits);
+        }
+        RawWaker::new(data, &KICK_ON_CLONE)
+    }
+
+    fn ignore_waker(_: *const ()) {}
+
+    #[test]
+    fn kick_between_first_take_and_registration_is_returned_by_same_poll() {
+        let hook = KickOnClone {
+            kick: Kick::new(),
+            bits: 0b0010_0000,
+            fired: AtomicBool::new(false),
+        };
+        let raw = RawWaker::new(ptr::from_ref(&hook).cast(), &KICK_ON_CLONE);
+        // SAFETY: the vtable keeps the `RawWaker` contract: `clone` returns the same data and
+        // vtable, `wake`, `wake_by_ref` and `drop` free nothing, and `hook` outlives the waker.
+        let waker = unsafe { Waker::from_raw(raw) };
+        let mut cx = Context::from_waker(&waker);
+        let mut fut = pin!(hook.kick.wait());
+        assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(0b0010_0000));
+        assert!(hook.fired.load(Ordering::SeqCst));
+        assert_eq!(hook.kick.take(), 0);
     }
 
     struct ThreadWaker(thread::Thread);
