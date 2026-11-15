@@ -372,12 +372,16 @@ pub fn save() -> Result<u64, &'static str> {
         );
         return Err("flight core not answering");
     }
-    if !HANDSHAKE.begin_save() {
-        defmt::warn!("[INFO] settings save refused: armed, nothing written");
-        return Err("armed");
-    }
-    let result = with_storage(write_record).unwrap_or(Err("storage busy"));
-    HANDSHAKE.end_save();
+    let result = with_storage(|st| {
+        if !HANDSHAKE.begin_save() {
+            defmt::warn!("[INFO] settings save refused: armed, nothing written");
+            return Err("armed");
+        }
+        let written = write_record(st);
+        HANDSHAKE.end_save();
+        written
+    })
+    .unwrap_or(Err("storage busy"));
     if result.is_ok() {
         store::with(|p| p.clear_dirty());
     }

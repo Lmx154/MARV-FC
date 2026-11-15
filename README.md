@@ -617,7 +617,7 @@ What each link carries:
 | | USB (link 0) | Radio (link 1, only while the port is locked on MAVLink) |
 |---|---|---|
 | HEARTBEAT, SYS_STATUS | 1 Hz each | 1 Hz each |
-| MARV_DEVICE_STATUS | 7 rows, 4 per message batch every 500 ms | one row per second: a row whose state changed since it was last sent on the radio first, else in turn |
+| MARV_DEVICE_STATUS | 7 rows, 4 per message batch every 500 ms | one row per second: a row whose state changed since it was last sent on the radio goes out of turn, at most every other message (the message after it is the in-turn one), else in turn |
 | GPS_RAW_INT | 1 Hz | every 2 s |
 | HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | none |
 | RC_CHANNELS (65) | 5 Hz while stick reports are younger than 1 s: 16 channels in us, `chancount` 16, `rssi` = CRSF uplink LQ x 254 / 100, or RADIO_STATUS `rssi` in MAVLink mode, 255 without a fresh figure | none |

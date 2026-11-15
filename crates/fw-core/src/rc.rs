@@ -84,6 +84,24 @@ pub fn verdict(input: &RcInput) -> RcVerdict {
     }
 }
 
+/// The next MARV_DEVICE_STATUS row on the radio: `changed` (a row whose state differs from the
+/// state last sent) goes out of turn, but never twice in a row; otherwise the row at `cursor` goes
+/// in turn. Returns (row, new cursor, whether this message was out of turn).
+pub fn pick_row(
+    changed: Option<usize>,
+    cursor: usize,
+    rows: usize,
+    last_out_of_turn: bool,
+) -> (usize, usize, bool) {
+    match changed {
+        Some(row) if !last_out_of_turn => (row, cursor, true),
+        _ => {
+            let row = cursor.checked_rem(rows).unwrap_or(0);
+            (row, row.saturating_add(1), false)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +199,25 @@ mod tests {
             assert_eq!(masks.health & bit != 0, up, "rssi {rssi}");
             assert_ne!(masks.present & bit, 0);
             assert_ne!(masks.enabled & bit, 0, "Degraded is still enabled");
+        }
+    }
+
+    #[test]
+    fn a_changed_row_takes_at_most_every_other_message() {
+        const ROWS: usize = 7;
+        let (mut cursor, mut out_of_turn) = (0, false);
+        let mut seen = [false; ROWS];
+        for _ in 0..2 * ROWS {
+            let (row, next, oot) = pick_row(Some(3), cursor, ROWS, out_of_turn);
+            seen[row] = true;
+            (cursor, out_of_turn) = (next, oot);
+        }
+        assert_eq!(seen, [true; ROWS]);
+        let (mut cursor, mut out_of_turn) = (0, false);
+        for n in 0..3 * ROWS {
+            let (row, next, oot) = pick_row(None, cursor, ROWS, out_of_turn);
+            assert_eq!((row, oot), (n % ROWS, false));
+            (cursor, out_of_turn) = (next, oot);
         }
     }
 }

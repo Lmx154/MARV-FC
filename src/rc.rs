@@ -332,10 +332,12 @@ impl TxBusy for CountingUart {
 }
 
 /// The radio node's hooks (link 1): HEARTBEAT state, SYS_STATUS, one MARV_DEVICE_STATUS row per
-/// message (a row whose state changed since it was last sent on the radio first, else in turn),
+/// message (a row whose state changed since it was last sent on the radio goes out of turn, at most every
+/// other message; the message after it is the cursor's),
 /// GPS_RAW_INT, the texts of link 1, commands through the one book.
 struct RadioBoard {
     cursor: usize,
+    last_out_of_turn: bool,
     sent_state: [Option<u8>; crate::ROWS],
 }
 
@@ -350,11 +352,10 @@ impl Telemetry for RadioBoard {
                 let changed = messages.iter().zip(self.sent_state.iter()).position(
                     |(m, sent)| matches!((m, sent), (Some(m), Some(s)) if m.state as u8 != *s),
                 );
-                let i = changed.unwrap_or_else(|| {
-                    let i = self.cursor % crate::ROWS;
-                    self.cursor = i + 1;
-                    i
-                });
+                let (i, cursor, out_of_turn) =
+                    fw_core::rc::pick_row(changed, self.cursor, crate::ROWS, self.last_out_of_turn);
+                self.cursor = cursor;
+                self.last_out_of_turn = out_of_turn;
                 let Some(Some(message)) = messages.get(i) else {
                     return false;
                 };
@@ -472,6 +473,7 @@ async fn rc_link(
     let mut params = crate::store::Store;
     let mut radio = RadioBoard {
         cursor: 0,
+        last_out_of_turn: false,
         sent_state: [None; crate::ROWS],
     };
     let mut hooks = RcHooks;
