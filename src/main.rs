@@ -10,13 +10,14 @@
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
-//! Features `inject-baro-transient`, `inject-baro-persistent`: fault injection (`inject`).
+//! Features `inject-baro-transient`, `-persistent`, `-missed-edge`, `-silent`, `-verify`, `-stuck`: fault
+//! injection (`inject`).
 #![no_std]
 #![no_main]
 
 mod baro;
 mod device;
-#[cfg(any(feature = "inject-baro-transient", feature = "inject-baro-persistent"))]
+#[cfg(feature = "inject")]
 mod inject;
 
 use core::any::type_name;

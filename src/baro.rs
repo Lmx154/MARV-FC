@@ -39,6 +39,8 @@ pub struct Bmp581Adapter {
     chip: Option<Bmp581<Bus>>,
     config: Config,
     calls: u32,
+    /// `acquire` read the power-on flag (clear-on-read, so gone from the chip): `status` reports it.
+    por: bool,
 }
 
 impl Bmp581Adapter {
@@ -56,6 +58,7 @@ impl Bmp581Adapter {
             chip: None,
             config: config(),
             calls: 0,
+            por: false,
         };
         adapter.chip = Some(Bmp581::new(adapter.bus(), DEFAULT_ADDRESS));
         defmt::info!(
@@ -160,8 +163,16 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn acquire(&mut self) -> Result<Reading, ErrorKind> {
+        let chip = self.chip()?;
+        // INT_STATUS is clear-on-read: reading it with every sample keeps the flag that `status` sees
+        // after a data-ready timeout fresh (otherwise the first timeout of an outage finds a stale one).
+        let int = chip.interrupt_status().await.map_err(|e| kind(&e))?;
+        if int.power_on_reset {
+            self.por = true;
+            return Err(ErrorKind::Por);
+        }
         // `NoSample` (data registers at their reset value) counts as a decode error.
-        let sample = self.chip()?.read().await.map_err(|e| kind(&e))?;
+        let sample = chip.read().await.map_err(|e| kind(&e))?;
         Ok(Reading::Baro {
             pressure_pa: sample.pascals(),
             temperature_c: sample.celsius(),
@@ -169,6 +180,9 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn status(&mut self) -> Result<Pending, ErrorKind> {
+        if core::mem::take(&mut self.por) {
+            return Ok(Pending::PowerOnReset);
+        }
         let status = self
             .chip()?
             .interrupt_status()
@@ -227,9 +241,9 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 }
 
-#[cfg(not(any(feature = "inject-baro-transient", feature = "inject-baro-persistent")))]
+#[cfg(not(feature = "inject"))]
 type Adapter = Bmp581Adapter;
-#[cfg(any(feature = "inject-baro-transient", feature = "inject-baro-persistent"))]
+#[cfg(feature = "inject")]
 type Adapter = crate::inject::Inject<Bmp581Adapter>;
 
 /// The adapter for this build (with the fault-injection wrapper when an injection feature is on).
@@ -242,11 +256,11 @@ pub fn adapter(
     wrap(Bmp581Adapter::new(i2c, scl, sda, int))
 }
 
-#[cfg(not(any(feature = "inject-baro-transient", feature = "inject-baro-persistent")))]
+#[cfg(not(feature = "inject"))]
 fn wrap(adapter: Bmp581Adapter) -> Adapter {
     adapter
 }
-#[cfg(any(feature = "inject-baro-transient", feature = "inject-baro-persistent"))]
+#[cfg(feature = "inject")]
 fn wrap(adapter: Bmp581Adapter) -> Adapter {
     crate::inject::Inject::new(adapter)
 }
