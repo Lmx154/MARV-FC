@@ -10,7 +10,7 @@
 //!
 //! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
 //! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned.
-//! Features `inject-baro-transient`, `-persistent`, `-missed-edge`, `-silent`, `-verify`, `-stuck`: fault
+//! Features `inject-baro-transient`, `-persistent`, `-missed-edge`, `-silent`, `-verify`, `-stuck`, `-por`: fault
 //! injection (`inject`).
 #![no_std]
 #![no_main]

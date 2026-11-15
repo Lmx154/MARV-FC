@@ -169,7 +169,7 @@ crates/fw-flight    the flight-core (core 1) tasks; depends on fw-core only
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (126 tests); the binary uses `xcore::Kick`, `health`, `sys_status` and `params` (over an empty
+the host (127 tests); the binary uses `xcore::Kick`, `health`, `sys_status` and `params` (over an empty
 table) so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
