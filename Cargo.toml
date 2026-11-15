@@ -98,7 +98,7 @@ inject-imu2-persistent = ["inject-imu2"]
 inject-imu2 = ["inject-imu"]
 # Internal: on when an IMU injection feature is on (src/imu_inject.rs, the wrapper both IMUs use).
 inject-imu = []
-# Invariant F1 on the board: one core-0 task spins 3 s without yielding, once, 20 s after start.
+# Invariant F1 on the board: one core-0 task spins 1.2 s without yielding, once, 20 s after start.
 stall-core0 = []
 # NEGATIVE CONTROL of F4: a DMA channel built on core 0 before the start-up check (no transfer;
 # its line is disabled again before core 1 starts).

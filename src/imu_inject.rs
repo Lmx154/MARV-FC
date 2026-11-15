@@ -157,4 +157,8 @@ impl<A: ImuAdapter> ImuAdapter for Inject<A> {
     fn injection(&self) -> (u32, u64) {
         (self.state, self.since_us)
     }
+
+    fn latency(&self) -> (u32, u32) {
+        self.inner.latency()
+    }
 }

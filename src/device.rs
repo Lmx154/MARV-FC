@@ -876,7 +876,7 @@ impl Supervision {
                     )
                 });
                 defmt::info!(
-                    "[STAT] {=str} flight core: delay count {=u32} ({=u32} after the start), CHECK kicks taken {=u32}, verifies {=u32} took last {=u32} min {=u32} max {=u32} us, sample already waiting after {=u32}, gaps over 1.5 P {=u32} ({=u32} across a verify), |accel| {=f32} m/s^2, accel {} m/s^2, gyro {} rad/s, temperature {=f32} C, progress {=u32}",
+                    "[STAT] {=str} flight core: delay count {=u32} ({=u32} after the start), CHECK kicks taken {=u32}, verifies {=u32} took last {=u32} min {=u32} max {=u32} us, sample already waiting after {=u32}, gaps over 1.5 P {=u32} ({=u32} across a verify), longest run without a yield {=u32} us, yields {=u32}, |accel| {=f32} m/s^2, accel {} m/s^2, gyro {} rad/s, temperature {=f32} C, progress {=u32}",
                     dev.name,
                     f.delays,
                     f.delays_after_start,
@@ -888,6 +888,8 @@ impl Supervision {
                     f.verify_pending,
                     f.long_gaps,
                     f.long_gaps_after_verify,
+                    f.stretch_max_us,
+                    f.yields,
                     norm(accel),
                     accel,
                     gyro,

@@ -117,6 +117,10 @@ pub trait ImuAdapter {
     fn injection(&self) -> (u32, u64) {
         (0, 0)
     }
+    /// The task's longest stretch without a yield (us) and its yield count; `(0, 0)` unmeasured.
+    fn latency(&self) -> (u32, u32) {
+        (0, 0)
+    }
 }
 
 /// A [`DelayNs`] that counts its waits (one per call).
@@ -236,6 +240,10 @@ pub struct ImuStatus {
     pub long_gaps: u32,
     /// Of those, intervals that contained a `verify()`.
     pub long_gaps_after_verify: u32,
+    /// The longest stretch the task ran without yielding, us (`ImuAdapter::latency`).
+    pub stretch_max_us: u32,
+    /// The task's yields (`ImuAdapter::latency`).
+    pub yields: u32,
 }
 
 impl ImuStatus {
@@ -281,6 +289,8 @@ impl ImuStatus {
         verify_pending: 0,
         long_gaps: 0,
         long_gaps_after_verify: 0,
+        stretch_max_us: 0,
+        yields: 0,
     };
 }
 
@@ -574,6 +584,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         let (inject, since) = self.adapter.injection();
         self.status.inject = inject;
         self.status.inject_since_us = since;
+        (self.status.stretch_max_us, self.status.yields) = self.adapter.latency();
         self.writer.write(self.status);
     }
 

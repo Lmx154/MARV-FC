@@ -6,11 +6,13 @@
 
 use core::convert::Infallible;
 
+use crate::flight_yield::{Stretch, YieldSpi, measured};
+use embassy_futures::yield_now;
 use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, PIN_15, PIN_16, PIN_18, PIN_19, PIN_20, SPI0};
 use embassy_rp::spi::{self, Spi};
-use embassy_time::{Delay, Duration, block_for};
+use embassy_time::{Delay, Duration, Instant};
 use embedded_hal_async::delay::DelayNs;
 use embedded_hal_bus::spi::{DeviceError, ExclusiveDevice, NoDelay};
 use fw_core::health::{ErrorKind, Limits};
@@ -23,6 +25,8 @@ use icm45686::{
 
 /// The cells between core 0 and the IMU1 task.
 pub static CELLS: ImuCells = ImuCells::new();
+/// The IMU1 task's longest stretch without a yield and its yield count.
+static STRETCH: Stretch = Stretch::new();
 
 /// Nominal sample period P: 800 Hz, the output data rate nearest to 1 kHz that the bench proved
 /// (the ICM-45686 has no 1 kHz rate: 800 Hz or 1.6 kHz).
@@ -62,20 +66,32 @@ pub struct Parts {
     pub rx_dma: Peri<'static, DMA_CH1>,
 }
 
-type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>;
+type Dev = YieldSpi<ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>>;
 type DevError = DeviceError<spi::Error, Infallible>;
 
-/// A busy wait on the time driver's counter: no timer, no lock (`verify` between samples reads
-/// indirect registers with a 10 us wait each).
+/// A wait on the time driver's counter that yields to the executor until the time has passed: no
+/// timer, no lock (`verify` between samples reads indirect registers with a 10 us wait each).
 struct SpinDelay;
+
+impl SpinDelay {
+    async fn wait_us(us: u64) {
+        let until = Instant::now() + Duration::from_micros(us);
+        loop {
+            yield_now().await;
+            if Instant::now() >= until {
+                return;
+            }
+        }
+    }
+}
 
 impl DelayNs for SpinDelay {
     async fn delay_ns(&mut self, ns: u32) {
-        block_for(Duration::from_micros(u64::from(ns.div_ceil(1000))));
+        Self::wait_us(u64::from(ns.div_ceil(1000))).await;
     }
 
     async fn delay_us(&mut self, us: u32) {
-        block_for(Duration::from_micros(u64::from(us)));
+        Self::wait_us(u64::from(us)).await;
     }
 }
 
@@ -114,7 +130,7 @@ impl Icm45686Adapter {
             Err(never) => match never {},
         };
         Self {
-            chip: Icm45686::new(device),
+            chip: Icm45686::new(YieldSpi(device)),
             int1: Input::new(p.int1, Pull::None),
             calls: 0,
         }
@@ -205,6 +221,10 @@ impl ImuAdapter for Icm45686Adapter {
     fn calls(&self) -> u32 {
         self.calls
     }
+
+    fn latency(&self) -> (u32, u32) {
+        STRETCH.get()
+    }
 }
 
 #[cfg(not(feature = "inject-imu1"))]
@@ -239,10 +259,13 @@ pub async fn task(adapter: Adapter) -> ! {
         Limits::DESIGN,
     ) {
         Some(task) => {
-            fw_flight::tagged(
-                &crate::watchdog::RUNNING1,
-                fw_core::watchdog::task::IMU1,
-                task.run(),
+            measured(
+                &STRETCH,
+                fw_flight::tagged(
+                    &crate::watchdog::RUNNING1,
+                    fw_core::watchdog::task::IMU1,
+                    task.run(),
+                ),
             )
             .await
         }

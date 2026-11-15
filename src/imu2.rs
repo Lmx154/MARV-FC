@@ -6,6 +6,7 @@
 
 use core::convert::Infallible;
 
+use crate::flight_yield::{Stretch, YieldSpi, measured};
 use embassy_rp::Peri;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{DMA_CH2, DMA_CH3, PIN_7, PIN_8, PIN_9, PIN_10, PIN_11, SPI1};
@@ -24,6 +25,8 @@ use lsm6dsk320x::{
 
 /// The cells between core 0 and the IMU2 task.
 pub static CELLS: ImuCells = ImuCells::new();
+/// The IMU2 task's longest stretch without a yield and its yield count.
+static STRETCH: Stretch = Stretch::new();
 
 /// Nominal sample period P: 800 Hz, the high-accuracy ODR set "800" with the ODR code that is
 /// 960 Hz in the normal mode. The normal mode offers 480 or 960 Hz, and its 960 Hz ran at
@@ -64,7 +67,7 @@ pub struct Parts {
     pub rx_dma: Peri<'static, DMA_CH3>,
 }
 
-type Dev = ExclusiveDevice<Spi<'static, SPI1, spi::Async>, Output<'static>, NoDelay>;
+type Dev = YieldSpi<ExclusiveDevice<Spi<'static, SPI1, spi::Async>, Output<'static>, NoDelay>>;
 type DevError = DeviceError<spi::Error, Infallible>;
 
 pub struct Lsm6dsk320xAdapter {
@@ -102,7 +105,7 @@ impl Lsm6dsk320xAdapter {
             Err(never) => match never {},
         };
         Self {
-            chip: Lsm6dsk320x::new(device),
+            chip: Lsm6dsk320x::new(YieldSpi(device)),
             int1: Input::new(p.int1, Pull::None),
             calls: 0,
         }
@@ -188,6 +191,10 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     fn calls(&self) -> u32 {
         self.calls
     }
+
+    fn latency(&self) -> (u32, u32) {
+        STRETCH.get()
+    }
 }
 
 #[cfg(not(feature = "inject-imu2"))]
@@ -218,10 +225,13 @@ pub async fn task(adapter: Adapter) -> ! {
         Limits::DESIGN,
     ) {
         Some(task) => {
-            fw_flight::tagged(
-                &crate::watchdog::RUNNING1,
-                fw_core::watchdog::task::IMU2,
-                task.run(),
+            measured(
+                &STRETCH,
+                fw_flight::tagged(
+                    &crate::watchdog::RUNNING1,
+                    fw_core::watchdog::task::IMU2,
+                    task.run(),
+                ),
             )
             .await
         }

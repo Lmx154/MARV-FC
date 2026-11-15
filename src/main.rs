@@ -23,7 +23,7 @@
 //! `-verify`, `-stuck`, `-por`: fault injection (`inject`). Features `inject-imu1-persistent`,
 //! `inject-imu1-missed-edge`, `inject-imu2-persistent`: fault injection around an IMU's adapter
 //! (`imu_inject::Inject`). Feature
-//! `stall-core0`: one core-0 task spins 3 s without yielding, 20 s after start (invariant F1).
+//! `stall-core0`: one core-0 task spins 1.2 s without yielding, 20 s after start (invariant F1).
 //! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
 //! start-up check, then its line is disabled again before core 1 starts.
 //! Features `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign`: the
@@ -37,6 +37,7 @@ mod baro;
 mod batt;
 mod busclear;
 mod device;
+mod flight_yield;
 mod imu1;
 mod imu2;
 #[cfg(feature = "inject-imu")]
@@ -723,9 +724,10 @@ async fn beat0() -> ! {
     .await
 }
 
-/// Feature `stall-core0` (invariant F1): 20 s after start, spins 3 s without yielding, once, and
-/// logs IMU1's and IMU2's samples and errors before and after. The watchdog resets the board about 1.7 s
-/// into the spin; it does not act after a watchdog reset (no reset loop).
+/// Feature `stall-core0` (invariant F1): 20 s after start, spins 1.2 s without yielding, once, and
+/// logs IMU1's and IMU2's samples and errors before and after. The watchdog is fed again before
+/// 1.6 s without a feed, so it survives (a "core 0 stalled" text, no reset); it does not act after
+/// a watchdog reset (no reset loop).
 #[cfg(feature = "stall-core0")]
 #[embassy_executor::task]
 async fn stall() {
@@ -738,7 +740,7 @@ async fn stall() {
     let imus = [("IMU1", &imu1::CELLS), ("IMU2", &imu2::CELLS)];
     let before = imus.map(|(_, cells)| cells.read());
     let begun = Instant::now();
-    while begun.elapsed() < Duration::from_secs(3) {
+    while begun.elapsed() < Duration::from_millis(1200) {
         core::hint::spin_loop();
     }
     let ended = Instant::now();

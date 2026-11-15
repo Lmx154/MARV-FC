@@ -108,6 +108,12 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 8. The flight core schedules no timer in its sample loops, takes no critical-section primitive of its own and
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
    buffer into it, atomic flags with a lock-free waker for requests).
+9. On the flight core no task holds the executor longer than one bus transaction or one short busy wait
+   (lead's ruling, 2026-11-15): every SPI transaction and every busy wait of a flight-core adapter is followed
+   by a yield to the executor (`src/flight_yield.rs`: `YieldSpi` around both IMUs' SPI devices; IMU1's
+   `SpinDelay` yields while it waits). No timer, no critical-section primitive, no log; in the binary's
+   adapters, not in `fw-flight` or the drivers. Each IMU task's longest stretch without a yield is published
+   and logged in its `[STAT]` line.
 
 ## Not yet decided or measured
 
