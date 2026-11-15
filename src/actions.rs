@@ -16,6 +16,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::admission::{Action, ActionBook, Effect};
 use fw_core::calib::Kind;
+use fw_core::selftest::{self, Verdict};
 
 use fw_core::watchdog::task;
 use mavlink_device::dialect::MavSeverity;
@@ -23,14 +24,15 @@ use mavlink_device::marv::{MarvDevice, MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck};
 
 use crate::calibration::Step;
-use crate::device::{find, raise_apply};
+use crate::device::{TextLine, error_name, find, raise_apply};
 use crate::store;
 
 static BOOK: Mutex<CriticalSectionRawMutex, RefCell<ActionBook>> =
     Mutex::new(RefCell::new(ActionBook::new()));
 
-/// The number of the restart request the running `DeviceRestart` action raised: the action
-/// ends only on that request's outcome (`Device::restart_outcome`), never on an older one.
+/// The number of the restart (or self-test) request the running `DeviceRestart` (`DeviceSelfTest`)
+/// action raised: the action ends only on that request's outcome (`Device::restart_outcome`, and
+/// `Device::self_test_outcome`), never on an older one.
 static RESTART_NUMBER: Mutex<CriticalSectionRawMutex, Cell<u32>> = Mutex::new(Cell::new(0));
 
 fn result_name(result: MavResult) -> &'static str {
@@ -180,6 +182,20 @@ fn run(action: Action, now_ms: u64) {
         RESTART_NUMBER.lock(|n| n.set(number));
         return;
     }
+    if let Action::DeviceSelfTest(id @ MarvDevice::MARV_DEVICE_MAG) = action
+        && let Some(dev) = find(id)
+    {
+        let number = dev.request_self_test();
+        RESTART_NUMBER.lock(|n| n.set(number));
+        defmt::info!(
+            "[INFO] action {=str} {=str}: request {=u32}, flag self-test set at {=u64} ms",
+            action_name(action),
+            dev.name,
+            number,
+            now_ms
+        );
+        return;
+    }
     match action {
         Action::StorageDefaultsAll => defaults(false, now_ms),
         Action::StorageDefaultsCalibration => defaults(true, now_ms),
@@ -304,6 +320,11 @@ pub fn tick(now_ms: u64) {
             action_name(action),
             action.max_duration_ms()
         );
+        if let Action::DeviceSelfTest(id) = action
+            && let Some(dev) = find(id)
+        {
+            dev.self_test_ended();
+        }
     }
     match running {
         Some(
@@ -326,5 +347,43 @@ pub fn tick(now_ms: u64) {
             None => return,
         };
         end(now_ms, action, result);
+    }
+    if let Some(action @ Action::DeviceSelfTest(id)) = running
+        && let Some(dev) = find(id)
+    {
+        let number = RESTART_NUMBER.lock(Cell::get);
+        let (Some(outcome), Some(device_ok)) =
+            (dev.self_test_outcome(number), dev.restart_outcome(number))
+        else {
+            return;
+        };
+        let rows = dev.self_test_ended();
+        let text = TextLine::new(format_args!(
+            "{}",
+            selftest::Text {
+                device: id,
+                name: dev.name,
+                verdict: outcome.verdict,
+                error_name,
+            }
+        ));
+        defmt::info!(
+            "[INFO] action {=str} {=str}: request {=u32}: {=str}; the test took {=u32} ms, the device came back Ok {=bool}; flag self-test cleared at {=u64} ms, rows sent with it since boot {=u32}",
+            action_name(action),
+            dev.name,
+            number,
+            text.as_str(),
+            outcome.took_us / 1000,
+            device_ok,
+            now_ms,
+            rows
+        );
+        let severity = if outcome.verdict == Verdict::Pass {
+            MavSeverity::MAV_SEVERITY_INFO
+        } else {
+            MavSeverity::MAV_SEVERITY_WARNING
+        };
+        crate::text(severity, text.as_str());
+        end(now_ms, action, outcome.result(device_ok));
     }
 }

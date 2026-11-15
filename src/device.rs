@@ -17,6 +17,7 @@ use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Sender, Watch};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
+use fw_core::selftest::{Outcome as SelfTestOutcome, Verdict};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_flight::imu::{ImuCells, TRANSITIONS};
 use mavlink_device::dialect::MavSeverity;
@@ -163,6 +164,11 @@ pub trait DeviceAdapter {
     /// for the first start attempt after an operator RESTART request; a failed attempt after a
     /// RESTART request goes on to the normal start retries.
     async fn restart(&mut self) -> Result<(), ErrorKind>;
+    /// The device's built-in self-test with the driver's default settings. The loop then restarts
+    /// the device as for an operator RESTART request, whatever this returned.
+    async fn self_test(&mut self) -> Verdict {
+        Verdict::Unsupported
+    }
     /// The adapter's own counters.
     fn counters(&self) -> AdapterCounters;
 }
@@ -214,13 +220,19 @@ pub struct Device {
     pub wake: Signal<CriticalSectionRawMutex, ()>,
     pub progress: AtomicU32,
     pub stuck: AtomicBool,
-    /// The requests raised for the task (`REQ_APPLY`, `REQ_RESTART`); the task clears each as it takes it.
+    /// The requests raised for the task (`REQ_APPLY`, `REQ_RESTART`, `REQ_SELF_TEST`); the task clears each as it takes it.
     request: AtomicU8,
     /// Restart requests raised since boot: the number of the latest request.
     restarts: AtomicU32,
     /// The outcome of the latest restart the task has finished: request number << 1, bit 0 set when
     /// the device reached Ok, clear when it reached Failed or Absent (0 = none yet; numbers start at 1).
     restart_outcome: AtomicU32,
+    /// The latest self-test the task has finished (`None` before the first).
+    self_test: Mutex<CriticalSectionRawMutex, Cell<Option<SelfTestOutcome>>>,
+    /// A self-test action runs on the device (the row's flag bit 1): set and cleared by the action.
+    self_testing: AtomicBool,
+    /// MARV_DEVICE_STATUS rows built with the self-test flag since boot.
+    self_test_rows: AtomicU32,
     /// The flight-core task's cells, for a row backed by the flight core.
     flight: Option<&'static ImuCells>,
     /// The data-ready deadline T in microseconds when it is not 3 P (0: 3 P).
@@ -231,6 +243,8 @@ pub struct Device {
 const REQ_APPLY: u8 = 1;
 /// Request bit: restart the device, from any state.
 const REQ_RESTART: u8 = 2;
+/// Request bit: self-test the device, then restart it as for `REQ_RESTART`, from any state.
+const REQ_SELF_TEST: u8 = 4;
 
 impl Device {
     pub const fn new(id: MarvDevice, name: &'static str, period_us: u32) -> Self {
@@ -246,6 +260,9 @@ impl Device {
             request: AtomicU8::new(0),
             restarts: AtomicU32::new(0),
             restart_outcome: AtomicU32::new(0),
+            self_test: Mutex::new(Cell::new(None)),
+            self_testing: AtomicBool::new(false),
+            self_test_rows: AtomicU32::new(0),
             flight: None,
             deadline_us: 0,
         }
@@ -313,6 +330,33 @@ impl Device {
         (outcome >> 1 == number).then_some(outcome & 1 == 1)
     }
 
+    /// Raises the device's SELF-TEST request, wakes its task and sets the row's self-test flag.
+    /// Numbered with the restart requests: the restart that follows the test reports under the same
+    /// number through [`restart_outcome`](Self::restart_outcome), the test itself through
+    /// [`self_test_outcome`](Self::self_test_outcome).
+    pub fn request_self_test(&self) -> u32 {
+        self.self_testing.store(true, Ordering::Relaxed);
+        let number = self.restarts.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
+        self.request.fetch_or(REQ_SELF_TEST, Ordering::AcqRel);
+        self.wake.signal(());
+        number
+    }
+
+    /// The outcome of self-test request `number` once its test has finished (`None` before, and
+    /// for any other request).
+    pub fn self_test_outcome(&self, number: u32) -> Option<SelfTestOutcome> {
+        self.self_test
+            .lock(Cell::get)
+            .filter(|o| o.number == number)
+    }
+
+    /// The self-test action has ended: clears the row's flag. Returns the MARV_DEVICE_STATUS rows
+    /// built with the flag since boot.
+    pub fn self_test_ended(&self) -> u32 {
+        self.self_testing.store(false, Ordering::Relaxed);
+        self.self_test_rows.load(Ordering::Relaxed)
+    }
+
     fn take_request(&self, bit: u8) -> bool {
         self.request.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
@@ -366,6 +410,10 @@ impl Device {
     pub fn message(&self, now_us: u64) -> MARV_DEVICE_STATUS_DATA {
         let status = self.status();
         let ms = |us: u64| u32::try_from(us / 1000).unwrap_or(u32::MAX);
+        let self_test = self.self_testing.load(Ordering::Relaxed);
+        if self_test {
+            self.self_test_rows.fetch_add(1, Ordering::Relaxed);
+        }
         device_status(&StatusInput {
             device: self.id,
             state: status.state,
@@ -374,7 +422,7 @@ impl Device {
             samples: status.samples,
             last_sample_age_ms: status.last_sample_us.map(|t| ms(now_us.saturating_sub(t))),
             hil: false,
-            self_test: false,
+            self_test,
             time_boot_ms: ms(now_us),
         })
     }
@@ -484,15 +532,25 @@ pub async fn run_device<A: DeviceAdapter>(
     let sender = dev.latest.sender();
     let mut step = health.step(Event::Tick, now_ms());
     loop {
+        // A self-test request: the test, then the operator restart under the test's number.
+        let mut restart = None;
+        if dev.take_request(REQ_SELF_TEST) {
+            let number = dev.restarts();
+            self_test(dev, adapter, number).await;
+            restart = Some(number);
+        }
         if dev.take_request(REQ_RESTART) {
-            restart_run = Some(dev.restarts());
+            restart = Some(dev.restarts());
+        }
+        if let Some(number) = restart {
+            restart_run = Some(number);
             strong_first = true;
             let (before, now) = (health.state(), now_ms());
             step = health.step(Event::Restart, now);
             defmt::info!(
                 "[INFO] {=str}: restart request {=u32} taken at {=u64} ms: {=str} -> {=str}",
                 dev.name,
-                dev.restarts(),
+                number,
                 now,
                 state_name(before),
                 state_name(health.state())
@@ -630,6 +688,21 @@ pub async fn run_device<A: DeviceAdapter>(
     }
 }
 
+/// A SELF-TEST request: the adapter's test, its outcome published under request `number`.
+async fn self_test<A: DeviceAdapter>(dev: &'static Device, adapter: &mut A, number: u32) {
+    let begun = Instant::now();
+    let verdict = adapter.self_test().await;
+    dev.mark();
+    let took_us = u32::try_from(begun.elapsed().as_micros()).unwrap_or(u32::MAX);
+    dev.self_test.lock(|cell| {
+        cell.set(Some(SelfTestOutcome {
+            number,
+            verdict,
+            took_us,
+        }))
+    });
+}
+
 /// One data-ready wait and what follows it.
 async fn sample<A: DeviceAdapter>(
     dev: &'static Device,
@@ -745,7 +818,7 @@ async fn sleep_until(dev: &Device, until_ms: u64) {
         }
         Timer::at(until.min(now + SLICE)).await;
         dev.mark();
-        if dev.requested(REQ_RESTART) {
+        if dev.requested(REQ_RESTART | REQ_SELF_TEST) {
             return;
         }
     }

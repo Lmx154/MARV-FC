@@ -17,6 +17,7 @@
 
 use embassy_time::{Duration, Instant};
 use fw_core::health::ErrorKind;
+use fw_core::selftest::Verdict;
 
 use crate::device::{
     AdapterCounters, BARO, Device, DeviceAdapter, MAG, Pending, Reading, StartFailure, VerifyError,
@@ -257,6 +258,10 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
             return Err(ErrorKind::Bus);
         }
         result
+    }
+
+    async fn self_test(&mut self) -> Verdict {
+        self.inner.self_test().await
     }
 
     fn counters(&self) -> AdapterCounters {

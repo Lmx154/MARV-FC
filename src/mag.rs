@@ -11,6 +11,7 @@ use embassy_rp::peripherals::{I2C0, PIN_4, PIN_12, PIN_13};
 use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::Delay;
 use fw_core::health::{ErrorKind, Limits};
+use fw_core::selftest::Verdict;
 
 pub use fw_settings::mag as settings;
 
@@ -214,6 +215,35 @@ impl DeviceAdapter for Bmm350Adapter {
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
         self.chip()?.recover(&mut Delay).await.map_err(|e| kind(&e))
+    }
+
+    /// The driver's self-test (X and Y, both polarities); it restores the configuration only on
+    /// success, and the loop restarts the device afterwards in any case.
+    async fn self_test(&mut self) -> Verdict {
+        let chip = match self.chip() {
+            Ok(chip) => chip,
+            Err(kind) => return Verdict::Error(kind),
+        };
+        match chip.self_test(&mut Delay).await {
+            Ok(report) => {
+                defmt::info!("[INFO] MAG: self-test: {}", report);
+                if report.passed() {
+                    Verdict::Pass
+                } else {
+                    let failed = report
+                        .entries
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, e)| !e.passed)
+                        .fold(0u16, |mask, (i, _)| mask | (1 << i));
+                    Verdict::Fail(failed)
+                }
+            }
+            Err(e) => {
+                defmt::warn!("[INFO] MAG: self-test failed: {}", e);
+                Verdict::Error(kind(&e))
+            }
+        }
     }
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
