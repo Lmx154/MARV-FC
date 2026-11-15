@@ -162,28 +162,117 @@ impl DeviceStatus {
 pub struct Device {
     pub id: MarvDevice,
     pub name: &'static str,
-    /// Nominal sample period P.
-    pub period_us: u32,
+    /// Nominal sample period P in microseconds; it follows the configured output data rate.
+    period_us: AtomicU32,
     pub latest: Watch<CriticalSectionRawMutex, Sample, READERS>,
     status: Mutex<CriticalSectionRawMutex, Cell<DeviceStatus>>,
-    /// Wakes the task for a request (no request exists yet).
+    /// Wakes the task for a request.
     pub wake: Signal<CriticalSectionRawMutex, ()>,
     pub progress: AtomicU32,
     pub stuck: AtomicBool,
+    /// The requests raised for the task (`REQ_APPLY`, `REQ_RESTART`); the task clears each as it takes it.
+    request: AtomicU8,
+    /// The task's report on the last restart request: `RESTART_*`.
+    restart_state: AtomicU8,
+    /// Restart requests raised since boot.
+    restarts: AtomicU32,
+    /// APPLY requests raised and carried out (successfully or not) since boot.
+    applies_raised: AtomicU32,
+    applies_done: AtomicU32,
 }
+
+/// Request bit: apply the stored settings to the running device.
+const REQ_APPLY: u8 = 1;
+/// Request bit: restart the device, from any state.
+const REQ_RESTART: u8 = 2;
+/// `restart_state`: no restart request outstanding.
+pub const RESTART_IDLE: u8 = 0;
+/// A restart request is raised or running.
+pub const RESTART_RUNNING: u8 = 1;
+/// The restarted device reached Ok.
+pub const RESTART_OK: u8 = 2;
+/// The restarted device reached Failed or Absent.
+pub const RESTART_FAILED: u8 = 3;
 
 impl Device {
     pub const fn new(id: MarvDevice, name: &'static str, period_us: u32) -> Self {
         Self {
             id,
             name,
-            period_us,
+            period_us: AtomicU32::new(period_us),
             latest: Watch::new(),
             status: Mutex::new(Cell::new(DeviceStatus::INITIAL)),
             wake: Signal::new(),
             progress: AtomicU32::new(0),
             stuck: AtomicBool::new(false),
+            request: AtomicU8::new(0),
+            restart_state: AtomicU8::new(RESTART_IDLE),
+            restarts: AtomicU32::new(0),
+            applies_raised: AtomicU32::new(0),
+            applies_done: AtomicU32::new(0),
         }
+    }
+
+    /// Sets the nominal period P (the task does, when it applies a configuration).
+    pub fn set_period_us(&self, us: u32) {
+        self.period_us.store(us, Ordering::Relaxed);
+    }
+
+    pub fn period_us(&self) -> u32 {
+        self.period_us.load(Ordering::Relaxed)
+    }
+
+    /// Raises the device's APPLY request and wakes its task.
+    pub fn request_apply(&self) {
+        self.applies_raised.fetch_add(1, Ordering::Relaxed);
+        self.request.fetch_or(REQ_APPLY, Ordering::AcqRel);
+        self.wake.signal(());
+    }
+
+    /// Raises the device's RESTART request and wakes its task.
+    pub fn request_restart(&self) {
+        self.restart_state.store(RESTART_RUNNING, Ordering::Release);
+        self.restarts.fetch_add(1, Ordering::Relaxed);
+        self.request.fetch_or(REQ_RESTART, Ordering::AcqRel);
+        self.wake.signal(());
+    }
+
+    /// Restart requests raised since boot.
+    pub fn restarts(&self) -> u32 {
+        self.restarts.load(Ordering::Relaxed)
+    }
+
+    /// True while an APPLY request has been raised and not yet carried out.
+    pub fn apply_pending(&self) -> bool {
+        self.applies_done.load(Ordering::Relaxed) != self.applies_raised.load(Ordering::Relaxed)
+    }
+
+    /// `RESTART_*`, as the task last wrote it.
+    pub fn restart_state(&self) -> u8 {
+        self.restart_state.load(Ordering::Acquire)
+    }
+
+    /// The supervisor takes the finished restart's result: back to `RESTART_IDLE`.
+    pub fn clear_restart_state(&self) {
+        self.restart_state.store(RESTART_IDLE, Ordering::Release);
+    }
+
+    fn take_request(&self, bit: u8) -> bool {
+        self.request.fetch_and(!bit, Ordering::AcqRel) & bit != 0
+    }
+
+    /// Takes the APPLY request: the number of applies raised so far, to hand to `finish_apply`.
+    fn take_apply(&self) -> Option<u32> {
+        self.take_request(REQ_APPLY)
+            .then(|| self.applies_raised.load(Ordering::Acquire))
+    }
+
+    fn finish_apply(&self, raised: u32) {
+        self.applies_done.store(raised, Ordering::Release);
+    }
+
+    fn requested(&self, bit: u8) -> bool {
+        self.request.load(Ordering::Acquire) & bit != 0
     }
 
     pub fn status(&self) -> DeviceStatus {
@@ -195,7 +284,7 @@ impl Device {
     }
 
     fn period(&self) -> Duration {
-        Duration::from_micros(u64::from(self.period_us))
+        Duration::from_micros(u64::from(self.period_us()))
     }
 
     /// T = max(3 P, 10 ms).
@@ -249,6 +338,16 @@ pub const DEVICE_COUNT: usize = 1;
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
 /// The registry.
 pub static DEVICES: [&Device; DEVICE_COUNT] = [&BARO];
+
+/// Raises the APPLY request of every device whose bit (bit = `MARV_DEVICE` id) is set in `mask`.
+pub fn raise_apply(mask: u32) {
+    for dev in DEVICES {
+        if mask & (1 << (dev.id as u8)) != 0 {
+            dev.request_apply();
+        }
+    }
+}
+
 /// The id (`MARV_DEVICE`) of the device task that ran last.
 pub static RUNNING: AtomicU8 = AtomicU8::new(0);
 
@@ -305,6 +404,27 @@ pub async fn run_device<A: DeviceAdapter>(
     let sender = dev.latest.sender();
     let mut step = health.step(Event::Tick, now_ms());
     loop {
+        if dev.take_request(REQ_RESTART) {
+            let (before, now) = (health.state(), now_ms());
+            step = health.step(Event::Restart, now);
+            defmt::info!(
+                "[INFO] {=str}: restart request {=u32} taken at {=u64} ms: {=str} -> {=str}",
+                dev.name,
+                dev.restarts(),
+                now,
+                state_name(before),
+                state_name(health.state())
+            );
+            status.state = health.state();
+            status.health = *health.counters();
+            dev.set_status(status);
+        }
+        // A start or restart reads the stored settings itself: it carries out an APPLY request.
+        let taken = if matches!(step.action, Action::Start | Action::Restart) {
+            dev.take_apply()
+        } else {
+            None
+        };
         let event = match step.action {
             Action::Start => match adapter.start().await {
                 Ok(()) if fresh_sample(dev, adapter, &mut status, &mut seq, &sender).await => {
@@ -341,12 +461,19 @@ pub async fn run_device<A: DeviceAdapter>(
                 Event::Tick
             }
             Action::Park => {
-                // No bus traffic; a request would arrive through `wake` (none exists yet).
+                // No bus traffic; a request arrives through `wake`.
                 let _ = select(Timer::after(SLICE), dev.wake.wait()).await;
                 Event::Tick
             }
             Action::None if matches!(health.state(), State::Ok | State::Degraded) => {
-                if last_verify.elapsed() >= VERIFY_EVERY {
+                if let Some(raised) = dev.take_apply() {
+                    let result = adapter.apply().await;
+                    dev.finish_apply(raised);
+                    match result {
+                        Ok(()) => Event::Tick,
+                        Err(kind) => Event::Error(kind),
+                    }
+                } else if last_verify.elapsed() >= VERIFY_EVERY {
                     last_verify = Instant::now();
                     match adapter.verify().await {
                         Ok(()) => Event::Tick,
@@ -364,6 +491,9 @@ pub async fn run_device<A: DeviceAdapter>(
             }
         };
         dev.mark();
+        if let Some(raised) = taken {
+            dev.finish_apply(raised);
+        }
 
         let before = health.state();
         let now = now_ms();
@@ -395,6 +525,15 @@ pub async fn run_device<A: DeviceAdapter>(
                 health.counters().attempts,
                 now
             );
+        }
+        if dev.restart_state() == RESTART_RUNNING && !dev.requested(REQ_RESTART) {
+            match after {
+                State::Ok => dev.restart_state.store(RESTART_OK, Ordering::Release),
+                State::Failed | State::Absent => {
+                    dev.restart_state.store(RESTART_FAILED, Ordering::Release);
+                }
+                _ => {}
+            }
         }
         status.state = after;
         status.health = *health.counters();
@@ -435,7 +574,7 @@ async fn sample<A: DeviceAdapter>(
                 Err(kind) => Event::Error(kind),
             }
         }
-        // Requests (APPLY, RESTART, SELF_TEST) are not built yet.
+        // A request (APPLY, RESTART) is taken at the top of the loop.
         Either::Second(()) => Event::Tick,
     }
 }
@@ -494,6 +633,9 @@ async fn sleep_until(dev: &Device, until_ms: u64) {
         }
         Timer::at(until.min(now + SLICE)).await;
         dev.mark();
+        if dev.requested(REQ_RESTART) {
+            return;
+        }
     }
 }
 

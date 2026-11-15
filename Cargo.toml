@@ -67,6 +67,8 @@ inject-baro-missed-edge = ["inject"]
 inject-baro-silent = ["inject"]
 inject-baro-verify = ["inject"]
 inject-baro-por = ["inject"]
+# Also: as persistent until a RESTART request (`device restart BARO`) has been raised, then everything works again.
+inject-baro-fail-until-restart = ["inject"]
 inject-baro-stuck = ["inject"]
 # Internal: on when any injection feature is on.
 inject = []

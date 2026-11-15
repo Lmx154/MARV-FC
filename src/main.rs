@@ -15,10 +15,12 @@
 #![no_std]
 #![no_main]
 
+mod actions;
 mod baro;
 mod device;
 #[cfg(feature = "inject")]
 mod inject;
+mod store;
 
 use core::any::type_name;
 use core::fmt;
@@ -38,13 +40,12 @@ use embassy_sync::channel::Channel;
 use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
-use fw_core::params::{ParamDef, Params};
 use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
 use fw_core::xcore::Kick;
 use mavlink_device::dialect::{MavSeverity, MavState, MavSysStatusSensor, SYS_STATUS_DATA};
 use mavlink_device::{
-    Config as NodeConfig, MAX_BATCH, Node, Outgoing, ParamStore, RunError, Stream, StreamSlot,
-    Telemetry, Texts,
+    CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, MAX_BATCH, Node, Outgoing,
+    ParamStore, RunError, Stream, StreamSlot, Telemetry, Texts,
 };
 use panic_probe as _;
 use static_cell::{ConstStaticCell, StaticCell};
@@ -92,8 +93,6 @@ const LINK_GATE: u8 = 1;
 const LINK_RUN: u8 = 2;
 /// The supervisor's STATUSTEXTs for the node's text hook (the design's ring of 8 is a later packet).
 static TEXTS: Channel<CriticalSectionRawMutex, (MavSeverity, TextLine), 4> = Channel::new();
-/// The parameter table: empty until the devices bring theirs.
-static PARAM_TABLE: [ParamDef; 0] = [];
 
 const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
@@ -237,6 +236,14 @@ impl Telemetry for Board {
             let _ = out.push(severity, text.as_str());
         }
     }
+
+    fn command(&mut self, req: &CommandRequest, now_us: u64) -> CommandOutcome {
+        actions::command(req, now_us / 1000)
+    }
+
+    fn acks(&mut self, now_us: u64) -> Option<LateAck> {
+        actions::next_ack(now_us / 1000)
+    }
 }
 
 fn text(severity: MavSeverity, text: &str) {
@@ -317,9 +324,7 @@ async fn usb_link(
         }),
     ];
     let mut node = Node::new(NodeConfig::new(1, 1), &mut slots);
-    let Ok(mut params) = Params::<0>::new(&PARAM_TABLE) else {
-        defmt::panic!("[FAIL] parameter table rejected");
-    };
+    let mut params = store::Store;
     let mut board = Board { cursor: 0 };
     let mut delay = Delay;
     loop {
@@ -328,6 +333,7 @@ async fn usb_link(
         LINK_STATE.store(LINK_GATE, Ordering::Relaxed);
         if !start_gate(&mut rx, &link, &mut node, &mut params).await {
             node.on_link_down();
+            actions::link_lost();
             continue;
         }
         LINK_STATE.store(LINK_RUN, Ordering::Relaxed);
@@ -352,6 +358,7 @@ async fn usb_link(
             node.stats()
         );
         node.on_link_down();
+        actions::link_lost();
     }
 }
 
@@ -373,6 +380,7 @@ async fn supervisor() -> ! {
         ticker.next().await;
         let now = Instant::now();
         devices.tick(now);
+        actions::tick(now.as_millis());
         let ping = PING.load(Ordering::Relaxed);
         let pong = PONG.load(Ordering::Acquire);
         if pong == ping {
@@ -481,6 +489,7 @@ async fn main(spawner: Spawner) {
         u32::from(dma_irq0_on),
     );
 
+    store::init();
     spawn_core1(p.CORE1, CORE1_STACK.take(), core1_main);
 
     let mut config = UsbConfig::new(0xc0de, 0xcafe);

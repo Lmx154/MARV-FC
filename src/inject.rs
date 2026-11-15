@@ -7,6 +7,8 @@
 //! - `inject-baro-missed-edge`: after 5 s of good samples, the data-ready edges are swallowed for
 //!   200 ms while the chip keeps producing data, once.
 //! - `inject-baro-silent`: the same for 1 s, and `status` answers "nothing pending" meanwhile.
+//! - `inject-baro-fail-until-restart`: as `persistent`, until a RESTART request has been raised
+//!   (`Device::restarts`); from then on everything works again.
 //! - `inject-baro-por`: after 5 s of good samples, one `acquire` answers a power-on reset, once.
 //! - `inject-baro-verify`: after 5 s of good samples, one `verify` answers "mismatch", once.
 //! - `inject-baro-stuck`: after 5 s of good samples, `acquire` never returns.
@@ -16,11 +18,14 @@
 use embassy_time::{Duration, Instant};
 use fw_core::health::ErrorKind;
 
-use crate::device::{AdapterCounters, DeviceAdapter, Pending, Reading, StartFailure, VerifyError};
+use crate::device::{
+    AdapterCounters, BARO, DeviceAdapter, Pending, Reading, StartFailure, VerifyError,
+};
 
 const AFTER: Duration = Duration::from_secs(5);
 const TRANSIENT_FAILURES: u8 = 4;
 const PERSISTENT: bool = cfg!(feature = "inject-baro-persistent");
+const UNTIL_RESTART: bool = cfg!(feature = "inject-baro-fail-until-restart");
 const TRANSIENT: bool = cfg!(feature = "inject-baro-transient");
 const MISSED_EDGE: bool = cfg!(feature = "inject-baro-missed-edge");
 const SILENT: bool = cfg!(feature = "inject-baro-silent");
@@ -59,6 +64,8 @@ impl<A: DeviceAdapter> Inject<A> {
             "[INFO] inject: {=str} armed",
             if PERSISTENT {
                 "persistent"
+            } else if UNTIL_RESTART {
+                "fail-until-restart"
             } else if SILENT {
                 "silent"
             } else if MISSED_EDGE {
@@ -124,9 +131,12 @@ impl<A: DeviceAdapter> Inject<A> {
     }
 
     fn fail(&mut self, what: &str) -> bool {
-        let fail = (PERSISTENT || TRANSIENT)
+        let always = PERSISTENT || UNTIL_RESTART;
+        let restarted = UNTIL_RESTART && !PERSISTENT && BARO.restarts() > 0;
+        let fail = (always || TRANSIENT)
+            && !restarted
             && self.due()
-            && (PERSISTENT || self.injected < TRANSIENT_FAILURES);
+            && (always || self.injected < TRANSIENT_FAILURES);
         if fail {
             self.injected = self.injected.saturating_add(1);
             defmt::info!(
@@ -215,7 +225,7 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.recover().await;
-        if PERSISTENT && self.fail("recover") {
+        if (PERSISTENT || UNTIL_RESTART) && self.fail("recover") {
             return Err(ErrorKind::Bus);
         }
         result
@@ -223,7 +233,7 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         let result = self.inner.restart().await;
-        if PERSISTENT && self.fail("restart") {
+        if (PERSISTENT || UNTIL_RESTART) && self.fail("restart") {
             return Err(ErrorKind::Bus);
         }
         result

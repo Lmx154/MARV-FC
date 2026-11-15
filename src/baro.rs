@@ -10,6 +10,8 @@ use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::{Delay, Duration, block_for};
 use fw_core::health::{ErrorKind, Limits};
 
+pub mod settings;
+
 use crate::device::{
     AdapterCounters, BARO, DeviceAdapter, Pending, Reading, StartFailure, VerifyError, run_device,
 };
@@ -18,13 +20,15 @@ bind_interrupts!(struct Irqs {
     I2C1_IRQ => i2c::InterruptHandler<I2C1>;
 });
 
-/// Nominal sample period P: 1 / 50.056 Hz (the output data rate of [`config`]).
+/// Nominal sample period P at boot: 1 / 50.056 Hz (the default of `BARO_ODR_HZ`); afterwards
+/// [`settings::period_us`] of the configured rate.
 pub const PERIOD_US: u32 = 19_978;
 const I2C_HZ: u32 = 400_000;
 
-/// The fixed configuration until parameters arrive: the driver's default, as `bmp581_smoke` ran it
-/// on this board: pressure 16x, temperature 2x, normal mode at 50.056 Hz, no IIR filter, no FIFO,
-/// data-ready interrupt pulsed, active high, push-pull.
+/// The configuration before the first start: the driver's default, as `bmp581_smoke` ran it on this
+/// board: pressure 16x, temperature 2x, normal mode at 50.056 Hz, no IIR filter, no FIFO, data-ready
+/// interrupt pulsed, active high, push-pull. It equals the parameters' defaults; every start and
+/// apply takes the stored parameters instead (`refresh_config`).
 fn config() -> Config {
     Config::new()
 }
@@ -120,6 +124,30 @@ impl Bmp581Adapter {
         (sda_low, scl_low, pulses)
     }
 
+    /// Takes the configuration from the stored parameters and sets the device's nominal period P
+    /// from its rate (before the chip is configured, so the deadline T is never shorter than the
+    /// new sample interval).
+    fn refresh_config(&mut self) {
+        match crate::store::baro_config() {
+            Ok(config) => self.config = config,
+            Err(reason) => defmt::warn!(
+                "[INFO] BARO: stored settings refused ({=str}), keeping the previous configuration",
+                reason
+            ),
+        }
+        let period = settings::period_us(self.config.odr);
+        BARO.set_period_us(period);
+        defmt::info!(
+            "[INFO] BARO: configuration: output data rate {=f32} Hz, pressure {=u8} (code), temperature {=u8} (code), IIR pressure {=u8} temperature {=u8} (codes), nominal period {=u32} us",
+            self.config.odr.hz(),
+            self.config.pressure_oversampling.code(),
+            self.config.temperature_oversampling.code(),
+            self.config.pressure_iir.code(),
+            self.config.temperature_iir.code(),
+            period
+        );
+    }
+
     /// The driver, counting one adapter call on the bus.
     fn chip(&mut self) -> Result<&mut Bmp581<Bus>, ErrorKind> {
         self.calls = self.calls.wrapping_add(1);
@@ -141,6 +169,7 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn start(&mut self) -> Result<(), StartFailure> {
+        self.refresh_config();
         let config = self.config;
         let chip = self
             .chip()
@@ -203,12 +232,22 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn apply(&mut self) -> Result<(), ErrorKind> {
+        self.refresh_config();
         let config = self.config;
-        self.chip()?
+        let result = self
+            .chip()?
             .configure(&mut Delay, &config)
             .await
             .map(|_| ())
-            .map_err(|e| kind(&e))
+            .map_err(|e| kind(&e));
+        match &result {
+            Ok(()) => defmt::info!("[INFO] BARO: applied"),
+            Err(error) => defmt::warn!(
+                "[INFO] BARO: apply failed ({=str})",
+                crate::device::error_name(*error)
+            ),
+        }
+        result
     }
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
