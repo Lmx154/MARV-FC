@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn every_offered_value_alone_is_accepted_or_refused_only_by_the_averaging_rule() {
-        // On top of the default averaging (2) the two fastest rates are refused.
+        // On top of the default averaging (2) only the fastest rate is refused.
         let refused_rates: Vec<f32> = RATES
             .iter()
             .map(|(hz, _)| *hz)

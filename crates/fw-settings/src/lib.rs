@@ -23,3 +23,49 @@ extern crate std;
 
 pub mod baro;
 pub mod mag;
+
+use fw_core::params::ParamDef;
+
+/// The number of parameters of the whole firmware.
+pub const COUNT: usize = baro::COUNT + mag::COUNT;
+
+/// The firmware's one parameter table: every device's table in the order BARO, MAG.
+pub static TABLE: [ParamDef; COUNT] = concat();
+
+#[allow(clippy::indexing_slicing)] // the loops run exactly over each source table's length
+const fn concat() -> [ParamDef; COUNT] {
+    let mut out = [baro::TABLE[0]; COUNT];
+    let mut n = 0;
+    let mut i = 0;
+    while i < baro::COUNT {
+        out[n] = baro::TABLE[i];
+        n += 1;
+        i += 1;
+    }
+    i = 0;
+    while i < mag::COUNT {
+        out[n] = mag::TABLE[i];
+        n += 1;
+        i += 1;
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fw_core::params::Params;
+
+    #[test]
+    fn the_whole_table_is_accepted_with_every_validator() {
+        let mut params = Params::<COUNT>::new(&TABLE).unwrap();
+        assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
+        assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
+        assert_eq!(params.count() as usize, COUNT);
+        let mut expected = baro::TABLE.iter().chain(mag::TABLE.iter());
+        for def in &TABLE {
+            assert_eq!(def.name, expected.next().unwrap().name);
+        }
+        assert!(expected.next().is_none());
+    }
+}
