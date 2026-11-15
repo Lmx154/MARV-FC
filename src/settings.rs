@@ -24,6 +24,7 @@ use fw_core::handshake::Handshake;
 use fw_core::params::{Apply, LoadError};
 use fw_core::record::{self, Boot, Decoded, Entry, SECTOR_LEN, Sector};
 use mavlink_device::dialect::MavSeverity;
+use mavlink_device::marv::MarvDevice;
 use mavlink_device::{ParamName, ParamStore, ParamValue};
 use static_cell::ConstStaticCell;
 
@@ -45,6 +46,8 @@ const _: () = assert!(REGION_END as usize == FLASH_SIZE);
 const PONG_FRESH_MAX_MS: u32 = 100;
 /// Skipped entries named in a text each; the rest are counted in one more text.
 const SKIP_TEXTS: usize = 4;
+/// Entries the feature `save-foreign` adds to one save.
+const FOREIGN: usize = if cfg!(feature = "save-foreign") { 2 } else { 0 };
 
 /// The arm/save handshake; `ARMED` will be owned by the flight core's arming code.
 pub static HANDSHAKE: Handshake = Handshake::new();
@@ -187,6 +190,28 @@ fn reason(error: LoadError) -> &'static str {
     }
 }
 
+/// After a load: each device's stored values through its validator (`settings_to_config`, what
+/// `settings::validate` runs). A refused set goes back to the device's defaults in RAM (the flash
+/// is not touched) and the reason is returned, so the device starts on valid values.
+fn check_devices() -> Option<&'static str> {
+    let Err(reason) = store::baro_config() else {
+        return None;
+    };
+    let baro = MarvDevice::MARV_DEVICE_BARO as u8;
+    store::with(|p| {
+        for def in settings::TABLE.iter().filter(|d| d.device == baro) {
+            if let Ok(name) = ParamName::new(def.name) {
+                let _ = p.load(&name, def.default);
+            }
+        }
+    });
+    defmt::warn!(
+        "[INFO] settings: BARO stored settings refused ({=str}): BARO parameters to their defaults in RAM, flash unchanged",
+        reason
+    );
+    Some(reason)
+}
+
 fn values() -> [Option<ParamValue>; store::COUNT] {
     store::with(|p| core::array::from_fn(|i| p.get(u16::try_from(i).unwrap_or(u16::MAX))))
         .unwrap_or([None; store::COUNT])
@@ -231,6 +256,7 @@ fn load_from_flash(st: &mut Storage, what: &str) -> Result<u32, &'static str> {
         p.clear_dirty();
     })
     .ok_or("store not ready")?;
+    let refused = check_devices();
     let after = values();
     let mut configure = 0u32;
     for ((def, old), new) in settings::TABLE.iter().zip(before).zip(after) {
@@ -272,6 +298,12 @@ fn load_from_flash(st: &mut Storage, what: &str) -> Result<u32, &'static str> {
             ("stored record invalid, defaults (nothing erased)", "-", 0)
         }
     };
+    if refused.is_some() {
+        crate::text(
+            MavSeverity::MAV_SEVERITY_WARNING,
+            "BARO: stored settings invalid, defaults",
+        );
+    }
     defmt::info!(
         "[INFO] settings {=str}: {=str}, sector {=str}, sequence {=u32}, {=u16} loaded, {=u16} skipped; sector A {}, sector B {}; next save to sector {=str} with sequence {=u32}; apply mask {=u32:#x}",
         what,
@@ -333,7 +365,7 @@ pub fn save() -> Result<u64, &'static str> {
 }
 
 fn write_record(st: &mut Storage) -> Result<u64, &'static str> {
-    let mut entries: [Option<Entry>; store::COUNT] = [None; store::COUNT];
+    let mut entries: [Option<Entry>; store::COUNT + FOREIGN] = [None; store::COUNT + FOREIGN];
     let count = store::with(|p| {
         let mut n = 0usize;
         for (name, value) in p.non_default() {
@@ -345,6 +377,8 @@ fn write_record(st: &mut Storage) -> Result<u64, &'static str> {
         n
     })
     .ok_or("store not ready")?;
+    #[cfg(feature = "save-foreign")]
+    let count = add_foreign(&mut entries, count);
     let sector = st.write_sector;
     let sequence = st.next_sequence;
     let at = offset(sector);
@@ -469,6 +503,85 @@ pub fn corrupt_newest() {
                 "FAILED"
             }
         );
+    });
+}
+
+/// Feature `save-foreign`: the first save after boot also stores `ZZZ_UNKNOWN` = 1 (no such
+/// parameter) and `BARO_ODR_HZ` = 33 (in the table's range, refused by the validator), as a record
+/// from another firmware version might.
+#[cfg(feature = "save-foreign")]
+fn add_foreign(entries: &mut [Option<Entry>], mut count: usize) -> usize {
+    use core::sync::atomic::AtomicBool;
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::Relaxed) {
+        return count;
+    }
+    let (Ok(unknown), Ok(odr)) = (ParamName::new("ZZZ_UNKNOWN"), ParamName::new("BARO_ODR_HZ"))
+    else {
+        return count;
+    };
+    for (name, value) in [(unknown, ParamValue::I32(1)), (odr, ParamValue::I32(33))] {
+        if let Some(entry) = entries
+            .iter_mut()
+            .flatten()
+            .find(|e| e.name.as_str() == name.as_str())
+        {
+            entry.value = value;
+        } else if let Some(slot) = entries.get_mut(count) {
+            *slot = Some(Entry { name, value });
+            count += 1;
+        }
+    }
+    defmt::warn!("[INFO] save-foreign: this save also stores ZZZ_UNKNOWN = 1 and BARO_ODR_HZ = 33");
+    count
+}
+
+/// Feature `guard-negative`: three ranges the guard must refuse before any flash call (the
+/// sector just below the region, a byte just above its end, an empty range inside it).
+#[cfg(feature = "guard-negative")]
+pub fn guard_negative() {
+    let _ = with_storage(|st| {
+        let before = GUARD_REFUSALS.load(Ordering::Relaxed);
+        let results = [
+            guarded(
+                &mut st.flash,
+                Op::Erase {
+                    from: REGION_START - SECTOR,
+                    to: REGION_START,
+                },
+            ),
+            guarded(
+                &mut st.flash,
+                Op::Program {
+                    offset: REGION_END,
+                    bytes: &[0x00],
+                },
+            ),
+            guarded(
+                &mut st.flash,
+                Op::Program {
+                    offset: REGION_START,
+                    bytes: &[],
+                },
+            ),
+        ];
+        let counted = GUARD_REFUSALS.load(Ordering::Relaxed).wrapping_sub(before);
+        let by_guard = results
+            .iter()
+            .filter(|r| **r == Err("refused by the range guard"))
+            .count();
+        if by_guard == 3 && counted == 3 {
+            defmt::info!(
+                "[PASS] guard-negative: 3 of 3 refused by the guard before any flash call, GUARD_REFUSALS {=u32}",
+                counted
+            );
+        } else {
+            defmt::error!(
+                "[FAIL] guard-negative: {=usize} of 3 refused by the guard, GUARD_REFUSALS +{=u32}",
+                by_guard,
+                counted
+            );
+        }
     });
 }
 

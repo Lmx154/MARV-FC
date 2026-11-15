@@ -21,7 +21,8 @@
 //! `stall-core0`: one core-0 task spins 3 s without yielding, 20 s after start (invariant F1).
 //! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
 //! start-up check, then its line is disabled again before core 1 starts.
-//! Features `save-loop`, `fake-armed`, `corrupt-newest`: the settings checks (`settings`).
+//! Features `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign`: the
+//! settings checks (`settings`).
 #![no_std]
 #![no_main]
 
@@ -623,6 +624,8 @@ async fn main(spawner: Spawner) {
 
     store::init();
     settings::init(p.FLASH);
+    #[cfg(feature = "guard-negative")]
+    settings::guard_negative();
     #[cfg(feature = "corrupt-newest")]
     settings::corrupt_newest();
     settings::boot();

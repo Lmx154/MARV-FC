@@ -219,7 +219,13 @@ their default.
   to defaults and each entry loaded; an entry that fails (unknown name, wrong type, out of range, read
   only) is skipped with one WARNING text, at most 4 named, then one "settings: ... and N more skipped".
   Both sectors erased: defaults and one INFO text "settings: none stored, defaults". Otherwise no valid
-  record: defaults and one WARNING "settings: stored record invalid, defaults"; NOTHING is erased. One log
+  record: defaults and one WARNING "settings: stored record invalid, defaults"; NOTHING is erased. Then
+  (at boot and after a reload) each device's stored values go through that device's validator (the
+  barometer: `fw_settings::baro::settings_to_config`, what `validate` runs); a set it refuses (for
+  example a rate in the table's range that the chip does not offer, from a record of another firmware
+  version: `load` runs no validator) puts ALL of that device's parameters back to their defaults in RAM,
+  the flash untouched, with ONE WARNING text "BARO: stored settings invalid, defaults"; the device then
+  starts normally on its defaults (`param list` shows them; a save writes them). One log
   line `[INFO] settings boot: <class>, sector, sequence, loaded, skipped; sector A <state>, sector B <state>;
   next save to sector <X> with sequence <N>`. The texts are queued before anything else and wait in the
   text queue until a ground station connects (if nobody ever connects they stay queued; nothing is lost
@@ -259,6 +265,15 @@ Features for the checks (off by default):
   valid record (the first entry's value byte, else the CRC's, else the magic's) is programmed to 0x00
   through the guard; the boot then chooses the other sector (invariant I3.2) and the next save goes to the
   corrupted sector's place.
+- `FEATURES=guard-negative tools/run.sh 60` (NEGATIVE CONTROL of the range guard): at boot, before the
+  settings are read, an erase of the sector just below the region (0x1FD000..0x1FE000), a program of one
+  byte just above its end (0x200000) and an empty program; each is refused by the guard before any flash
+  call (three `[FAIL] settings: ... refused` lines), then one `[PASS] guard-negative: 3 of 3 refused ...,
+  GUARD_REFUSALS 3`; the firmware runs on normally.
+- `FEATURES=save-foreign tools/run.sh 60`: the first `param save` after boot also stores `ZZZ_UNKNOWN` = 1
+  and `BARO_ODR_HZ` = 33 through the normal guarded save. The next normal boot skips `ZZZ_UNKNOWN` with
+  its text and falls back to the barometer's defaults (text "BARO: stored settings invalid, defaults").
+  Put a clean record back afterwards (`param reset-all --yes`, `param save`).
 - The existing `no-fbeat`: `param save` ends FAILED "save failed: flight core not answering".
 
 ## Commands

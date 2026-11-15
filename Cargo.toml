@@ -97,6 +97,12 @@ f4-negative = []
 save-loop = []
 fake-armed = []
 corrupt-newest = []
+# NEGATIVE CONTROL of the range guard: at boot an erase just below the settings region, a program just
+# above its end and an empty program, each to be refused before any flash call (guard-negative). The
+# first save after boot also stores ZZZ_UNKNOWN = 1 and BARO_ODR_HZ = 33, as a record from another
+# firmware version might (save-foreign).
+guard-negative = []
+save-foreign = []
 
 [profile.release]
 debug = true
