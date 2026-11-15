@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the 13 parameters of BARO, MAG and BATT (see Parameters),
+  second, the parameter protocol over the 25 parameters of BARO, MAG, BATT and the two IMUs' calibration offsets (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -44,9 +44,9 @@ It has no flight functionality.
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
   enabled on core 0 after core 1 started.
 
-Not in it yet: the IMUs' parameters, calibration offsets and self-test (fixed configurations for now), IMU2's
-high-g accelerometer (off; nothing of it on the link), the RC receiver row and the radio link (the ELRS receiver on UART0), GNSS's PPS and time synchronisation (the pin is not read), the compass
-calibration command (only the `MAG_OFF*` parameters it will write exist), the calibrations and the self-test, the radio link
+Not in it yet: IMU configuration parameters and the self-test (fixed configurations for now; the IMU calibration
+offsets and the gyro, accelerometer and compass calibrations exist, see Calibrations), IMU2's
+high-g accelerometer (off; nothing of it on the link), the RC receiver row and the radio link (the ELRS receiver on UART0), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit, the radio link
 (UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
 a ground station's node runs; when it is full, newer texts are dropped with a log line).
 
@@ -70,7 +70,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(10 tests).
+(16 tests).
 
 IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock (as `icm45686_smoke` ran
 it on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
@@ -79,7 +79,7 @@ the ICM-45686 has no 1 kHz rate. Single-sample mode
 (`read()` on every data-ready signal, the driver README's single-sample path), with INT1_STATUS0 (clear on
 read) read with every sample so that the status read after a late CHECK sees a fresh flag; no FIFO, so
 the overflow count stays 0. Its values go to the station as HIGHRES_IMU (id 0, acceleration, gyro,
-temperature, the other fields NaN with their `fields_updated` bits clear) at 25 Hz; the magnetometer's field in gauss (1 G = 100 uT) as `xmag`, `ymag`, `zmag` with their `fields_updated` bits
+temperature, the other fields NaN with their `fields_updated` bits clear; the gyro and acceleration have the `IMU1_GYR_OFF*` and `IMU1_ACC_OFF*` offsets subtracted, which is nothing while they are 0) at 25 Hz; the magnetometer's field in gauss (1 G = 100 uT) as `xmag`, `ymag`, `zmag` with their `fields_updated` bits
 set only while the latest MAG sample is younger than 1 s (the same rule for the IMU1 fields: NaN and clear bits when older; SCALED_PRESSURE is not sent when its sample is older than 1 s); the barometer's as SCALED_PRESSURE at 25 Hz; the receiver's as GPS_RAW_INT (id 24) at 1 Hz (see GNSS below). SYS_STATUS carries
 `voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample while it is younger than 1 s (65535 and -1, MAVLink's "unknown", while there is none or it is older);
 `battery_remaining` stays -1.
@@ -94,7 +94,7 @@ as `lsm6dsk320x_modes` check 5 showed), waited for by level, so a sample that ar
 is not lost. One `read_all()` per sample (temperature, gyroscope, low-g; the high-g registers are read and
 dropped). STATUS_REG is not clear-on-read (its flags clear when the data is read), so no status read goes
 with the sample; the chip has no reset flag, so a power-on reset shows as a timeout or a `verify` mismatch.
-Its values go to the station as SCALED_IMU2 (116) at 25 Hz: milli-g, milli-rad/s, centi-degrees (0.00 C sent
+Its values go to the station (with the `IMU2_GYR_OFF*` and `IMU2_ACC_OFF*` offsets subtracted, which is nothing while they are 0) as SCALED_IMU2 (116) at 25 Hz: milli-g, milli-rad/s, centi-degrees (0.00 C sent
 as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
@@ -326,7 +326,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG and BATT (after it); `fw_settings::TABLE` joins them (13 entries). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT and the IMUs' offsets (after it); `fw_settings::TABLE` joins them (25 entries: 5 + 5 + 3 + 12). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -365,13 +365,13 @@ Every parameter write, accepted or refused, has an `[INFO] param <NAME> = <value
 
 `crates/fw-settings/src/mag.rs`, device MAG. The two configuration parameters are the `Configure` class (the whole candidate goes
 through the driver's `Config::validate` before the value is stored); the three offsets are `Live` and `calibration`
-(`param reset-calibration` resets them), reserved for the compass calibration command, which is not built.
+(`param reset-calibration` resets them); the compass calibration writes them (see Calibrations).
 
 | Name | Type | Default | Range | Means |
 |---|---|---|---|---|
 | `MAG_ODR_HZ` | F32 | 100 | 1.5625 to 400 | output data rate in Hz: 400, 200, 100, 50, 25, 12.5, 6.25, 3.125 or 1.5625; refused otherwise ("rate not offered by the chip") |
 | `MAG_AVG` | I32 | 2 | 1 to 8 | samples averaged: 1, 2, 4 or 8 ("not 1, 2, 4 or 8"); the rate allows at most 1 at 400 Hz, 2 at 200 Hz, 4 at 100 Hz, 8 below ("averaging too high for the rate") |
-| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla subtracted from the field of that axis in every sample |
+| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla subtracted from the field of that axis in every sample (by the core-0 adapter, `fw_settings::mag::apply_offsets`) |
 
 ### BATT parameters
 
@@ -383,6 +383,17 @@ through the driver's `Config::validate` before the value is stored); the three o
 | `BATT_V_SCALE` | 1.0 | 0.1 to 10 | gain on the battery voltage (100k / 10k divider, 3.3 V reference): the crate's `gain_ppm` is `(scale - 1) * 1e6`; 2.0 doubles the voltage; the bench's one-point trim for this board would be 1.007603 (not applied) |
 | `BATT_A_SCALE` | 0.02 | 0 to 10 | volts at the pin per ampere of the ESC's current output; the default is the crate's PLACEHOLDER, not calibrated; 0 reads 0 A |
 | `BATT_A_OFFSET` | 0.0 | -3.3 to 3.3 | volts at the pin with no current (the crate's `zero_uv`) |
+
+### IMU offset parameters
+
+`crates/fw-settings/src/imu.rs`, twelve `F32` parameters, `Live` and `calibration` (`param reset-calibration`
+resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtracts them from every sample
+(see Calibrations); a change reaches it within one supervisor tick.
+
+| Name | Range | Means |
+|---|---|---|
+| `IMU1_GYR_OFFX`, `IMU1_GYR_OFFY`, `IMU1_GYR_OFFZ`, `IMU2_GYR_OFFX`, `IMU2_GYR_OFFY`, `IMU2_GYR_OFFZ` | -34.9066 to 34.9066 | gyro offset in rad/s: the gyros' full scale, 2000 dps (Betaflight's `GYRO_SCALE_2000DPS`), so the store holds any rate a working gyro reports |
+| `IMU1_ACC_OFFX`, `IMU1_ACC_OFFY`, `IMU1_ACC_OFFZ`, `IMU2_ACC_OFFX`, `IMU2_ACC_OFFY`, `IMU2_ACC_OFFZ` | -9.80665 to 9.80665 | accelerometer offset in m/s^2: ArduPilot's largest accepted offset, one gravity (`AccelCalibrator::accept_result`) |
 
 ## Settings in flash
 
@@ -459,6 +470,98 @@ Features for the checks (off by default):
   Put a clean record back afterwards (`param reset-all --yes`, `param save`).
 - The existing `no-fbeat`: `param save` ends FAILED "save failed: flight core not answering".
 
+## Calibrations
+
+`marv-cli calibrate gyro`, `calibrate accel`, `calibrate compass` (MAV_CMD_PREFLIGHT_CALIBRATION 241) and
+`calibrate cancel` (the all-zero 241). The decision is pure and tested on the host (`fw_core::calib`); the
+firmware glue is `src/calibration.rs` on core 0, stepped from the supervisor tick (`actions::tick`). One
+calibration at a time (the one `ActionBook`); progress 0 to 100 % goes out through the book, HEARTBEAT
+`system_status` is CALIBRATING while one runs. The result is written into the parameters and used at once;
+it is NOT saved to flash: only the user's Save (`param save`) stores it, and a reset or `param reload`
+loses it. Nothing is written by a failed or cancelled run. Every calibration queues its result or failure
+text BEFORE its action ends, and the final ACK is held until the text queue is empty (`actions::next_ack`,
+because the node sends ACKs before it takes texts), so the text always precedes the ACK on the link and
+the command-line tool prints it.
+
+**Cancel.** `calibrate cancel` drops the running calibration, nothing is written, the action ends CANCELLED
+(its final ACK; no text).
+
+**What the offsets are subtracted from, and where.** Every offset is subtracted from the sample in software
+(the chips' own offset registers stay 0). IMU offsets: core 0 writes `IMUx_GYR_OFF*` and `IMUx_ACC_OFF*` into
+one `fw_core::xcore::TripleBuffer<ImuOffsets>` per IMU (at boot before core 1 starts, and within one
+supervisor tick of any change of the stored values: a parameter set, `param reset-calibration`, a reload,
+a calibration result; pushes wait while a calibration runs, so the offsets stay constant during the
+measurement); each IMU's adapter on the flight core reads it wait-free with every sample and publishes
+`raw - offset`. MAG offsets: the core-0 adapter (`src/mag.rs`) reads `MAG_OFFX/Y/Z` from the store for every
+sample and publishes `raw - offset` (`fw_settings::mag::apply_offsets`). So the samples on the link and in
+the rows are corrected, and a calibration measures the RAW value: it adds the offsets in force back to each
+sample it sees (`ImuOffsets::restore`, `fw_core::calib::mag_raw`); a second calibration with the first's
+offsets in force gives the same result. Core 0 sees the rows' latest sample (the supervisor mirrors the
+flight rows every 10 ms, about 100 per second per IMU); every sample is counted once by its `seq`.
+
+### Gyro (`calibrate gyro`, both IMUs)
+
+Method: Betaflight `performGyroCalibration` (`src/main/sensors/gyro.c`): the samples of a fixed duration,
+`gyroCalibrationDuration` = 125 (1.25 s, `pgResetFn_gyroConfig`); their mean is the offset. Moving when the
+standard deviation (`devStandardDeviation`, `common/maths.c`, n - 1) of any axis exceeds
+`gyroMovementCalibrationThreshold` = 48 raw counts, at the 2000 dps scale Betaflight runs every gyro at
+(`GYRO_SCALE_2000DPS` = 2000 / 2^15 dps per count, `drivers/accgyro/accgyro.h`): 2.93 dps. Betaflight starts
+over when moving; here the run fails. Duration: 125 samples, about 1.25 s. There is no limit on the offset
+(neither Betaflight nor ArduPilot has one) beyond the parameters' range, the gyros' full scale: a mean the
+store refuses (a broken sensor) ends FAILED. Texts: "gyro calibration: moving", "gyro calibration: offset
+out of range", "gyro calibration: no IMU Ok", "gyro calibration: IMUn not Ok, skipped" (that IMU is left
+out); the result "gyro cal: |IMU1| N |IMU2| N urad/s" (the length of each IMU's offset vector). One IMU
+moving fails the whole run.
+
+### Accelerometer (`calibrate accel`, both IMUs, one position, +Z up)
+
+Method: ArduPilot `AP_InertialSensor::simple_accel_cal`: averages of 50 samples; two successive averages
+closer than `accel_convergence_limit` = 0.05 m/s^2 (length of the difference) converge, the offset is
+their mean minus gravity (0, 0, 9.80665); not converged within 20 averages ("up to 10 seconds"): failed.
+The largest offset accepted per axis is one gravity (`AccelCalibrator::accept_result`, `GRAVITY_MSS`;
+`simple_accel_cal` itself has no limit). Duration: 1 s at the least, 10 s at the most. Texts: "accel
+calibration: moving" (not converged), "accel calibration: IMUn offset too large", "accel calibration: no IMU
+Ok", "accel calibration: IMUn not Ok, skipped"; the result "accel cal: |IMU1| N |IMU2| N mm/s^2".
+
+### Compass (`calibrate compass`, MAG)
+
+Method: Betaflight's compass calibration by minimum and maximum, `compassUpdate`
+(`src/main/sensors/compass.c`, release tags up to 4.4.3): for 30 s (`(currentTimeUs - tCal) < 30000000`) the
+user turns the vehicle through all orientations, the firmware tracks the minimum and maximum of each axis
+(`magZeroTempMin`, `magZeroTempMax`), and the offset is `(min + max) / 2`. What master does now: 4.5 and
+master (`CALIBRATION_TIME_US` = 30 s, `CALIBRATION_WAIT_US` = 15 s) start on movement and fit a recursive
+bias estimator (`compassBiasEstimator`) instead; this firmware keeps the minimum and maximum method.
+Duration: 30 s of the samples' own time stamps from the first sample (admission limit 40 s). The radius
+seen on an axis is `(max - min) / 2`. Accepted only if EVERY axis' radius lies strictly between ArduPilot's
+bounds (`libraries/AP_Compass/CompassCalibrator.cpp`: `#define FIELD_RADIUS_MIN 150`, `#define
+FIELD_RADIUS_MAX 950`, milligauss; `fit_acceptable_status`: `radius <= FIELD_RADIUS_MIN || radius >=
+FIELD_RADIUS_MAX` is `FAILED_RADIUS`), that is more than 15 and less than 95 microtesla (1 G = 100 uT); Betaflight
+accepts whatever comes out. Texts: "compass cal: not rotated, radius X Y Z uT" (integers; a vehicle at rest
+shows about 1 each), "compass cal: offset out of range X Y Z uT" (the offsets would fall outside
+`MAG_OFF*`'s -200 to 200), "compass cal: MAG not ok" (the row is not Ok when the action starts; FAILED
+at once); the result "compass cal: off X Y Z r X Y Z uT" (offsets and radii, integers, INFO). On success
+`MAG_OFFX/Y/Z` hold the midpoints and the adapter uses them from the next sample. Not built: soft-iron
+(matrix) fit, automatic or in-flight compass learning.
+
+### Test feature
+
+`inject-mag-rotation` (off by default; `FEATURES=inject-mag-rotation tools/run.sh`): while a compass
+calibration runs, its input (not the published samples) is replaced by a synthetic rotation, the six points
+(+-50, 0, 0), (0, +-50, 0), (0, 0, +-50) uT about the centre (10, -20, 30) uT, each held for 100 samples, so
+the success path can be shown on a board that cannot be turned: offsets (10, -20, 30), radii 50.
+
+### On the board (2026-11-15, MARV V2 Rev 1 at rest on the bench, nothing saved)
+
+Normal build: `calibrate accel` ACCEPTED, "accel cal: |IMU1| 285 |IMU2| 294 mm/s^2" printed before the exit
+(exit 0); `calibrate gyro` ACCEPTED, "gyro cal: |IMU1| 5417 |IMU2| 5412 urad/s"; `calibrate compass`: 0 to
+98 % over 30 s, then FAILED "compass cal: not rotated, radius 1 1 1 uT" (exit 1), `MAG_OFF*` still 0; a run
+interrupted at about 9 s and ended by `calibrate cancel`: "compass calibration stopped (cancelled): nothing
+written", final ACK of command 241 CANCELLED, `MAG_OFF*` 0. Then `param reset-calibration --yes`. With
+`inject-mag-rotation`: ACCEPTED, "compass cal: off 10 -20 30 r 50 50 50 uT", `MAG_OFFX/Y/Z` = 10, -20, 30;
+the `[STAT] MAG:` field of the next line moved from (-32.93, 13.03, 37.86) to (-42.66, 32.93, 7.88) uT, the
+offsets less the noise of a single sample (about 0.3 uT); after a restart `MAG_OFF*` read 0 (not saved).
+Six rows Ok, 0 errors, watchdog stalls begun 0, no reset throughout.
+
 ## Commands
 
 `Telemetry::command` and `Telemetry::acks` on the USB link, over ONE `fw_core::admission::ActionBook`
@@ -473,11 +576,12 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 |---|---|
 | `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
-| `param reset-calibration --yes` | `Params::reset_calibration`, the same way; there are no calibration parameters yet, so it changes nothing and is ACCEPTED |
+| `param reset-calibration --yes` | `Params::reset_calibration`, the same way: the twelve `IMUx_*_OFF*` and the three `MAG_OFF*` go to 0 and the IMU offsets are pushed to the flight core; ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
 | `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
 | `reboot --yes` | MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN param1 = 1: the action writes the REQUESTED scratch record and ends ACCEPTED; when the final ACK is handed to the link the watchdog monitor resets the board (`trigger_reset`) 100 to 200 ms later (1 s after the action when no ACK could be handed). Nothing is saved: an unsaved parameter change is gone after the reboot. The boot report then says INFO "reboot: requested" |
-| `calibrate gyro`, `accel`, `compass`, `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "gyro calibration: not built yet"). No fake success |
+| `calibrate gyro`, `accel`, `compass`, `calibrate cancel` | see Calibrations |
+| `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "self-test: not built yet"). No fake success |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Device drivers
@@ -625,7 +729,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (141 tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (162 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
@@ -641,7 +745,7 @@ the host (141 tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `pa
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (6 tests: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (20 tests, the first six: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store
