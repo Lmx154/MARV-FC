@@ -261,7 +261,9 @@ Features for the checks (off by default):
 - `FEATURES=save-loop tools/run.sh 200`: 60 s after start, 100 saves one second apart, `BARO_IIR_T`
   alternating 1 and 3, each stall logged, then `[INFO] save-loop summary: ...` (count, verified,
   min/max/mean stall, device transitions, IMU1 missed edges, long gaps and largest gap, BARO timeouts,
-  discarded windows, guard refusals, the last value saved). Flash wear: 100 erases per run.
+  discarded windows, guard refusals, the last value saved). Flash wear: 100 erases per run. Runs once per
+  power-up or flash: not after a reset the watchdog caused (so a fault can never make it loop). Not yet run
+  under the watchdog (see Watchdog).
 - `FEATURES=fake-armed tools/run.sh 60`: the handshake's armed flag is set at boot; `param save` ends
   FAILED "save failed: armed" and writes nothing.
 - `FEATURES=corrupt-newest tools/run.sh 60`: at boot, before the settings are read, one byte of the newest
@@ -352,9 +354,12 @@ watchdog caused it, `power-on` otherwise, which includes a debugger reset by `to
 
 Negative control: `FEATURES=no-fbeat tools/run.sh 30` builds with the cargo feature `no-fbeat`: core 1
 starts but its liveness task is not spawned. Expected: `[FAIL] PONG follows PING`, the log line and the
-WARNING text "flight core not answering". With the watchdog this build also resets about 1.7 s after start
-and again after every reset (a reset loop, record "FBEAT stalled (flight core)" or the task that ran last):
-run `tools/run.sh` at once afterwards to put the normal build back on the board.
+WARNING text "flight core not answering", and `param save` ends FAILED "save failed: flight core not
+answering" with nothing written. The hardware watchdog is NOT started in this build (`[INFO] watchdog NOT
+started ...`): the flight core never answers, so it would reset the board in a loop. The monitor still runs
+without effect (it logs the flight-core stall once) and carries out a reboot. Measured 2026-11-15: 60 s, no
+reset, all three of the above. Run `tools/run.sh` again afterwards to put the normal build back on the
+board.
 
 ## Watchdog
 
@@ -389,6 +394,28 @@ run `tools/run.sh` at once afterwards to put the normal build back on the board.
 - Under `probe-rs run` a watchdog reset ends the probe session ("Firmware exited unexpectedly: Exception"): the
   firmware boots again from flash on its own and keeps running; its evidence is then read with `marv-cli`.
   A flash by `tools/run.sh` leaves the scratch registers at 0 and the reset reason empty.
+- Every 10 s: `[STAT] watchdog: feeds N, stalls begun B, ended E, checks after a save S`.
+- A save under the watchdog (2026-11-15, normal build, `param set BARO_IIR_T 3`, `param save`,
+  `param reset-all --yes`, `param save`): both ACCEPTED, stalls 42.1 ms and 40.7 ms, `checks after a save
+  2`, `stalls begun 0`, feeds 100 per 10 s (no check went unfed), no reset. The 100-save `save-loop` run
+  under the watchdog has not been done yet.
+- A stuck device (2026-11-15, `inject-baro-stuck`, 75 s): "BARO: stuck" (ERROR), the row FAILED/STUCK, no
+  stall, no reset; IMU1 Ok with 0 errors at 803.5 samples/s throughout.
+
+What each cargo feature does under the watchdog:
+
+| Feature | Under the watchdog |
+|---|---|
+| `no-fbeat` | the watchdog is not started (a pre-watchdog negative control); no reset |
+| `inject-baro-*` (transient, persistent, missed-edge, silent, verify, por, fail-until-restart, stuck) | device faults inside awaits: the executor runs on, the watchdog stays fed, no reset (stuck: measured) |
+| `inject-imu1-persistent`, `inject-imu1-missed-edge` | IMU1 faults on the flight core; `fbeat` still answers, no reset |
+| `stall-core0` | 3 s spin: reset about 1.7 s in, record "TEST stalled (core 0)"; once per power-up or flash |
+| `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
+| `save-loop` | 100 saves; must not reset (not yet run under the watchdog); once per power-up or flash |
+| `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
+| `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
+| `wdg-scratch-probe` | no monitor; at most two resets by design |
+| `inject`, `inject-imu1` | internal, switched on by the features above |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
 it provokes; `tools/run.sh` puts the normal build back):
