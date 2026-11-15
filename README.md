@@ -46,9 +46,7 @@ It has no flight functionality.
 
 Not in it yet: IMU configuration parameters and the self-test (fixed configurations for now; the IMU calibration
 offsets and the gyro, accelerometer and compass calibrations exist, see Calibrations), IMU2's
-high-g accelerometer (off; nothing of it on the link), the RC receiver row and the radio link (the ELRS receiver on UART0), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit, the radio link
-(UART), the SD card, the design's text ring of 8 (a fixed queue of 8 texts stands in: texts wait there until
-a ground station's node runs; when it is full, newer texts are dropped with a log line).
+high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit, the SD card.
 
 ## Flight-core device loop
 
@@ -420,8 +418,9 @@ their default.
   starts normally on its defaults (`param list` shows them; a save writes them). One log
   line `[INFO] settings boot: <class>, sector, sequence, loaded, skipped; sector A <state>, sector B <state>;
   next save to sector <X> with sequence <N>`. The texts are queued before anything else and wait in the
-  text queue until a ground station connects (if nobody ever connects they stay queued; nothing is lost
-  unless the queue of 8 fills first).
+  text ring until each link's station connects; the classification text ("none stored" / "stored record
+  invalid") is sticky (kept until every link took it), the skip and "stored settings invalid" lines are
+  ordinary texts (a link more than 8 texts behind loses the oldest).
 - Save (`param save`): FAILED with the text "save failed: flight core not answering" unless the flight
   core's `PONG` was seen fresh within 100 ms (the HAL pauses core 1 through its FIFO interrupt and waits for
   it without a time limit); FAILED "save failed: armed" when the arm/save handshake
@@ -479,7 +478,7 @@ calibration at a time (the one `ActionBook`); progress 0 to 100 % goes out throu
 `system_status` is CALIBRATING while one runs. The result is written into the parameters and used at once;
 it is NOT saved to flash: only the user's Save (`param save`) stores it, and a reset or `param reload`
 loses it. Nothing is written by a failed or cancelled run. Every calibration queues its result or failure
-text BEFORE its action ends, and the final ACK is held until the text queue is empty (`actions::next_ack`,
+text BEFORE its action ends, and the final ACK is held until that link's texts are taken (`actions::next_ack`, per link,
 because the node sends ACKs before it takes texts), but for at most 300 ms (then the ACK goes out even if
 texts are still waiting, and a text may arrive after its ACK; one `[INFO]` log line says so), so normally the
 text precedes the ACK on the link and the command-line tool prints it. The action's time limit is applied
@@ -585,6 +584,55 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 | `calibrate gyro`, `accel`, `compass`, `calibrate cancel` | see Calibrations |
 | `device selftest <NAME>` | admitted, then FAILED at once with ONE STATUSTEXT "<what>: not built yet" (for example "self-test: not built yet"). No fake success |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
+
+## Radio (ELRS receiver, `rc-port`)
+
+`src/rc.rs`, task `rc_link` (watchdog id RC = 13) on core 0's thread-mode executor: UART0 as `BufferedUart`
+(interrupt driven, `UART0_IRQ`, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pad's pull-up turned
+on after the UART is built (embassy-rp 0.10 leaves it without a pull; the start line logs pull-up, pull-down
+and the line level). `rc-port` (`5d5f6bd`) follows the receiver between CRSF (420000) and MAVLink (460800)
+by itself; it carries the radio's MAVLink node (system 1, component 1, link 1). The bench (`rc_link.rs`)
+ran the port on the `SWI_IRQ_0` interrupt executor so that no thread-mode task could delay its reads;
+here it runs in thread mode and the UART error counters (overrun included) are in the `[STAT] RC:` line:
+whether to move it is decided after a radio-on run.
+
+The RC row (`MARV_DEVICE_STATUS` device 7, SYS_STATUS RC_RECEIVER) is REPORT ONLY: no health machine,
+no recovery (`rc-port` recovers by itself), `device restart RC` is DENIED. State: locked on CRSF or
+MAVLink = OK; searching = STARTING until the first lock since boot, DEGRADED after a lock was lost.
+`present` = locked at least once since boot; `enabled` = the state mapping of `fw_core::sys_status`;
+`health` = locked. `samples` = stick reports + RADIO_STATUS reports, `last_sample_age_ms` from the
+newer of the two, `errors` = CRC + UART errors, `timeouts` = lock losses. The row is in both links'
+device rotation; it is not in the supervised registry (`device::DEVICES`).
+
+What each link carries:
+
+| | USB (link 0) | Radio (link 1, only while the port is locked on MAVLink) |
+|---|---|---|
+| HEARTBEAT, SYS_STATUS | 1 Hz each | 1 Hz each |
+| MARV_DEVICE_STATUS | 7 rows, 4 per message batch every 500 ms | one row per second: a row whose state changed since it was last sent on the radio first, else in turn |
+| GPS_RAW_INT | 1 Hz | every 2 s |
+| HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | none |
+| RC_CHANNELS (65) | 5 Hz while stick reports are younger than 1 s: 16 channels in us, `chancount` 16, `rssi` = CRSF uplink LQ x 254 / 100, or RADIO_STATUS `rssi` in MAVLink mode, 255 without a fresh figure | none |
+| STATUSTEXT | the ring, link 0 | the ring, link 1 |
+| Parameters, commands | on request; ACKs on the origin link | the same; no automatic push |
+
+The radio's budget from the frame sizes (MAVLink 2, 12 bytes of framing): HEARTBEAT 21 B/s, SYS_STATUS up
+to 43 B/s, one MARV_DEVICE_STATUS up to 42 B/s, GPS_RAW_INT up to 64 B per 2 s = 32 B/s: about 138 B/s
+plus texts (up to 66 B each), inside the design's 120 to 180 B/s of the roughly 500 B/s measured. The
+streams' fastest interval is their default, so a station cannot raise it; the node's own slowdown from
+RADIO_STATUS stays on. In CRSF mode the port sends the battery frame at most every 100 ms from the BATT
+row's latest sample while it is younger than 1 s (remaining percent and capacity 0: not estimated).
+
+A parameter change on one link is answered (echoed) on that link only; both nodes use the one store
+(`store::Store`), whose critical-section mutex serialises writes from the two links. Texts: the ring
+`fw_core::text_ring` (8 entries, 32 with `latency-text`), a cursor per link, each text once per link;
+the boot report and the settings classification in the 2 sticky slots (taken first, kept until every
+link took them; the worst case of all boot texts is about 14, so the skip and per-device lines are
+ordinary texts); a link that is down holds back nobody; the 300 ms "text before ACK" hold is per link.
+
+Not built: any use of the sticks, arming, failsafe, a rule about which link has authority or what a
+mode change means. Not yet run: anything with the transmitter switched off and on in each mode, the
+radio link seen from a ground station, UART overruns under traffic in each mode.
 
 ## Device drivers
 
@@ -731,7 +779,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (170 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far (`text_ring` is not wired into the binary yet). Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (171 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far, `text_ring`. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
