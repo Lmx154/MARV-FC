@@ -51,6 +51,7 @@ mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
 #[cfg(not(feature = "sd-fat-probe"))]
+mod logdl;
 mod logger;
 mod mag;
 mod ram;
@@ -86,7 +87,7 @@ use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{bind_interrupts, dma};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
@@ -100,8 +101,8 @@ use mavlink_device::dialect::{
 };
 use mavlink_device::marv::MARV_DEVICE_STATUS_DATA;
 use mavlink_device::{
-    CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, MAX_BATCH, Node, Outgoing,
-    ParamStore, RunError, Stream, StreamSlot, Telemetry, Texts,
+    CommandOutcome, CommandRequest, Config as NodeConfig, FRAME_BUF, LateAck, MAX_BATCH, Node,
+    Outgoing, ParamStore, RunError, Stream, StreamSlot, Telemetry, Texts,
 };
 use panic_probe as _;
 use static_cell::{ConstStaticCell, StaticCell};
@@ -351,6 +352,8 @@ impl<T: Write> Write for Counted<T> {
 struct Board {
     /// The next registry row to send.
     cursor: usize,
+    /// The log download (USB link only).
+    logs: logdl::Usb,
 }
 
 fn rows() -> [DeviceRow; ROWS] {
@@ -556,6 +559,9 @@ impl Telemetry for Board {
         if message_id == RC_CHANNELS_ID {
             return rc::rc_channels(now_us).is_some_and(|m: RC_CHANNELS_DATA| out.push(&m).is_ok());
         }
+        if message_id == logdl::LOG_DATA_ID {
+            return self.logs.sample(out);
+        }
         if message_id == DEVICE_STATUS_ID {
             let mut sent = false;
             for _ in 0..ROWS.min(MAX_BATCH) {
@@ -739,11 +745,18 @@ async fn link_loop(
             default_interval_us: RC_CHANNELS_INTERVAL_US,
             min_interval_us: 20_000,
         }),
+        StreamSlot::new(Stream {
+            message_id: logdl::LOG_DATA_ID,
+            default_interval_us: logdl::INTERVAL_US,
+            min_interval_us: logdl::INTERVAL_US as u32,
+        }),
     ];
-    let mut node = Node::new(NodeConfig::new(1, 1), &mut slots);
+    let mut node = Node::new(USB_NODE, &mut slots);
     let mut params = store::Store;
-    let mut board = Board { cursor: 0 };
-    let mut delay = Delay;
+    let mut board = Board {
+        cursor: 0,
+        logs: logdl::Usb::new(1, 1),
+    };
     loop {
         LINK_STATE.store(LINK_DOWN, Ordering::Relaxed);
         link.wait_up().await;
@@ -754,16 +767,7 @@ async fn link_loop(
             continue;
         }
         LINK_STATE.store(LINK_RUN, Ordering::Relaxed);
-        let end = node
-            .run(
-                &mut rx,
-                &mut tx,
-                &mut delay,
-                now_us,
-                &mut params,
-                &mut board,
-            )
-            .await;
+        let end = drive(&mut node, &mut rx, &mut tx, &mut params, &mut board).await;
         let why = match end {
             RunError::Read(_) => "read error",
             RunError::Write(_) => "write error",
@@ -775,7 +779,63 @@ async fn link_loop(
             node.stats()
         );
         node.on_link_down();
+        board.logs.stop();
         actions::link_lost(LINK_USB as u8);
+    }
+}
+
+/// The USB node: system 1, component 1, the log-download requests handed over, and the station
+/// counted present for 3 s after its HEARTBEAT (read by `start_gate` and `drive`).
+const USB_NODE: NodeConfig = match NodeConfig::new(1, 1)
+    .with_gcs_timeout_us(logdl::GCS_TIMEOUT_US)
+    .with_accept_list(&logdl::ACCEPT)
+{
+    Ok(config) => config,
+    Err(_) => panic!("accept list too long"),
+};
+/// Bytes read from the link at a time, as `Node::run`.
+const READ_BUF: usize = 64;
+/// Longest sleep of `drive`, as `Node::run`.
+const MAX_WAIT_US: u64 = 100_000;
+
+/// The USB node's driver. It mirrors `Node::run` of mavlink-device (`src/run.rs` lines 48-95 at rev
+/// dfdb11a; compare it with that function at every bump of the crate) with two differences only:
+/// received bytes go to `receive_with`, which hands the log-download requests to `board.logs`, and
+/// after each round of sending a log transfer stops when the station's HEARTBEAT is older than
+/// `logdl::GCS_TIMEOUT_US` (`gcs_present`). The timer is embassy's `Timer`, which `Delay` is.
+async fn drive<R: Read, W: Write>(
+    node: &mut Node<'_>,
+    rx: &mut R,
+    tx: &mut W,
+    params: &mut store::Store,
+    board: &mut Board,
+) -> RunError<R::Error, W::Error> {
+    let mut frame = [0u8; FRAME_BUF];
+    let mut buf = [0u8; READ_BUF];
+    loop {
+        while let Some(n) = node.poll_transmit(now_us(), &*params, board, &mut frame) {
+            let Some(bytes) = frame.get(..n) else {
+                continue;
+            };
+            if let Err(e) = tx.write_all(bytes).await {
+                return RunError::Write(e);
+            }
+        }
+        if !node.gcs_present(now_us()) {
+            board.logs.stop();
+        }
+        let wait_us = (node.next_deadline_us().saturating_sub(now_us())).clamp(1, MAX_WAIT_US);
+        let wait_us = u32::try_from(wait_us).unwrap_or(u32::MAX);
+        match select(rx.read(&mut buf), Timer::after_micros(u64::from(wait_us))).await {
+            Either::Second(()) => {}
+            Either::First(Err(e)) => return RunError::Read(e),
+            Either::First(Ok(0)) => return RunError::EndOfStream,
+            Either::First(Ok(n)) => {
+                if let Some(bytes) = buf.get(..n) {
+                    node.receive_with(bytes, now_us(), params, &mut |m| board.logs.message(m));
+                }
+            }
+        }
     }
 }
 
@@ -858,7 +918,7 @@ async fn supervise() -> ! {
         if tick.is_multiple_of(1000) && tick > 0 {
             if !cfg!(feature = "quiet-stat") {
                 defmt::info!(
-                    "[STAT] uptime {=u64} s, PONG age max {=u64} us, PING {=u32} PONG {=u32}, usb wrote {=u32} B {=u32} frames, read {=u32} B, link {=str}",
+                    "[STAT] uptime {=u64} s, PONG age max {=u64} us, PING {=u32} PONG {=u32}, usb wrote {=u32} B {=u32} frames, read {=u32} B, link {=str}; log download: {=u32} transfers, {=u32} B sent, SD step max {=u32} us, piece or flush late max {=u32} us",
                     now.as_secs(),
                     max_age_us,
                     PING.load(Ordering::Relaxed),
@@ -870,7 +930,11 @@ async fn supervise() -> ! {
                         LINK_RUN => "up, node running",
                         LINK_GATE => "up, start gate closed",
                         _ => "down",
-                    }
+                    },
+                    logdl::TRANSFERS.load(Ordering::Relaxed),
+                    logdl::BYTES_SENT.load(Ordering::Relaxed),
+                    logdl::STEP_MAX_US.load(Ordering::Relaxed),
+                    logdl::LATE_MAX_US.load(Ordering::Relaxed)
                 );
             }
             devices.stat(now);

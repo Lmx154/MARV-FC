@@ -49,7 +49,7 @@ use core::sync::atomic::Ordering;
 
 use atomic_waker::AtomicWaker;
 use block_device_adapters::{BufStream, BufStreamError, StreamSlice, StreamSliceError};
-use embassy_futures::select::{Either, select, select3};
+use embassy_futures::select::{Either, select, select4};
 use embassy_rp::Peri;
 use embassy_rp::interrupt::{self, InterruptExt};
 use embassy_rp::pac;
@@ -59,7 +59,7 @@ use embassy_time::{Duration, Instant, Timer};
 use embedded_fatfs::{
     DefaultTimeProvider, FatType, File, FileSystem, FsOptions, LossyOemCpConverter,
 };
-use embedded_io_async::{Read, Write};
+use embedded_io_async::{Read, Seek, SeekFrom, Write};
 use fw_core::dflog::{Dsf, HEADER_SEQUENCE_LEN, write_header};
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
 use fw_core::logfile::{
@@ -68,7 +68,7 @@ use fw_core::logfile::{
 };
 use fw_core::mbr::{Partition, partition1};
 use fw_core::watchdog::task;
-use fw_core::xcore::LogConsumer;
+use fw_core::xcore::{LogConsumer, LogProducer};
 use fw_flight::tagged;
 use mavlink_device::ParamValue;
 use mavlink_device::dialect::MavSeverity;
@@ -77,6 +77,7 @@ use pio_sdmmc::{Block, BusError, Config, Error as CardError, SdCard};
 use static_cell::ConstStaticCell;
 
 use crate::device::{self, Device, DeviceStatus, REQ_RESTART, SD, error_name, state_name};
+use crate::logdl::{self, CHUNK, DATA_HEADER, ENTRY_LEN, HANDOVER, HANDOVER_BYTES, Request};
 use crate::logger::{DATA, DSF_FIGURES, OPEN, PAD, PIECE, RING, RING_BYTES};
 
 /// The row's nominal period P: the service's 1 s (the flush, the longest wait).
@@ -120,6 +121,13 @@ static HEADER: ConstStaticCell<[u8; HEADER_SEQUENCE_LEN]> =
 struct VerifyBuf([u8; PIECE]);
 #[cfg(feature = "log-verify")]
 static VERIFY_BUF: ConstStaticCell<VerifyBuf> = ConstStaticCell::new(VerifyBuf([0; PIECE]));
+
+/// Log bytes a download step reads at most (10 LOG_DATA).
+const READ_CHUNK: usize = 10 * CHUNK;
+/// Room a whole read step needs in the hand-over ring.
+const READ_ROOM: usize = READ_CHUNK + 10 * DATA_HEADER;
+/// The download's read buffer.
+static READ_BUF: ConstStaticCell<[u8; READ_CHUNK]> = ConstStaticCell::new([0; READ_CHUNK]);
 
 /// The waker of the SD bus's DMA completion (the driver keeps no static state, CONTRACT A6).
 static SD_WAKER: AtomicWaker = AtomicWaker::new();
@@ -372,6 +380,9 @@ async fn run(mut parts: Parts) -> ! {
     let Some(consumer) = RING.take_consumer() else {
         defmt::panic!("[FAIL] log ring: consumer taken twice");
     };
+    let Some(handover) = HANDOVER.take_producer() else {
+        defmt::panic!("[FAIL] hand-over ring: producer taken twice");
+    };
     let header = HEADER.take();
     write_header(header);
     let mut w = LogState {
@@ -382,6 +393,8 @@ async fn run(mut parts: Parts) -> ! {
         header,
         written: 0,
         inject_calls: 0,
+        handover,
+        read_buf: READ_BUF.take(),
         #[cfg(feature = "inject-sd-write-fail")]
         injected: false,
         #[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
@@ -577,6 +590,9 @@ struct LogState {
     written: u64,
     /// Write calls still to fail (`inject-sd-write-fail`; 0 otherwise).
     inject_calls: u8,
+    /// The log download's answers to the USB task.
+    handover: LogProducer<'static, HANDOVER_BYTES>,
+    read_buf: &'static mut [u8; READ_CHUNK],
     #[cfg(feature = "inject-sd-write-fail")]
     injected: bool,
     /// The clean-up hooks' pretended volume was used (once per boot).
@@ -785,7 +801,7 @@ async fn logging(
         offset: HEADER_SEQUENCE_LEN as u64,
         opened_at: Instant::now(),
     };
-    let end = serve(&mut file, &mut log, row, w).await;
+    let end = serve(fs, &mut file, &mut log, row, w).await;
     OPEN.store(0, Ordering::Release);
     if end == End::Restart {
         // What waits in the ring goes into this log first (the collector has stopped).
@@ -1034,8 +1050,9 @@ async fn flush(file: &mut LogFile<'_, '_, '_>, dev: &'static Device) -> Result<(
 }
 
 /// The writer's loop while the machine wants nothing and no RESTART request waits.
-async fn serve(
-    file: &mut LogFile<'_, '_, '_>,
+async fn serve<'f, 'v, 'a>(
+    fs: &'f Fs<'v, 'a>,
+    file: &mut LogFile<'f, 'v, 'a>,
     log: &mut Open,
     row: &mut Row,
     w: &mut LogState,
@@ -1043,11 +1060,16 @@ async fn serve(
     let dev = row.dev;
     let mut last_write = Instant::now();
     let mut last_flush = Instant::now();
+    let mut download = Download::new();
+    // When the last download step began, until the loop has looked at what is due after it.
+    let mut step_began: Option<Instant> = None;
     loop {
         if dev.requested(REQ_RESTART) {
+            download.close().await;
             return End::Restart;
         }
         if row.action != Action::None {
+            download.close().await;
             return End::Machine;
         }
         #[cfg(feature = "inject-sd-write-fail")]
@@ -1076,9 +1098,32 @@ async fn serve(
         let need = PIECE - w.tail as usize % PIECE;
         let write_due = readable >= need || now >= last_write + SECOND;
         let flush_due = now >= last_flush + SECOND;
+        if let Some(began) = step_began.take()
+            && (write_due || flush_due)
+        {
+            let late = u32::try_from(began.elapsed().as_micros()).unwrap_or(u32::MAX);
+            logdl::LATE_MAX_US.fetch_max(late, Ordering::Relaxed);
+        }
         if !write_due && !flush_due {
+            // The log download only between pieces, one bounded step at a time, while Ok.
+            if row.status.state == State::Ok {
+                let began = Instant::now();
+                if download.step(fs, w, log.number).await {
+                    dev.mark();
+                    let took = u32::try_from(began.elapsed().as_micros()).unwrap_or(u32::MAX);
+                    logdl::STEP_MAX_US.fetch_max(took, Ordering::Relaxed);
+                    step_began = Some(began);
+                    continue;
+                }
+            }
             let until = (last_write + SECOND).min(last_flush + SECOND);
-            let _ = select3(DATA.wait(), Timer::at(until), dev.wake.wait()).await;
+            let _ = select4(
+                DATA.wait(),
+                Timer::at(until),
+                dev.wake.wait(),
+                logdl::WAKE.wait(),
+            )
+            .await;
             dev.mark();
             continue;
         }
@@ -1141,6 +1186,268 @@ async fn serve(
                 *slot = u32::try_from(log.offset)
                     .unwrap_or(ABSENT - 1)
                     .min(ABSENT - 1);
+            }
+        }
+    }
+}
+
+/// What the SD task does for the log download (`logdl`).
+#[derive(Clone, Copy)]
+enum Job {
+    /// Nothing; a read handle is closed.
+    Idle,
+    /// Nothing more for this request; a read handle stays open for the next request.
+    Done,
+    /// The LOG_ENTRY of the logs from `next` to `end`.
+    List {
+        next: u32,
+        end: u32,
+        num_logs: u16,
+        last: u16,
+    },
+    /// The one LOG_ENTRY with id 0: no logs.
+    Empty,
+    /// LOG_DATA for the bytes `pos..end` of log `id`.
+    Data { id: u32, pos: u64, end: u64 },
+    /// The one LOG_DATA with count 0: `ofs` at or past the end of log `id`.
+    End { id: u32, ofs: u32 },
+}
+
+/// The download's read handle: a second file beside the log being written.
+struct Reader<'f, 'v, 'a> {
+    number: u32,
+    /// The listed size when it was opened (the file's directory entry holds at least this).
+    size: u64,
+    /// The file offset.
+    at: u64,
+    file: LogFile<'f, 'v, 'a>,
+}
+
+/// The SD task's side of the log download.
+struct Download<'f, 'v, 'a> {
+    /// The generation of the request taken last.
+    generation: u32,
+    job: Job,
+    reader: Option<Reader<'f, 'v, 'a>>,
+}
+
+impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
+    /// A request made before the service began is not answered.
+    fn new() -> Self {
+        Self {
+            generation: logdl::request().0,
+            job: Job::Idle,
+            reader: None,
+        }
+    }
+
+    async fn close(&mut self) {
+        if let Some(reader) = self.reader.take() {
+            let _ = reader.file.close().await;
+        }
+    }
+
+    /// One bounded step: a new request taken, the read handle closed, opened or moved, at most
+    /// `READ_CHUNK` bytes read and handed over, or LOG_ENTRY records handed over. `false`: nothing
+    /// to do now (no request, or no room in the hand-over ring).
+    async fn step(&mut self, fs: &'f Fs<'v, 'a>, w: &mut LogState, open: u32) -> bool {
+        let (generation, request) = logdl::request();
+        if generation != self.generation {
+            self.generation = generation;
+            self.job = job_of(request, w, open);
+            return true;
+        }
+        if let Some(reader) = &self.reader {
+            let keep = match self.job {
+                Job::Data { id, end, .. } => id == reader.number && end <= reader.size,
+                Job::Done => true,
+                _ => false,
+            };
+            if !keep {
+                self.close().await;
+                return true;
+            }
+        }
+        let room = w.handover.free();
+        match self.job {
+            Job::Idle | Job::Done => false,
+            Job::Empty => {
+                if room < ENTRY_LEN {
+                    return false;
+                }
+                logdl::push_entry(&mut w.handover, generation, 0, 0, 0, 0);
+                self.job = Job::Done;
+                true
+            }
+            Job::End { id, ofs } => {
+                if room < DATA_HEADER {
+                    return false;
+                }
+                logdl::push_data(&mut w.handover, generation, id as u16, ofs, &[]);
+                self.job = Job::Done;
+                true
+            }
+            Job::List {
+                mut next,
+                end,
+                num_logs,
+                last,
+            } => {
+                if room < ENTRY_LEN {
+                    return false;
+                }
+                while next <= end && w.handover.free() >= ENTRY_LEN {
+                    if let Some(&size) = w.sizes.get(next as usize)
+                        && size != ABSENT
+                    {
+                        logdl::push_entry(
+                            &mut w.handover,
+                            generation,
+                            next as u16,
+                            num_logs,
+                            last,
+                            size,
+                        );
+                    }
+                    next += 1;
+                }
+                self.job = if next > end {
+                    Job::Done
+                } else {
+                    Job::List {
+                        next,
+                        end,
+                        num_logs,
+                        last,
+                    }
+                };
+                true
+            }
+            Job::Data { id, pos, end } => {
+                let Some(reader) = self.reader.as_mut() else {
+                    let size = w.sizes.get(id as usize).copied().unwrap_or(0);
+                    let path = log_path(id);
+                    match fs.root_dir().open_file(as_str(&path)).await {
+                        Ok(file) => {
+                            self.reader = Some(Reader {
+                                number: id,
+                                size: u64::from(size),
+                                at: 0,
+                                file,
+                            })
+                        }
+                        Err(e) => {
+                            defmt::info!(
+                                "[INFO] SD: download: {=str} not opened: {}",
+                                as_str(&path),
+                                defmt::Debug2Format(&e)
+                            );
+                            self.job = Job::Done;
+                        }
+                    }
+                    return true;
+                };
+                if reader.at != pos {
+                    let sought = reader.file.seek(SeekFrom::Start(pos)).await;
+                    match sought {
+                        Ok(at) if at == pos => reader.at = at,
+                        r => {
+                            defmt::info!(
+                                "[INFO] SD: download: log {=u32}: seek to {=u64} B ended at {}",
+                                id,
+                                pos,
+                                defmt::Debug2Format(&r)
+                            );
+                            self.job = Job::Done;
+                            self.close().await;
+                        }
+                    }
+                    return true;
+                }
+                if room < READ_ROOM {
+                    return false;
+                }
+                let n = usize::try_from(end - pos)
+                    .unwrap_or(READ_CHUNK)
+                    .min(READ_CHUNK);
+                let buf = w.read_buf.get_mut(..n).unwrap_or(&mut []);
+                let read = reader.file.read(buf).await;
+                match read {
+                    Ok(k) if k > 0 => {
+                        let mut ofs = pos;
+                        for chunk in buf.get(..k).unwrap_or(&[]).chunks(CHUNK) {
+                            logdl::push_data(
+                                &mut w.handover,
+                                generation,
+                                id as u16,
+                                ofs as u32,
+                                chunk,
+                            );
+                            ofs += chunk.len() as u64;
+                        }
+                        reader.at = ofs;
+                        self.job = if ofs >= end {
+                            Job::Done
+                        } else {
+                            Job::Data { id, pos: ofs, end }
+                        };
+                    }
+                    r => {
+                        defmt::info!(
+                            "[INFO] SD: download: log {=u32}: read at {=u64} B (end {=u64} B) gave {}",
+                            id,
+                            pos,
+                            end,
+                            defmt::Debug2Format(&r)
+                        );
+                        self.job = Job::Done;
+                        self.close().await;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+/// The job of a request: answered from the listing; nothing for a log that does not exist.
+fn job_of(request: Request, w: &LogState, open: u32) -> Job {
+    match request {
+        Request::Stop => Job::Idle,
+        Request::List { start, end } => {
+            let num_logs = u16::try_from(w.listing().count()).unwrap_or(u16::MAX);
+            if num_logs == 0 {
+                Job::Empty
+            } else {
+                Job::List {
+                    next: u32::from(start).max(1),
+                    end: u32::from(end).min(MAX_LOG_NUMBER),
+                    num_logs,
+                    last: u16::try_from(open).unwrap_or(0),
+                }
+            }
+        }
+        Request::Data { id, ofs, count } => {
+            let size = match w.sizes.get(usize::from(id)) {
+                Some(&size) if id != 0 && size != ABSENT => u64::from(size),
+                _ => return Job::Idle,
+            };
+            let pos = u64::from(ofs);
+            if pos >= size {
+                return Job::End {
+                    id: u32::from(id),
+                    ofs,
+                };
+            }
+            let end = pos.saturating_add(u64::from(count)).min(size);
+            if end == pos {
+                Job::Done
+            } else {
+                Job::Data {
+                    id: u32::from(id),
+                    pos,
+                    end,
+                }
             }
         }
     }
