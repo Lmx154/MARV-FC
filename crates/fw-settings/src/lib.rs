@@ -25,14 +25,15 @@ pub mod baro;
 pub mod batt;
 pub mod imu;
 pub mod mag;
+pub mod rc;
 pub mod sd;
 
 use fw_core::params::ParamDef;
 
 /// The number of parameters of the whole firmware.
-pub const COUNT: usize = baro::COUNT + mag::COUNT + batt::COUNT + imu::COUNT + sd::COUNT;
+pub const COUNT: usize = baro::COUNT + mag::COUNT + batt::COUNT + imu::COUNT + sd::COUNT + rc::COUNT;
 
-/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD.
+/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC.
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 #[allow(clippy::indexing_slicing)] // the loops run exactly over each source table's length
@@ -69,6 +70,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < rc::COUNT {
+        out[n] = rc::TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -84,13 +91,14 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 26);
+        assert_eq!(COUNT, 70);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
             .chain(batt::TABLE.iter())
             .chain(imu::TABLE.iter())
-            .chain(sd::TABLE.iter());
+            .chain(sd::TABLE.iter())
+            .chain(rc::TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
