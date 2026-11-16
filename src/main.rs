@@ -31,6 +31,8 @@
 //! `wdg-scratch-probe`: the watchdog checks (`watchdog`).
 #![no_std]
 #![no_main]
+// The SD probe's file-system futures nest deeper than the default limit allows for their layout.
+#![cfg_attr(feature = "sd-fat-probe", recursion_limit = "256")]
 
 mod actions;
 mod baro;
@@ -49,6 +51,8 @@ mod imu_inject;
 mod inject;
 mod mag;
 mod rc;
+#[cfg(feature = "sd-fat-probe")]
+mod sd_probe;
 mod settings;
 mod store;
 mod watchdog;
@@ -240,6 +244,11 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
     let imu2 = imu2::adapter(imu2_parts);
     let dma_on = interrupt::DMA_IRQ_0.is_enabled();
     CORE1_DMA_IRQ0.store(1 + u8::from(dma_on), Ordering::Release);
+    #[cfg(feature = "sd-fat-probe")]
+    sd_probe::CORE1_DMA_IRQ1.store(
+        1 + u8::from(interrupt::DMA_IRQ_1.is_enabled()),
+        Ordering::Release,
+    );
     let executor = EXECUTOR1.init(Executor::new());
     executor.run(|spawner| {
         #[cfg(not(feature = "no-fbeat"))]
@@ -1034,6 +1043,17 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
+    #[cfg(feature = "sd-fat-probe")]
+    spawner.spawn(defmt::unwrap!(sd_probe::task(sd_probe::Parts {
+        pio: p.PIO0,
+        dma: p.DMA_CH4,
+        clk: p.PIN_32,
+        cmd: p.PIN_33,
+        dat0: p.PIN_28,
+        dat1: p.PIN_29,
+        dat2: p.PIN_30,
+        dat3: p.PIN_31,
+    })));
 }
 
 /// The start-up checks that wait for core 1, and the watchdog's first feeds.
