@@ -5,6 +5,9 @@ controlling plan is `docs/plan.md` in this repo (local, not in git): its log has
 design is `~/Documents/MARV-V2-drivers/_plan/decision-esc-link-20261112.md`: read the SIXTH and SEVENTH
 amendments first, then the fifth (only the parts the sixth says are kept).
 
+Updated 2026-11-15: the motors are wired and were spun, the working branches are gone and the state paragraphs below are
+brought to the present (what is still open is listed in "What is still open").
+
 ## The owner's standing words (verbatim; they bind)
 
 - Goal: "drivers for ESC communication with AM32, as well as other battery functionality like current
@@ -27,8 +30,8 @@ amendments first, then the fifth (only the parts the sixth says are kept).
 ## State
 
 Driver crates: `~/Documents/MARV-V2-drivers/<crate>`, accepted work on `main`, pushed to
-`github.com/Lmx154/<crate>` (`dshot` -> `dshot-rs`). Work branches: `first-version` (new crates), `to-1.0`
-(the eight older ones).
+`github.com/Lmx154/<crate>` (`dshot` -> `dshot-rs`). The local work branches (`first-version`, `to-1.0`,
+`wip-pio-dshot`, `wip-spin`) no longer exist: every driver repository has only `main`.
 
 | Piece | State |
 |---|---|
@@ -37,11 +40,11 @@ Driver crates: `~/Documents/MARV-V2-drivers/<crate>`, accepted work on `main`, p
 | AM32 passthrough | DONE on the standalone demo: the real configurator read, changed a setting, flashed one ESC, verified byte for byte (esc-passthrough) |
 | `pio-uart` `OneWire` and `UartRx` | DONE, reviewed; no real ESC telemetry received yet |
 | DShot pure core | DONE, pushed (dshot-rs main 43c212d) |
-| DShot back-end `PioDshot` | DONE at zero throttle, no motors: accepted, reviewed, README current, pushed (dshot-rs main b7c823a, 2026-11-12 night). Not yet run with motors |
+| DShot back-end `PioDshot` | DONE: accepted, reviewed, pushed (dshot-rs main b7c823a, 2026-11-12 night). With the four motors attached: three zero-throttle runs passed (`dshot_smoke-20261113-022722`, `-022838`, `-022952`) and the spin test `dshot_spin` ran all four at up to 5 % (`dshot_spin-20261113-030326`, PASS); dshot-rs main `3557eb1` |
 | READMEs / "Works with" / package metadata | Done and pushed for the 14 other crates |
 | crates.io | Six crates prepared (icm45686, lsm6dsk320x, lc76g, bmm350 as `bmm350-async`, bmp581 as `bmp581-async`, esc-passthrough); nothing published (the owner's e-mail was not verified); PARKED by the owner |
 | ESC serial telemetry, firmware passthrough hookup, firmware arming rules | NOT STARTED |
-| Motors | NOT soldered. The owner has the lead's word to solder (back-end accepted) |
+| Motors | Wired since 2026-11-13 ("motors are wired and ready to test"), no propellers; positions and directions: `docs/pinout.md`, bench configuration |
 
 ## The DShot back-end: exactly where it stands
 
@@ -55,15 +58,9 @@ Done on the board (zero throttle, no motors): the removal passed two full runs; 
 Drop) restructured and passing; cancel sweep with a release attempt after each of 2156 cancels and a
 double-cancel sweep (940): every failure counter 0; NO driver defect found by any of it.
 
-State of the tree when the session stopped (23:15): the last commit on `wip-pio-dshot` is 4226808 ("WIP
-checkpoint: lapse lock and bench reply rules removed"). Everything after it is UNCOMMITTED in the working tree
-(`git -C ~/Documents/MARV-V2-drivers/dshot status`): check 6 restructured, the single and double cancel sweeps
-(passing on the board in logs -221711, -222912, -223115), and the SEVENTH amendment fully coded in
-`hil/src/bin/dshot_smoke.rs` (check 2 with the bounded transient: `classify`, `a_form`, `Zone`; addendum C's
-exemption at our release; the 25 us pacing margin; the five negative controls) but NOT YET RUN on the board. It
-builds (`cargo build --release --bin dshot_smoke` and clippy clean in `hil/`); `src/` is unchanged since the
-host checks last passed. The engineer's own checkpoint commit was refused by the permission system, so the
-first act of the next session (or the owner) is to commit that tree as a WIP checkpoint.
+Present state (updated 2026-11-15): the work of that night is committed, reviewed and squashed into dshot-rs
+`main` (`b7c823a`, then `a6fd136` and `3557eb1` for the spin test); the six passing full runs of `dshot_smoke`
+and the review are in the plan log. The driver's README is current. The WIP branches are deleted.
 
 **UPDATE 2 (2026-11-13, about 03:10): step 5 is DONE as far as the first spin.** Motors soldered (Emax ECO II 2807
 1700KV, 14 magnets, 4S; M1 rear left CCW, M2 front left CW, M3 rear right CW, M4 front right CCW: `docs/pinout.md`).
@@ -74,28 +71,19 @@ can do as a speed. STILL OPEN in the ESC program: the stop on signal loss; the b
 own current reading, about 155 A at rest, is unusable as a reference); ESC serial telemetry; the firmware's
 passthrough hookup and arming rules.
 
-**UPDATE (next session, same night): steps 1 to 4 below are DONE** (plan log, last entry: six passing full
-runs, two reviews PASS, squashed to dshot-rs main b7c823a; `wip-pio-dshot` is local and has the same tree). The
-"State of the tree" paragraph above is history. START AT STEP 5, after the owner has soldered the motors. Before
-step 5's runs, consider the bench-review follow-ups listed in the plan log.
+## What is still open
 
-Remaining, in order (all delegated; the lead only audits and troubleshoots):
-1. Commit the working tree as a WIP checkpoint; ONE development run of the seventh-amendment code and fix
-   only what it shows; then THREE CONSECUTIVE full runs, `tools/run.sh dshot_smoke 600` in `dshot/` (about 70 s
-   each, exit 0, no source change between them). If one fails: look at the failing lines with their edges and
-   check AM32's source before believing a bench theory.
-2. Independent review (reviewer) of the whole back-end against the decision document. Nothing has been reviewed.
-3. Mechanical and docs (coder): `cargo fmt` in `dshot/hil` (never formatted); README rewrite (back-end API,
-   what was measured with log names, the controller's start sequence and late reply, the overlap sentence,
-   tested cadence 1 kHz and "sparse frames make AM32 drop out", "Works with", what is not covered); Cargo
-   description (still says "no I/O"); package metadata like the other crates. One commit; merge to
-   `first-version`; move `main`; push to `dshot-rs`.
-4. Tell the owner the back-end is accepted and that the motors can be soldered.
-5. With motors, still zero throttle: the same three runs. Then, only on the owner's word and after asking
-   whether the props are off: a low-throttle spin test, RPM in the replies, the current scale.
-Later: zero-throttle extras (beep commands, extended telemetry, decode cost); ESC serial telemetry (measure
-the ESC's real baud rate first; `UartRx` tolerates -4.6 % to +3.9 %); the firmware's passthrough tap on the
-port shared with MAVLink; the firmware's arming and error counting.
+Steps 1 to 5 of the earlier plan (checkpoint, three full runs, review, README, tell the owner, then the same three
+runs with the motors and the first spin test at the 5 % cap) are DONE. Still open:
+- The stop on signal loss (the driver does not stop the motors; the firmware's rule, Betaflight-style).
+- The board's current scale: the ESCs' own current reading (153 to 160 A at rest) is unusable as a reference; a
+  reference other than the ESC is needed.
+- ESC serial telemetry (measure the ESC's real baud rate first; `UartRx` tolerates -4.6 % to +3.9 %).
+- The firmware's hookup: the passthrough tap on the port shared with MAVLink, arming rules (arm when every line
+  has answered) and error counting.
+- Zero-throttle extras (beep commands, extended telemetry, decode cost) and the bench-review follow-ups of the plan
+  log (the self-test for a short pulse at our release, the 53 ns tolerance, the arming block's position, `shorts_lost`
+  and `ring_over` asserted per rate only in check 3).
 
 ## Facts worth not relearning
 
@@ -114,11 +102,11 @@ port shared with MAVLink; the firmware's arming and error counting.
 
 ## Rules for the bench
 
-- Zero throttle only until the owner says to spin. Never write to an ESC without the owner's word (settings
+- Zero throttle only, except the capped spin test the owner allowed on 2026-11-13 (5 % cap, props off, `dshot_spin`, feature `motor-test`); anything beyond it needs his word again. Never write to an ESC without the owner's word (settings
   and flashing are the owner's, in the configurator). The PCB repo `~/Documents/kicad/MARV-V2` is read-only.
   Files under `_plan/ref/` are never executed. The board only through each crate's `tools/run.sh`.
-- Bench as left: battery plugged in (the bench runs need it), no motors, four AM32 2.20 ESCs with their
-  original settings (ESC 1 re-flashed with the same 2.20 today, verified); the last program on the board is
-  `dshot_smoke`, which ends with the lines released, so the ESCs sit in their bootloaders.
+- Bench: the battery must be plugged in for the bench runs; the four motors are attached, no propellers; four AM32
+  2.20 ESCs with their original settings (ESC 1 was re-flashed with the same 2.20 on 2026-11-12, verified).
+  `dshot_smoke` and `dshot_spin` end with the lines released, so the ESCs then sit in their bootloaders.
 - Passthrough for the configurator: in `esc-passthrough/`,
   `DEMO_USB_VID=1209 DEMO_USB_PID=0001 tools/run.sh passthrough_demo 3600`, then am32.ca/configurator in Chrome.
