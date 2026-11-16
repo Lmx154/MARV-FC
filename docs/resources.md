@@ -119,6 +119,16 @@ futures), `.uninit` 1 024; static SRAM 274 908 B, free 249 380 B (243 KiB). New 
 `logdl::WAKE` (a `Signal`), the counters `TRANSFERS`, `BYTES_SENT`, `STEP_MAX_US`, `LATE_MAX_US`. No new task,
 interrupt, DMA channel or flight-core change.
 
+F1 and F2 (2026-11-16, branch `wip-rcmap`, normal build, against `main` 6f26fc2: `.text` 492 588, `.ram_text` 122 340, `.data` 43 536,
+`.bss` 107 996): `.text` 500 048 (+7 460), `.ram_text` 125 860 (+3 520), `.data` 43 892 (+356), `.bss` 108 652 (+656), `.uninit` 1 024;
+static SRAM 279 428 B (the sum, as the earlier rows). The growth is mostly F1's 44-entry parameter table (`.ram_text`: the rule puts every constant in SRAM) and its
+store values (`.bss`). F2 adds no static, no task, no interrupt and no DMA channel: one byte in the existing `rc::SHARED`
+(`sticks_crsf`, copied under the lock the RC hook already takes) and one stream slot in the USB task's local array. `rc::manual_control`
+runs in the USB link task on core 0 when the stream is due, once per message at most 50 times a second: one `SHARED` lock to copy the
+sticks, then one store lock to copy 44 values by index (a 44-entry `Option<ParamValue>` array of about 530 B on the task's stack,
+not in its future); the mapping is computed outside both locks. Nothing is added to core 1 (`tools/check-ram-code.py` passes
+unchanged).
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow

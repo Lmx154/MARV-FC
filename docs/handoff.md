@@ -53,6 +53,15 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   the bus is cleared and rebuilt by the normal recovery ladder.
 - **Ground station:** Devices view, parameter editing with Save, command buttons, the configure/operate gate.
   `marv-cli` covers the same from a shell; a full companion session over USB passed on this desktop.
+- **RC mapping, reported only (branch `wip-rcmap`, not in `main`):** 44 RC parameters (`RCn_MIN/TRIM/MAX/REVERSED/DZ` for
+  channels 1 to 8, `RCMAP_ROLL/PITCH/THROTTLE/YAW`, all `Live`) and MANUAL_CONTROL (69) on USB at 5 Hz (fastest 50 Hz) from the
+  CRSF sticks only, while the latest stick report is younger than 1 s (a MAVLink override never feeds it). Nothing reads the values
+  except the encoder: no arming, failsafe, mode or output. Computed in the USB task (`rc::manual_control`), not in the RC hook and not
+  on core 1. Seen on the board on 2026-11-16 (transmitter in its CRSF model): 300 MANUAL_CONTROL in 60 s, RC_CHANNELS still 5 Hz; each
+  MANUAL_CONTROL equal to the formulas applied to the nearest RC_CHANNELS; `param set RCMAP_ROLL 3` and `RC1_TRIM 1400` took effect
+  at once, with no reboot and no save; `RC1_MIN 700` refused with "RC1_MIN: out of range"; 0 RC UART overruns in 320 s (also 0 on
+  `main` in 320 s). Not yet seen: the transmitter's MAVLink model giving no MANUAL_CONTROL (checked with the owner), and the
+  station side (Radio tab, calibration).
 
 ## In progress: SD card logging
 
