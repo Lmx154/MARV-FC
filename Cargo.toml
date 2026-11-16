@@ -23,7 +23,7 @@ bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca
 bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac832582f3c67be3332e12baf9970d0d6a", features = ["defmt"] }
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }
 lc76g = { git = "https://github.com/Lmx154/lc76g-rs.git", rev = "2ee54f927bd0ffb7c4f7a4978c84cc2af962f405", features = ["defmt"] }
-pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "d07804875fedf32121bd48314ad975bbd9534f5f", features = ["defmt", "embassy-rp-0-10"] }
+pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "424fd58b4beb7607e426c398494c836b4bfe1fb3", features = ["defmt", "embassy-rp-0-10", "block-device-driver-0-2"] }
 qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "591ca04501144fa40b66ed17262df836f258c076", features = ["rp2350", "defmt"] }
 ws2812c = { git = "https://github.com/Lmx154/ws2812c-rs.git", rev = "831c70b527a87bba9e63969d3c5632cf8a7ac892", features = ["defmt", "embassy-rp"] }
 
@@ -58,6 +58,14 @@ embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-futures = "0.1.2"
 static_cell = "2.1.1"
+# The FAT32 file system on the SD card (src/sd_probe.rs) and its stream adapters (`BufStream`, `StreamSlice`):
+# git only (no release), both at one commit of master (2026-10-23), with the `[patch.crates-io]` below so that
+# the one `BlockDevice<512>` trait in the tree is the one pio-sdmmc implements. 8.3 names, no chrono (FAT
+# times 1980-01-01), no log, no alloc.
+embedded-fatfs = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "7961cd4eb64de51818d8cdda991713784fa98366", default-features = false }
+block-device-adapters = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "7961cd4eb64de51818d8cdda991713784fa98366", default-features = false }
+# The lock-free waker static behind the SD bus's `DMA_IRQ_1` handler (pio-sdmmc `DmaWaker`).
+atomic-waker = "1.1"
 panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 semihosting = "0.1"
 
@@ -155,6 +163,24 @@ wdg-scratch-probe = []
 latency-text = []
 # The supervisor's periodic `[STAT]` lines (uptime, devices, watchdog) are not printed.
 quiet-stat = []
+# Probe P3 of the SD logging design (src/sd_probe.rs): from 20.5 s a core-0 task builds the SD bus (PIO0
+# SM0, DMA channel 4 on DMA_IRQ_1), prints the INTEn and NVIC checks, mounts the FAT32 volume of MBR
+# partition 1, times the free-space query, writes LOGS/P3TEST.BIN (16 MiB in 4 KiB writes, a flush each
+# second), reads it back and compares, lists LOGS/ and un-mounts. sd-fat-format first writes a new MBR and
+# formats partition 1 FAT32 (32 KiB clusters, label MARV): it ERASES the card.
+sd-fat-probe = []
+sd-fat-format = ["sd-fat-probe"]
+# Also: after the mount, instead of the 16 MiB burst, 150 s at the logger's duty: one 4 KiB write to
+# LOGS/P3PACED.BIN every 700 ms and a flush every second, then close and un-mount.
+sd-fat-paced = ["sd-fat-probe"]
+# Measurement only (src/xip_probe.rs): at start the QMI flash read mode and the cost of one XIP cache
+# miss (three passes and a control), then an extra `[STAT]` line with the XIP accesses, hits and misses.
+xip-stat = []
 
 [profile.release]
 debug = true
+
+# One `block-device-driver` in the tree: the one of the embedded-fatfs commit above, which
+# block-device-adapters uses, also for pio-sdmmc (its trait text is that of crates.io 0.2.0).
+[patch.crates-io]
+block-device-driver = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "7961cd4eb64de51818d8cdda991713784fa98366" }

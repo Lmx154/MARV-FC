@@ -31,6 +31,8 @@
 //! `wdg-scratch-probe`: the watchdog checks (`watchdog`).
 #![no_std]
 #![no_main]
+// The SD probe's file-system futures nest deeper than the default limit allows for their layout.
+#![cfg_attr(feature = "sd-fat-probe", recursion_limit = "256")]
 
 mod actions;
 mod baro;
@@ -49,9 +51,13 @@ mod imu_inject;
 mod inject;
 mod mag;
 mod rc;
+#[cfg(feature = "sd-fat-probe")]
+mod sd_probe;
 mod settings;
 mod store;
 mod watchdog;
+#[cfg(feature = "xip-stat")]
+mod xip_probe;
 
 use core::any::type_name;
 use core::cell::RefCell;
@@ -240,6 +246,11 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
     let imu2 = imu2::adapter(imu2_parts);
     let dma_on = interrupt::DMA_IRQ_0.is_enabled();
     CORE1_DMA_IRQ0.store(1 + u8::from(dma_on), Ordering::Release);
+    #[cfg(feature = "sd-fat-probe")]
+    sd_probe::CORE1_DMA_IRQ1.store(
+        1 + u8::from(interrupt::DMA_IRQ_1.is_enabled()),
+        Ordering::Release,
+    );
     let executor = EXECUTOR1.init(Executor::new());
     executor.run(|spawner| {
         #[cfg(not(feature = "no-fbeat"))]
@@ -824,6 +835,8 @@ async fn supervise() -> ! {
             rc::stat(now);
             calibration::stat();
             watchdog::stat();
+            #[cfg(feature = "xip-stat")]
+            xip_probe::stat(now);
         }
         tick = tick.wrapping_add(1);
     }
@@ -910,6 +923,8 @@ async fn main(spawner: Spawner) {
         "[INFO] MARV V2 fw {=str}: two-core skeleton",
         env!("CARGO_PKG_VERSION")
     );
+    #[cfg(feature = "xip-stat")]
+    xip_probe::run();
     defmt::info!("[INFO] icm45686: {}", type_name::<icm45686::Info>());
     defmt::info!("[INFO] lsm6dsk320x: {}", type_name::<lsm6dsk320x::Info>());
     defmt::info!("[INFO] bmp581: {}", type_name::<bmp581::Info>());
@@ -1034,6 +1049,17 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
+    #[cfg(feature = "sd-fat-probe")]
+    spawner.spawn(defmt::unwrap!(sd_probe::task(sd_probe::Parts {
+        pio: p.PIO0,
+        dma: p.DMA_CH4,
+        clk: p.PIN_32,
+        cmd: p.PIN_33,
+        dat0: p.PIN_28,
+        dat1: p.PIN_29,
+        dat2: p.PIN_30,
+        dat3: p.PIN_31,
+    })));
 }
 
 /// The start-up checks that wait for core 1, and the watchdog's first feeds.

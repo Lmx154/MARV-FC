@@ -807,11 +807,13 @@ What each cargo feature does under the watchdog:
 | `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify` | IMU faults on the flight core; `fbeat` still answers, no reset |
 | `stall-core0` | 1.2 s spin: a "core 0 stalled" text, no reset; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
+| `sd-fat-probe`, `sd-fat-format`, `sd-fat-paced` | probe P3 of the SD logging design (`src/sd_probe.rs`): from 20.5 s a core-0 task builds the SD bus (PIO0 SM0, DMA channel 4 on `DMA_IRQ_1`), mounts the FAT32 volume of MBR partition 1, writes, reads back and compares `LOGS/P3TEST.BIN` (16 MiB) and un-mounts, yielding at every card access; `sd-fat-format` first writes a new MBR and formats the card FAT32 (erases it). Measured 2026-11-15 (logs 222457 format, 223053 probe): every probe check PASS, stalls begun 0, no reset; but while the card was written the flight core's IMU rates fell by 1 to 6 % and its gaps over 1.5 P per 10 s rose 10 to 50 times (back to normal once the probe ended), so the SD path is not yet fit for a burst. `sd-fat-paced` (also: instead of the burst, 150 s at the logger's duty, one 4 KiB write every 700 ms and a flush each second): measured 2026-11-15 (logs 224159 with `xip-stat`, 224604 without), every check PASS, IMU rates within 0.2 % of the normal build, XIP misses within 3 % of idle; with `xip-stat` (223918) the burst doubled the XIP misses per second |
 | `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |
 | `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
 | `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
+| `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
 it provokes; `tools/run.sh` puts the normal build back):
