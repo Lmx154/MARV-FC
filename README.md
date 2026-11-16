@@ -516,8 +516,9 @@ written.
   time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
   status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 26 parameters when a log opens and for each
-  accepted set, DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
+  text ring's third cursor: the boot texts first), PARM for all 26 parameters when a log opens and after
+  every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
+  compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second).
 - Path: `log_collect` (core 0, watchdog id LOG) is the one producer of a 32 KiB `LogRing`; it pushes only while
   a log is open (`logger::OPEN`) and never awaits the card. A record that does not fit is dropped and counted.

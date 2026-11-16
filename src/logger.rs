@@ -10,8 +10,9 @@
 //! every row. Then, per Q5: IMU1 and IMU2 at 25 Hz from their seqlocks (every 4th tick, only a new
 //! `seq`, `TimeUS` the sample's own time), BARO, MAG, BAT and GPS at every new sample, RCIN at
 //! 10 Hz while stick reports are fresh, DEV for every row at 1 Hz and at every state change, MSG
-//! for every text (the text ring's third cursor, so the boot texts come first), PARM for each
-//! accepted set ([`PARM_SETS`]), and DSF once per second from the figures the SD task hands over
+//! for every text (the text ring's third cursor, so the boot texts come first), PARM after every
+//! change of a parameter's value, whatever made it (a set, a calibration result, a reset, a
+//! reload: every tick the store is compared with the values last logged), and DSF once per second from the figures the SD task hands over
 //! in [`DSF_FIGURES`] (it owns the ring's statistics); Dp is counted here. A record that does not
 //! fit is dropped and counted by the ring. The collector never awaits the card and takes no lock
 //! that the SD task holds across a card call (Q4-I4): its only locks are short critical sections.
@@ -21,7 +22,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker};
 use fw_core::dflog::{self, Dev, Dsf, Gps};
@@ -52,8 +52,6 @@ pub static PAD: AtomicU32 = AtomicU32::new(0);
 /// SD task -> collector: the DSF figures of the last second (`dropped` is filled in here).
 pub static DSF_FIGURES: Mutex<CriticalSectionRawMutex, Cell<Option<Dsf>>> =
     Mutex::new(Cell::new(None));
-/// Parameter protocol -> collector: the index of each accepted set.
-pub static PARM_SETS: Channel<CriticalSectionRawMutex, u16, 8> = Channel::new();
 
 type Producer = LogProducer<'static, RING_BYTES>;
 
@@ -83,6 +81,7 @@ async fn collect() -> ! {
         imu_seq: [None; 2],
         seq: [None; 4],
         rows: [None; ROWS],
+        params: [None; fw_settings::COUNT],
     };
     loop {
         ticker.next().await;
@@ -103,6 +102,8 @@ struct Collector {
     seq: [Option<u32>; 4],
     /// Per row the state (and stuck flag) of its last DEV record.
     rows: [Option<(State, bool)>; ROWS],
+    /// Per parameter the value of its last PARM record.
+    params: [Option<ParamValue>; fw_settings::COUNT],
 }
 
 impl Collector {
@@ -116,13 +117,13 @@ impl Collector {
         if open != self.open {
             self.open = open;
             if open != 0 {
-                self.start(p, now);
+                self.start(p);
             }
         }
         if self.open == 0 {
-            while PARM_SETS.try_receive().is_ok() {}
             return;
         }
+        self.parms(p, now);
         self.imus(p);
         self.sensors(p);
         if tick.is_multiple_of(RCIN_EVERY)
@@ -154,9 +155,6 @@ impl Collector {
                 dflog::encode_msg(b, now, line.as_str().as_bytes())
             });
         }
-        while let Ok(i) = PARM_SETS.try_receive() {
-            parm(p, now, i);
-        }
         if let Some(mut dsf) = DSF_FIGURES.lock(Cell::take) {
             dsf.dropped = p.dropped().saturating_sub(self.dropped_at_open);
             p.push_with(dflog::DSF.length.into(), |b| {
@@ -168,9 +166,9 @@ impl Collector {
         }
     }
 
-    /// A log opened: the filler, then a PARM for every parameter; every row's DEV and both IMUs
-    /// follow in this tick.
-    fn start(&mut self, p: &mut Producer, now: u64) {
+    /// A log opened: the filler; a PARM for every parameter, every row's DEV and both IMUs follow
+    /// in this tick.
+    fn start(&mut self, p: &mut Producer) {
         let pad = PAD.load(Ordering::Relaxed) as usize;
         if pad > 0 {
             match p.reserve(pad) {
@@ -181,10 +179,24 @@ impl Collector {
         self.dropped_at_open = p.dropped();
         self.rows = [None; ROWS];
         self.imu_due = [true; 2];
+        self.params = [None; fw_settings::COUNT];
         DSF_FIGURES.lock(|c| c.set(None));
-        while PARM_SETS.try_receive().is_ok() {}
-        for i in 0..fw_settings::COUNT as u16 {
-            parm(p, now, i);
+    }
+
+    /// A PARM for every parameter whose value differs from its last record (all of them right
+    /// after a log opened).
+    fn parms(&mut self, p: &mut Producer, now: u64) {
+        let current: [Option<ParamValue>; fw_settings::COUNT] =
+            crate::store::with(|s| core::array::from_fn(|i| s.get(i as u16)))
+                .unwrap_or([None; fw_settings::COUNT]);
+        for (i, (value, last)) in current.into_iter().zip(self.params.iter_mut()).enumerate() {
+            if same(value, *last) {
+                continue;
+            }
+            *last = value;
+            if value.is_some() {
+                parm(p, now, i as u16);
+            }
         }
     }
 
@@ -384,6 +396,16 @@ fn gps(reading: &Reading) -> Option<Gps> {
         speed_m_s: speed_mm_s.map_or(0.0, |v| v as f32 / 1000.0),
         course_deg: course_cdeg.map_or(0.0, |v| f32::from(v) / 100.0),
     })
+}
+
+/// The same value (a float compared bit for bit).
+fn same(a: Option<ParamValue>, b: Option<ParamValue>) -> bool {
+    match (a, b) {
+        (Some(ParamValue::I32(a)), Some(ParamValue::I32(b))) => a == b,
+        (Some(ParamValue::F32(a)), Some(ParamValue::F32(b))) => a.to_bits() == b.to_bits(),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// PARM of parameter `i`: its name, value and default (an I32 as `f32`).

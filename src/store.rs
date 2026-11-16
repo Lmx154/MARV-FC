@@ -161,9 +161,6 @@ impl ParamStore for Store {
                 );
                 raise_apply(configure);
                 crate::calibration::raise_push(live);
-                // The SD log's PARM of this set; a full queue loses the record.
-                #[cfg(not(feature = "sd-fat-probe"))]
-                let _ = crate::logger::PARM_SETS.try_send(i);
             }
             Err(error) => {
                 let reason = notice.map_or("refused", |n| n.kind.text());
