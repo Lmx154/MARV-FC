@@ -344,6 +344,9 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   retries, each a clear and rebuild, then Absent); 9 time-outs in all, never STUCK, the other rows Ok, stalls
   begun 0. Not seen: a real bus stuck in the middle of a run (only this injected hang, which never touches the
   bus, so the state an abandoned embassy-rp transfer leaves in the controller was not exercised on the board).
+  The normal build with the deadline (`...-192012.log`, 310 s): BARO Ok 49.90/s and MAG Ok 100.10/s over the
+  last 10 s, errors 0, timeouts 0, no `timed out` line (no spurious time-out from the 4 ms deadline), both
+  `I2Cx bus at boot` lines, the other rows Ok, 7 `[PASS]`, watchdog stalls begun 0.
 
 - `FEATURES=inject-gnss-silent tools/run.sh 100`: 10 s after GNSS's first good sample the adapter stops seeing sentences (the wrapper swallows the
   fixes; the receiver keeps talking) until a RESTART request (`device restart GNSS`). Shows the long path of a device that stays silent:
