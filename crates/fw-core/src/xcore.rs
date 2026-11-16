@@ -1300,7 +1300,10 @@ mod log_ring_tests {
         let mut consumer = ring.take_consumer().unwrap();
         assert!(producer.push(&[1, 2, 3, 4, 5, 6]));
         assert_eq!(consumer.consume(5), 5);
-        assert!(producer.push(&[7, 8, 9, 10, 11, 12]), "wraps: 2 bytes, then 4");
+        assert!(
+            producer.push(&[7, 8, 9, 10, 11, 12]),
+            "wraps: 2 bytes, then 4"
+        );
         assert_eq!(consumer.readable(), 7);
         let (a, b) = consumer.peek();
         assert_eq!((a, b), (&[6, 7, 8][..], &[9, 10, 11, 12][..]));
@@ -1313,7 +1316,11 @@ mod log_ring_tests {
         assert_eq!(consumer.consume(4), 4);
         let (a, b) = consumer.peek();
         assert_eq!((a, b), (&[10, 11, 12][..], &[][..]));
-        assert_eq!(consumer.consume(100), 3, "consume is clamped to what is readable");
+        assert_eq!(
+            consumer.consume(100),
+            3,
+            "consume is clamped to what is readable"
+        );
         assert_eq!(consumer.readable(), 0);
     }
 
@@ -1632,7 +1639,10 @@ mod log_ring_tests {
             "q4-i2 model, N = 128: 10^6 operations in {:?}: {accepted} records accepted, {dropped} dropped",
             start.elapsed()
         );
-        assert!(accepted > 10_000 && dropped > 10_000, "both paths are exercised");
+        assert!(
+            accepted > 10_000 && dropped > 10_000,
+            "both paths are exercised"
+        );
         for (seed, n) in [(1, 1usize), (2, 2), (3, 16), (4, 4096)] {
             let (accepted, dropped) = match n {
                 1 => model_run::<1>(100_000, seed),
@@ -1717,7 +1727,10 @@ mod log_ring_tests {
                         break;
                     }
                     let seq = u32::from_le_bytes(pending[2..6].try_into().unwrap());
-                    assert!(seq >= next_seq && seq < PUSHES, "seq {seq}, expected {next_seq}");
+                    assert!(
+                        seq >= next_seq && seq < PUSHES,
+                        "seq {seq}, expected {next_seq}"
+                    );
                     for (i, &b) in pending[..len].iter().enumerate() {
                         assert_eq!(b, record_byte(len, seq, i), "torn record {seq} byte {i}");
                     }
@@ -1730,7 +1743,11 @@ mod log_ring_tests {
                     break;
                 }
             }
-            assert!(pending.is_empty(), "{} bytes of a partial record left", pending.len());
+            assert!(
+                pending.is_empty(),
+                "{} bytes of a partial record left",
+                pending.len()
+            );
             missing += PUSHES - next_seq;
             (producing.join().unwrap(), delivered, missing)
         });

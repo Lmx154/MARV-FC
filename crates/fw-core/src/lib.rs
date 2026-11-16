@@ -28,6 +28,7 @@ pub mod dflog;
 pub mod handshake;
 pub mod health;
 pub mod i2c;
+pub mod logfile;
 pub mod mbr;
 pub mod params;
 pub mod rc;
