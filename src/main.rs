@@ -64,7 +64,7 @@ mod watchdog;
 mod xip_probe;
 
 use core::any::type_name;
-use core::cell::RefCell;
+use core::cell::{RefCell, UnsafeCell};
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -145,6 +145,19 @@ static CORE1_DMA_IRQ0: AtomicU8 = AtomicU8::new(0);
 /// Core 1's `DMA_IRQ_1` (the SD card's line, core 0 only), read at the same point; stored before
 /// `CORE1_DMA_IRQ0`, so it is published once that is: 0 not read yet, 1 disabled, 2 enabled.
 pub static CORE1_DMA_IRQ1: AtomicU8 = AtomicU8::new(0);
+/// Core 1's VTOR as it read it back after pointing it at `CORE1_VECTOR_TABLE`; 0 until then.
+static CORE1_VTOR: AtomicU32 = AtomicU32::new(0);
+
+/// Core 1's own vector table, in SRAM (decision-ram-code Q3): `spawn_core1` hands core 1 core 0's
+/// table in flash, so every exception on core 1 would read flash. Core 0 copies its table here before
+/// core 1 starts; core 1 points its VTOR here first thing. 128 words cover the 68 entries.
+const CORE1_VECTORS: usize = 128;
+#[repr(C, align(512))]
+struct Core1Vectors(UnsafeCell<[u32; CORE1_VECTORS]>);
+// SAFETY: written only by core 0 in `main` before `spawn_core1`, afterwards only read (by core 1's
+// exception entry).
+unsafe impl Sync for Core1Vectors {}
+static CORE1_VECTOR_TABLE: Core1Vectors = Core1Vectors(UnsafeCell::new([0; CORE1_VECTORS]));
 
 /// Core 1's stack and executor.
 const CORE1_STACK_BYTES: usize = 16 * 1024;
@@ -251,6 +264,17 @@ async fn fbeat() -> ! {
 }
 
 fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
+    let table = CORE1_VECTOR_TABLE.0.get() as u32;
+    // SAFETY: the executing core's own VTOR; the table is aligned to 512 bytes and was filled by core
+    // 0 before this core started. No interrupt of this core is enabled by this firmware yet.
+    let vtor = unsafe {
+        let scb = &*cortex_m::peripheral::SCB::PTR;
+        scb.vtor.write(table);
+        cortex_m::asm::dsb();
+        cortex_m::asm::isb();
+        scb.vtor.read()
+    };
+    CORE1_VTOR.store(vtor, Ordering::Release);
     CORE1_ACTLR.store(read_actlr(), Ordering::Relaxed);
     CORE1_ACTLR_READ.store(true, Ordering::Release);
     // Built here so that the DMA and GPIO interrupts are enabled on this core's NVIC.
@@ -998,6 +1022,18 @@ async fn main(spawner: Spawner) {
         rx_dma: p.DMA_CH3,
         offsets: imu2_offsets,
     };
+    unsafe extern "C" {
+        static __vector_table: u32;
+        static __vector_table_end: u32;
+    }
+    let vectors = &raw const __vector_table;
+    let words = (&raw const __vector_table_end as usize - vectors as usize) / 4;
+    defmt::assert!(words <= CORE1_VECTORS);
+    // SAFETY: `words` words of core 0's vector table in flash (bounds from the linker script) into
+    // core 1's table, which nothing else touches before core 1 starts below.
+    unsafe {
+        core::ptr::copy_nonoverlapping(vectors, CORE1_VECTOR_TABLE.0.get().cast::<u32>(), words);
+    }
     spawn_core1(p.CORE1, CORE1_STACK.take(), move || {
         core1_main(imu1_parts, imu2_parts)
     });
@@ -1096,6 +1132,12 @@ async fn startup_checks() {
         CORE1_ACTLR_READ.load(Ordering::Acquire) && actlr1 & EXTEXCLALL != 0,
         "EXTEXCLALL set on core 1, ACTLR",
         actlr1,
+    );
+    let vtor1 = CORE1_VTOR.load(Ordering::Acquire);
+    check(
+        vtor1 == CORE1_VECTOR_TABLE.0.get() as u32 && (0x2000_0000..0x2008_0000).contains(&vtor1),
+        "core 1 VTOR is its RAM vector table",
+        vtor1,
     );
     let started = Instant::now();
     while CORE1_DMA_IRQ0.load(Ordering::Acquire) == 0 && started.elapsed() < PONG_STALE {
