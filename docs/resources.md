@@ -105,6 +105,9 @@ host-tested ring), `.bss` 106 532 (+2 560: the header buffer 980 B, the collecto
 the 26 logged parameter values, the SD task's future 19 432 B against 18 632), `.ram_text` 119 332 (+8 076: rodata and the
 `LogRing` methods, which the existing `fw_core::xcore` rule puts in SRAM), `.text` 423 168 (+33 852). New core-0
 thread-mode task `log_collect` (`src/logger.rs`, watchdog id LOG = 15, a 10 ms `Ticker`, never awaits the card).
+At the merged head (after the clean-up moved before the log's opening): `.text` 485 104, `.ram_text` 121 764,
+`.data` 39 388, `.bss` 106 732, `.uninit` 1 024; static SRAM 269 036 B, free 255 252 B (249 KiB). The move cost
+about 62 KB of flash code (the file system's delete path is now part of the open sequence): not investigated.
 
 SRAM8 and SRAM9 (4 KB each) are unused.
 
