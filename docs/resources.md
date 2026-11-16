@@ -85,6 +85,20 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Core 1 stack | a `static`, 16 KB default, set from stack painting | DECIDED |
 | Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, `pause_on_debug(true)`, only while `BEAT0` and `PONG` both changed less than 200 ms ago; scratch registers 0 to 3 hold the reset record (layout version 2; 4 to 7 are the boot ROM's). BUILT | DECIDED |
 
+## Internal SRAM (measured from the ELF, normal build, 2026-11-16, branch `wip-ram-code`)
+
+| Item | Bytes | Note |
+|---|---|---|
+| `.ram_text`, the flight core's code, from 0x20000000 | 75 668 | selected in `memory.x`, copied from flash at boot (rule 10) |
+| `.ram_text`, every constant (`.rodata`) | 35 592 | none left in flash (link ASSERT) |
+| `.data` | 4 548 | |
+| `.bss` | 103 972 | core 1's vector table (512 B at 0x2002b600) among it |
+| `.uninit` | 1 024 | |
+| static use | 221 220 | 0x20000000 to `__euninit` 0x20036024 |
+| free, up to 0x20080000 | 303 068 (296 KiB) | core 0's stack grows down into it from the top; link ASSERT: at least 32 KiB (`_stack_start - __euninit`); core 0's stack depth is not measured |
+
+SRAM8 and SRAM9 (4 KB each) are unused.
+
 ## Rules that follow
 
 1. A write or erase of the in-package flash runs with ALL interrupts off, from RAM, with core 1 paused
@@ -136,9 +150,24 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
    earlier rule, a yield after every transaction and busy wait, was withdrawn: it stretched a whole `verify`
    past one sample period, during which the task cannot read its own samples. Each IMU task's longest
    stretch without a yield (since boot and per 10 s window) is published and logged in its `[STAT]` line.
+10. The flight core runs from internal SRAM (decision-ram-code-20261115; the owner: "run from PSRAM or RAM not
+   flash"; the PSRAM sits behind the same XIP cache as the flash). R1: once `core1_main` has started, core 1
+   makes no XIP access. Guards: `tools/check-ram-code.py`, run by `tools/run.sh` on every build before
+   flashing (a wrong result flashes nothing); the link ASSERTs for gross failure; on the board
+   `FEATURES=xip-park` with its negative control `xip-park,ram-negative` (0 accesses in a 1 s window with
+   core 0 parked, 2026-11-16); run it again when the control loop or DShot lands. R2: core 1's VTOR points at
+   its vector table in SRAM (start-up check). R3: no constants in flash (link ASSERT
+   `__erodata == __srodata`). R4: at least 32 KiB of SRAM above the statics for core 0's stack (link ASSERT on
+   `__euninit`; an overflow of RAM fails the link). R5: the copy runs before anything uses SRAM code
+   (`__wrap___pre_init`, assembly, wrapped ahead of embassy-rp's `__pre_init`; a violation faults at once on
+   every boot). Maintenance: a new core-1 interrupt (for example `PIO2_IRQ_0` for DShot) becomes a checker
+   root and a pattern line in `memory.x`; a new flight crate (for example `*5dshot*`) gets a pattern line; a
+   pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
+   identical functions make the patterns inexact: three lines exist only for merged functions' sections). A
+   binary flashed without `tools/run.sh` skips the checker.
 
 ## Not yet decided or measured
 
 Whether the two IMUs' SPI really need DMA at the rates used; stack and static RAM
-per task; what the loaded I/O core does to the flight core (milestone FD4); the flight core's IMU figures under sustained card work (the shared XIP cache; facts-sd-logging C2).
+per task; what the loaded I/O core does to the flight core (milestone FD4); the flight core's IMU figures under sustained card work (the shared XIP cache; facts-sd-logging C2) were measured again with the flight core in SRAM (rule 10): unchanged by the 16 MiB burst (facts-sd-logging C3, 2026-11-16).
 A microSD logger needs a buffer that rides through the card's stalls: on the one card tested (SanDisk 64 GB, `pio-sdmmc`, 2026-11-11) a single write call sometimes took 30 to 132 ms; the driver does not retry.

@@ -1,6 +1,7 @@
 # MARV V2 firmware: hand-off
 
-State on 2026-11-15, late evening. Written for whoever picks the work up next, human or agent. It says what
+State on 2026-11-15, late evening; the flight core in SRAM added on 2026-11-16 (branch `wip-ram-code`, not
+in `main`). Written for whoever picks the work up next, human or agent. It says what
 is built and proven, what is in progress, and what is left. It is an overview: the details and the evidence
 are in the documents it points to.
 
@@ -66,7 +67,7 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | SD1 | The driver's new DMA back-end | done, reviewed, `pio-sdmmc` `main` = `424fd58` |
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
 | P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done (branch `wip-sd-p3`, merged into `wip-sd2`; the probes stay as features) |
-| SD2 | The SD card as a device row (mount, capacity, health) | built and run on the board (branch `wip-sd2`, local, not in `main`; README "SD card") |
+| SD2 | The SD card as a device row (mount, capacity, health) | done, merged into `main` (README "SD card") |
 | SD3 | The log writer and what is logged | after SD2 |
 | SD4 | Log list and download over USB (`marv-cli logs list/get`) | after SD3 |
 
@@ -89,11 +90,11 @@ desk, so checks that compare a file on a PC are done by read-back on the board o
   loop and for full-rate logging).
 
 **Known and parked**
-- Late IMU samples: with no debugger attached about 6 (IMU1) and 17 (IMU2) samples per second arrive more
-  than 0.6 ms late, largest gaps 2.7 to 4 ms; rates within 1 %, no errors. Three causes were measured and
-  ruled out as the main one (flash read mode, a long lock holder, the debugger). The reference projects read
-  the IMU FIFO with timestamps; this comes back as a design question for the control loop. Measurement builds
-  are on branch `wip-csstat`.
+- Late IMU samples: with the flight core in SRAM (branch `wip-ram-code`) a 200 s run of the normal build shows
+  0 samples later than 1.5 P per 10 s window for both IMUs (before: 6 to 20 and 23 to 53), largest gaps 1.6
+  and 1.7 ms, rates within 1 %, no errors (2026-11-16, debugger attached; not repeated without one). The
+  shared XIP cache was their main cause (README "Flight core in SRAM"; facts-sd-logging C3). Measurement
+  builds of the earlier search are on branch `wip-csstat`.
 - About 0.1 receive errors per second on the radio UART in normal running.
 
 **Never exercised on real hardware**
@@ -106,6 +107,9 @@ desk, so checks that compare a file on a PC are done by read-back on the board o
 - `marv-cli devices` prints no flags column (the "self-test running" flag is only in the window).
 - `MARV-V2-drivers/CONTRACT.md` still says eight drivers and names a 1.0 gate the owner set aside.
 - An intermittent failure of one property test in `rc-port` (input not captured).
+- Core 0 has no working stack guard: `_stack_end` resolves to a flash address (`memory.x` inserts `.end_block`
+  after `.uninit`, ahead of cortex-m-rt's `PROVIDE(_stack_end = .)`), and embassy-rp's
+  `install_core0_stack_guard` is not called. The 32 KiB floor of the link ASSERT is checked on `__euninit`.
 - `python3 -m venv` does not work on this desktop (no ensurepip); `uv` does. A nightly Rust toolchain was
   installed by accident earlier (`rustup toolchain uninstall nightly` removes it).
 
@@ -114,6 +118,11 @@ desk, so checks that compare a file on a PC are done by read-back on the board o
 - **Nothing on core 1 may use a timer, a log call or a lock.** A timer scheduled from core 1 can silently kill
   a core-0 interrupt-executor task (the watchdog monitor, the radio port). The IMU tasks wait through
   `SpinDelay`. This is by convention; nothing enforces it at compile time.
+- **The flight core runs from SRAM.** Everything core 1 runs after `core1_main`, every constant and core 1's
+  vector table are copied to SRAM at boot (`.ram_text` in `memory.x`). `tools/run.sh` runs
+  `tools/check-ram-code.py` before flashing and refuses to flash on a wrong result; a binary flashed another
+  way skips that check. A new core-1 interrupt or flight crate needs a pattern line in `memory.x` and a
+  passing checker (`docs/resources.md` rule 10).
 - **`DMA_IRQ_0` belongs to core 1.** Core 0 builds no embassy-rp DMA channel. The SD card uses channel 4 on
   `DMA_IRQ_1` through its own driver code. Core 0 never read-modify-writes a DMA register shared by channels.
 - **Flash:** the firmware writes only its settings region, through one guarded function; a save stalls both

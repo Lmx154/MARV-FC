@@ -24,7 +24,8 @@ It has no flight functionality.
   its INT1 on GPIO7 (INT2, GPIO6, unused), all built inside core 1's entry closure so their interrupts land on
   core 1, each running the flight-core device loop `fw_flight::imu` in its own task (see Flight-core device
   loop). The program's one `DMA_IRQ_0` binding (`DmaIrqs` in `src/main.rs`) lists the four channels. No log, no critical-section primitive of its own, and no
-  timer in the sample loop there.
+  timer in the sample loop there. Everything it runs, every constant and its vector table are in internal SRAM
+  (see Flight core in SRAM).
 - RULE of the flight core (lead's ruling, 2026-11-15): the flight core verifies INCREMENTALLY (as ArduPilot's
   `check_next_register`). The sample loop never runs a whole-configuration `verify`: after every K-th sample,
   and never while a sample is waiting (the latched data-ready level, `ImuAdapter::data_waiting`), it takes ONE
@@ -787,19 +788,23 @@ on the board, what the firmware has to respect, and what is still open: the Meas
 
 ## Build and run
 
-Needs the Rust toolchain with the `thumbv8m.main-none-eabihf` target, `probe-rs`, and a debug probe
-connected to the board.
+Needs the Rust toolchain with the `thumbv8m.main-none-eabihf` target, `probe-rs`, python3 and
+arm-none-eabi-binutils (`readelf` and `objdump`, for `tools/check-ram-code.py`), and a debug probe connected
+to the board.
 
 ```
 cargo build --release     # builds for the board (target set in .cargo/config.toml)
 tools/run.sh 90           # build, flash, run for 90 s, print the report lines
 ```
 
-`tools/run.sh` takes the probe lock (`marv-v2-probe.lock` in `XDG_RUNTIME_DIR`), so it waits if another
+Between the build and the flash, `tools/run.sh` runs `tools/check-ram-code.py` on the ELF (see Flight core in
+SRAM) and writes its output at the top of the log: the check must pass (exit 0), or with the feature
+`ram-negative` it must fail (exit 1); on any other result the script flashes nothing and exits 3. A binary
+flashed some other way skips this check. `tools/run.sh` takes the probe lock (`marv-v2-probe.lock` in `XDG_RUNTIME_DIR`), so it waits if another
 test is using the probe. Its full log is kept under `logs/` (git-ignored). The firmware runs until the
 script's timeout ends it, so exit status 124 is the normal end. Expected output: one `[INFO]` line per
-driver (proof that it is linked), twelve start-up checks, each `[PASS]` or `[FAIL]` (seven with `LOG_BACKEND_TYPE` = 0): EXTEXCLALL set on
-core 0, `DMA_IRQ_0` not enabled on core 0, EXTEXCLALL set on core 1, `DMA_IRQ_0` enabled on core 1,
+driver (proof that it is linked), thirteen start-up checks, each `[PASS]` or `[FAIL]` (eight with `LOG_BACKEND_TYPE` = 0): EXTEXCLALL set on
+core 0, `DMA_IRQ_0` not enabled on core 0, EXTEXCLALL set on core 1, core 1's VTOR is its vector table in SRAM, `DMA_IRQ_0` enabled on core 1,
 `DMA_IRQ_0` still not enabled on core 0, the watchdog fed by its monitor, `PONG` follows `PING` within 200 ms, and the five DMA checks once the SD bus is built (INTE0 = the flight core's channels, INTE1 = channel 4, INTE2 and INTE3 = 0, `DMA_IRQ_1` on and `DMA_IRQ_0` off on core 0, `DMA_IRQ_1` off on core 1); then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
 200 ms), `PING` and `PONG`, the bytes and frames the node wrote and the bytes it read on USB, the link
 state; and a `[STAT]` line per device (see Device layer).
@@ -877,7 +882,7 @@ What each cargo feature does under the watchdog:
 | `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify` | IMU faults on the flight core; `fbeat` still answers, no reset |
 | `stall-core0` | 1.2 s spin: a "core 0 stalled" text, no reset; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
-| `sd-fat-probe`, `sd-fat-format`, `sd-fat-paced` | probe P3 of the SD logging design (`src/sd_probe.rs`): from 20.5 s a core-0 task builds the SD bus (PIO0 SM0, DMA channel 4 on `DMA_IRQ_1`), mounts the FAT32 volume of MBR partition 1, writes, reads back and compares `LOGS/P3TEST.BIN` (16 MiB) and un-mounts, yielding at every card access; `sd-fat-format` first writes a new MBR and formats the card FAT32 (erases it). Measured 2026-11-15 (logs 222457 format, 223053 probe): every probe check PASS, stalls begun 0, no reset; but while the card was written the flight core's IMU rates fell by 1 to 6 % and its gaps over 1.5 P per 10 s rose 10 to 50 times (back to normal once the probe ended), so the SD path is not yet fit for a burst. `sd-fat-paced` (also: instead of the burst, 150 s at the logger's duty, one 4 KiB write every 700 ms and a flush each second): measured 2026-11-15 (logs 224159 with `xip-stat`, 224604 without), every check PASS, IMU rates within 0.2 % of the normal build, XIP misses within 3 % of idle; with `xip-stat` (223918) the burst doubled the XIP misses per second |
+| `sd-fat-probe`, `sd-fat-format`, `sd-fat-paced` | probe P3 of the SD logging design (`src/sd_probe.rs`): from 20.5 s a core-0 task builds the SD bus (PIO0 SM0, DMA channel 4 on `DMA_IRQ_1`), mounts the FAT32 volume of MBR partition 1, writes, reads back and compares `LOGS/P3TEST.BIN` (16 MiB) and un-mounts, yielding at every card access; `sd-fat-format` first writes a new MBR and formats the card FAT32 (erases it). Measured 2026-11-15 (logs 222457 format, 223053 probe): every probe check PASS, stalls begun 0, no reset; but while the card was written the flight core's IMU rates fell by 1 to 6 % and its gaps over 1.5 P per 10 s rose 10 to 50 times (back to normal once the probe ended), so the SD path is not yet fit for a burst. `sd-fat-paced` (also: instead of the burst, 150 s at the logger's duty, one 4 KiB write every 700 ms and a flush each second): measured 2026-11-15 (logs 224159 with `xip-stat`, 224604 without), every check PASS, IMU rates within 0.2 % of the normal build, XIP misses within 3 % of idle; with `xip-stat` (223918) the burst doubled the XIP misses per second. With the flight core in SRAM (2026-11-16, log 20261116-000838) the burst leaves the IMUs unchanged: see Flight core in SRAM |
 | `inject-sd-no-card`, `inject-sd-wrong-format`, `sd-irq-negative` | the SD task's test hooks (every card `init` answers `NoCard`; block 0's partition type handed to the MBR check as 0x07) and the negative control of Q1-I1 (INTE0 bit 4 set before the SD register check, cleared after it): rows and `[FAIL]` lines only, no stall |
 | `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |
 | `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
@@ -885,6 +890,8 @@ What each cargo feature does under the watchdog:
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
 | `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
 | `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
+| `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
+| `xip-park` | the board check of the flight core in SRAM (`src/xip_park.rs`), once, 30 s after a start the watchdog did not cause: a 1 s window of XIP accesses with both cores running (over 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with its interrupts off and the XIP accesses counted meanwhile, core 1's, must be exactly 0 while each IMU gains at least 790 samples and no error; with `xip-park,ram-negative` at least 1000. One "core 0 stalled 1.0 s" text, no reset. Not together with `xip-stat` |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
 it provokes; `tools/run.sh` puts the normal build back):
@@ -953,13 +960,80 @@ cargo build --release         # the firmware for the board (thumbv8m.main-none-e
 `cargo host-clippy -p fw-core -p fw-flight --all-targets` is the matching host lint. The host alias
 assumes an x86_64 Linux host; on another host, pass your own `--target`.
 
-## Flash layout
+## Flight core in SRAM
+
+Design: `~/Documents/MARV-V2-drivers/_plan/decision-ram-code-20261115.md` (the owner: "run from PSRAM or RAM
+not flash"; the PSRAM sits behind the same 16 kB XIP cache as the flash, so this is internal SRAM). Since
+branch `wip-ram-code` the flight core executes only from internal SRAM once `core1_main` has started, so it no
+longer shares the XIP cache with core 0, whose misses under card work slowed it (facts-sd-logging C2).
+
+- In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks, `fw_flight`'s imu and liveness
+  modules, both IMU drivers, embassy-rp's SPI, DMA, GPIO and multicore code, the executor's poll and wake path,
+  `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions, the handlers `DMA_IRQ_0`,
+  `IO_IRQ_BANK0` and `SIO_IRQ_FIFO`, the critical-section and time functions), every constant (`.rodata`),
+  and core 1's own vector table. Left in flash: core 1's panic paths and the launch trampoline that runs
+  before `core1_main`.
+- How: `memory.x` adds the output section `.ram_text` (`> RAM AT> FLASH`, inserted before `.text`), whose
+  rules pick functions by their v0-mangled names (`.cargo/config.toml` pins `symbol-mangling-version=v0`),
+  then all `.rodata`. `src/ram.rs` copies it from its load image in flash to 0x20000000, in assembly, before
+  anything else runs: embassy-rp already defines `__pre_init`, so the link wraps it (`--wrap=__pre_init`,
+  `build.rs`); the copy, `__wrap___pre_init`, runs first and then continues into embassy-rp's. Link ASSERTs:
+  the three handlers lie in RAM, `.rodata` is empty, `.ram_text` is word-aligned, at least 32 KiB of RAM stay
+  free above the statics for core 0's stack.
+- Core 1's vector table: core 0 copies its own (69 words) into a 512-byte-aligned static before
+  `spawn_core1`; the first statement of `core1_main` points core 1's VTOR at it. Start-up check:
+  `[PASS] core 1 VTOR is its RAM vector table (0x2002b600)`.
+- The guard: `tools/check-ram-code.py <elf>` (python3 standard library, `arm-none-eabi-readelf` and
+  `-objdump`), run by `tools/run.sh` before every flash. From the roots `core1_main`, `DMA_IRQ_0`,
+  `IO_IRQ_BANK0`, `SIO_IRQ_FIFO` (and `xip_park::park_core0` in that feature) it follows direct branches and
+  long-branch thunks, addresses formed by movw/movt pairs, literal loads and `adr`, and the code and data
+  pointers inside every constant it reaches. It fails (exit 1, printing each find with its call chain) on any
+  function, data object or constant address in flash (0x10000000 to 0x1FFFFFFF) other than the panic
+  machinery; a tool error exits 2. Blind spot: a function pointer formed only by core 0 and called on core 1
+  (none today), which `xip-park` covers on the board. The patterns are the mechanism and the checker is the
+  proof: a pattern change counts only with a passing checker (`docs/resources.md`, rule 10).
+- Measured (2026-11-16, probe-rs attached in every run):
+  - `xip-park` (log `20261116-001800`): unparked 1 s window 1 667 188 XIP accesses; core 0 parked 1 s in SRAM
+    with interrupts off: 0 accesses (HIT 0) while IMU1 gained 803 and IMU2 801 samples, 0 errors. Negative
+    control `xip-park,ram-negative` (`20261116-000720`): 159 605 accesses.
+  - The checker passes on this build and fails on `main`'s ELF of 96b94b7 (127 functions in flash) and with
+    `ram-negative` (naming `now_us`).
+  - The 16 MiB SD burst (`sd-fat-probe,xip-stat`, log `20261116-000838` against `20261115-223918`): during
+    the burst IMU1 803.49 to 803.61 and IMU2 800.61 to 800.70 samples/s (idle 803.5 and 800.7; before 790 to
+    802 and 770 to 799), 0 samples later than 1.5 P per 10 s (before 63 to 541), 0 errors.
+    Core 0 got faster too: the 16 MiB write took 16.7 s (1004 kB/s) against 35.5 s (472 kB/s), though its
+    longest single write call was longer (130 ms against 72 ms).
+  - The normal build, 200 s (log `20261116-001110` against `20261115-233145`): 0 samples later than 1.5 P per
+    10 s window for both IMUs (before 6 to 20 and 23 to 53), largest gap 1.63 and 1.67 ms (before 3.0 and
+    3.3 ms).
+  - The XIP counters now count core 0 alone: about 1.5 million accesses and 0.15 million misses per second
+    idle (both cores before: 94 million and 0.74 million).
+- Not done or not seen: no run without the debugger attached; the boot-copy time is not measured (the first
+  log line's timestamp starts after the copy); no breakpoint was tried in SRAM code; stage 2 (core 0's own
+  hot paths, such as the SD write path or the UART and USB handlers, in SRAM) is not built; core 0 still
+  competes with itself for the cache (its card work evicts its own code).
+
+## Flash layout and memory map
 
 `memory.x` gives the program `FLASH` 2040K (0x10000000 to 0x101FE000) and reserves the last 8 KB of the
 2 MiB flash, 0x101FE000 to 0x10200000, as the `SETTINGS` region for the settings record (`src/settings.rs`;
-the only range the firmware erases or programs). Use (normal build, 2026-11-15): program 171.7 KB of 2040 KB
-(.text 154424 B, .rodata 15768 B, .data 1172 B); static RAM 41.3 KB of 512 KB (.data 1172 B, .bss 39080 B,
-.uninit 1024 B), of which 12 KB are the settings module's three sector buffers.
+the only range the firmware erases or programs). The map of the normal build (2026-11-16, branch
+`wip-ram-code`, from `arm-none-eabi-size -A` and the linker symbols):
+
+| Where | What | Bytes |
+|---|---|---|
+| flash 0x10000000 | `.vector_table` (core 0's) and `.start_block` (the RP2350 image definition) | 276 + 40 |
+| flash 0x10000140 | the load image of `.ram_text`, copied to SRAM at boot | 111 260 |
+| flash 0x1001b3e0 | `.text`: core 0's code | 389 312 |
+| flash | `.rodata` | 0 (every constant is in SRAM) |
+| flash, after `.text` | the load image of `.data` | 4 548 |
+| SRAM 0x20000000 | `.ram_text`: the flight core's code (75 668), then all constants (35 592) | 111 260 |
+| SRAM | `.data` | 4 548 |
+| SRAM | `.bss` (core 1's 512-byte vector table, at 0x2002b600, among it) | 103 972 |
+| SRAM | `.uninit` | 1 024 |
+| SRAM, up to 0x20080000 | free; core 0's stack grows down from the top (link ASSERT: at least 32 KiB) | 303 068 |
+
+Program in flash 505 436 B of 2040 KiB; static SRAM 221 220 B of 512 KiB.
 
 ## Board documentation
 
