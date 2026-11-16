@@ -24,7 +24,8 @@ elf="${target_dir:?cargo metadata gave no target directory}/thumbv8m.main-none-e
 python3 tools/check-ram-code.py "$elf" | tee "$log"
 check=${PIPESTATUS[0]}
 want=0
-[[ " ${FEATURES//,/ } " == *" ram-negative "* ]] && want=1
+features="${FEATURES:-}"
+[[ " ${features//,/ } " == *" ram-negative "* ]] && want=1
 if [ "$check" -ne "$want" ]; then
     echo "check-ram-code: exit $check, $want required: not flashed" | tee -a "$log"
     exit 3
