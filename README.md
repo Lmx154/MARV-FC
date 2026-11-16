@@ -4,7 +4,7 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: mounted and reported, no log yet; see SD card) and the radio receiver (RC, report only; see Radio), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: an ArduPilot-format `.BIN` log from boot; see SD card and Logging) and the radio receiver (RC, report only; see Radio), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
@@ -155,7 +155,7 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 | MAG | BMM350 (`src/mag.rs`) | I2C0 at 400 kHz, SDA GPIO12, SCL GPIO13, data-ready GPIO4 (rising edge), no DMA | from `MAG_ODR_HZ` and `MAG_AVG`; defaults = the driver's bench config: 100 Hz, averaging 2, all axes, normal mode, data-ready pulsed, active high, push-pull | 10 000 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 30 ms at the default | max(1 s, 20 P) |
 | GNSS | LC76G (`src/gnss.rs`) | UART1 (`BufferedUart`, interrupt driven on core 0, no DMA) 115200 8N1, board TX GPIO24, RX GPIO25, RX buffer 4096 B; PPS GPIO5 not read | none: receive only, nothing is sent to the receiver; it is read as it comes (default stream, 1 fix per second) | 1 000 000 us (1 Hz) | 2.5 s (own deadline, not 3 P) | 20 s |
 | BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
-| SD | microSD card (`src/sd.rs`, own loop over the same `Health` machine; see SD card) | PIO0 SM0 (`pio-sdmmc`), CLK GPIO32, CMD 33, DAT0-3 28-31, DMA channel 4 completing on `DMA_IRQ_1` on core 0, `PIO0_IRQ_0` | `LOG_BACKEND_TYPE` (read at boot) | 1 000 000 us (one liveness per second) | none (no data-ready) | 20 s |
+| SD | microSD card (`src/sd.rs`, own loop over the same `Health` machine; see SD card) | PIO0 SM0 (`pio-sdmmc`), CLK GPIO32, CMD 33, DAT0-3 28-31, DMA channel 4 completing on `DMA_IRQ_1` on core 0, `PIO0_IRQ_0` | `LOG_BACKEND_TYPE` (read at boot) | 1 000 000 us (the writer's 1 s: flush, longest wait) | none (no data-ready) | 20 s |
 | RC | ELRS receiver (`src/rc.rs`, task `rc_link`; see Radio) | UART0 (`BufferedUart`, interrupt driven, `UART0_IRQ`), TX GPIO14, RX GPIO17, no DMA | none: report only, the port follows CRSF and MAVLink by itself | none | none | none (not a supervised row: not in `DEVICES`) |
 
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
@@ -449,20 +449,19 @@ thread-mode executor, tagged `SD` for the watchdog. It owns PIO0 (SM0, the `pio-
 static `SD_WAKER` and the binding `DMA_IRQ_1 => DmaIrqHandler<SdWaker>` are in `src/sd.rs`), the card and the
 mounted FAT32 volume (`embedded-fatfs` over `BufStream` + `StreamSlice`), and drives row 9 through the shared
 `fw_core::health::Health` with its own loop (the row is in `DEVICES`, so the supervisor's stuck check with
-P = 1 s, its texts and `[STAT] SD:` line apply). The log writer is milestone SD3: today nothing is written to the
-card except `LOGS/` when it is missing.
+P = 1 s, its texts and `[STAT] SD:` line apply). It is also the log writer (milestone SD3, see Logging): the
+one consumer of the log ring.
 
 - Start, recovery and restart are the same: a NEW bus (PIO0 and its pins re-borrowed, so a bus the driver marked
   dead after a failed cancel is replaced), `init`, block 0 through `fw_core::mbr::partition1` (MBR partition 1 of
   type 0x0B or 0x0C inside the card), the mount, `LOGS/` opened (created if missing), one bounded listing of
   `LOGS/` for the notice; a recovery or restart un-mounts first. Free space is never asked of the file system
   (the scan can take 68 s): used space is the sum of the files' sizes in `LOGS/`.
-- While mounted, once per second, the liveness: the FAT's status flags (the FAT's first block) and the root
-  directory's `LOGS` entry (the root's first block). `BufStream` caches one block, so each of the two is one
-  512-byte read from the card: 1 KiB/s, no write. A good liveness is the row's `samples` and
-  `last_sample_age_ms`; a failed one is an error event (BUS, or TIMEOUT for the driver's time-outs and
-  `InitTimeout`; a time-out that overlapped a settings save is discarded as for the other rows). It stands in
-  for SD3's writes.
+- While mounted, the log's writes are the liveness (SD2's once-per-second reads are gone): `samples` = 512-byte
+  blocks written since boot, `errors` = writes that failed after their retry, `timeouts` = driver time-outs,
+  `overflows` = records the log ring dropped (saturating), `last_sample_age_ms` = time since the last good write.
+  A write or flush that fails after its retry is an error event (BUS, or TIMEOUT for the driver's time-outs; a
+  time-out that overlapped a settings save is retried with no event).
 - Every card and file-system call is awaited to its end; the waits between them (`select` of the 1 s timer and
   the row's wake) are no card calls, and a RESTART request is taken between calls (Q2-I1). RESTART (`device
   restart SD`) is how a changed card is taken up (there is no card detect). SELF_TEST on SD is DENIED by the
@@ -476,11 +475,12 @@ card except `LOGS/` when it is missing.
 | Condition | State | Last error | Text |
 |---|---|---|---|
 | init, MBR check, mount | Starting | | |
-| mounted | Ok | | NOTICE "SD: 59.5 GiB FAT32, 17 MiB in 2 logs" (partition size, sum of `LOGS/` files, their number), at every mount |
+| mounted, log open | Ok | | NOTICE "SD: 59.5 GiB FAT32, 17 MiB in 2 logs, log 3" (partition size, sum of the logs in `LOGS/`, their number, the new log's number), at every mount |
+| card full (the clean-up planner) | Failed | unchanged | ERROR "SD: card full", no log, parked until RESTART |
 | `NoCard` on every start try (100/300/1000 ms) | Absent | TIMEOUT | ERROR "SD: no card" (instead of the supervisor's "absent") |
 | block 0 not an MBR with a FAT32 partition 1, or a volume that does not mount as FAT32, on every start try | Failed | ID_MISMATCH | ERROR "SD: no FAT32 volume, reformat as FAT32" |
 | another start failure on every try | Absent | its BUS or TIMEOUT | the supervisor's "SD: absent (...)" |
-| liveness errors | per the machine and its ladder | BUS or TIMEOUT | the supervisor's texts |
+| write or flush errors | per the machine and its ladder | BUS or TIMEOUT | the supervisor's texts |
 | `LOG_BACKEND_TYPE` = 0 at boot | Absent | NONE | INFO "SD: logging off", once |
 
 The machine itself parks a row whose start retries all failed as Absent with no last error; the SD task shows
@@ -501,6 +501,52 @@ check FAILs, the other four PASS. `LOG_BACKEND_TYPE` 0, saved, `reboot --yes` (2
 card removal or insertion, a real exFAT card, a second card type, errors in service (the ladder on a real
 card fault); the 10-minute run against `main` (milestone check G) was started but not read when this was
 written.
+
+## Logging
+
+`src/logger.rs` and `src/sd.rs` (decision-sd-logging Q3 to Q6, milestone SD3; the pure pieces are
+`fw_core::dflog`, `fw_core::logfile` and `fw_core::xcore::LogRing`).
+
+- Format: ArduPilot DataFlash `.BIN` (FMT records first, then `A3 95 <type> <payload>` records, little-endian,
+  `TimeUS` board microseconds first). Readers, free and without conversion: `mavlogdump.py` and MAVExplorer
+  (`pip install pymavlink MAVProxy`), UAV Log Viewer (plot.ardupilot.org), Mission Planner. Not yet checked on a
+  PC with this firmware's files (the owner moves the card to a card reader).
+- What and how often (Q5; about 5.2 kB/s without the radio, 5.6 kB/s with fresh stick reports): IMU for each
+  IMU at 25 Hz (from its seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own
+  time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
+  status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
+  stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
+  text ring's third cursor: the boot texts first), PARM for all 26 parameters when a log opens and for each
+  accepted set, DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
+  ring's free bytes over the second).
+- Path: `log_collect` (core 0, watchdog id LOG) is the one producer of a 32 KiB `LogRing`; it pushes only while
+  a log is open (`logger::OPEN`) and never awaits the card. A record that does not fit is dropped and counted.
+  The SD task is the one consumer: whole 4 KiB pieces are written in place from the ring (the file offset and
+  the ring's read index are kept equal modulo 4096 by a filler the collector commits and the SD task discards
+  when a log opens), after 1 s without a write the bytes that wait, then a piece up to the next 4 KiB boundary;
+  `flush` once per second. The SD task computes the DSF figures (it owns the ring's statistics) and the
+  collector writes the record.
+- Files: `LOGS/NNNNNNNN.BIN`, 1 to 500 then 1 again; `LOGS/LASTLOG.TXT` holds the last number and is written
+  before the log is opened; a missing or unreadable `LASTLOG.TXT` falls back to the largest number in `LOGS/`.
+  Other files in `LOGS/` are left alone. FAT times stay 1980-01-01.
+- When: from boot, one log per boot and a new number after every recovery or RESTART (`device restart SD`
+  writes what waits in the ring, flushes, closes, un-mounts, mounts and opens the next number). Off with
+  `LOG_BACKEND_TYPE` = 0 (nothing collected, the card untouched).
+- Stalls and failures: the ring absorbs about 6 s of a stalled card; beyond that records are dropped (counted in
+  `overflows` and Dp). A failed write is retried once at once; a second failure is one error event and the piece
+  is discarded (the file then has a gap); three such events make the row Recovering, and the recovery opens the
+  next log. FAT is not power-safe: a power cut or reset loses what was not yet flushed (about 1 to 2 s).
+- Clean-up, after logging started and never before (deleting costs about 10 ms per 32 KiB cluster): once per
+  second `plan_cleanup` over the listing (the open log with its current size): while the logs together exceed
+  the volume minus 500 MiB the oldest (ring order) is deleted, one per step; "card full" (under 8 MiB left
+  even without the other logs) ends the log and parks the row Failed with "SD: card full". The file system is
+  never asked for free space.
+- Test hooks: `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (Cargo.toml).
+
+On the board (2026-11-16, the scratch card): normal build, 50 s (`marv-v2-firmware-20261116-010952.log`): log 1
+opened 580 ms after boot (filler 979 B), "SD: 59.5 GiB FAT32, 0 MiB in 0 logs, log 1", the row Ok, 10.4
+blocks/s, 0 dropped, IMU rates 803.50 / 800.70. NOT yet seen: the 30-minute run with saves, the walker's
+summary of a long log, RESTART, the injections, a PC reading the files.
 
 ## Settings in flash
 
@@ -923,6 +969,8 @@ the host (243 tests, and 4 doc tests); the binary uses every module listed below
 | Module | What it is |
 |---|---|
 | `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake), `LogRing` (the SD logger's single-producer single-consumer byte ring for whole records: a record goes in whole or not at all, drops counted, wait-free both ways, usable from either core). The only module with `unsafe`. Tested with two host threads over 10^7 writes (`LogRing`: 10^6 random operations against a model, and 4 x 10^5 records between two threads); statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
+| `dflog` | The log format, pure: ArduPilot DataFlash `.BIN` records, one table of the 11 types (FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF) from which both the FMT records and the encoders' lengths come, the 979-byte header, GPS week and ms from UTC (integer); `dflog::walk::Walker`, an incremental reader of our own files (per-type counts and first/last `TimeUS`, bad bytes, a truncated tail, the FMT check) |
+| `mbr` | Block 0 of the SD card: MBR partition 1 of type 0x0B or 0x0C inside the card, or why not (no 0x55AA, protective GPT, exFAT/NTFS, out of range) |
 | `logfile` | The SD log files' rules, pure: log numbers 1 to 500 then 1 again, the 8.3 name `NNNNNNNN.BIN` and its parse, `LASTLOG.TXT` (format, parse, the last-number rule), and the clean-up planner (one deletion per call, the oldest log in ring order, from the sum of the log sizes and the volume size; "card full" under 8 MiB) |
 | `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
 | `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |

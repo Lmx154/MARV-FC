@@ -68,7 +68,7 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
 | P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done (branch `wip-sd-p3`, merged into `wip-sd2`; the probes stay as features) |
 | SD2 | The SD card as a device row (mount, capacity, health) | done, merged into `main` (README "SD card") |
-| SD3 | The log writer and what is logged | after SD2 |
+| SD3 | The log writer and what is logged | in progress, branch `wip-sd3` (README "Logging"): writer, collector and test hooks built; board: logging from boot seen, the 30-minute run and the injections not yet |
 | SD4 | Log list and download over USB (`marv-cli logs list/get`) | after SD3 |
 
 The card in the slot is a scratch card and may be erased (owner's word). There is no card reader on the
