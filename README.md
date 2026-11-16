@@ -890,6 +890,8 @@ the only range the firmware erases or programs). Use (normal build, 2026-11-15):
 
 ## Board documentation
 
+- `docs/handoff.md`: the overview for whoever picks the work up: what is done and proven, what is in progress
+  (SD card logging), what is left, and the rules that are easy to break (2026-11-15).
 - `docs/handoff-esc-link.md`: the ESC link (DShot, AM32 passthrough, ESC telemetry input) and battery sensing: what the drivers
   already do, the owner's decisions and what is still open for the firmware (not built here yet).
 - `docs/pinout.md`: the board pin assignment.
