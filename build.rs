@@ -14,4 +14,8 @@ fn main() {
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
+    // The flight core's code is copied to SRAM before anything runs (src/ram.rs): embassy-rp already
+    // defines `__pre_init`, so cortex-m-rt's call goes to `__wrap___pre_init`, which copies and then
+    // continues in embassy-rp's (`__real___pre_init`).
+    println!("cargo:rustc-link-arg-bins=--wrap=__pre_init");
 }

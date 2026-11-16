@@ -5,6 +5,9 @@
 #
 # Usage: [FEATURES=<cargo features>] tools/run.sh [timeout_seconds, default 120]
 #   FEATURES=no-fbeat tools/run.sh 30    # the negative control (see README)
+# Before flashing, tools/check-ram-code.py (python3, arm-none-eabi-binutils) checks that nothing the
+# flight core runs lies in flash (decision-ram-code-20261115, R1): it must pass, or with the feature
+# ram-negative (its negative control) it must fail; otherwise nothing is flashed (exit 3).
 set -u
 tmo="${1:-120}"
 bin="marv-v2-firmware"
@@ -18,9 +21,18 @@ log="logs/${bin}-$(date +%Y%m%d-%H%M%S).log"
 target_dir="$(cargo metadata --format-version 1 --no-deps | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')"
 elf="${target_dir:?cargo metadata gave no target directory}/thumbv8m.main-none-eabihf/release/${bin}"
 
+python3 tools/check-ram-code.py "$elf" | tee "$log"
+check=${PIPESTATUS[0]}
+want=0
+[[ " ${FEATURES//,/ } " == *" ram-negative "* ]] && want=1
+if [ "$check" -ne "$want" ]; then
+    echo "check-ram-code: exit $check, $want required: not flashed" | tee -a "$log"
+    exit 3
+fi
+
 # One probe, one user at a time, across every checkout on this machine.
 lock="${XDG_RUNTIME_DIR:-/tmp}/marv-v2-probe.lock"
-flock "$lock" timeout "$tmo" probe-rs run --chip RP235x "$elf" >"$log" 2>&1
+flock "$lock" timeout "$tmo" probe-rs run --chip RP235x "$elf" >>"$log" 2>&1
 status=$?
 
 grep -E '\[(PASS|FAIL|SKIP|INFO|STAT)\]|RESULT|panicked|ERROR|Error' "$log" | tail -n 80

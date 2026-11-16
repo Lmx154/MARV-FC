@@ -51,6 +51,7 @@ mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
 mod mag;
+mod ram;
 mod rc;
 #[cfg(not(feature = "sd-fat-probe"))]
 mod sd;
@@ -211,6 +212,11 @@ const STALE_US: u64 = 1_000_000;
 /// The boot text line; the reset cause follows (", reset: timeout|forced|power-on").
 const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": flight core up");
 
+#[cfg_attr(
+    feature = "ram-negative",
+    unsafe(link_section = ".text.ram_negative"),
+    inline(never)
+)]
 fn now_us() -> u64 {
     Instant::now().as_micros()
 }

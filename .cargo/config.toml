@@ -1,5 +1,8 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
 runner = "probe-rs run --chip RP235x"
+# memory.x selects the flight core's code for SRAM by v0-mangled names (decision-ram-code-20261115);
+# v0 is this toolchain's default, the line makes the dependency explicit.
+rustflags = ["-C", "symbol-mangling-version=v0"]
 
 # The workspace default is the board, so `cargo build --release` and tools/run.sh are unchanged.
 # The pure libraries (fw-core, fw-flight) are tested on the host with these aliases, which only

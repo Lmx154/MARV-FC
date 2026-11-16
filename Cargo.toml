@@ -184,6 +184,10 @@ inject-sd-wrong-format = []
 # NEGATIVE CONTROL of Q1-I1: INTE0 bit 4 (the SD card's channel) is set before the SD task's register
 # check and cleared after it: the INTE0 check must FAIL.
 sd-irq-negative = []
+# NEGATIVE CONTROL of the RAM-code guard (decision-ram-code-20261115): `now_us` is linked into flash
+# (section `.text.ram_negative`, never inlined), so tools/check-ram-code.py must FAIL naming it;
+# tools/run.sh then requires that failure (exit 1) before it flashes.
+ram-negative = []
 
 [profile.release]
 debug = true

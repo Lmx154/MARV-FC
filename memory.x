@@ -45,8 +45,7 @@ SECTIONS {
 
 } INSERT AFTER .vector_table;
 
-/* move .text to start /after/ the boot info */
-_stext = ALIGN(ADDR(.start_block) + SIZEOF(.start_block), 8);
+/* .text starts after the boot info and the load image of .ram_text: see the end of this file. */
 
 SECTIONS {
     /* ### Picotool 'Binary Info' Entries
@@ -82,3 +81,49 @@ SECTIONS {
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);
+
+/* Flight core in SRAM (decision-ram-code-20261115). INSERT BEFORE .text is load-bearing: an input
+ * section goes to the FIRST rule in script order that matches it; after cortex-m-rt's .text/.rodata
+ * these rules would match nothing. Patterns are v0-mangled names. They are the mechanism, not the
+ * proof: tools/check-ram-code.py is the guard. The copy is `__wrap___pre_init` in src/ram.rs. */
+SECTIONS {
+    .ram_text : ALIGN(8)
+    {
+        __sram_text = .;
+        *(.text.SIO_IRQ_FIFO .text.DMA_IRQ_0 .text.IO_IRQ_BANK0)
+        *(.text._critical_section_1_0_acquire .text._critical_section_1_0_release .text._embassy_time_now)
+        *(.text.__aeabi_mem* .text.*17compiler_builtins3mem*)
+        *(.text.*8icm45686* .text.*11lsm6dsk320x*)
+        *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness*)
+        *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
+        *(.text.*16marv_v2_firmware10imu_inject* .text.*16marv_v2_firmware14flight_latency*)
+        *(.text.*16marv_v2_firmware10core1_main* .text.*16marv_v2_firmware12___fbeat_task* .text.*16marv_v2_firmware6now_us*)
+        *(.text.*10embassy_rp3spi* .text.*10embassy_rp3dma* .text.*10embassy_rp4gpio*)
+        *(.text.*10embassy_rp9multicore* .text.*10embassy_rp*6RegExt*)
+        *(.text.*16embassy_executor3raw5waker* .text.*16embassy_executor3raw*8Executor* .text.*16embassy_executor8platform6thread*)
+        *(.text.*12atomic_waker* .text.*12embassy_time5delay9block_for* .text.*12embassy_time7instant*)
+        *(.text.*7fw_core6health* .text.*7fw_core5xcore* .text.*16embedded_hal_bus3spi* .text.*15embassy_futures4join*)
+        /* rustc merges identical functions into aliases, and the section keeps the name of the one it
+         * kept: raw::Executor::spawn is SyncExecutor::spawn's, raw::Executor::poll is
+         * InterruptExecutor::on_interrupt's, _critical_section_1_0_* are RpSpinlockCs's Impl. */
+        *(.text.*16embassy_executor3raw*12SyncExecutor* .text.*16embassy_executor8platform9interrupt*17InterruptExecutor12on_interrupt)
+        *(.text.*10embassy_rp21critical_section_impl*)
+        . = ALIGN(4);
+        __eram_code = .;
+        *(.rodata .rodata.*)
+        . = ALIGN(4);
+        __eram_text = .;
+    } > RAM AT> FLASH
+    __siram_text = LOADADDR(.ram_text);
+} INSERT BEFORE .text;
+
+_stext = ALIGN(LOADADDR(.ram_text) + SIZEOF(.ram_text), 8);
+__vector_table_end = ADDR(.vector_table) + SIZEOF(.vector_table);
+ASSERT(SIO_IRQ_FIFO >= ORIGIN(RAM) && SIO_IRQ_FIFO < ORIGIN(RAM) + LENGTH(RAM), "ram-code: SIO_IRQ_FIFO not in RAM: .ram_text rules match nothing");
+ASSERT(DMA_IRQ_0 >= ORIGIN(RAM) && DMA_IRQ_0 < ORIGIN(RAM) + LENGTH(RAM), "ram-code: DMA_IRQ_0 not in RAM");
+ASSERT(IO_IRQ_BANK0 >= ORIGIN(RAM) && IO_IRQ_BANK0 < ORIGIN(RAM) + LENGTH(RAM), "ram-code: IO_IRQ_BANK0 not in RAM");
+ASSERT(__erodata == __srodata, "ram-code: constants left in flash");
+ASSERT(__siram_text % 4 == 0 && __eram_text % 4 == 0, "ram-code: .ram_text not word aligned");
+/* __euninit, not _stack_end: .end_block above is inserted after .uninit, so cortex-m-rt's
+ * PROVIDE(_stack_end = .) that follows .uninit takes the end of the FLASH image. */
+ASSERT(_stack_start - __euninit >= 32K, "ram-code: under 32 KiB left for core 0's stack");
