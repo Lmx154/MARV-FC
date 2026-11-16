@@ -39,6 +39,8 @@
 //! so the length that goes into a FMT record and the length of the encoded record cannot differ
 //! (invariant Q3-I1).
 
+pub mod walk;
+
 /// First byte of every record.
 pub const HEAD1: u8 = 0xA3;
 /// Second byte of every record.
