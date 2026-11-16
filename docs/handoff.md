@@ -71,8 +71,9 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | SD3 | The log writer and what is logged | built, branch `wip-sd3` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. A real card removal seen (Failed 5.5 s after the pull, restart Ok in 329 ms), and three logs read on a PC with pymavlink 2.4.50 `mavlogdump.py` (no bad bytes). Not yet: a power cut, UAV Log Viewer |
 | SD4 | Log list and download over USB (`marv-cli logs list/get`) | firmware half built, branch `wip-sd4` (README "Logging", "Logs over USB"): list, download (logs 8 and 13 byte-identical to the card-reader copies, twice), absent log, end marker, take-over, END and the 3 s HEARTBEAT rule seen on the board with a throw-away pymavlink client; the station's half on MARV-GCS `wip-logs` |
 
-The card in the slot is a scratch card and may be erased (owner's word). There is no card reader on the
-desk, so checks that compare a file on a PC are done by read-back on the board or wait for SD4.
+The card in the slot is a scratch card and may be erased (owner's word). The owner has a USB card reader:
+logs copied off the card with it were read with ArduPilot's reader (2026-11-16) and serve as reference
+copies for the download checks.
 
 ## Left open
 

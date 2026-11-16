@@ -50,8 +50,10 @@ mod imu2;
 mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
-#[cfg(not(feature = "sd-fat-probe"))]
+// In a probe build the SD task does not exist, so the SD side of `logdl` is unused there.
+#[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
 mod logdl;
+#[cfg(not(feature = "sd-fat-probe"))]
 mod logger;
 mod mag;
 mod ram;

@@ -564,8 +564,9 @@ written.
   grows). A request for a log that does not exist gets nothing; `ofs` at or past the end one LOG_DATA with count
   0. A new LOG_REQUEST_DATA or LOG_REQUEST_LIST replaces the running transfer; LOG_REQUEST_END, the station's
   HEARTBEAT older than 3 s or the link going down stop it. Requests that arrive before the start gate opens
-  are dropped (the station retries), and so are requests while the SD row is not Ok (no card, starting,
-  recovering, the clean-up before a log opens): no answer at all, not even the empty entry.
+  are dropped (the station retries). While the SD row is not Ok (no card, starting, recovering, the clean-up
+  before a log opens) a request gets no answer at all, not even the empty entry; a request that arrives while
+  the row is only Degraded is held and answered when the row is Ok again.
   How (`src/logdl.rs`): the USB link runs its own copy of the node's driver (`drive` in `main.rs`, mirroring
   mavlink-device `run.rs` at dfdb11a) so that `receive_with` hands the three requests over; each request gets
   a new generation number and wakes the SD task. The SD task answers from its listing and reads the log
