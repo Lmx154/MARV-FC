@@ -95,7 +95,10 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
    (`src/settings.rs`, ONLY on an explicit save), not in a separate `flash_saver` task; no PSRAM is mapped
    yet, so no `remap()`.
 2. A bus call of a sensor driver is never cancelled (embassy-rp 0.10): the timeout goes around the data-ready
-   wait, then the driver's `recover()` is called.
+   wait, then the driver's `recover()` is called. Exception since 2026-11-15 (the owner's "Yes just do what
+   PX4 and ardupilot do", amending I1.1): an I2C transaction of BARO or MAG that misses its deadline
+   (ArduPilot's formula, 4 ms at 400 kHz, `src/i2cbus.rs`) is abandoned; the bus is then refused until the
+   adapter has cleared it and rebuilt the controller and the driver.
 3. DShot and ESC passthrough never hold PIO2 together; passthrough is only entered with the motors stopped.
 4. The servo pads 4 and 5 carry the magnetometer's interrupt and the GNSS PPS on the bench: servo outputs on
    slice 2 are not available while that wiring stands.

@@ -263,6 +263,19 @@ The barometer's `restart` first does a bus clear (up to 9 SCL pulses while SDA i
 STOP, as the driver's `bmp581_cancel` bench program; neither the driver nor embassy-rp 0.10 has one), then
 rebuilds I2C1 and runs `init`. Both I2C buses (I2C1 BARO, I2C0 MAG) are also cleared the same way at every boot, before the first transaction, and each logs one line with the SDA and SCL levels before and after and the pulses given: a reset of the MCU in the middle of a transfer can leave the sensor holding SDA low (seen on I2C1 on 2026-11-15, where the barometer's first start then never ended), and the MCU's reset does not release it.
 
+A hung I2C transfer (owner's decision of 2026-11-15, "Yes just do what PX4 and ardupilot do"; it amends the
+design's rule I1.1): every transaction of the BARO and MAG drivers runs under a deadline (`src/i2cbus.rs`,
+`Timed`, a wrapper around the embassy-rp bus the driver is given), ArduPilot's formula from
+`I2CDevice::_transfer`, 1 + 2 * (((8 * 10^6 / bus clock) * bytes) / 1000) ms with its 4 ms floor
+(`fw_core::i2c::timeout_ms`; 4 ms for every transfer of these drivers at 400 kHz). A deadline that a flash save
+overlapped is discarded. A transaction that misses it is abandoned and the driver gets a bus error (row error
+kind BUS), logged as `[INFO] I2C1: transaction of N bytes timed out after 4 ms ...`; the bus is then refused
+(every further transaction fails at once with the same error) until it has been cleared and rebuilt. The
+health machine and its ladder are unchanged: the errors take the row Ok -> Degraded -> Recovering; `recover`
+fails at once on a refused bus, so the attempt goes on to `restart` (bus clear, rebuild, start); a start retry
+at boot on a refused bus does the same clear and rebuild first. There is no retry inside the wrapper. The stuck
+check stays as the last resort for anything else that hangs (`inject-baro-stuck`).
+
 How to see it: `tools/run.sh` prints one `[INFO]` line per health transition (with the board time in ms)
 and, every 10 s, a `[STAT] BARO:` line: state, samples and samples per second over the last 10 s, the
 latest `seq`, errors, timeouts, missed edges, recoveries, config restored, attempts, the largest gap between samples, the
@@ -315,6 +328,22 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   STUCK, one ERROR text "BARO: stuck"; the board is not reset (a device stuck in an await does not stop
   core 0's executor, so the watchdog stays fed) and the rest of the
   firmware (HEARTBEAT, PING/PONG, `[STAT]` lines) keeps running.
+- `FEATURES=inject-baro-hang-once tools/run.sh 60`, `inject-baro-hang-boot`, `inject-baro-hang-forever`
+  (`src/i2cbus.rs` `hang`, BELOW the deadline wrapper, so the deadline is what is exercised; not part of the
+  adapter wrapper above): the inner I2C1 transaction never completes, once at the first transaction from 15 s
+  of uptime, once at the first transaction at boot, or every transaction from 15 s on (also on rebuilt buses).
+  Logs `[INFO] inject: I2C1 transaction never completes from ... ms` for each hang. Seen on the board
+  (2026-11-15): `once` (`logs/marv-v2-firmware-20261115-191628.log`): hang at 15007 ms, time-out at 15011 ms
+  (4 ms, a 2-byte transaction), Degraded at once, Recovering at 15047 ms (two refused reads), attempt 1 at
+  15147 ms: `recover` refused, `restart` = bus clear, rebuild, start, Ok at 15174 ms: 167 ms from the hang to
+  Ok, BARO errors 3, recoveries 1, never STUCK; MAG and the other rows Ok, MAG errors 0, watchdog stalls begun
+  0, 7 `[PASS]`. `boot` (`...-191738.log`): the first start timed out at 10 ms, the start retry at 111 ms did
+  the clear and rebuild first, Ok at 131 ms (no STUCK, not Absent). `forever` (`...-191829.log`): Recovering,
+  4 attempts (each a clear, rebuild and a timed-out start) at 100, 300, 1000, 3000 ms, Failed at 19487 ms;
+  `device restart BARO` answered `failed` about 1.4 s after the request was taken (the restart and its 3 start
+  retries, each a clear and rebuild, then Absent); 9 time-outs in all, never STUCK, the other rows Ok, stalls
+  begun 0. Not seen: a real bus stuck in the middle of a run (only this injected hang, which never touches the
+  bus, so the state an abandoned embassy-rp transfer leaves in the controller was not exercised on the board).
 
 - `FEATURES=inject-gnss-silent tools/run.sh 100`: 10 s after GNSS's first good sample the adapter stops seeing sentences (the wrapper swallows the
   fixes; the receiver keeps talking) until a RESTART request (`device restart GNSS`). Shows the long path of a device that stays silent:
