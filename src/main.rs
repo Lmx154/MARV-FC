@@ -50,6 +50,8 @@ mod imu2;
 mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
+#[cfg(not(feature = "sd-fat-probe"))]
+mod logger;
 mod mag;
 mod ram;
 mod rc;
@@ -184,9 +186,12 @@ const LINK_RUN: u8 = 2;
 /// The link ids of the text ring and the action book: USB and the radio.
 pub const LINK_USB: usize = 0;
 pub const LINK_RADIO: usize = 1;
-/// The STATUSTEXT ring (`fw_core::text_ring`): a cursor per link, each text once per link, the
-/// boot report and the settings classification in the sticky slots until each link took them.
-type Ring = TextRing<(MavSeverity, TextLine), 2, TEXTS_DEPTH>;
+/// The text ring's third cursor: the SD log's MSG records (`logger`), not a MAVLink link.
+pub const LINK_LOG: usize = 2;
+/// The STATUSTEXT ring (`fw_core::text_ring`): a cursor per link and one for the log, each text
+/// once per cursor, the boot report and the settings classification in the sticky slots until
+/// each cursor took them.
+type Ring = TextRing<(MavSeverity, TextLine), 3, TEXTS_DEPTH>;
 static TEXTS: Mutex<CriticalSectionRawMutex, RefCell<Ring>> = Mutex::new(RefCell::new(Ring::new()));
 /// 8; with `latency-text` 32, so that the boot's texts and the two sets of latency texts (4 each)
 /// all wait for a station that connects after 590 s.
@@ -1100,7 +1105,10 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
-    // The SD card's device task; in a build of the SD probe the probe owns the card instead.
+    // The SD card's device task and the log collector; in a build of the SD probe the probe owns
+    // the card instead.
+    #[cfg(not(feature = "sd-fat-probe"))]
+    spawner.spawn(defmt::unwrap!(logger::task()));
     #[cfg(not(feature = "sd-fat-probe"))]
     spawner.spawn(defmt::unwrap!(sd::task(sd::Parts {
         pio: p.PIO0,

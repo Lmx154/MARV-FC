@@ -1,52 +1,83 @@
-//! The SD card as a device row (decision-sd-logging Q1, Q2, Q4 first bullet, Q6; milestone SD2): one
-//! core-0 thread-mode task owns the bus (PIO0 SM0, DMA channel 4 completing on `DMA_IRQ_1` on core 0),
-//! the card and the mounted FAT32 volume, and drives row 9 through the shared `Health` machine with
-//! its own loop. Nothing is written to the card except `LOGS/` when it is missing (the log writer is
-//! SD3).
+//! The SD card as a device row and the log writer (decision-sd-logging Q1, Q2, Q4, Q6; milestones
+//! SD2, SD3): one core-0 thread-mode task owns the bus (PIO0 SM0, DMA channel 4 completing on
+//! `DMA_IRQ_1` on core 0), the card, the mounted FAT32 volume and the open log, drives row 9
+//! through the shared `Health` machine with its own loop, and is the one consumer of the log ring
+//! (`logger::RING`; `logger`'s collector is its one producer).
 //!
 //! A start, a recovery and a restart are the same: a new bus, `init`, block 0 through
 //! `fw_core::mbr` (partition 1 of type 0x0B/0x0C), the mount over `BufStream` + `StreamSlice`,
-//! `LOGS/` opened (created if missing) and listed once for the notice text. While mounted, every
-//! second, one liveness: the FAT's status flags and the root directory's `LOGS` entry, two
-//! different blocks, so that `BufStream`'s one-block cache serves neither and each is one block read
-//! from the card; a good liveness is the row's sample. The waits (`select` of the 1 s timer and
-//! the row's wake) are no card calls; every card and file-system call is awaited to its end and a
-//! RESTART request is taken between them (Q2-I1). A recovery or a restart un-mounts first.
+//! `LOGS/` opened (created if missing) and listed once; then the new log (`fw_core::logfile`): the
+//! number after the one `LOGS/LASTLOG.TXT` holds (or the listing's largest), a stale file of that
+//! number deleted, `LASTLOG.TXT` written BEFORE the log is opened (Q4-I3), `LOGS/NNNNNNNN.BIN`
+//! created and the header (the FMT records) written; then the ring is emptied, the collector is
+//! told the number and the filler length (`logger::OPEN`, `logger::PAD`) and the row is Ok with
+//! one NOTICE ("SD: 59.5 GiB FAT32, 17 MiB in 2 logs, log 3").
+//!
+//! The service: wait (no card call) for a piece in the ring, 1 s or the row's wake; write whole
+//! 4096-byte pieces in place from the ring and release them after the write returned; after 1 s
+//! without a write the bytes that wait; `flush` once per second, then the DSF figures for the
+//! collector and one step of the clean-up (`plan_cleanup` over the listing, the open log with its
+//! size: one deletion, or "SD: card full", which ends the log and parks the row Failed). The file
+//! offset and the ring's read index are kept equal modulo 4096 (the filler before the log's first
+//! record makes the read index equal to the header's length), so a short piece is followed by
+//! one that ends at the next 4096-byte boundary of both, and later pieces are whole and in place
+//! again. A failed write is retried once at once; a second failure is one error event and the
+//! piece is discarded. A time-out that overlapped a settings save is retried with no event. A
+//! good write is the row's sample (`samples` = 512-byte blocks written, `overflows` = records the
+//! ring dropped). Every card and file-system call is awaited to its end and a RESTART request is
+//! taken between them (Q2-I1); a recovery or a restart closes the log, un-mounts and opens the
+//! next log number.
 //!
 //! Row (Q6): `NoCard` on every start try: Absent, TIMEOUT, "SD: no card"; block 0 not an MBR with a
 //! FAT32 partition 1, or a volume that does not mount as FAT32: Failed, ID_MISMATCH, "SD: no FAT32
 //! volume, reformat as FAT32" (the machine parks the row after the start retries; this task shows
-//! why); mounted: Ok with one NOTICE; `LOG_BACKEND_TYPE` 0 at boot: Absent, NONE, "SD: logging
-//! off", the card untouched. Errors in service go through the machine and its ladder (BUS or
-//! TIMEOUT, the supervisor's texts).
+//! why); logging: Ok with one NOTICE; card full: Failed, "SD: card full"; `LOG_BACKEND_TYPE` 0 at
+//! boot: Absent, NONE, "SD: logging off", the card untouched, nothing collected. Errors in service
+//! go through the machine and its ladder (BUS or TIMEOUT, the supervisor's texts).
+//!
+//! Test hooks: `inject-sd-write-fail` (60 s after the log opened the next six write calls fail
+//! without card traffic: three pieces, each with its retry); `log-verify` (after the mount, before
+//! the new log, the previous log is read through `dflog::walk::Walker` and summarised);
+//! `inject-log-small-volume` (the first clean-up step is told a volume of the reserve plus the
+//! listed bytes minus one, so the oldest log is deleted once).
 
 use core::sync::atomic::Ordering;
 
 use atomic_waker::AtomicWaker;
 use block_device_adapters::{BufStream, BufStreamError, StreamSlice, StreamSliceError};
-use embassy_futures::select::select;
+use embassy_futures::select::{select, select3};
 use embassy_rp::Peri;
 use embassy_rp::interrupt::{self, InterruptExt};
 use embassy_rp::pac;
 use embassy_rp::peripherals::{DMA_CH4, PIN_28, PIN_29, PIN_30, PIN_31, PIN_32, PIN_33, PIO0};
 use embassy_rp::pio::{self, Pio};
 use embassy_time::{Duration, Instant, Timer};
-use embedded_fatfs::{DefaultTimeProvider, FatType, FileSystem, FsOptions, LossyOemCpConverter};
-use embedded_io_async::Write;
+use embedded_fatfs::{
+    DefaultTimeProvider, FatType, File, FileSystem, FsOptions, LossyOemCpConverter,
+};
+use embedded_io_async::{Read, Write};
+use fw_core::dflog::{Dsf, HEADER_SEQUENCE_LEN, write_header};
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
+use fw_core::logfile::{
+    CleanUp, LASTLOG_NAME, LOG_DIR, MAX_LOG_NUMBER, RESERVE_BYTES, file_name, format_lastlog,
+    last_number, next_number, parse_file_name, parse_lastlog, plan_cleanup,
+};
 use fw_core::mbr::{Partition, partition1};
 use fw_core::watchdog::task;
+use fw_core::xcore::LogConsumer;
 use fw_flight::tagged;
 use mavlink_device::ParamValue;
 use mavlink_device::dialect::MavSeverity;
 use pio_sdmmc::pio::{DmaIrqHandler, DmaWaker, PioBus, PioBusConfig};
 use pio_sdmmc::{Block, BusError, Config, Error as CardError, SdCard};
+use static_cell::ConstStaticCell;
 
 use crate::device::{self, Device, DeviceStatus, REQ_RESTART, SD, error_name, state_name};
+use crate::logger::{DATA, DSF_FIGURES, OPEN, PAD, PIECE, RING, RING_BYTES};
 
-/// The row's nominal period P: one liveness per second.
+/// The row's nominal period P: the service's 1 s (the flush, the longest wait).
 pub const PERIOD_US: u32 = 1_000_000;
-const LIVENESS_EVERY: Duration = Duration::from_secs(1);
+const SECOND: Duration = Duration::from_secs(1);
 /// Longest wait while parked, as in `device`.
 const SLICE: Duration = Duration::from_millis(100);
 /// The SD card's channel (resources.md DMA row 4).
@@ -54,17 +85,37 @@ const CH: usize = 4;
 const BIT: u32 = 1 << CH;
 /// INTE0 as the flight core leaves it: IMU1's channels 0 and 1, IMU2's 2 and 3.
 const FLIGHT_CHANNELS: u32 = 0x0f;
-/// At most this many entries of `LOGS/` are read for the notice.
+/// At most this many entries of `LOGS/` are listed.
 const LIST_MAX: usize = 1024;
+/// One slot per log number (slot 0 unused).
+const LOG_SLOTS: usize = MAX_LOG_NUMBER as usize + 1;
+/// A listing slot with no file.
+const ABSENT: u32 = u32::MAX;
+/// Attempts of one write or flush whose time-outs overlapped a settings save.
+const SAVE_RETRIES: u32 = 3;
 /// 512-byte blocks per GiB.
 const GIB_BLOCKS: u64 = 1 << 21;
 const NO_CARD: &str = "SD: no card";
 const WRONG_FORMAT: &str = "SD: no FAT32 volume, reformat as FAT32";
+const CARD_FULL: &str = "SD: card full";
 
 type Sd<'a> = SdCard<PioBus<'a, PIO0, 0>>;
 type Volume<'a> = StreamSlice<BufStream<Sd<'a>, 512>>;
 type Fs<'v, 'a> = FileSystem<&'v mut Volume<'a>, DefaultTimeProvider, LossyOemCpConverter>;
 type FsError = embedded_fatfs::Error<StreamSliceError<BufStreamError<CardError>>>;
+type LogFile<'f, 'v, 'a> = File<'f, &'v mut Volume<'a>, DefaultTimeProvider, LossyOemCpConverter>;
+
+/// The `LOGS/` listing: per log number its file size (`ABSENT`: none).
+static SIZES: ConstStaticCell<[u32; LOG_SLOTS]> = ConstStaticCell::new([ABSENT; LOG_SLOTS]);
+/// The header of every log (the FMT records), built once.
+static HEADER: ConstStaticCell<[u8; HEADER_SEQUENCE_LEN]> =
+    ConstStaticCell::new([0; HEADER_SEQUENCE_LEN]);
+/// `log-verify`: the read buffer, 4-byte aligned so that whole blocks are read in place.
+#[cfg(feature = "log-verify")]
+#[repr(C, align(4))]
+struct VerifyBuf([u8; PIECE]);
+#[cfg(feature = "log-verify")]
+static VERIFY_BUF: ConstStaticCell<VerifyBuf> = ConstStaticCell::new(VerifyBuf([0; PIECE]));
 
 /// The waker of the SD bus's DMA completion (the driver keeps no static state, CONTRACT A6).
 static SD_WAKER: AtomicWaker = AtomicWaker::new();
@@ -137,6 +188,8 @@ struct Row {
     /// The restart request being carried out, until its outcome is published.
     restart_run: Option<u32>,
     checked: bool,
+    /// The card is full (`plan_cleanup`): Failed, no log, parked until a RESTART request.
+    full: bool,
 }
 
 impl Row {
@@ -144,7 +197,11 @@ impl Row {
     /// retries shows why (Q6).
     fn shown(&self) -> (State, Counters) {
         let mut counters = *self.health.counters();
+        counters.overflows = RING.dropped();
         let mut state = self.health.state();
+        if self.full {
+            state = State::Failed;
+        }
         if state == State::Absent {
             match self.start_fault {
                 Some(Fault::NoCard) => counters.last_error = ErrorKind::Timeout,
@@ -216,6 +273,7 @@ impl Row {
         let before = self.status.state;
         self.restart_run = Some(number);
         self.start_fault = None;
+        self.full = false;
         self.action = self.health.step(Event::Restart, now_ms()).action;
         self.publish();
         defmt::info!(
@@ -290,6 +348,26 @@ async fn run(mut parts: Parts) -> ! {
     if !fw_settings::sd::file_backend(backend) {
         off(dev).await
     }
+    let Some(consumer) = RING.take_consumer() else {
+        defmt::panic!("[FAIL] log ring: consumer taken twice");
+    };
+    let header = HEADER.take();
+    write_header(header);
+    let mut w = LogState {
+        consumer,
+        tail: 0,
+        pad_left: 0,
+        sizes: SIZES.take(),
+        header,
+        written: 0,
+        inject_calls: 0,
+        #[cfg(feature = "inject-sd-write-fail")]
+        injected: false,
+        #[cfg(feature = "inject-log-small-volume")]
+        small_told: false,
+        #[cfg(feature = "log-verify")]
+        verify_buf: &mut VERIFY_BUF.take().0,
+    };
     let mut row = Row {
         dev,
         health: Health::new(Limits::DESIGN),
@@ -298,13 +376,20 @@ async fn run(mut parts: Parts) -> ! {
         start_fault: None,
         restart_run: None,
         checked: false,
+        full: false,
     };
     row.feed(Event::Tick);
     loop {
         row.take_restart();
+        if row.full {
+            // No card traffic; a RESTART request arrives through `wake`.
+            let _ = select(Timer::after(SLICE), dev.wake.wait()).await;
+            dev.mark();
+            continue;
+        }
         match row.action {
             Action::Start | Action::Recover | Action::Restart => {
-                session(&mut parts, &mut row).await
+                session(&mut parts, &mut row, &mut w).await
             }
             Action::WaitUntil(until) => {
                 device::sleep_until(dev, until).await;
@@ -355,7 +440,7 @@ async fn off(dev: &'static Device) -> ! {
 
 /// One bus: built, the start (recovery, restart) the machine asked for, the service while mounted,
 /// the un-mount. Returns when the machine wants another operation or a RESTART request waits.
-async fn session(parts: &mut Parts, row: &mut Row) {
+async fn session(parts: &mut Parts, row: &mut Row, w: &mut LogState) {
     let op = row.action;
     let began = Instant::now();
     let Pio {
@@ -395,7 +480,7 @@ async fn session(parts: &mut Parts, row: &mut Row) {
         }
         Err(_) => return row.failed(op, Fault::Error(ErrorKind::Bus), began),
     };
-    mounted(&mut volume, part, row, op, began).await;
+    mounted(&mut volume, part, row, op, began, w).await;
     let flushed = volume.flush().await;
     row.dev.mark();
     let card = volume.into_inner().into_inner();
@@ -457,13 +542,91 @@ async fn open(card: &mut Sd<'_>) -> Result<Partition, Fault> {
     }
 }
 
-/// The mount, the notice, the service, the un-mount.
+/// What the writer keeps across sessions.
+struct LogState {
+    consumer: LogConsumer<'static, RING_BYTES>,
+    /// The ring's read index: bytes consumed since boot (wrapping).
+    tail: u32,
+    /// Filler bytes of the open log still to consume unwritten.
+    pad_left: usize,
+    /// The `LOGS/` listing: per log number its size, `ABSENT` for none.
+    sizes: &'static mut [u32; LOG_SLOTS],
+    header: &'static mut [u8; HEADER_SEQUENCE_LEN],
+    /// Bytes written to logs since boot (the row's samples are these in 512-byte blocks).
+    written: u64,
+    /// Write calls still to fail (`inject-sd-write-fail`; 0 otherwise).
+    inject_calls: u8,
+    #[cfg(feature = "inject-sd-write-fail")]
+    injected: bool,
+    #[cfg(feature = "inject-log-small-volume")]
+    small_told: bool,
+    #[cfg(feature = "log-verify")]
+    verify_buf: &'static mut [u8; PIECE],
+}
+
+impl LogState {
+    fn consume(&mut self, n: usize) {
+        let n = self.consumer.consume(n);
+        self.tail = self.tail.wrapping_add(n as u32);
+    }
+
+    /// Empties the ring (nothing is pushed while no log is open).
+    fn drain(&mut self) {
+        let n = self.consumer.readable();
+        self.consume(n);
+    }
+
+    /// The listing as `(number, size)`.
+    fn listing(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
+        (0u32..)
+            .zip(self.sizes.iter())
+            .filter(|&(_, &size)| size != ABSENT)
+            .map(|(n, &size)| (n, u64::from(size)))
+    }
+}
+
+/// The open log.
+struct Open {
+    number: u32,
+    /// The partition's size for the clean-up planner.
+    volume_bytes: u64,
+    /// The file offset: bytes written to the file.
+    offset: u64,
+    opened_at: Instant,
+}
+
+/// Why the service ended.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// The machine wants another operation (recovery after errors).
+    Machine,
+    /// A RESTART request waits.
+    Restart,
+    /// The clean-up planner said the card is full.
+    Full,
+}
+
+/// The path of log `n`, `LOGS/NNNNNNNN.BIN`.
+fn log_path(n: u32) -> [u8; 17] {
+    let mut path = *b"LOGS/00000000.BIN";
+    if let Some(name) = path.get_mut(5..) {
+        name.copy_from_slice(&file_name(n));
+    }
+    path
+}
+
+fn as_str(bytes: &[u8]) -> &str {
+    core::str::from_utf8(bytes).unwrap_or("?")
+}
+
+/// The mount, the new log, the notice, the service, the log closed, the un-mount.
 async fn mounted(
     volume: &mut Volume<'_>,
     part: Partition,
     row: &mut Row,
     op: Action,
     began: Instant,
+    w: &mut LogState,
 ) {
     let t = Instant::now();
     let fs = match FileSystem::new(volume, FsOptions::new()).await {
@@ -485,9 +648,9 @@ async fn mounted(
         row.dev.mark();
         return row.failed(op, Fault::WrongFormat, began);
     }
-    let listed = logs(&fs).await;
+    let listed = list(&fs, w.sizes).await;
     row.dev.mark();
-    let (files, bytes) = match listed {
+    let listing = match listed {
         Ok(v) => v,
         Err(e) => {
             let kind = fs_kind(&e);
@@ -496,31 +659,25 @@ async fn mounted(
             return row.failed(op, Fault::Error(kind), began);
         }
     };
-    let tenths = (u64::from(part.blocks) * 10 + GIB_BLOCKS / 2) / GIB_BLOCKS;
-    let used_mib = (bytes + (1 << 19)) >> 20;
-    defmt::info!(
-        "[INFO] SD: {=str} done in {=u64} ms: partition 1 type {=u8:#04x} from block {=u32}, {=u32} blocks; mounted in {=u64} us, cluster {=u32} B, label {=[u8]:a}; LOGS/ holds {=u32} files, {=u64} B",
-        op_name(op),
-        began.elapsed().as_millis(),
-        part.kind,
-        part.first_block,
-        part.blocks,
-        mount_us,
-        fs.cluster_size(),
-        fs.volume_label_as_bytes(),
-        files,
-        bytes
-    );
-    let line = device::TextLine::new(format_args!(
-        "SD: {}.{} GiB FAT32, {} MiB in {} logs",
-        tenths / 10,
-        tenths % 10,
-        used_mib,
-        files
-    ));
-    text(MavSeverity::MAV_SEVERITY_NOTICE, line.as_str());
-    row.succeeded(op);
-    serve(&fs, row).await;
+    let lastlog = read_lastlog(&fs).await;
+    row.dev.mark();
+    let lastlog = match lastlog {
+        Ok(v) => v,
+        Err(e) => {
+            let kind = fs_kind(&e);
+            let _ = fs.unmount().await;
+            row.dev.mark();
+            return row.failed(op, Fault::Error(kind), began);
+        }
+    };
+    #[cfg(feature = "log-verify")]
+    verify(&fs, lastlog.or(listing.max), row.dev, w.verify_buf).await;
+    let logged = logging(&fs, part, row, op, began, mount_us, &listing, lastlog, w).await;
+    if let Err(kind) = logged {
+        let _ = fs.unmount().await;
+        row.dev.mark();
+        return row.failed(op, Fault::Error(kind), began);
+    }
     let t = Instant::now();
     let unmounted = fs.unmount().await;
     row.dev.mark();
@@ -531,70 +688,576 @@ async fn mounted(
     );
 }
 
-/// `LOGS/`, created if missing, and its files: (count, bytes). One listing, bounded.
-async fn logs(fs: &Fs<'_, '_>) -> Result<(u32, u64), FsError> {
-    let dir = fs.root_dir().create_dir("LOGS").await?;
+/// The new log, the notice, the service, the log closed. `Err` if the log could not be opened.
+#[allow(clippy::too_many_arguments)]
+async fn logging(
+    fs: &Fs<'_, '_>,
+    part: Partition,
+    row: &mut Row,
+    op: Action,
+    began: Instant,
+    mount_us: u64,
+    listing: &Listing,
+    lastlog: Option<u32>,
+    w: &mut LogState,
+) -> Result<(), ErrorKind> {
+    let number = next_number(Some(last_number(lastlog, listing.max)));
+    let t_open = Instant::now();
+    let opened = open_log(fs, number, w).await;
+    row.dev.mark();
+    let mut file = match opened {
+        Ok(file) => file,
+        Err(e) => {
+            let kind = fs_kind(&e);
+            defmt::info!(
+                "[INFO] SD: log {=u32} not opened: {}",
+                number,
+                defmt::Debug2Format(&e)
+            );
+            return Err(kind);
+        }
+    };
+    // The hand-off: the ring is empty (nothing is pushed while `OPEN` is 0); the filler makes the
+    // read index equal to the file offset (the header's length) modulo one piece.
+    w.drain();
+    let pad = (HEADER_SEQUENCE_LEN as u32).wrapping_sub(w.tail) as usize % PIECE;
+    w.pad_left = pad;
+    PAD.store(pad as u32, Ordering::Relaxed);
+    OPEN.store(number, Ordering::Release);
+    let tenths = (u64::from(part.blocks) * 10 + GIB_BLOCKS / 2) / GIB_BLOCKS;
+    let used_mib = (listing.log_bytes + (1 << 19)) >> 20;
+    defmt::info!(
+        "[INFO] SD: {=str} done in {=u64} ms: partition 1 type {=u8:#04x} from block {=u32}, {=u32} blocks; mounted in {=u64} us, cluster {=u32} B, label {=[u8]:a}; LOGS/ holds {=u32} logs ({=u64} B) and {=u32} other files, LASTLOG.TXT {=?}; log {=u32} opened in {=u64} us, filler {=usize} B",
+        op_name(op),
+        began.elapsed().as_millis(),
+        part.kind,
+        part.first_block,
+        part.blocks,
+        mount_us,
+        fs.cluster_size(),
+        fs.volume_label_as_bytes(),
+        listing.logs,
+        listing.log_bytes,
+        listing.others,
+        lastlog,
+        number,
+        t_open.elapsed().as_micros(),
+        pad
+    );
+    let line = device::TextLine::new(format_args!(
+        "SD: {}.{} GiB FAT32, {} MiB in {} logs, log {}",
+        tenths / 10,
+        tenths % 10,
+        used_mib,
+        listing.logs,
+        number
+    ));
+    text(MavSeverity::MAV_SEVERITY_NOTICE, line.as_str());
+    row.succeeded(op);
+    let mut log = Open {
+        number,
+        volume_bytes: u64::from(part.blocks) * 512,
+        offset: HEADER_SEQUENCE_LEN as u64,
+        opened_at: Instant::now(),
+    };
+    let end = serve(fs, &mut file, &mut log, row, w).await;
+    OPEN.store(0, Ordering::Release);
+    if end == End::Restart {
+        // What waits in the ring goes into this log first (the collector has stopped).
+        for _ in 0..RING_BYTES / PIECE + 1 {
+            if w.pad_left > 0 {
+                let n = w.pad_left.min(w.consumer.readable());
+                w.consume(n);
+                w.pad_left -= n;
+            }
+            let readable = w.consumer.readable();
+            if readable == 0 {
+                break;
+            }
+            let len = (PIECE - w.tail as usize % PIECE).min(readable);
+            let (piece, _) = w.consumer.peek_up_to(len);
+            let written = write_piece(&mut file, piece, row.dev, &mut w.inject_calls).await;
+            row.dev.mark();
+            let len = piece.len();
+            w.consume(len);
+            match written {
+                Ok(n) => {
+                    log.offset += n as u64;
+                    w.written += n as u64;
+                }
+                Err(_) => break,
+            }
+        }
+    }
+    w.pad_left = 0;
+    let t = Instant::now();
+    let closed = file.close().await;
+    row.dev.mark();
+    defmt::info!(
+        "[INFO] SD: log {=u32} closed after {=u64} s in {=u64} us, ok {=bool}: {=u64} B, {=u32} records dropped in all",
+        log.number,
+        log.opened_at.elapsed().as_secs(),
+        t.elapsed().as_micros(),
+        closed.is_ok(),
+        log.offset,
+        RING.dropped()
+    );
+    if end == End::Full {
+        row.full = true;
+        let before = row.status.state;
+        row.publish();
+        device::STATE_CHANGES.fetch_add(1, Ordering::Relaxed);
+        defmt::info!(
+            "[INFO] SD: {=str} -> Failed at {=u64} ms: the card is full, no log",
+            state_name(before),
+            now_ms()
+        );
+        text(MavSeverity::MAV_SEVERITY_ERROR, CARD_FULL);
+    }
+    Ok(())
+}
+
+/// What one listing of `LOGS/` found.
+struct Listing {
+    logs: u32,
+    log_bytes: u64,
+    others: u32,
+    /// The largest log number.
+    max: Option<u32>,
+}
+
+/// `LOGS/`, created if missing, listed once (bounded) into `sizes`.
+async fn list(fs: &Fs<'_, '_>, sizes: &mut [u32; LOG_SLOTS]) -> Result<Listing, FsError> {
+    sizes.fill(ABSENT);
+    let dir = fs.root_dir().create_dir(LOG_DIR).await?;
     let mut entries = dir.iter();
-    let (mut files, mut bytes) = (0u32, 0u64);
+    let mut listing = Listing {
+        logs: 0,
+        log_bytes: 0,
+        others: 0,
+        max: None,
+    };
     for _ in 0..LIST_MAX {
         let Some(entry) = entries.next().await else {
             break;
         };
         let entry = entry?;
-        if entry.is_file() {
-            files += 1;
-            bytes += entry.len();
+        if !entry.is_file() {
+            continue;
+        }
+        match parse_file_name(entry.short_file_name_as_bytes()) {
+            Some(n) => {
+                if let Some(slot) = sizes.get_mut(n as usize) {
+                    *slot = u32::try_from(entry.len()).unwrap_or(ABSENT).min(ABSENT - 1);
+                }
+                listing.logs += 1;
+                listing.log_bytes += entry.len();
+                listing.max = listing.max.max(Some(n));
+            }
+            None => listing.others += 1,
         }
     }
-    Ok((files, bytes))
+    Ok(listing)
 }
 
-/// While the machine wants nothing and no RESTART request waits: one liveness per second.
-async fn serve(fs: &Fs<'_, '_>, row: &mut Row) {
-    let dev = row.dev;
-    while row.action == Action::None && !dev.requested(REQ_RESTART) {
-        let _ = select(Timer::after(LIVENESS_EVERY), dev.wake.wait()).await;
-        dev.mark();
-        if dev.requested(REQ_RESTART) {
-            return;
-        }
-        let began = Instant::now();
-        let alive = liveness(fs).await;
-        dev.mark();
-        let event = match alive {
-            Ok(()) => {
-                let t_us = began.as_micros();
-                let status = &mut row.status;
-                if let Some(last) = status.last_sample_us {
-                    status.max_gap_us = status.max_gap_us.max(t_us.saturating_sub(last));
-                }
-                status.last_sample_us = Some(t_us);
-                status.samples = status.samples.wrapping_add(1);
-                Event::Good
-            }
+/// The number `LOGS/LASTLOG.TXT` holds; `None` if the file is missing or does not parse.
+async fn read_lastlog(fs: &Fs<'_, '_>) -> Result<Option<u32>, FsError> {
+    let dir = fs.root_dir().open_dir(LOG_DIR).await?;
+    let mut file = match dir.open_file(LASTLOG_NAME).await {
+        Ok(file) => file,
+        Err(embedded_fatfs::Error::NotFound) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let mut buf = [0u8; 16];
+    let mut n = 0;
+    while let Some(rest) = buf.get_mut(n..)
+        && !rest.is_empty()
+    {
+        match file.read(rest).await {
+            Ok(0) => break,
+            Ok(k) => n += k,
             Err(e) => {
-                let kind = fs_kind(&e);
-                defmt::info!("[INFO] SD: liveness failed: {}", defmt::Debug2Format(&e));
-                if kind == ErrorKind::Timeout
-                    && crate::settings::overlaps_save(began, Instant::now())
-                {
-                    device::discard_for_save(dev, "liveness time-out");
-                    Event::Tick
-                } else {
-                    Event::Error(kind)
+                let _ = file.close().await;
+                return Err(e);
+            }
+        }
+    }
+    file.close().await?;
+    Ok(parse_lastlog(buf.get(..n).unwrap_or(&[])))
+}
+
+/// Log `number`: a stale file of that number deleted, `LASTLOG.TXT` written (Q4-I3), the log
+/// created and its header written.
+async fn open_log<'f, 'v, 'a>(
+    fs: &'f Fs<'v, 'a>,
+    number: u32,
+    w: &mut LogState,
+) -> Result<LogFile<'f, 'v, 'a>, FsError> {
+    let dir = fs.root_dir().open_dir(LOG_DIR).await?;
+    let name = file_name(number);
+    let name = as_str(&name);
+    if let Some(slot) = w.sizes.get_mut(number as usize)
+        && *slot != ABSENT
+    {
+        let t = Instant::now();
+        dir.remove(name).await?;
+        defmt::info!(
+            "[INFO] SD: stale LOGS/{=str} ({=u32} B) deleted in {=u64} us",
+            name,
+            *slot,
+            t.elapsed().as_micros()
+        );
+        *slot = ABSENT;
+    }
+    let mut digits = [0u8; 12];
+    let len = format_lastlog(number, &mut digits);
+    let mut lastlog = dir.create_file(LASTLOG_NAME).await?;
+    let written = async {
+        lastlog.write_all(digits.get(..len).unwrap_or(&[])).await?;
+        lastlog.truncate().await
+    }
+    .await;
+    let closed = lastlog.close().await;
+    written?;
+    closed?;
+    let mut file = dir.create_file(name).await?;
+    if let Err(e) = file.write_all(&w.header[..]).await {
+        let _ = file.close().await;
+        return Err(e);
+    }
+    if let Some(slot) = w.sizes.get_mut(number as usize) {
+        *slot = HEADER_SEQUENCE_LEN as u32;
+    }
+    w.written += HEADER_SEQUENCE_LEN as u64;
+    Ok(file)
+}
+
+/// Writes `piece` to the log: one immediate retry of a failed write call, and a time-out that
+/// overlapped a settings save retried with no event. `Ok(bytes)`, or the error and the bytes
+/// written before it.
+async fn write_piece(
+    file: &mut LogFile<'_, '_, '_>,
+    piece: &[u8],
+    dev: &'static Device,
+    inject_calls: &mut u8,
+) -> Result<usize, (ErrorKind, usize)> {
+    let mut done = 0;
+    let mut retried = false;
+    let mut save_retries = 0;
+    while let Some(rest) = piece.get(done..)
+        && !rest.is_empty()
+    {
+        let began = Instant::now();
+        let result = if *inject_calls > 0 {
+            *inject_calls -= 1;
+            Err(ErrorKind::Bus)
+        } else {
+            match file.write(rest).await {
+                // No byte written: the file is at its size limit or the card is full.
+                Ok(0) => Err(ErrorKind::Bus),
+                Ok(n) => Ok(n),
+                Err(e) => {
+                    defmt::info!(
+                        "[INFO] SD: write of {=usize} B failed after {=u64} us: {}",
+                        rest.len(),
+                        began.elapsed().as_micros(),
+                        defmt::Debug2Format(&e)
+                    );
+                    Err(fs_kind(&e))
                 }
             }
         };
-        row.feed(event);
+        match result {
+            Ok(n) => done += n,
+            Err(kind) => {
+                if kind == ErrorKind::Timeout
+                    && save_retries < SAVE_RETRIES
+                    && crate::settings::overlaps_save(began, Instant::now())
+                {
+                    save_retries += 1;
+                    device::discard_for_save(dev, "write time-out");
+                } else if !retried {
+                    retried = true;
+                    defmt::info!(
+                        "[INFO] SD: write failed ({=str}), retrying",
+                        error_name(kind)
+                    );
+                } else {
+                    return Err((kind, done));
+                }
+            }
+        }
+    }
+    Ok(done)
+}
+
+/// `flush` with the same retries as a write.
+async fn flush(file: &mut LogFile<'_, '_, '_>, dev: &'static Device) -> Result<(), ErrorKind> {
+    let mut retried = false;
+    let mut save_retries = 0;
+    loop {
+        let began = Instant::now();
+        let Err(e) = file.flush().await else {
+            return Ok(());
+        };
+        let kind = fs_kind(&e);
+        defmt::info!(
+            "[INFO] SD: flush failed after {=u64} us: {}",
+            began.elapsed().as_micros(),
+            defmt::Debug2Format(&e)
+        );
+        if kind == ErrorKind::Timeout
+            && save_retries < SAVE_RETRIES
+            && crate::settings::overlaps_save(began, Instant::now())
+        {
+            save_retries += 1;
+            device::discard_for_save(dev, "flush time-out");
+        } else if !retried {
+            retried = true;
+        } else {
+            return Err(kind);
+        }
     }
 }
 
-/// The FAT's status flags (its first block) and the root directory's `LOGS` entry (the root's
-/// first block): two blocks, so each is read from the card.
-async fn liveness(fs: &Fs<'_, '_>) -> Result<(), FsError> {
-    fs.read_status_flags().await?;
-    fs.root_dir().open_dir("LOGS").await?;
-    Ok(())
+/// The writer's loop while the machine wants nothing and no RESTART request waits.
+async fn serve(
+    fs: &Fs<'_, '_>,
+    file: &mut LogFile<'_, '_, '_>,
+    log: &mut Open,
+    row: &mut Row,
+    w: &mut LogState,
+) -> End {
+    let dev = row.dev;
+    let mut last_write = Instant::now();
+    let mut last_flush = Instant::now();
+    loop {
+        if dev.requested(REQ_RESTART) {
+            return End::Restart;
+        }
+        if row.action != Action::None {
+            return End::Machine;
+        }
+        #[cfg(feature = "inject-sd-write-fail")]
+        if !w.injected && log.opened_at.elapsed() >= Duration::from_secs(60) {
+            w.injected = true;
+            w.inject_calls = 6;
+            defmt::info!(
+                "[INFO] SD: inject-sd-write-fail: the next 6 write calls of log {=u32} fail",
+                log.number
+            );
+        }
+        if w.pad_left > 0 {
+            let n = w.pad_left.min(w.consumer.readable());
+            w.consume(n);
+            w.pad_left -= n;
+        }
+        let now = Instant::now();
+        let readable = if w.pad_left > 0 {
+            0
+        } else {
+            w.consumer.readable()
+        };
+        if readable == 0 {
+            last_write = now;
+        }
+        let need = PIECE - w.tail as usize % PIECE;
+        let write_due = readable >= need || now >= last_write + SECOND;
+        let flush_due = now >= last_flush + SECOND;
+        if !write_due && !flush_due {
+            let until = (last_write + SECOND).min(last_flush + SECOND);
+            let _ = select3(DATA.wait(), Timer::at(until), dev.wake.wait()).await;
+            dev.mark();
+            continue;
+        }
+        if write_due {
+            let (piece, _) = w.consumer.peek_up_to(need.min(readable));
+            let began = Instant::now();
+            let written = write_piece(file, piece, dev, &mut w.inject_calls).await;
+            dev.mark();
+            let len = piece.len();
+            w.consume(len);
+            last_write = Instant::now();
+            let event = match written {
+                Ok(n) => {
+                    log.offset += n as u64;
+                    w.written += n as u64;
+                    let t_us = began.as_micros();
+                    let status = &mut row.status;
+                    if let Some(last) = status.last_sample_us {
+                        status.max_gap_us = status.max_gap_us.max(t_us.saturating_sub(last));
+                    }
+                    status.last_sample_us = Some(t_us);
+                    status.samples = u32::try_from(w.written / 512).unwrap_or(u32::MAX);
+                    Event::Good
+                }
+                Err((kind, n)) => {
+                    log.offset += n as u64;
+                    w.written += n as u64;
+                    defmt::info!(
+                        "[INFO] SD: log {=u32}: a piece of {=usize} B discarded after its retry failed ({=str}), {=usize} B of it written",
+                        log.number,
+                        len,
+                        error_name(kind),
+                        n
+                    );
+                    Event::Error(kind)
+                }
+            };
+            row.feed(event);
+        }
+        if flush_due {
+            let flushed = flush(file, dev).await;
+            dev.mark();
+            last_flush = Instant::now();
+            if let Err(kind) = flushed {
+                row.feed(Event::Error(kind));
+                continue;
+            }
+            let stats = w.consumer.take_stats();
+            DSF_FIGURES.lock(|c| {
+                c.set(Some(Dsf {
+                    dropped: 0,
+                    blocks: u32::try_from(log.offset / 512).unwrap_or(u32::MAX),
+                    bytes: u32::try_from(log.offset).unwrap_or(u32::MAX),
+                    free_min: stats.free_min,
+                    free_max: stats.free_max,
+                    free_avg: stats.free_avg,
+                }))
+            });
+            if let Some(slot) = w.sizes.get_mut(log.number as usize) {
+                *slot = u32::try_from(log.offset)
+                    .unwrap_or(ABSENT - 1)
+                    .min(ABSENT - 1);
+            }
+            if clean_up(fs, log, row, w).await {
+                return End::Full;
+            }
+        }
+    }
+}
+
+/// One step of the clean-up (after logging has started, never before): at most one deletion.
+/// Returns true when the card is full.
+async fn clean_up(fs: &Fs<'_, '_>, log: &Open, row: &mut Row, w: &mut LogState) -> bool {
+    #[allow(unused_mut)]
+    let mut volume_bytes = log.volume_bytes;
+    #[cfg(feature = "inject-log-small-volume")]
+    if !w.small_told {
+        w.small_told = true;
+        let used: u64 = w.listing().map(|(_, size)| size).sum();
+        volume_bytes = RESERVE_BYTES + used - 1;
+        defmt::info!(
+            "[INFO] SD: inject-log-small-volume: the planner is told a volume of {=u64} B (the reserve + the {=u64} B listed - 1) once",
+            volume_bytes,
+            used
+        );
+    }
+    match plan_cleanup(volume_bytes, RESERVE_BYTES, log.number, w.listing()) {
+        CleanUp::Nothing => false,
+        CleanUp::Full => true,
+        CleanUp::Delete(n) => {
+            let path = log_path(n);
+            let size = w.sizes.get(n as usize).copied().unwrap_or(0);
+            let t = Instant::now();
+            let removed = fs.root_dir().remove(as_str(&path)).await;
+            row.dev.mark();
+            defmt::info!(
+                "[INFO] SD: clean-up: {=str} ({=u32} B) deleted in {=u64} ms, ok {=bool}",
+                as_str(&path),
+                size,
+                t.elapsed().as_millis(),
+                removed.is_ok()
+            );
+            match removed {
+                Ok(()) => {
+                    if let Some(slot) = w.sizes.get_mut(n as usize) {
+                        *slot = ABSENT;
+                    }
+                }
+                Err(e) => row.feed(Event::Error(fs_kind(&e))),
+            }
+            false
+        }
+    }
+}
+
+/// `log-verify`: the previous log read through the walker in 4 KiB pieces and summarised.
+#[cfg(feature = "log-verify")]
+async fn verify(fs: &Fs<'_, '_>, number: Option<u32>, dev: &'static Device, buf: &mut [u8; PIECE]) {
+    use fw_core::dflog::TYPES;
+    use fw_core::dflog::walk::Walker;
+    let Some(n) = number else {
+        defmt::info!("[INFO] log-verify: no previous log");
+        return;
+    };
+    let path = log_path(n);
+    let path = as_str(&path);
+    let mut file = match fs.root_dir().open_file(path).await {
+        Ok(file) => file,
+        Err(e) => {
+            dev.mark();
+            defmt::info!(
+                "[INFO] log-verify: {=str} not opened: {}",
+                path,
+                defmt::Debug2Format(&e)
+            );
+            return;
+        }
+    };
+    let began = Instant::now();
+    let mut walker = Walker::new();
+    let mut size = 0u64;
+    loop {
+        let r = file.read(&mut buf[..]).await;
+        dev.mark();
+        match r {
+            Ok(0) => break,
+            Ok(k) => {
+                walker.feed(buf.get(..k).unwrap_or(&[]));
+                size += k as u64;
+            }
+            Err(e) => {
+                defmt::info!(
+                    "[INFO] log-verify: read failed at {=u64} B: {}",
+                    size,
+                    defmt::Debug2Format(&e)
+                );
+                break;
+            }
+        }
+    }
+    let _ = file.close().await;
+    dev.mark();
+    let s = walker.summary();
+    defmt::info!(
+        "[INFO] log-verify: {=str}: {=u64} B read in {=u64} ms; records {=u32}, bad bytes {=u32}, tail bytes {=usize}, began with FMT {=bool}, FMT matched {=u32} mismatched {=u32}",
+        path,
+        size,
+        began.elapsed().as_millis(),
+        s.records,
+        s.bad_bytes,
+        s.tail_bytes,
+        s.began_with_fmt,
+        s.fmt_matched,
+        s.fmt_mismatched
+    );
+    for (def, t) in TYPES.iter().zip(s.types.iter()) {
+        let span_us = t.last_time_us.saturating_sub(t.first_time_us);
+        let rate = if span_us > 0 && t.count > 1 {
+            (t.count - 1) as f32 * 1.0e6 / span_us as f32
+        } else {
+            0.0
+        };
+        defmt::info!(
+            "[INFO] log-verify: {=str}: count {=u32}, TimeUS first {=u64} last {=u64}, rate {=f32}/s",
+            def.name,
+            t.count,
+            t.first_time_us,
+            t.last_time_us,
+            rate
+        );
+    }
 }
 
 /// Q1-I1 and Q1-I2, once, after the first bus was built. `sd-irq-negative` sets INTE0 bit 4 first

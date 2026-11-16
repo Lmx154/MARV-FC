@@ -56,6 +56,8 @@ pub mod task {
     pub const RC: u8 = 13;
     /// The SD card's device task (`sd`).
     pub const SD: u8 = 14;
+    /// The log collector (`log_collect`, the SD log's one producer).
+    pub const LOG: u8 = 15;
     /// A check feature's own task.
     pub const TEST: u8 = 9;
     /// The flight core's liveness task (`fbeat`).
@@ -82,6 +84,7 @@ pub const fn task_name(id: u8) -> &'static str {
         task::GNSS => "GNSS",
         task::RC => "RC",
         task::SD => "SD",
+        task::LOG => "LOG",
         task::TEST => "TEST",
         task::FBEAT => "FBEAT",
         task::IMU1 => "IMU1",
@@ -808,7 +811,7 @@ mod tests {
                 names.push(n);
             }
         }
-        assert_eq!(names.len(), 17);
+        assert_eq!(names.len(), 18);
         assert_eq!(
             (task_name(task::MAG), task_name(task::BATT)),
             ("MAG", "BATT")
@@ -816,6 +819,7 @@ mod tests {
         assert_eq!(task_name(task::GNSS), "GNSS");
         assert_eq!(task_name(task::RC), "RC");
         assert_eq!(task_name(task::SD), "SD");
+        assert_eq!(task_name(task::LOG), "LOG");
         assert_eq!(
             (task_name(task::IMU1), task_name(task::IMU2)),
             ("IMU1", "IMU2")

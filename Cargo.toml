@@ -181,6 +181,15 @@ xip-stat = []
 # the MBR check a block 0 whose partition 1 type is 0x07 (exFAT/NTFS).
 inject-sd-no-card = []
 inject-sd-wrong-format = []
+# Test hooks of the log writer (src/sd.rs): inject-sd-write-fail: 60 s after the log opened the next six
+# write calls fail without card traffic (three pieces, each with its retry: three error events, the ladder
+# recovers and the next log number is opened); log-verify: after the mount and before the new log is opened,
+# the previous log (the number in LOGS/LASTLOG.TXT) is read through fw-core's dflog walker and summarised;
+# inject-log-small-volume: the first clean-up step after logging started is told a volume of 500 MiB plus the
+# listed bytes minus one, so the oldest log is deleted once.
+inject-sd-write-fail = []
+log-verify = []
+inject-log-small-volume = []
 # NEGATIVE CONTROL of Q1-I1: INTE0 bit 4 (the SD card's channel) is set before the SD task's register
 # check and cleared after it: the INTE0 check must FAIL.
 sd-irq-negative = []

@@ -96,4 +96,42 @@ mod tests {
         }
         assert!(expected.next().is_none());
     }
+
+    /// decision-sd-logging Q4: the start burst of a log (the header, a PARM for every parameter,
+    /// the boot texts that wait for the log's text cursor: the ring's depth and its sticky slots)
+    /// is at most 16 KiB, also with the writer's alignment filler (under one 4 KiB piece) in the
+    /// ring before it. Encoded from the table, not counted from literals.
+    #[test]
+    fn the_start_burst_is_at_most_16_kib() {
+        use fw_core::dflog::{HEADER_SEQUENCE_LEN, encode_msg, encode_parm, write_header};
+        use fw_core::text_ring::{DEPTH, STICKY};
+        use mavlink_device::ParamValue;
+        let as_f32 = |v: ParamValue| match v {
+            ParamValue::I32(i) => i as f32,
+            ParamValue::F32(f) => f,
+        };
+        let mut buf = [0u8; 256];
+        let mut header = [0u8; HEADER_SEQUENCE_LEN];
+        let mut burst = write_header(&mut header);
+        assert_eq!(burst, HEADER_SEQUENCE_LEN);
+        for def in &TABLE {
+            let d = as_f32(def.default);
+            let n = encode_parm(&mut buf, u64::MAX, def.name.as_bytes(), d, d);
+            assert!(n > 0, "{}", def.name);
+            burst += n;
+        }
+        let longest = [b'x'; 64];
+        for _ in 0..DEPTH + STICKY {
+            let n = encode_msg(&mut buf, u64::MAX, &longest);
+            assert!(n > 0);
+            burst += n;
+        }
+        const FILLER_MAX: usize = 4096 - 1;
+        assert!(burst <= 16 * 1024, "start burst {burst} B");
+        assert!(
+            burst + FILLER_MAX <= 16 * 1024,
+            "with the filler {} B",
+            burst + FILLER_MAX
+        );
+    }
 }
