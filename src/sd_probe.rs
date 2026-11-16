@@ -20,7 +20,7 @@ use embassy_rp::interrupt::{self, InterruptExt};
 use embassy_rp::pac;
 use embassy_rp::peripherals::{DMA_CH4, PIN_28, PIN_29, PIN_30, PIN_31, PIN_32, PIN_33, PIO0};
 use embassy_rp::pio::{self, Pio};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Ticker, Timer};
 use embedded_fatfs::{DefaultTimeProvider, FatType, FileSystem, FsOptions, LossyOemCpConverter};
 use embedded_io_async::{Read, Write};
 use fw_core::watchdog::task;
@@ -48,6 +48,13 @@ const PATH: &str = "LOGS/P3TEST.BIN";
 const PART_START: u32 = 2048;
 /// At most this many directory entries are listed.
 const LIST_MAX: usize = 64;
+/// `sd-fat-paced`: one piece every 7 ticks (700 ms) and a flush every 10 (1 s), for 1500 ticks (150 s).
+const PACED_PATH: &str = "LOGS/P3PACED.BIN";
+const PACED_TICK: Duration = Duration::from_millis(100);
+const PACED_TICKS: u32 = 1500;
+const PACED_WRITE_TICKS: u32 = 7;
+const PACED_FLUSH_TICKS: u32 = 10;
+const PACED_PIECES: usize = PACED_TICKS.div_ceil(PACED_WRITE_TICKS) as usize;
 
 type Sd = SdCard<PioBus<'static, PIO0, 0>>;
 type Volume = StreamSlice<BufStream<Sd, 512>>;
@@ -428,7 +435,12 @@ async fn mounted_session(fs: Fs<'_>, mount_us: u64) -> u32 {
         us(t)
     );
 
-    let failures = failures + files(&fs).await;
+    let failures = failures
+        + if cfg!(feature = "sd-fat-paced") {
+            paced(&fs).await
+        } else {
+            files(&fs).await
+        };
 
     let t = Instant::now();
     step!(failures, "un-mount", fs.unmount().await);
@@ -601,6 +613,109 @@ async fn files(fs: &Fs<'_>) -> u32 {
         "{=str} sd-probe: LOGS/ lists P3TEST.BIN with {=u32} B",
         line,
         FILE_BYTES
+    );
+    failures
+}
+
+/// `sd-fat-paced`: the logger's duty instead of the burst. `LOGS/P3PACED.BIN` created (truncated if it
+/// exists), then for 150 s one 4 KiB piece every 700 ms and a flush every second, nothing else; closed.
+async fn paced(fs: &Fs<'_>) -> u32 {
+    let failures = 0;
+    let root = fs.root_dir();
+    step!(failures, "create LOGS/", root.create_dir("LOGS").await);
+    let t = Instant::now();
+    let mut file = step!(
+        failures,
+        "create the file",
+        root.create_file(PACED_PATH).await
+    );
+    if let Err(e) = file.truncate().await {
+        defmt::error!(
+            "[FAIL] sd-probe paced: truncate the file: {}",
+            defmt::Debug2Format(&e)
+        );
+        let _ = file.close().await;
+        return failures + 1;
+    }
+    defmt::info!(
+        "[INFO] sd-probe paced: {=str} created or opened and truncated in {=u64} us; from {=u64} ms, {=u32} s of one 4 KiB write every {=u64} ms and a flush every {=u64} ms",
+        PACED_PATH,
+        us(t),
+        Instant::now().as_millis(),
+        PACED_TICKS / 10,
+        PACED_TICK.as_millis() * u64::from(PACED_WRITE_TICKS),
+        PACED_TICK.as_millis() * u64::from(PACED_FLUSH_TICKS)
+    );
+    let mut piece = Piece([0; PIECE]);
+    let mut durations = [0u32; PACED_PIECES];
+    let mut written = 0usize;
+    let (mut flushes, mut flush_max, mut flush_sum) = (0u32, 0u64, 0u64);
+    let mut error = false;
+    let mut x = SEED;
+    let mut ticker = Ticker::every(PACED_TICK);
+    for tick in 0..PACED_TICKS {
+        ticker.next().await;
+        if tick.is_multiple_of(PACED_WRITE_TICKS) {
+            let Some(d) = durations.get_mut(written) else {
+                break;
+            };
+            fill(&mut piece.0, &mut x);
+            let t = Instant::now();
+            let r = file.write(&piece.0).await;
+            *d = us(t) as u32;
+            written += 1;
+            if !matches!(r, Ok(PIECE)) {
+                defmt::error!("[FAIL] sd-probe paced: write: {}", defmt::Debug2Format(&r));
+                error = true;
+                break;
+            }
+        }
+        if tick % PACED_FLUSH_TICKS == PACED_FLUSH_TICKS - 1 {
+            let t = Instant::now();
+            let r = file.flush().await;
+            let f = us(t);
+            flushes += 1;
+            flush_max = flush_max.max(f);
+            flush_sum += f;
+            if let Err(e) = r {
+                defmt::error!("[FAIL] sd-probe paced: flush: {}", defmt::Debug2Format(&e));
+                error = true;
+                break;
+            }
+        }
+    }
+    let t = Instant::now();
+    let closed = file.close().await;
+    let close_us = us(t);
+    let failures = failures + u32::from(error);
+    step!(failures, "close the paced file", closed);
+    let calls = durations.get_mut(..written).unwrap_or(&mut []);
+    let slowest = calls
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &d)| d)
+        .map_or(0, |(i, _)| i);
+    calls.sort_unstable();
+    let n = calls.len().max(1);
+    let sum: u64 = calls.iter().map(|&d| u64::from(d)).sum();
+    let at = |q: usize| calls.get(calls.len() * q / 100).copied().unwrap_or(0);
+    let over = |limit: u32| calls.iter().filter(|&&d| d > limit).count() as u32;
+    defmt::info!(
+        "[INFO] sd-probe paced: {=usize} writes of {=usize} B, ended at {=u64} ms; per call: mean {=u64} us, median {=u32} us, 99th percentile {=u32} us, longest {=u32} us (call {=usize}), over 5 ms {=u32}, over 30 ms {=u32}; {=u32} flushes, mean {=u64} us, longest {=u64} us; close {=u64} us",
+        written,
+        PIECE,
+        Instant::now().as_millis(),
+        sum / n as u64,
+        at(50),
+        at(99),
+        calls.last().copied().unwrap_or(0),
+        slowest,
+        over(5_000),
+        over(30_000),
+        flushes,
+        flush_sum / u64::from(flushes.max(1)),
+        flush_max,
+        close_us
     );
     failures
 }
