@@ -79,6 +79,13 @@ inject-baro-por = ["inject"]
 # Also: as persistent until a RESTART request (`device restart BARO`) has been raised, then everything works again.
 inject-baro-fail-until-restart = ["inject"]
 inject-baro-stuck = ["inject"]
+# A hung I2C1 transaction below the deadline (src/i2cbus.rs `hang`): the inner transaction never
+# completes, once from 15 s of uptime, once at boot (the first transaction), or for ever from 15 s on.
+inject-baro-hang-once = ["inject-baro-hang"]
+inject-baro-hang-boot = ["inject-baro-hang"]
+inject-baro-hang-forever = ["inject-baro-hang"]
+# Internal: on when an I2C1 hang feature is on.
+inject-baro-hang = []
 # The same around the magnetometer's adapter: 5 s after the first good sample every acquire, recover and
 # restart fails until a RESTART request (`device restart MAG`) has been raised, then everything works.
 inject-mag-fail-until-restart = ["inject-mag"]

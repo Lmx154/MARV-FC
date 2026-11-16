@@ -146,3 +146,91 @@ async fn guarded<E>(
         }
     }
 }
+
+/// The test hook below the deadline, on I2C1 (cargo features `inject-baro-hang-*`): the inner
+/// transaction never completes and never touches the bus. `once`: the first transaction from
+/// 15 s of uptime on; `boot`: the first transaction at boot; `forever`: every transaction from
+/// 15 s on, also on every rebuilt bus. Logs an `[INFO] inject:` line for each hang.
+#[cfg(feature = "inject-baro-hang")]
+pub mod hang {
+    use core::sync::atomic::{AtomicBool, Ordering};
+
+    use embassy_time::Instant;
+    use embedded_hal_async::i2c::{ErrorType, I2c, Operation};
+
+    const FROM_S: u64 = 15;
+    const FOREVER: bool = cfg!(feature = "inject-baro-hang-forever");
+    const BOOT: bool = cfg!(feature = "inject-baro-hang-boot");
+    /// The one hang of `once` or `boot` has been given (kept across rebuilt buses).
+    static GIVEN: AtomicBool = AtomicBool::new(false);
+
+    /// The bus under the deadline, with the hook.
+    pub struct Hang<B>(B);
+
+    impl<B> From<B> for Hang<B> {
+        fn from(bus: B) -> Self {
+            Self(bus)
+        }
+    }
+
+    async fn hold() {
+        let now = Instant::now();
+        let late = now.as_secs() >= FROM_S;
+        let hangs = if FOREVER {
+            late
+        } else if BOOT {
+            !GIVEN.swap(true, Ordering::Relaxed)
+        } else {
+            late && !GIVEN.swap(true, Ordering::Relaxed)
+        };
+        if hangs {
+            defmt::info!(
+                "[INFO] inject: I2C1 transaction never completes from {=u64} ms ({=str})",
+                now.as_millis(),
+                if FOREVER {
+                    "forever"
+                } else if BOOT {
+                    "boot"
+                } else {
+                    "once"
+                }
+            );
+            core::future::pending::<()>().await;
+        }
+    }
+
+    impl<B: ErrorType> ErrorType for Hang<B> {
+        type Error = B::Error;
+    }
+
+    impl<B: I2c> I2c for Hang<B> {
+        async fn read(&mut self, address: u8, read: &mut [u8]) -> Result<(), Self::Error> {
+            hold().await;
+            self.0.read(address, read).await
+        }
+
+        async fn write(&mut self, address: u8, write: &[u8]) -> Result<(), Self::Error> {
+            hold().await;
+            self.0.write(address, write).await
+        }
+
+        async fn write_read(
+            &mut self,
+            address: u8,
+            write: &[u8],
+            read: &mut [u8],
+        ) -> Result<(), Self::Error> {
+            hold().await;
+            self.0.write_read(address, write, read).await
+        }
+
+        async fn transaction(
+            &mut self,
+            address: u8,
+            operations: &mut [Operation<'_>],
+        ) -> Result<(), Self::Error> {
+            hold().await;
+            self.0.transaction(address, operations).await
+        }
+    }
+}

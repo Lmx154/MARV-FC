@@ -35,7 +35,11 @@ fn config() -> Config {
     Config::new()
 }
 
-type Bus = Timed<I2c<'static, I2C1, i2c::Async>>;
+#[cfg(not(feature = "inject-baro-hang"))]
+type Raw = I2c<'static, I2C1, i2c::Async>;
+#[cfg(feature = "inject-baro-hang")]
+type Raw = crate::i2cbus::hang::Hang<I2c<'static, I2C1, i2c::Async>>;
+type Bus = Timed<Raw>;
 
 /// I2C1's gate: dirty from a timed-out transaction until the bus is cleared and rebuilt.
 static GATE: Gate = Gate::new();
@@ -94,7 +98,7 @@ impl Bmp581Adapter {
             )
         };
         Timed::new(
-            I2c::new_async(i2c, scl, sda, Irqs, cfg),
+            Raw::from(I2c::new_async(i2c, scl, sda, Irqs, cfg)),
             I2C_HZ,
             &GATE,
             "I2C1",
