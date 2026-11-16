@@ -68,7 +68,7 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
 | P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done (branch `wip-sd-p3`, merged into `wip-sd2`; the probes stay as features) |
 | SD2 | The SD card as a device row (mount, capacity, health) | done, merged into `main` (README "SD card") |
-| SD3 | The log writer and what is logged | built, branch `wip-sd3` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. Not yet: a PC-side read of the files (`mavlogdump.py`, UAV Log Viewer), a power cut, a card removal |
+| SD3 | The log writer and what is logged | built, branch `wip-sd3` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. A real card removal seen (Failed 5.5 s after the pull, restart Ok in 329 ms), and three logs read on a PC with pymavlink 2.4.50 `mavlogdump.py` (no bad bytes). Not yet: a power cut, UAV Log Viewer |
 | SD4 | Log list and download over USB (`marv-cli logs list/get`) | after SD3 |
 
 The card in the slot is a scratch card and may be erased (owner's word). There is no card reader on the
@@ -139,7 +139,7 @@ desk, so checks that compare a file on a PC are done by read-back on the board o
 ## How to run things
 
 ```
-cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (200 + 2 doc, 20, 20 today)
+cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (244 + 4 doc, 23, 20 today)
 cargo build --release                                     # the firmware for the board
 tools/run.sh 120                                          # build, flash, run, log to logs/ for 120 s
 FEATURES=<feature> tools/run.sh 120                       # a test or measurement build (README lists them)

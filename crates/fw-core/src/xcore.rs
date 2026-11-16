@@ -545,10 +545,18 @@ impl<const N: usize> LogRing<N> {
     }
 
     /// Committed bytes not yet consumed. Readable from any core; a snapshot (the two indices
-    /// are read one after the other, the consumer's last).
+    /// are read one after the other, `tail` first: `head` only grows, so the `head` read second
+    /// is never behind the `tail` read first and the difference cannot wrap).
     pub fn readable(&self) -> usize {
-        let head = self.head.load(Ordering::Acquire);
+        self.readable_with(|| {})
+    }
+
+    /// [`readable`](Self::readable) with `between` run after the first load and before the second
+    /// (the tests' hook for the other side's work between them).
+    fn readable_with(&self, between: impl FnOnce()) -> usize {
         let tail = self.tail.load(Ordering::Acquire);
+        between();
+        let head = self.head.load(Ordering::Acquire);
         head.wrapping_sub(tail) as usize
     }
 
@@ -834,12 +842,14 @@ impl<const N: usize> LogConsumer<'_, N> {
     /// the maximum, the count and the 64-bit sum of the samples; `free_avg` is sum / count. The
     /// window ends at the producer's last sample before this call reads the producer's record of
     /// it, and the next window begins with the producer's first sample after it sees the
-    /// request, so a sample made while this call runs is in the one window or the other, never
-    /// in both and never half in each; the three values of a window always come from the same
-    /// samples. Returns `samples == 0` and the free bytes now when the producer made no sample
-    /// since the previous call, or (very rarely, the producer's few-instruction update of the
-    /// record overlapping every one of 32 reads) could not be read: the window is then not
-    /// closed, and the next call returns it.
+    /// request. A sample made between this call's read of the window and the producer seeing the
+    /// request for a new one goes into the window already read, which is not read again: it is
+    /// in neither window, so a sample can be missed at a window boundary. It is never in both
+    /// and never half in each: `free_min`, `free_max` and `free_avg` always come from one
+    /// consistent window, the same samples. Returns `samples == 0` and the free bytes now when
+    /// the producer made no sample since the previous call, or (very rarely, the producer's
+    /// few-instruction update of the record overlapping every one of 32 reads) could not be
+    /// read: the window is then not closed, and the next call returns it.
     pub fn take_stats(&mut self) -> LogStats {
         if let Some(window) = self.ring.stats.try_read(STAT_READ_ATTEMPTS)
             && window.epoch == self.epoch
@@ -1199,6 +1209,23 @@ mod log_ring_tests {
     fn read_all<const N: usize>(consumer: &LogConsumer<'_, N>) -> Vec<u8> {
         let (a, b) = consumer.peek();
         [a, b].concat()
+    }
+
+    #[test]
+    fn readable_from_a_third_party_reads_tail_first_so_it_cannot_wrap() {
+        // The other side moves both indices past the first load: with `head` read first the
+        // difference would be 8 - 16 = about 2^32; with `tail` first it is 16 - 0.
+        let ring = LogRing::<64>::new();
+        let mut producer = ring.take_producer().unwrap();
+        let mut consumer = ring.take_consumer().unwrap();
+        assert!(producer.push(&[1; 8]));
+        let readable = ring.readable_with(|| {
+            assert!(producer.push(&[2; 8]));
+            assert_eq!(consumer.consume(16), 16);
+        });
+        assert!(readable <= ring.capacity(), "wrapped: {readable}");
+        assert_eq!(ring.readable(), 0);
+        assert_eq!(ring.free(), 64);
     }
 
     #[test]

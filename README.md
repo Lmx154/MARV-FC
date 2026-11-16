@@ -475,6 +475,7 @@ one consumer of the log ring.
 | Condition | State | Last error | Text |
 |---|---|---|---|
 | init, MBR check, mount | Starting | | |
+| clean-up deleting an old log (before the log opens; a long deletion is one call of about 50 s for 161 MB) | Starting | | NOTICE "SD: clean-up, deleting log N", one per deletion |
 | mounted, log open | Ok | | NOTICE "SD: 59.5 GiB FAT32, 17 MiB in 2 logs, log 3" (partition size, sum of the logs in `LOGS/`, their number, the new log's number), at every mount |
 | card full (the clean-up planner) | Failed | unchanged | ERROR "SD: card full", no log, parked until RESTART |
 | `NoCard` on every start try (100/300/1000 ms) | Absent | TIMEOUT | ERROR "SD: no card" (instead of the supervisor's "absent") |
@@ -497,8 +498,8 @@ new notice; `device selftest SD`: DENIED "not supported yet". `inject-sd-no-card
 Absent at 2.03 s, last error timeout, "SD: no card". `inject-sd-wrong-format` (231330): Failed at 2.05 s, last
 error id mismatch, "SD: no FAT32 volume, reformat as FAT32". `sd-irq-negative` (231415): INTE0 0x1f, the INTE0
 check FAILs, the other four PASS. `LOG_BACKEND_TYPE` 0, saved, `reboot --yes` (231521, 231607): SD Absent NONE,
-"SD: logging off", no card init line in the boot's log; 1, saved, reboot: Ok with the notice. NOT seen: a real
-card removal or insertion, a real exFAT card, a second card type, errors in service (the ladder on a real
+"SD: logging off", no card init line in the boot's log; 1, saved, reboot: Ok with the notice. NOT seen then (a real card
+removal is below, in Logging): a real exFAT card, a second card type, errors in service (the ladder on a real
 card fault); the 10-minute run against `main` (milestone check G) was started but not read when this was
 written.
 
@@ -509,8 +510,12 @@ written.
 
 - Format: ArduPilot DataFlash `.BIN` (FMT records first, then `A3 95 <type> <payload>` records, little-endian,
   `TimeUS` board microseconds first). Readers, free and without conversion: `mavlogdump.py` and MAVExplorer
-  (`pip install pymavlink MAVProxy`), UAV Log Viewer (plot.ardupilot.org), Mission Planner. Not yet checked on a
-  PC with this firmware's files (the owner moves the card to a card reader).
+  (`pip install pymavlink MAVProxy`), UAV Log Viewer (plot.ardupilot.org), Mission Planner. Checked on a PC
+  (2026-11-16): ArduPilot's reader, pymavlink 2.4.50 `mavlogdump.py`, read three logs copied off the card with a
+  USB card reader: the 30-minute log 3 (397 226 records, no bad bytes, the same counts as the on-board walker,
+  45 282 IMU records per instance = 25.0 per second each, wall-clock time from the GPS records correct), the
+  8.5-hour log 5 (161 MB, no bad bytes, DSF 30 804, GPS 30 885) and log 13 (the one cut by the card pull below:
+  reads clean). UAV Log Viewer and Mission Planner were not tried.
 - What and how often (Q5; about 5.2 kB/s without the radio, 5.6 kB/s with fresh stick reports): IMU for each
   IMU at 25 Hz (from its seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own
   time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
@@ -537,12 +542,25 @@ written.
   `overflows` and Dp). A failed write is retried once at once; a second failure is one error event and the piece
   is discarded (the file then has a gap); three such events make the row Recovering, and the recovery opens the
   next log. FAT is not power-safe: a power cut or reset loses what was not yet flushed (about 1 to 2 s).
-- Clean-up, after logging started and never before (deleting costs about 10 ms per 32 KiB cluster): once per
-  second `plan_cleanup` over the listing (the open log with its current size): while the logs together exceed
-  the volume minus 500 MiB the oldest (ring order) is deleted, one per step; "card full" (under 8 MiB left
-  even without the other logs) ends the log and parks the row Failed with "SD: card full". The file system is
-  never asked for free space.
-- Test hooks: `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (Cargo.toml).
+- Clean-up, BEFORE the log is opened and never while a log is written (as ArduPilot's `Prep_MinSpace`, which
+  runs at initialisation): after the mount, the listing and the choice of the new number, and before
+  `LASTLOG.TXT` is written, `plan_cleanup` runs over the listing in a loop: while the logs together exceed the
+  volume minus 500 MiB the oldest (ring order) is deleted: first one NOTICE "SD: clean-up, deleting log N", then
+  the deletion, then the listing is updated and the planner asked again. "Card full" (under 8 MiB left even
+  without the other logs) opens no log and parks the row Failed with "SD: card full". A deletion is one awaited
+  file-system call that costs about 10 ms per 32 KiB cluster (a 161 MB log: about 50 s), so after a long deletion
+  logging starts late by its duration (the ring is not yet in use, nothing is lost, and the log's first records
+  are the ones after it opens); the row stays Starting (or Recovering, Restarting) throughout, and while a deletion
+  runs the task marks progress every second (the deletion's future is polled by reference, never dropped), so the
+  supervisor does not flag the row stuck. A log being written is never interrupted: the next clean-up is at the
+  next open (boot, RESTART or recovery), so a log that grows past the reserve is not trimmed until then. A
+  RESTART request that arrives during the clean-up waits for the log to open. The file system is never asked for
+  free space.
+- Test hooks (Cargo.toml): `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (the first open's
+  clean-up after boot is told a volume of the reserve plus the listed bytes minus one: the oldest log is deleted
+  before the log opens), `inject-log-delete-big` (the first open's clean-up after boot is told a volume of the
+  reserve plus the bytes of the logs after the largest one in ring order: every log up to and including the
+  largest is deleted, one by one, so a long deletion is seen on the board).
 
 On the board (2026-11-16, MARV V2 Rev 1 on USB, probe-rs attached, the scratch SanDisk 64 GB card, receiver
 searching, so no RCIN):
@@ -565,10 +583,14 @@ searching, so no RCIN):
   (26 + 2 + the 6 gyro offsets).
 - `inject-sd-write-fail` (`-103425.log`): at 60.7 s the next six write calls fail: Ok -> Degraded at 61.3 s,
   Recovering at 62.8 s, log 10 closed (315 392 B), Ok again at 63.0 s with log 11; the other rows unaffected.
-- `inject-log-small-volume` (`-103223.log`): 1 s after log 9 opened, `LOGS/00000001.BIN` (319 488 B) deleted in
+- `inject-log-small-volume` (`-103223.log`, before the clean-up moved to before the log opens): 1 s after log 9 opened, `LOGS/00000001.BIN` (319 488 B) deleted in
   58 ms, once; the row stayed Ok.
-- NOT seen: a PC reading the files (`mavlogdump.py`, UAV Log Viewer: the card goes to a card reader next), a
-  power cut, a card removal, a real write error on the card, card full, a second card type, RCIN records (no
+- A real card removal (`logs/marv-v2-firmware-20261116-104041.log`, pulled at 225 s): the next flush failed, Ok
+  -> Degraded, two pieces discarded after their retry, Recovering 0.9 s after the pull, the log closed and the
+  volume un-mounted on the missing card in under 2 ms (ok false, no hang), four recovery attempts "no card",
+  Failed 5.5 s after the pull with the text "SD: failed (bus)"; with the card back, `device restart SD` gave Ok
+  in 329 ms and log 14.
+- NOT seen: a power cut, a real write error on a present card, card full, a second card type, RCIN records (no
   transmitter), the logger without the debugger attached.
 
 ## Settings in flash
@@ -987,7 +1009,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (243 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (244 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
@@ -1011,7 +1033,7 @@ the host (243 tests, and 4 doc tests); the binary uses every module listed below
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, `mag`, `batt` and `imu`; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (20 tests, the first six: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (23 tests, the first six: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store

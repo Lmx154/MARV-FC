@@ -7,21 +7,23 @@
 //! A start, a recovery and a restart are the same: a new bus, `init`, block 0 through
 //! `fw_core::mbr` (partition 1 of type 0x0B/0x0C), the mount over `BufStream` + `StreamSlice`,
 //! `LOGS/` opened (created if missing) and listed once; then the new log (`fw_core::logfile`): the
-//! number after the one `LOGS/LASTLOG.TXT` holds (or the listing's largest), a stale file of that
+//! number after the one `LOGS/LASTLOG.TXT` holds (or the listing's largest), the clean-up
+//! (`plan_cleanup` over the listing, as ArduPilot's `Prep_MinSpace`: one text and one deletion per
+//! step until nothing is left to delete, or "SD: card full": Failed, no log), a stale file of that
 //! number deleted, `LASTLOG.TXT` written BEFORE the log is opened (Q4-I3), `LOGS/NNNNNNNN.BIN`
 //! created and the header (the FMT records) written; then the ring is emptied, the collector is
 //! told the number and the filler length (`logger::OPEN`, `logger::PAD`) and the row is Ok with
-//! one NOTICE ("SD: 59.5 GiB FAT32, 17 MiB in 2 logs, log 3").
+//! one NOTICE ("SD: 59.5 GiB FAT32, 17 MiB in 2 logs, log 3"). A deletion is one awaited call of
+//! about 10 ms per 32 KiB cluster (50 s for 161 MB): it runs only here, never while a log is
+//! written, and the row is kept out of the stuck check by a progress mark every second.
 //!
 //! The service: wait (no card call) for a piece in the ring, 1 s or the row's wake; write whole
 //! 4096-byte pieces in place from the ring and release them after the write returned; after 1 s
 //! without a write the bytes that wait; `flush` once per second, then the DSF figures for the
-//! collector and one step of the clean-up (`plan_cleanup` over the listing, the open log with its
-//! size: one deletion, or "SD: card full", which ends the log and parks the row Failed). The file
-//! offset and the ring's read index are kept equal modulo 4096 (the filler before the log's first
-//! record makes the read index equal to the header's length), so a short piece is followed by
-//! one that ends at the next 4096-byte boundary of both, and later pieces are whole and in place
-//! again. A failed write is retried once at once; a second failure is one error event and the
+//! collector. The file offset and the ring's read index are kept equal modulo 4096 (the filler
+//! before the log's first record makes the read index equal to the header's length), so a short
+//! piece is followed by one that ends at the next 4096-byte boundary of both, and later pieces
+//! are whole and in place again. A failed write is retried once at once; a second failure is one error event and the
 //! piece is discarded. A time-out that overlapped a settings save is retried with no event. A
 //! good write is the row's sample (`samples` = 512-byte blocks written, `overflows` = records the
 //! ring dropped). Every card and file-system call is awaited to its end and a RESTART request is
@@ -38,14 +40,16 @@
 //! Test hooks: `inject-sd-write-fail` (60 s after the log opened the next six write calls fail
 //! without card traffic: three pieces, each with its retry); `log-verify` (after the mount, before
 //! the new log, the previous log is read through `dflog::walk::Walker` and summarised);
-//! `inject-log-small-volume` (the first clean-up step is told a volume of the reserve plus the
-//! listed bytes minus one, so the oldest log is deleted once).
+//! `inject-log-small-volume` (the first open's clean-up is told a volume of the reserve plus the
+//! listed bytes minus one, so the oldest log is deleted before the log opens); `inject-log-delete-big`
+//! (the first open's clean-up is told a volume of the reserve plus the bytes of the logs after the
+//! largest one in ring order, so every log up to and including the largest is deleted).
 
 use core::sync::atomic::Ordering;
 
 use atomic_waker::AtomicWaker;
 use block_device_adapters::{BufStream, BufStreamError, StreamSlice, StreamSliceError};
-use embassy_futures::select::{select, select3};
+use embassy_futures::select::{Either, select, select3};
 use embassy_rp::Peri;
 use embassy_rp::interrupt::{self, InterruptExt};
 use embassy_rp::pac;
@@ -310,6 +314,23 @@ impl Row {
         self.feed(event);
     }
 
+    /// The clean-up planner said the card is full: Failed, no log, parked until a RESTART request.
+    fn card_full(&mut self) {
+        self.full = true;
+        let before = self.status.state;
+        self.publish();
+        device::STATE_CHANGES.fetch_add(1, Ordering::Relaxed);
+        defmt::info!(
+            "[INFO] SD: {=str} -> Failed at {=u64} ms: the card is full, no log",
+            state_name(before),
+            now_ms()
+        );
+        text(MavSeverity::MAV_SEVERITY_ERROR, CARD_FULL);
+        if let Some(number) = self.restart_run.take() {
+            self.dev.finish_restart(number, false);
+        }
+    }
+
     fn succeeded(&mut self, op: Action) {
         self.start_fault = None;
         self.feed(match op {
@@ -363,8 +384,8 @@ async fn run(mut parts: Parts) -> ! {
         inject_calls: 0,
         #[cfg(feature = "inject-sd-write-fail")]
         injected: false,
-        #[cfg(feature = "inject-log-small-volume")]
-        small_told: false,
+        #[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
+        pretend_told: false,
         #[cfg(feature = "log-verify")]
         verify_buf: &mut VERIFY_BUF.take().0,
     };
@@ -558,8 +579,9 @@ struct LogState {
     inject_calls: u8,
     #[cfg(feature = "inject-sd-write-fail")]
     injected: bool,
-    #[cfg(feature = "inject-log-small-volume")]
-    small_told: bool,
+    /// The clean-up hooks' pretended volume was used (once per boot).
+    #[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
+    pretend_told: bool,
     #[cfg(feature = "log-verify")]
     verify_buf: &'static mut [u8; PIECE],
 }
@@ -588,8 +610,6 @@ impl LogState {
 /// The open log.
 struct Open {
     number: u32,
-    /// The partition's size for the clean-up planner.
-    volume_bytes: u64,
     /// The file offset: bytes written to the file.
     offset: u64,
     opened_at: Instant,
@@ -602,8 +622,6 @@ enum End {
     Machine,
     /// A RESTART request waits.
     Restart,
-    /// The clean-up planner said the card is full.
-    Full,
 }
 
 /// The path of log `n`, `LOGS/NNNNNNNN.BIN`.
@@ -702,6 +720,14 @@ async fn logging(
     w: &mut LogState,
 ) -> Result<(), ErrorKind> {
     let number = next_number(Some(last_number(lastlog, listing.max)));
+    match clean_up(fs, number, part, row, w).await {
+        Ok(true) => {
+            row.card_full();
+            return Ok(());
+        }
+        Ok(false) => {}
+        Err(kind) => return Err(kind),
+    }
     let t_open = Instant::now();
     let opened = open_log(fs, number, w).await;
     row.dev.mark();
@@ -756,11 +782,10 @@ async fn logging(
     row.succeeded(op);
     let mut log = Open {
         number,
-        volume_bytes: u64::from(part.blocks) * 512,
         offset: HEADER_SEQUENCE_LEN as u64,
         opened_at: Instant::now(),
     };
-    let end = serve(fs, &mut file, &mut log, row, w).await;
+    let end = serve(&mut file, &mut log, row, w).await;
     OPEN.store(0, Ordering::Release);
     if end == End::Restart {
         // What waits in the ring goes into this log first (the collector has stopped).
@@ -802,18 +827,6 @@ async fn logging(
         log.offset,
         RING.dropped()
     );
-    if end == End::Full {
-        row.full = true;
-        let before = row.status.state;
-        row.publish();
-        device::STATE_CHANGES.fetch_add(1, Ordering::Relaxed);
-        defmt::info!(
-            "[INFO] SD: {=str} -> Failed at {=u64} ms: the card is full, no log",
-            state_name(before),
-            now_ms()
-        );
-        text(MavSeverity::MAV_SEVERITY_ERROR, CARD_FULL);
-    }
     Ok(())
 }
 
@@ -1022,7 +1035,6 @@ async fn flush(file: &mut LogFile<'_, '_, '_>, dev: &'static Device) -> Result<(
 
 /// The writer's loop while the machine wants nothing and no RESTART request waits.
 async fn serve(
-    fs: &Fs<'_, '_>,
     file: &mut LogFile<'_, '_, '_>,
     log: &mut Open,
     row: &mut Row,
@@ -1130,55 +1142,116 @@ async fn serve(
                     .unwrap_or(ABSENT - 1)
                     .min(ABSENT - 1);
             }
-            if clean_up(fs, log, row, w).await {
-                return End::Full;
-            }
         }
     }
 }
 
-/// One step of the clean-up (after logging has started, never before): at most one deletion.
-/// Returns true when the card is full.
-async fn clean_up(fs: &Fs<'_, '_>, log: &Open, row: &mut Row, w: &mut LogState) -> bool {
+/// The clean-up before log `number` is opened (ArduPilot's `Prep_MinSpace`): `plan_cleanup` over the
+/// listing until it says `Nothing`; per `Delete`, one text, the deletion (one awaited call, about
+/// 10 ms per 32 KiB cluster: 50 s for 161 MB) and the listing updated. `Ok(true)`: the card is full.
+/// While a deletion runs the row is marked every second (the supervisor's stuck check needs no
+/// progress mark but the task's own) and the deletion future is polled by reference, never
+/// dropped (Q2-I1). An error ends the open like any other error of the open.
+async fn clean_up(
+    fs: &Fs<'_, '_>,
+    number: u32,
+    part: Partition,
+    row: &mut Row,
+    w: &mut LogState,
+) -> Result<bool, ErrorKind> {
     #[allow(unused_mut)]
-    let mut volume_bytes = log.volume_bytes;
-    #[cfg(feature = "inject-log-small-volume")]
-    if !w.small_told {
-        w.small_told = true;
+    let mut volume_bytes = u64::from(part.blocks) * 512;
+    #[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
+    if !core::mem::replace(&mut w.pretend_told, true) {
+        volume_bytes = pretend_volume(w, number);
+    }
+    loop {
+        let n = match plan_cleanup(volume_bytes, RESERVE_BYTES, number, w.listing()) {
+            CleanUp::Nothing => return Ok(false),
+            CleanUp::Full => return Ok(true),
+            CleanUp::Delete(n) => n,
+        };
+        let path = log_path(n);
+        let size = w.sizes.get(n as usize).copied().unwrap_or(0);
+        let line = device::TextLine::new(format_args!("SD: clean-up, deleting log {}", n));
+        text(MavSeverity::MAV_SEVERITY_NOTICE, line.as_str());
+        let t = Instant::now();
+        row.dev.mark();
+        let root = fs.root_dir();
+        let removed = {
+            let mut remove = core::pin::pin!(root.remove(as_str(&path)));
+            loop {
+                match select(remove.as_mut(), Timer::after(SECOND)).await {
+                    Either::First(r) => break r,
+                    Either::Second(()) => row.dev.mark(),
+                }
+            }
+        };
+        row.dev.mark();
+        defmt::info!(
+            "[INFO] SD: clean-up: {=str} ({=u32} B) deleted in {=u64} ms, ok {=bool}",
+            as_str(&path),
+            size,
+            t.elapsed().as_millis(),
+            removed.is_ok()
+        );
+        match removed {
+            Ok(()) => {
+                if let Some(slot) = w.sizes.get_mut(n as usize) {
+                    *slot = ABSENT;
+                }
+            }
+            Err(e) => return Err(fs_kind(&e)),
+        }
+    }
+}
+
+/// The test hooks' pretended volume for the first open's clean-up (the whole loop), once per boot.
+/// `inject-log-small-volume`: the reserve plus the listed bytes minus one, so the oldest log goes.
+/// `inject-log-delete-big`: the reserve plus the bytes of the logs after the largest log other than
+/// `number` in ring order (`number` itself, a stale file, counts as the newest), so the planner
+/// deletes oldest first until the largest is gone and stops.
+#[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
+fn pretend_volume(w: &LogState, number: u32) -> u64 {
+    #[cfg(feature = "inject-log-delete-big")]
+    {
+        let rank = |n: u32| (n + MAX_LOG_NUMBER - 1 - number) % MAX_LOG_NUMBER;
+        let largest = w
+            .listing()
+            .filter(|&(n, _)| n != number)
+            .max_by_key(|&(n, size)| (size, rank(n)));
+        let (volume, big) = match largest {
+            Some((big, size)) => {
+                let after: u64 = w
+                    .listing()
+                    .filter(|&(n, _)| rank(n) > rank(big))
+                    .map(|(_, size)| size)
+                    .sum();
+                (RESERVE_BYTES + after, Some((big, size)))
+            }
+            None => (
+                RESERVE_BYTES + w.listing().map(|(_, size)| size).sum::<u64>(),
+                None,
+            ),
+        };
+        defmt::info!(
+            "[INFO] SD: inject-log-delete-big: the planner is told a volume of {=u64} B, so every log up to the largest {} goes",
+            volume,
+            big
+        );
+        volume
+    }
+    #[cfg(not(feature = "inject-log-delete-big"))]
+    {
+        let _ = number;
         let used: u64 = w.listing().map(|(_, size)| size).sum();
-        volume_bytes = RESERVE_BYTES + used - 1;
+        let volume = RESERVE_BYTES + used - 1;
         defmt::info!(
             "[INFO] SD: inject-log-small-volume: the planner is told a volume of {=u64} B (the reserve + the {=u64} B listed - 1) once",
-            volume_bytes,
+            volume,
             used
         );
-    }
-    match plan_cleanup(volume_bytes, RESERVE_BYTES, log.number, w.listing()) {
-        CleanUp::Nothing => false,
-        CleanUp::Full => true,
-        CleanUp::Delete(n) => {
-            let path = log_path(n);
-            let size = w.sizes.get(n as usize).copied().unwrap_or(0);
-            let t = Instant::now();
-            let removed = fs.root_dir().remove(as_str(&path)).await;
-            row.dev.mark();
-            defmt::info!(
-                "[INFO] SD: clean-up: {=str} ({=u32} B) deleted in {=u64} ms, ok {=bool}",
-                as_str(&path),
-                size,
-                t.elapsed().as_millis(),
-                removed.is_ok()
-            );
-            match removed {
-                Ok(()) => {
-                    if let Some(slot) = w.sizes.get_mut(n as usize) {
-                        *slot = ABSENT;
-                    }
-                }
-                Err(e) => row.feed(Event::Error(fs_kind(&e))),
-            }
-            false
-        }
+        volume
     }
 }
 

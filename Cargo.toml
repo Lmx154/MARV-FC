@@ -185,11 +185,14 @@ inject-sd-wrong-format = []
 # write calls fail without card traffic (three pieces, each with its retry: three error events, the ladder
 # recovers and the next log number is opened); log-verify: after the mount and before the new log is opened,
 # the previous log (the number in LOGS/LASTLOG.TXT) is read through fw-core's dflog walker and summarised;
-# inject-log-small-volume: the first clean-up step after logging started is told a volume of 500 MiB plus the
-# listed bytes minus one, so the oldest log is deleted once.
+# inject-log-small-volume: the first open's clean-up (before the log is opened) is told a volume of 500 MiB
+# plus the listed bytes minus one, so the oldest log is deleted once; inject-log-delete-big: the first open's
+# clean-up is told a volume of 500 MiB plus the bytes of the logs after the largest one in ring order, so
+# every log up to and including the largest is deleted (a long deletion on the board).
 inject-sd-write-fail = []
 log-verify = []
 inject-log-small-volume = []
+inject-log-delete-big = []
 # NEGATIVE CONTROL of Q1-I1: INTE0 bit 4 (the SD card's channel) is set before the SD task's register
 # check and cleared after it: the INTE0 check must FAIL.
 sd-irq-negative = []
