@@ -227,6 +227,10 @@ const GPS_INTERVAL_US: i32 = 1_000_000;
 /// RC_CHANNELS at 5 Hz while stick reports are fresh (USB only).
 const RC_CHANNELS_ID: u32 = 65;
 const RC_CHANNELS_INTERVAL_US: i32 = 200_000;
+/// MANUAL_CONTROL (the mapped sticks, reported only) at 5 Hz while CRSF stick reports are fresh
+/// (USB only).
+const MANUAL_CONTROL_ID: u32 = 69;
+const MANUAL_CONTROL_INTERVAL_US: i32 = 200_000;
 /// The receiver's value is not sent once its latest sample is older than this (3 fix periods; the
 /// 1 s of the fast sensors would be one period of this one).
 const GPS_STALE_US: u64 = 3_000_000;
@@ -561,6 +565,9 @@ impl Telemetry for Board {
         if message_id == RC_CHANNELS_ID {
             return rc::rc_channels(now_us).is_some_and(|m: RC_CHANNELS_DATA| out.push(&m).is_ok());
         }
+        if message_id == MANUAL_CONTROL_ID {
+            return rc::manual_control(now_us).is_some_and(|m| out.push(&m).is_ok());
+        }
         if message_id == logdl::LOG_DATA_ID {
             return self.logs.sample(out);
         }
@@ -745,6 +752,11 @@ async fn link_loop(
         StreamSlot::new(Stream {
             message_id: RC_CHANNELS_ID,
             default_interval_us: RC_CHANNELS_INTERVAL_US,
+            min_interval_us: 20_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: MANUAL_CONTROL_ID,
+            default_interval_us: MANUAL_CONTROL_INTERVAL_US,
             min_interval_us: 20_000,
         }),
         StreamSlot::new(Stream {

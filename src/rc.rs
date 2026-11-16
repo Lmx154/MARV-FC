@@ -26,18 +26,18 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::health::Counters;
-use fw_core::rc::{PortMode, RcInput, RcVerdict, verdict};
+use fw_core::rc::{PortMode, RcInput, RcVerdict, crsf_sticks, verdict};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
-use mavlink_device::dialect::{MavState, RC_CHANNELS_DATA};
+use mavlink_device::dialect::{MANUAL_CONTROL_DATA, MavState, RC_CHANNELS_DATA};
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
 use mavlink_device::{
-    CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, Outgoing, Stream, StreamSlot,
-    Telemetry, Texts,
+    CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, Outgoing, ParamStore,
+    ParamValue, Stream, StreamSlot, Telemetry, Texts,
 };
 use rc_port::crsf_codec::{Battery, LinkStatistics, MAX_FRAME_LEN, encode_battery};
 use rc_port::{
-    Config, Hooks, MAVLINK_BAUD, Mode, RadioStatus, RcPort, Report, SetBaud, Stats, TxBusy,
+    Config, Hooks, MAVLINK_BAUD, Mode, RadioStatus, RcPort, Report, SetBaud, Source, Stats, TxBusy,
 };
 use static_cell::StaticCell;
 
@@ -82,6 +82,8 @@ struct Shared {
     ever_locked: bool,
     lock_losses: u32,
     sticks: Option<([u16; 16], u64)>,
+    /// The latest stick report came from CRSF (not from a MAVLink RC_CHANNELS_OVERRIDE).
+    sticks_crsf: bool,
     crsf_link: Option<(LinkStatistics, u64)>,
     radio: Option<(RadioStatus, u64)>,
 }
@@ -91,6 +93,7 @@ static SHARED: Mutex<CriticalSectionRawMutex, RefCell<Shared>> = Mutex::new(RefC
     ever_locked: false,
     lock_losses: 0,
     sticks: None,
+    sticks_crsf: false,
     crsf_link: None,
     radio: None,
 }));
@@ -221,6 +224,36 @@ pub fn rc_channels(now_us: u64) -> Option<RC_CHANNELS_DATA> {
     })
 }
 
+/// MANUAL_CONTROL for USB, reported only: the four mapped sticks while the latest stick report is
+/// from CRSF and younger than 1 s (`fw_core::rc::crsf_sticks`). One `SHARED` lock copies the sticks,
+/// then (not nested) one store access copies the 44 RC values by index; the mapping is computed
+/// outside both. The table's defaults if the store is not ready.
+pub fn manual_control(now_us: u64) -> Option<MANUAL_CONTROL_DATA> {
+    let (latest, from_crsf) = SHARED.lock(|s| {
+        let s = s.borrow();
+        (s.sticks, s.sticks_crsf)
+    });
+    let pwm = crsf_sticks(latest, from_crsf, now_us)?;
+    let values = crate::store::with(|p| {
+        core::array::from_fn(|i| {
+            u16::try_from(fw_settings::rc::RC_OFFSET + i)
+                .ok()
+                .and_then(|n| ParamStore::get(p, n))
+        })
+    })
+    .unwrap_or([None::<ParamValue>; fw_settings::rc::COUNT]);
+    let axes = fw_settings::rc::RcMap::from_values(&values).axes(&pwm);
+    Some(MANUAL_CONTROL_DATA {
+        target: 1,
+        x: axes.x,
+        y: axes.y,
+        z: axes.z,
+        r: axes.r,
+        buttons: 0,
+        ..Default::default()
+    })
+}
+
 /// The port's hooks: copy into `SHARED`, never block, never format.
 struct RcHooks;
 
@@ -229,7 +262,10 @@ impl Hooks for RcHooks {
         SHARED.lock(|s| {
             let mut s = s.borrow_mut();
             match report {
-                Report::Sticks(r) => s.sticks = Some((r.channels_us, r.at_us)),
+                Report::Sticks(r) => {
+                    s.sticks = Some((r.channels_us, r.at_us));
+                    s.sticks_crsf = matches!(r.source, Source::Crsf);
+                }
                 Report::CrsfLink(r) => s.crsf_link = Some((r.stats, r.at_us)),
                 Report::RadioStatus(r) => s.radio = Some((r.status, r.at_us)),
                 _ => {}

@@ -447,8 +447,8 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 validator). ArduPilot's names for channels 1 to 8 (`RCn_*`) and for the function map (`RCMAP_*`); the table is appended last, so no
 other parameter changed its index. `RCn_MIN`, `RCn_TRIM` and `RCn_MAX` are calibration results (`param reset-calibration` resets
 them). There is no check between parameters (MIN below TRIM below MAX, a unique map): the normaliser gives a value for every in-range
-combination, and 0 when MAX is not above MIN. In this change the parameters and the pure normaliser exist (host tested); nothing
-sends the normalised sticks yet.
+combination, and 0 when MAX is not above MIN. The normalised sticks are REPORTED as MANUAL_CONTROL (69) on USB only (see Radio); nothing
+else in the firmware reads them.
 
 | Name (n = 1 to 8) | Default | Range | Means |
 |---|---|---|---|
@@ -887,6 +887,7 @@ What each link carries:
 | GPS_RAW_INT | 1 Hz | every 2 s |
 | HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | none |
 | RC_CHANNELS (65) | 5 Hz while stick reports are younger than 1 s: 16 channels in us, `chancount` 16, `rssi` = CRSF uplink LQ x 254 / 100, or RADIO_STATUS `rssi` in MAVLink mode, 255 without a fresh figure | none |
+| MANUAL_CONTROL (69) | 5 Hz (fastest 50 Hz, like RC_CHANNELS) while the latest stick report is from CRSF and younger than 1 s (`fw_core::rc::crsf_sticks`; a MAVLink RC_CHANNELS_OVERRIDE report never feeds it): `target` 1, `x` pitch, `y` roll, `z` throttle (0 to 1000), `r` yaw, each from the RC parameters (`fw_settings::rc::RcMap::axes`), `buttons` and the extension fields 0. Computed in the USB link task when the stream is due (`rc::manual_control`: one `SHARED` lock for the sticks, then one store access that copies the 44 values by index; not in the RC hook, not on core 1). Reported only; no value is held or invented when the sticks are stale | none |
 | STATUSTEXT | the ring, link 0 | the ring, link 1 |
 | Parameters, commands | on request; ACKs on the origin link | the same; no automatic push |
 
@@ -904,7 +905,7 @@ the boot report and the settings classification in the 2 sticky slots (taken fir
 link took them; the worst case of all boot texts is about 14, so the skip and per-device lines are
 ordinary texts); a link that is down holds back nobody; the 300 ms "text before ACK" hold is per link.
 
-Not built: any use of the sticks, arming, failsafe, a rule about which link has authority or what a
+Not built: any use of the sticks (they are only reported), arming, failsafe, a rule about which link has authority or what a
 mode change means.
 
 Seen on 2026-11-15, transmitter on in its MAVLink model, ground station on the transmitter backpack's
@@ -971,8 +972,8 @@ PID 0xcafe, product "MARV V2 firmware"; on Linux the second `/dev/ttyACM*` besid
 The node writes nothing until the station opens the port (DTR held 100 ms, or its HEARTBEAT). Then for
 example `marv-link-test --connect serial:/dev/ttyACM1 --count 0 --duration 60` (MARV-GCS) counts one
 HEARTBEAT, one SYS_STATUS and eight `MARV_DEVICE_STATUS` (4 per batch every 500 ms, cycling the seven registry rows and the RC row) per second,
-25 HIGHRES_IMU, 25 SCALED_IMU2 and 25 SCALED_PRESSURE per second, one GPS_RAW_INT per second while the fix is younger than 3 s and 5 RC_CHANNELS per second
-while stick reports are fresh, all from system 1 component 1, and the STATUSTEXT
+25 HIGHRES_IMU, 25 SCALED_IMU2 and 25 SCALED_PRESSURE per second, one GPS_RAW_INT per second while the fix is younger than 3 s and 5 RC_CHANNELS and 5 MANUAL_CONTROL per second
+while stick reports are fresh (MANUAL_CONTROL: CRSF sticks only), all from system 1 component 1, and the STATUSTEXT
 "MARV V2 fw 0.1.0: flight core up, reset: power-on" (the last reset's cause: `timeout` or `forced` when the
 watchdog caused it, `power-on` otherwise, which includes a debugger reset by `tools/run.sh`).
 

@@ -102,6 +102,18 @@ pub fn pick_row(
     }
 }
 
+/// The sticks that may feed MANUAL_CONTROL: the latest stick report (its channels in us and when it
+/// was read) only when it came from CRSF and is younger than [`FRESH_US`] (strictly). A report from
+/// a MAVLink RC_CHANNELS_OVERRIDE never does: "CRSF is for sticks".
+pub fn crsf_sticks(
+    latest: Option<([u16; 16], u64)>,
+    from_crsf: bool,
+    now_us: u64,
+) -> Option<[u16; 16]> {
+    let (channels, at_us) = latest?;
+    (from_crsf && now_us.saturating_sub(at_us) < FRESH_US).then_some(channels)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +231,48 @@ mod tests {
             assert_eq!((row, oot), (n % ROWS, false));
             (cursor, out_of_turn) = (next, oot);
         }
+    }
+
+    #[test]
+    fn only_fresh_crsf_sticks_feed_manual_control() {
+        let ch = [1500u16; 16];
+        // (latest report, from CRSF, now) -> sticks
+        assert_eq!(
+            crsf_sticks(Some((ch, FRESH)), true, NOW),
+            Some(ch),
+            "fresh CRSF"
+        );
+        assert_eq!(
+            crsf_sticks(Some((ch, NOW)), true, NOW),
+            Some(ch),
+            "just read"
+        );
+        assert_eq!(
+            crsf_sticks(Some((ch, FRESH)), false, NOW),
+            None,
+            "fresh override"
+        );
+        assert_eq!(
+            crsf_sticks(Some((ch, NOW)), false, NOW),
+            None,
+            "override just read"
+        );
+        assert_eq!(
+            crsf_sticks(Some((ch, STALE)), true, NOW),
+            None,
+            "stale CRSF, exactly 1 s"
+        );
+        assert_eq!(crsf_sticks(Some((ch, 0)), true, NOW), None, "old CRSF");
+        assert_eq!(
+            crsf_sticks(Some((ch, STALE)), false, NOW),
+            None,
+            "stale override"
+        );
+        assert_eq!(crsf_sticks(None, true, NOW), None, "no report");
+        assert_eq!(
+            crsf_sticks(Some((ch, NOW + 5)), true, NOW),
+            Some(ch),
+            "clock behind"
+        );
     }
 }
