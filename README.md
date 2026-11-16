@@ -683,7 +683,7 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 
 | Command (`marv-cli`) | What it does today |
 |---|---|
-| `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
+| `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT`, `SD` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way: the twelve `IMUx_*_OFF*` and the three `MAG_OFF*` go to 0 and the IMU offsets are pushed to the flight core; ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
@@ -798,9 +798,9 @@ tools/run.sh 90           # build, flash, run for 90 s, print the report lines
 `tools/run.sh` takes the probe lock (`marv-v2-probe.lock` in `XDG_RUNTIME_DIR`), so it waits if another
 test is using the probe. Its full log is kept under `logs/` (git-ignored). The firmware runs until the
 script's timeout ends it, so exit status 124 is the normal end. Expected output: one `[INFO]` line per
-driver (proof that it is linked), seven start-up checks, each `[PASS]` or `[FAIL]`: EXTEXCLALL set on
+driver (proof that it is linked), twelve start-up checks, each `[PASS]` or `[FAIL]` (seven with `LOG_BACKEND_TYPE` = 0): EXTEXCLALL set on
 core 0, `DMA_IRQ_0` not enabled on core 0, EXTEXCLALL set on core 1, `DMA_IRQ_0` enabled on core 1,
-`DMA_IRQ_0` still not enabled on core 0, the watchdog fed by its monitor, `PONG` follows `PING` within 200 ms; then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
+`DMA_IRQ_0` still not enabled on core 0, the watchdog fed by its monitor, `PONG` follows `PING` within 200 ms, and the five DMA checks once the SD bus is built (INTE0 = the flight core's channels, INTE1 = channel 4, INTE2 and INTE3 = 0, `DMA_IRQ_1` on and `DMA_IRQ_0` off on core 0, `DMA_IRQ_1` off on core 1); then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
 200 ms), `PING` and `PONG`, the bytes and frames the node wrote and the bytes it read on USB, the link
 state; and a `[STAT]` line per device (see Device layer).
 
@@ -808,7 +808,7 @@ From the ground station: the flight controller's own USB port enumerates as a CD
 PID 0xcafe, product "MARV V2 firmware"; on Linux the second `/dev/ttyACM*` besides the debug probe's).
 The node writes nothing until the station opens the port (DTR held 100 ms, or its HEARTBEAT). Then for
 example `marv-link-test --connect serial:/dev/ttyACM1 --count 0 --duration 60` (MARV-GCS) counts one
-HEARTBEAT, one SYS_STATUS and eight `MARV_DEVICE_STATUS` (4 per batch every 500 ms, cycling the six rows and the RC row) per second,
+HEARTBEAT, one SYS_STATUS and eight `MARV_DEVICE_STATUS` (4 per batch every 500 ms, cycling the seven registry rows and the RC row) per second,
 25 HIGHRES_IMU, 25 SCALED_IMU2 and 25 SCALED_PRESSURE per second, one GPS_RAW_INT per second while the fix is younger than 3 s and 5 RC_CHANNELS per second
 while stick reports are fresh, all from system 1 component 1, and the STATUSTEXT
 "MARV V2 fw 0.1.0: flight core up, reset: power-on" (the last reset's cause: `timeout` or `forced` when the

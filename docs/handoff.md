@@ -83,7 +83,8 @@ desk, so checks that compare a file on a PC are done by read-back on the board o
 - ESC in the firmware: the DShot driver and the passthrough work as driver crates with bench programs, but
   the firmware has no ESC row, no passthrough through its USB port, no stop on signal loss; the board's
   current scale and ESC serial telemetry are not done. See `docs/handoff-esc-link.md`.
-- Status LED, PSRAM (the socket is empty on the board).
+- Status LED. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
+  the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
 - Full-rate IMU data from the flight core to core 0 (a ring is reserved in the design; needed for a control
   loop and for full-rate logging).
 
