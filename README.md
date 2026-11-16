@@ -4,7 +4,7 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT) and the radio receiver (RC, report only; see Radio), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
@@ -16,7 +16,7 @@ It has no flight functionality.
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
   action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag`, `gnss` and `batt`, the four core-0 device tasks (see
-  Device layer).
+  Device layer). `rc_link`, the radio's task (UART0, report only; see Radio).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, IMU1
   (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, and IMU2
@@ -130,7 +130,7 @@ starts.
 
 `src/device.rs` (design item 1, on core 0): each device has a task running the one generic `run_device`
 loop over a firmware-side `DeviceAdapter` (`data_ready`, `start`, `acquire`, `status`, `verify`, `apply`,
-`recover`, `restart`, `counters`; no `self_test` yet). The loop steps the device's
+`recover`, `restart`, `counters`, `self_test`: implemented for IMU1, IMU2 and MAG, "unsupported" for the rest). The loop steps the device's
 `fw_core::health::Health` and carries out its action. Sampling is `select(with_timeout(T, data ready),
 wake)` with T = max(3 P, 10 ms) (GNSS: its own 2.5 s); a timeout makes ONE status read: data waiting = a missed edge, read it;
 nothing = a deadline miss. Every bus call is awaited to completion, never inside a `select` or a timeout.
@@ -153,6 +153,7 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 | MAG | BMM350 (`src/mag.rs`) | I2C0 at 400 kHz, SDA GPIO12, SCL GPIO13, data-ready GPIO4 (rising edge), no DMA | from `MAG_ODR_HZ` and `MAG_AVG`; defaults = the driver's bench config: 100 Hz, averaging 2, all axes, normal mode, data-ready pulsed, active high, push-pull | 10 000 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 30 ms at the default | max(1 s, 20 P) |
 | GNSS | LC76G (`src/gnss.rs`) | UART1 (`BufferedUart`, interrupt driven on core 0, no DMA) 115200 8N1, board TX GPIO24, RX GPIO25, RX buffer 4096 B; PPS GPIO5 not read | none: receive only, nothing is sent to the receiver; it is read as it comes (default stream, 1 fix per second) | 1 000 000 us (1 Hz) | 2.5 s (own deadline, not 3 P) | 20 s |
 | BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
+| RC | ELRS receiver (`src/rc.rs`, task `rc_link`; see Radio) | UART0 (`BufferedUart`, interrupt driven, `UART0_IRQ`), TX GPIO14, RX GPIO17, no DMA | none: report only, the port follows CRSF and MAVLink by itself | none | none | none (not a supervised row: not in `DEVICES`) |
 
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
 data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge: accepted, the bench-proven pulsed mode is kept and latched mode is not used), then `read_field`: the
@@ -670,9 +671,12 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | pio-sdmmc | <https://github.com/Lmx154/pio-sdmmc-rs> | SD card on the RP2350 PIO, 4-bit SD bus |
 | qmi-psram | <https://github.com/Lmx154/qmi-psram-rs> | 16 MiB QSPI PSRAM on the RP2350 QMI |
 | ws2812c | <https://github.com/Lmx154/ws2812c-rs> | WS2812C status LED (PIO) |
+| usb-cdc | <https://github.com/Lmx154/usb-cdc> | bytes over the board's USB port (CDC-ACM), the link to the ground station |
+| mavlink-device | <https://github.com/Lmx154/mavlink-device> | the board's MAVLink layer on any byte stream (with the `marv` dialect) |
+| rc-port | <https://github.com/Lmx154/rc-port> | the ELRS receiver's UART: CRSF and MAVLink, with its `crsf-codec` |
 
 For what each driver offers and how to use it, read the README in its own repository. What was proven
-on the board, what the firmware has to respect, and what is still open: `docs/handoff.md`.
+on the board, what the firmware has to respect, and what is still open: the Measured section of each driver's README.
 
 ## Build and run
 
@@ -687,9 +691,9 @@ tools/run.sh 90           # build, flash, run for 90 s, print the report lines
 `tools/run.sh` takes the probe lock (`marv-v2-probe.lock` in `XDG_RUNTIME_DIR`), so it waits if another
 test is using the probe. Its full log is kept under `logs/` (git-ignored). The firmware runs until the
 script's timeout ends it, so exit status 124 is the normal end. Expected output: one `[INFO]` line per
-driver (proof that it is linked), six start-up checks, each `[PASS]` or `[FAIL]`: EXTEXCLALL set on
+driver (proof that it is linked), seven start-up checks, each `[PASS]` or `[FAIL]`: EXTEXCLALL set on
 core 0, `DMA_IRQ_0` not enabled on core 0, EXTEXCLALL set on core 1, `DMA_IRQ_0` enabled on core 1,
-`DMA_IRQ_0` still not enabled on core 0, `PONG` follows `PING` within 200 ms; then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
+`DMA_IRQ_0` still not enabled on core 0, the watchdog fed by its monitor, `PONG` follows `PING` within 200 ms; then a `[STAT]` line every 10 s: uptime, the largest `PONG` age seen (healthy: far below
 200 ms), `PING` and `PONG`, the bytes and frames the node wrote and the bytes it read on USB, the link
 state; and a `[STAT]` line per device (see Device layer).
 
@@ -697,8 +701,9 @@ From the ground station: the flight controller's own USB port enumerates as a CD
 PID 0xcafe, product "MARV V2 firmware"; on Linux the second `/dev/ttyACM*` besides the debug probe's).
 The node writes nothing until the station opens the port (DTR held 100 ms, or its HEARTBEAT). Then for
 example `marv-link-test --connect serial:/dev/ttyACM1 --count 0 --duration 60` (MARV-GCS) counts one
-HEARTBEAT, one SYS_STATUS and two `MARV_DEVICE_STATUS` (IMU1, BARO) per second, 25 HIGHRES_IMU and 25
-SCALED_PRESSURE per second from system 1 component 1, and the STATUSTEXT
+HEARTBEAT, one SYS_STATUS and eight `MARV_DEVICE_STATUS` (4 per batch every 500 ms, cycling the six rows and the RC row) per second,
+25 HIGHRES_IMU, 25 SCALED_IMU2 and 25 SCALED_PRESSURE per second, one GPS_RAW_INT per second while the fix is younger than 3 s and 5 RC_CHANNELS per second
+while stick reports are fresh, all from system 1 component 1, and the STATUSTEXT
 "MARV V2 fw 0.1.0: flight core up, reset: power-on" (the last reset's cause: `timeout` or `forced` when the
 watchdog caused it, `power-on` otherwise, which includes a debugger reset by `tools/run.sh`).
 
@@ -796,22 +801,26 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (171 tests, and 2 doc tests); the binary uses `xcore::Kick`, `health`, `sys_status`, `params` and `admission` so far, `text_ring`. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (179 tests, and 2 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
 | `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake). The only module with `unsafe`. Tested with two host threads over 10^7 writes; statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
 | `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
 | `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |
-| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The table is the firmware's (`crates/fw-settings/src/baro.rs`) |
+| `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The tables are the firmware's (`crates/fw-settings/src/`, one file per device) |
 | `record` | The settings record for the two 4 KB flash sectors of the `SETTINGS` region: "MRVS", sequence, 24-byte entries, CRC-32; the choice of the current sector at boot |
 | `scratch` | The watchdog's record in four scratch registers (layout version 2) |
 | `admission` | What happens to a MAVLink command: classification of 241, 245, 246 and the project's 42430, the admission order, and the books of the one long action with its progress and its single final acknowledgement |
 | `sys_status` | From the device rows to SYS_STATUS's three masks, the HEARTBEAT state and the `MARV_DEVICE_STATUS` row |
+| `calib` | Gyroscope, one-position accelerometer and compass calibration, pure: samples in (per IMU, a sample counted once), a per-IMU offset or the reason for the failure out; Betaflight's gyro rule (1.25 s mean, moving when the standard deviation exceeds the threshold) |
+| `selftest` | A device self-test as its result crosses from the device's task to the action: the verdict and the failed axes as a bit mask (never figures), the action's final result and its one STATUSTEXT |
+| `watchdog` | The watchdog's pure decisions: the monitor's feed rule, the task-id table and the boot report |
+| `rc` | The radio receiver's row (RC): whether the radio link is up, from what the receiver port reports; report only, no health machine |
 | `text_ring` | The STATUSTEXT ring for the ground-station links: 8 entries, a read cursor per link (each text reaches each link once, in order), the oldest dropped and counted for a link more than 8 behind, so a slow or absent link holds back nobody; 2 sticky slots (the boot report) kept until every link took them, taken first |
 
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
-`settings_to_config` with its validator (today `baro`, over the `bmp581` driver's `Config`, without the
+`settings_to_config` with its validator (today `baro`, `mag`, `batt` and `imu`; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
 the host with `cargo host-test -p fw-settings` (20 tests, the first six: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
@@ -844,11 +853,11 @@ the only range the firmware erases or programs). Use (normal build, 2026-11-15):
 
 ## Board documentation
 
-- `docs/handoff.md`: the state of the drivers and the starting point for the firmware work (2026-11-11).
-- `docs/handoff-usb-mavlink.md`: the USB link, the MAVLink layer and the ground station, each in its own
-  GitHub repository, and how this firmware takes them (2026-11-12).
+- `docs/handoff-esc-link.md`: the ESC link (DShot, AM32 passthrough, ESC telemetry input) and battery sensing: what the drivers
+  already do, the owner's decisions and what is still open for the firmware (not built here yet).
 - `docs/pinout.md`: the board pin assignment.
 - `docs/devices.md`: the devices on the board and what was measured on them.
+- `docs/resources.md`: who owns which pin, PIO state machine, DMA channel and interrupt, and the rules that follow.
 
 ## Licence
 

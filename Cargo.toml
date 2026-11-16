@@ -12,7 +12,7 @@ resolver = "3"
 
 [dependencies]
 # The device drivers, one GitHub repository each, pinned to a commit (the state verified on the board on
-# 2026-11-11; see docs/handoff.md). The crate name is the repository name without "-rs".
+# 2026-11-11). The crate name is the repository name without "-rs".
 # To take a newer driver: change its `rev` to the new commit and run `cargo update -p <crate>`.
 # To work on a driver and the firmware together, override it locally without editing this file:
 #   [patch."https://github.com/Lmx154/icm45686-rs.git"]

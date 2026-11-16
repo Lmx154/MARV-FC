@@ -72,7 +72,7 @@ cap 5 %) spun all four, one at a time: `dshot_spin-20261113-030326`, RESULT: PAS
 reports a 2 us period ("not started yet") until its first commutation: never read an eRPM above what the motor
 can do as a speed. STILL OPEN in the ESC program: the stop on signal loss; the board's current scale (the ESCs'
 own current reading, about 155 A at rest, is unusable as a reference); ESC serial telemetry; the firmware's
-passthrough hookup and arming rules. The radio link has its own handoff: `docs/handoff-rc-link.md`.
+passthrough hookup and arming rules.
 
 **UPDATE (next session, same night): steps 1 to 4 below are DONE** (plan log, last entry: six passing full
 runs, two reviews PASS, squashed to dshot-rs main b7c823a; `wip-pio-dshot` is local and has the same tree). The

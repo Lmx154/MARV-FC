@@ -133,3 +133,4 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 
 Whether the two IMUs' SPI really need DMA at the rates used; stack and static RAM
 per task; what the loaded I/O core does to the flight core (milestone FD4); how the microSD gets its DMA channel.
+A microSD logger needs a buffer that rides through the card's stalls: on the one card tested (SanDisk 64 GB, `pio-sdmmc`, 2026-11-11) a single write call sometimes took 30 to 132 ms; the driver does not retry.
