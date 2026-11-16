@@ -544,10 +544,32 @@ written.
   never asked for free space.
 - Test hooks: `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (Cargo.toml).
 
-On the board (2026-11-16, the scratch card): normal build, 50 s (`marv-v2-firmware-20261116-010952.log`): log 1
-opened 580 ms after boot (filler 979 B), "SD: 59.5 GiB FAT32, 0 MiB in 0 logs, log 1", the row Ok, 10.4
-blocks/s, 0 dropped, IMU rates 803.50 / 800.70. NOT yet seen: the 30-minute run with saves, the walker's
-summary of a long log, RESTART, the injections, a PC reading the files.
+On the board (2026-11-16, MARV V2 Rev 1 on USB, probe-rs attached, the scratch SanDisk 64 GB card, receiver
+searching, so no RCIN):
+- 30 minutes from boot, normal build, three `param save` at 307, 914 and 1367 s
+  (`marv-v2-firmware-20261116-011541.log`): 13 `[PASS]`, 0 `[FAIL]`; every row Ok throughout with 0 errors, SD
+  Ok with 0 errors, 0 recoveries, 0 records dropped, 10.2 blocks/s (18 440 at 1810 s), largest gap between
+  writes 880 ms; IMU rates 803.5 to 803.6 / 800.6 to 800.7, and 800.0 / 797.2 in the three windows of a save;
+  gaps over 1.5 P: one per IMU at each save (3 in 30 minutes, the saves' flash stalls of 40.9, 40.7 and 44.6 ms,
+  the largest gap 45.0 / 45.3 ms), 0 in every other window (largest gap before the first save 1.66 / 1.54 ms);
+  watchdog stalls begun 0.
+- That log read back on the board (`log-verify`, `-014612.log`): 9 453 568 B, 397 226 records, 0 bad bytes, a
+  17-byte cut last record, FMT matched 11, mismatched 0; IMU 50.0/s (both together), BARO 49.8, MAG 99.5, GPS
+  1.0, BAT 10.0, DEV 8.0, DSF 0.997/s; PARM 26, MSG 2 (the boot text and the SD notice); 5.2 kB/s; the last
+  record within about 1 s of the moment the board was stopped.
+- An unplanned soak: log 5 ran 8 h 35 min (`-014815.log` to `-102320.log`): every row Ok with 0 errors at the
+  end; read back: 161 218 560 B, 6 775 764 records, 0 bad bytes, tail 37 B, FMT matched 11, mismatched 0, the
+  same rates; the SD row was not flagged stuck during the 68 s walk.
+- `device restart SD` (`-102721.log`): log 7 written out and closed (212 503 B), log 8 opened 80 ms later with a
+  new notice. In log 8 `param set BARO_ODR_HZ 25` and `50` and `calibrate gyro`: 34 PARM records read back
+  (26 + 2 + the 6 gyro offsets).
+- `inject-sd-write-fail` (`-103425.log`): at 60.7 s the next six write calls fail: Ok -> Degraded at 61.3 s,
+  Recovering at 62.8 s, log 10 closed (315 392 B), Ok again at 63.0 s with log 11; the other rows unaffected.
+- `inject-log-small-volume` (`-103223.log`): 1 s after log 9 opened, `LOGS/00000001.BIN` (319 488 B) deleted in
+  58 ms, once; the row stayed Ok.
+- NOT seen: a PC reading the files (`mavlogdump.py`, UAV Log Viewer: the card goes to a card reader next), a
+  power cut, a card removal, a real write error on the card, card full, a second card type, RCIN records (no
+  transmitter), the logger without the debugger attached.
 
 ## Settings in flash
 

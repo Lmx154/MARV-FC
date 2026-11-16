@@ -100,9 +100,10 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 SD3 (2026-11-16, branch `wip-sd3`, normal build): `.data` 39 388 (+34 840: the log ring `logger::RING`, 32 824 B,
 and the listing `sd::SIZES`, 2 004 B, are in `.data`, not `.bss`, because their initial values are not all zero:
 the ring's statistics window starts with its minimum at `u32::MAX`, the listing's empty slot is `u32::MAX`; they
-cost the same RAM and their size again in flash), `.bss` 106 516 (+2 544: the header buffer 980 B, the collector's
-task 360 B, the SD task's future 19 432 B against 18 632), `.ram_text` 119 332 (+8 076: rodata and the
-`LogRing` methods, which the existing `fw_core::xcore` rule puts in SRAM), `.text` 421 672 (+32 356). New core-0
+cost the same RAM and their size again in flash; accepted by the lead on 2026-11-16 rather than changing the
+host-tested ring), `.bss` 106 532 (+2 560: the header buffer 980 B, the collector's task 776 B with its copy of
+the 26 logged parameter values, the SD task's future 19 432 B against 18 632), `.ram_text` 119 332 (+8 076: rodata and the
+`LogRing` methods, which the existing `fw_core::xcore` rule puts in SRAM), `.text` 423 168 (+33 852). New core-0
 thread-mode task `log_collect` (`src/logger.rs`, watchdog id LOG = 15, a 10 ms `Ticker`, never awaits the card).
 
 SRAM8 and SRAM9 (4 KB each) are unused.
