@@ -9,12 +9,14 @@ use embassy_rp::peripherals::{I2C1, PIN_21, PIN_22, PIN_23};
 use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::Delay;
 use fw_core::health::{ErrorKind, Limits};
+use fw_core::i2c::Gate;
 
 pub use fw_settings::baro as settings;
 
 use crate::device::{
     AdapterCounters, BARO, DeviceAdapter, Pending, Reading, StartFailure, VerifyError, run_device,
 };
+use crate::i2cbus::Timed;
 
 bind_interrupts!(struct Irqs {
     I2C1_IRQ => i2c::InterruptHandler<I2C1>;
@@ -33,7 +35,10 @@ fn config() -> Config {
     Config::new()
 }
 
-type Bus = I2c<'static, I2C1, i2c::Async>;
+type Bus = Timed<I2c<'static, I2C1, i2c::Async>>;
+
+/// I2C1's gate: dirty from a timed-out transaction until the bus is cleared and rebuilt.
+static GATE: Gate = Gate::new();
 
 pub struct Bmp581Adapter {
     i2c: Peri<'static, I2C1>,
@@ -88,7 +93,12 @@ impl Bmp581Adapter {
                 self.sda.clone_unchecked(),
             )
         };
-        I2c::new_async(i2c, scl, sda, Irqs, cfg)
+        Timed::new(
+            I2c::new_async(i2c, scl, sda, Irqs, cfg),
+            I2C_HZ,
+            &GATE,
+            "I2C1",
+        )
     }
 
     /// Takes the configuration from the stored parameters and sets the device's nominal period P
@@ -120,6 +130,19 @@ impl Bmp581Adapter {
         self.calls = self.calls.wrapping_add(1);
         self.chip.as_mut().ok_or(ErrorKind::Bus)
     }
+
+    /// The bus clear, then a new I2C1 controller and driver (the gate admits again).
+    fn rebuild(&mut self) {
+        self.chip = None;
+        let (sda_low, scl_low, pulses) = crate::busclear::bus_clear(&mut self.scl, &mut self.sda);
+        defmt::info!(
+            "[INFO] BARO: bus clear: SDA low {=bool}, SCL low {=bool}, {=u8} pulses",
+            sda_low,
+            scl_low,
+            pulses
+        );
+        self.chip = Some(Bmp581::new(self.bus(), DEFAULT_ADDRESS));
+    }
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -136,6 +159,12 @@ impl DeviceAdapter for Bmp581Adapter {
     }
 
     async fn start(&mut self) -> Result<(), StartFailure> {
+        if GATE.dirty() {
+            defmt::info!(
+                "[INFO] BARO: start on a bus refused after a time-out: clear and rebuild first"
+            );
+            self.rebuild();
+        }
         self.refresh_config();
         let config = self.config;
         let chip = self
@@ -225,15 +254,7 @@ impl DeviceAdapter for Bmp581Adapter {
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         self.calls = self.calls.wrapping_add(1);
-        self.chip = None;
-        let (sda_low, scl_low, pulses) = crate::busclear::bus_clear(&mut self.scl, &mut self.sda);
-        defmt::info!(
-            "[INFO] BARO: bus clear: SDA low {=bool}, SCL low {=bool}, {=u8} pulses",
-            sda_low,
-            scl_low,
-            pulses
-        );
-        self.chip = Some(Bmp581::new(self.bus(), DEFAULT_ADDRESS));
+        self.rebuild();
         self.start().await.map_err(|_| ErrorKind::Bus)
     }
 

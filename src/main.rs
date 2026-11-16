@@ -40,6 +40,7 @@ mod calibration;
 mod device;
 mod flight_latency;
 mod gnss;
+mod i2cbus;
 mod imu1;
 mod imu2;
 #[cfg(feature = "inject-imu")]

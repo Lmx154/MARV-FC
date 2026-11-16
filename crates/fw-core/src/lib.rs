@@ -26,6 +26,7 @@ pub mod admission;
 pub mod calib;
 pub mod handshake;
 pub mod health;
+pub mod i2c;
 pub mod params;
 pub mod rc;
 pub mod record;
