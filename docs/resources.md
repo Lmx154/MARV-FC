@@ -109,6 +109,16 @@ At the merged head (after the clean-up moved before the log's opening): `.text` 
 `.data` 39 388, `.bss` 106 732, `.uninit` 1 024; static SRAM 269 036 B, free 255 252 B (249 KiB). The move cost
 about 62 KB of flash code (the file system's delete path is now part of the open sequence): not investigated.
 
+SD4 (2026-11-16, branch `wip-sd4`, normal build): `.text` 492 588 (+7 484), `.ram_text` 122 340 (+576, the
+second `LogRing` size's methods), `.data` 43 536 (+4 148: the hand-over ring `logdl::HANDOVER`, 4 152 B, in
+`.data` for the same reason as `logger::RING`), `.bss` 107 996 (+1 264: the read buffer `sd::READ_BUF` 900 B,
+the request `logdl::REQUEST` 16 B, the wake signal, four counters, the SD task's and the USB task's larger
+futures), `.uninit` 1 024; static SRAM 274 908 B, free 249 380 B (243 KiB). New statics, all core 0 only
+(USB task and SD task): `logdl::HANDOVER` (one producer, the SD task; one consumer, the USB task),
+`logdl::REQUEST` (written by the USB task, read by the SD task, under a critical-section mutex),
+`logdl::WAKE` (a `Signal`), the counters `TRANSFERS`, `BYTES_SENT`, `STEP_MAX_US`, `LATE_MAX_US`. No new task,
+interrupt, DMA channel or flight-core change.
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow

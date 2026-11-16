@@ -576,6 +576,22 @@ written.
   handle with nothing left to read is closed after 2 s. `[STAT]` of the USB link: transfers, bytes sent, the
   SD task's longest download step, and the longest time a piece or flush waited for one (an upper bound: the
   step's whole duration).
+  On the board (2026-11-16, normal build, logging; `logs/marv-v2-firmware-20261116-113221.log`, `-114213.log`):
+  the list equals the SD task's listing (19 logs, numbers 7 to 25 with sizes; the open log listed with its
+  flushed size, growing); logs 8 and 13 downloaded twice with a throw-away pymavlink client (the station's
+  client did not exist yet) and once with `marv-cli logs get`: all byte-identical (sha256) to the card-reader
+  copies; 57 kB/s with the pymavlink script, about 70 kB/s with `marv-cli` (2 527 232 B in 36 s). Seen: a log
+  that does not exist gets no LOG_DATA; `ofs` at and past the end one LOG_DATA with count 0; a new request in
+  the middle of a transfer takes over (4 frames of the old log already on their way, none after the first frame
+  of the new one); LOG_REQUEST_END stops the stream at once; with the station's HEARTBEAT stopped the last
+  LOG_DATA came 3.01 s after the last HEARTBEAT. During a 109 s download of log 24 (6 258 688 B): SD Ok, 0
+  errors, overflows 0, 9.6 to 10.4 blocks/s, every other row Ok with 0 errors, IMU 803.49 to 803.63 / 800.66
+  to 800.76, watchdog stalls begun 0; one IMU2 gap over 1.5 P (largest gap 1 886 us against 1 874 us) in the
+  window 260 to 270 s, IMU1 0. The SD task's longest download step 8.1 ms, the longest wait of a piece or
+  flush for one 3.5 ms (upper bound). The open log, read through the second handle while being written, came
+  down to its flushed size (1 449 984 B) and is the exact prefix of the same log downloaded after it was
+  closed; `log-verify` read that log (2 527 232 B) with 0 bad bytes. NOT seen: a request while the row is not
+  Ok (no card, recovery, clean-up), a link drop in the middle of a transfer, a listing of hundreds of logs.
 - Test hooks (Cargo.toml): `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (the first open's
   clean-up after boot is told a volume of the reserve plus the listed bytes minus one: the oldest log is deleted
   before the log opens), `inject-log-delete-big` (the first open's clean-up after boot is told a volume of the
