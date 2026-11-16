@@ -65,8 +65,8 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | P2 | DMA on the second interrupt line, on the board | done (branch `wip-sd-p2`, pushed, not in `main`) |
 | SD1 | The driver's new DMA back-end | done, reviewed, `pio-sdmmc` `main` = `424fd58` |
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
-| P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | running (branch `wip-sd-p3`, local) |
-| SD2 | The SD card as a device row (mount, capacity, health) | next |
+| P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done (branch `wip-sd-p3`, merged into `wip-sd2`; the probes stay as features) |
+| SD2 | The SD card as a device row (mount, capacity, health) | built and run on the board (branch `wip-sd2`, local, not in `main`; README "SD card") |
 | SD3 | The log writer and what is logged | after SD2 |
 | SD4 | Log list and download over USB (`marv-cli logs list/get`) | after SD3 |
 

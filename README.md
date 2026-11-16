@@ -4,7 +4,7 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT) and the radio receiver (RC, report only; see Radio), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: mounted and reported, no log yet; see SD card) and the radio receiver (RC, report only; see Radio), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
@@ -16,7 +16,7 @@ It has no flight functionality.
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
   action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag`, `gnss` and `batt`, the four core-0 device tasks (see
-  Device layer). `rc_link`, the radio's task (UART0, report only; see Radio).
+  Device layer), and `sd`, the SD card's device task with its own loop (see SD card). `rc_link`, the radio's task (UART0, report only; see Radio).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, IMU1
   (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, and IMU2
@@ -154,6 +154,7 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 | MAG | BMM350 (`src/mag.rs`) | I2C0 at 400 kHz, SDA GPIO12, SCL GPIO13, data-ready GPIO4 (rising edge), no DMA | from `MAG_ODR_HZ` and `MAG_AVG`; defaults = the driver's bench config: 100 Hz, averaging 2, all axes, normal mode, data-ready pulsed, active high, push-pull | 10 000 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 30 ms at the default | max(1 s, 20 P) |
 | GNSS | LC76G (`src/gnss.rs`) | UART1 (`BufferedUart`, interrupt driven on core 0, no DMA) 115200 8N1, board TX GPIO24, RX GPIO25, RX buffer 4096 B; PPS GPIO5 not read | none: receive only, nothing is sent to the receiver; it is read as it comes (default stream, 1 fix per second) | 1 000 000 us (1 Hz) | 2.5 s (own deadline, not 3 P) | 20 s |
 | BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
+| SD | microSD card (`src/sd.rs`, own loop over the same `Health` machine; see SD card) | PIO0 SM0 (`pio-sdmmc`), CLK GPIO32, CMD 33, DAT0-3 28-31, DMA channel 4 completing on `DMA_IRQ_1` on core 0, `PIO0_IRQ_0` | `LOG_BACKEND_TYPE` (read at boot) | 1 000 000 us (one liveness per second) | none (no data-ready) | 20 s |
 | RC | ELRS receiver (`src/rc.rs`, task `rc_link`; see Radio) | UART0 (`BufferedUart`, interrupt driven, `UART0_IRQ`), TX GPIO14, RX GPIO17, no DMA | none: report only, the port follows CRSF and MAVLink by itself | none | none | none (not a supervised row: not in `DEVICES`) |
 
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
@@ -430,6 +431,75 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 |---|---|---|
 | `IMU1_GYR_OFFX`, `IMU1_GYR_OFFY`, `IMU1_GYR_OFFZ`, `IMU2_GYR_OFFX`, `IMU2_GYR_OFFY`, `IMU2_GYR_OFFZ` | -34.9066 to 34.9066 | gyro offset in rad/s: the gyros' full scale, 2000 dps (Betaflight's `GYRO_SCALE_2000DPS`), so the store holds any rate a working gyro reports |
 | `IMU1_ACC_OFFX`, `IMU1_ACC_OFFY`, `IMU1_ACC_OFFZ`, `IMU2_ACC_OFFX`, `IMU2_ACC_OFFY`, `IMU2_ACC_OFFZ` | -9.80665 to 9.80665 | accelerometer offset in m/s^2: ArduPilot's largest accepted offset, one gravity (`AccelCalibrator::accept_result`) |
+
+### SD parameter
+
+`crates/fw-settings/src/sd.rs`, one `I32` parameter, device SD, `Reboot` (read once at boot).
+
+| Name | Default | Range | Means |
+|---|---|---|---|
+| `LOG_BACKEND_TYPE` | 1 | 0 to 1 | 0: no logging, the SD task never touches the card and the row is Absent with the text "SD: logging off"; 1: the SD card (ArduPilot's name; ArduPilot's other values are not offered) |
+
+## SD card (device row 9)
+
+`src/sd.rs` (decision-sd-logging Q1, Q2, Q4 first bullet, Q6; milestone SD2), task `sd` on core 0's
+thread-mode executor, tagged `SD` for the watchdog. It owns PIO0 (SM0, the `pio-sdmmc` program), DMA channel 4
+(programmed by the driver through the PAC, completing on `DMA_IRQ_1`, enabled only in core 0's NVIC; the waker
+static `SD_WAKER` and the binding `DMA_IRQ_1 => DmaIrqHandler<SdWaker>` are in `src/sd.rs`), the card and the
+mounted FAT32 volume (`embedded-fatfs` over `BufStream` + `StreamSlice`), and drives row 9 through the shared
+`fw_core::health::Health` with its own loop (the row is in `DEVICES`, so the supervisor's stuck check with
+P = 1 s, its texts and `[STAT] SD:` line apply). The log writer is milestone SD3: today nothing is written to the
+card except `LOGS/` when it is missing.
+
+- Start, recovery and restart are the same: a NEW bus (PIO0 and its pins re-borrowed, so a bus the driver marked
+  dead after a failed cancel is replaced), `init`, block 0 through `fw_core::mbr::partition1` (MBR partition 1 of
+  type 0x0B or 0x0C inside the card), the mount, `LOGS/` opened (created if missing), one bounded listing of
+  `LOGS/` for the notice; a recovery or restart un-mounts first. Free space is never asked of the file system
+  (the scan can take 68 s): used space is the sum of the files' sizes in `LOGS/`.
+- While mounted, once per second, the liveness: the FAT's status flags (the FAT's first block) and the root
+  directory's `LOGS` entry (the root's first block). `BufStream` caches one block, so each of the two is one
+  512-byte read from the card: 1 KiB/s, no write. A good liveness is the row's `samples` and
+  `last_sample_age_ms`; a failed one is an error event (BUS, or TIMEOUT for the driver's time-outs and
+  `InitTimeout`; a time-out that overlapped a settings save is discarded as for the other rows). It stands in
+  for SD3's writes.
+- Every card and file-system call is awaited to its end; the waits between them (`select` of the 1 s timer and
+  the row's wake) are no card calls, and a RESTART request is taken between calls (Q2-I1). RESTART (`device
+  restart SD`) is how a changed card is taken up (there is no card detect). SELF_TEST on SD is DENIED by the
+  admission ("not supported yet").
+- Start-up checks, once, after the first bus is built (`[PASS]`/`[FAIL]`): INTE0 = exactly the flight core's
+  channels 0-3, INTE1 = 1 << 4, INTE2 = INTE3 = 0 (Q1-I1); on core 0 `DMA_IRQ_1` enabled and `DMA_IRQ_0` not, and
+  `DMA_IRQ_1` not enabled on core 1, which publishes its NVIC bit once through `CORE1_DMA_IRQ1` (Q1-I2).
+- In a build with `sd-fat-probe` the module is not compiled, its row is not in `DEVICES` (6 rows) and the probe
+  owns the card.
+
+| Condition | State | Last error | Text |
+|---|---|---|---|
+| init, MBR check, mount | Starting | | |
+| mounted | Ok | | NOTICE "SD: 59.5 GiB FAT32, 17 MiB in 2 logs" (partition size, sum of `LOGS/` files, their number), at every mount |
+| `NoCard` on every start try (100/300/1000 ms) | Absent | TIMEOUT | ERROR "SD: no card" (instead of the supervisor's "absent") |
+| block 0 not an MBR with a FAT32 partition 1, or a volume that does not mount as FAT32, on every start try | Failed | ID_MISMATCH | ERROR "SD: no FAT32 volume, reformat as FAT32" |
+| another start failure on every try | Absent | its BUS or TIMEOUT | the supervisor's "SD: absent (...)" |
+| liveness errors | per the machine and its ladder | BUS or TIMEOUT | the supervisor's texts |
+| `LOG_BACKEND_TYPE` = 0 at boot | Absent | NONE | INFO "SD: logging off", once |
+
+The machine itself parks a row whose start retries all failed as Absent with no last error; the SD task shows
+the cause of the last failed start instead (Failed and ID_MISMATCH for the wrong format, TIMEOUT for no card),
+as the stuck flag is shown as Failed/STUCK. SYS_STATUS: row 9 is `MAV_SYS_STATUS_LOGGING` (as ArduPilot).
+
+On the board (2026-11-15, MARV V2 Rev 1 on USB, the scratch SanDisk 64 GB card, FAT32, 32 KiB clusters; logs
+`marv-v2-firmware-20261115-*`): normal build (231006): the five SD checks PASS with the seven earlier ones,
+0 `[FAIL]`; card init 47 ms, mount 4.8 ms, Ok at 572 ms after boot, the notice "SD: 59.5 GiB FAT32, 17 MiB in 2
+logs" on USB; `status` shows LOGGING healthy; `devices` 8 rows, the six and SD OK, RC Starting (no radio
+link on the desk); liveness 1.0 samples/s; after 41 s the driver counted 85 blocks read, 0 written (2 per
+liveness plus the mount). `device restart SD`: accepted, un-mount 0.3 ms, a new bus, Ok again 66 ms later with a
+new notice; `device selftest SD`: DENIED "not supported yet". `inject-sd-no-card` (231243): four start tries,
+Absent at 2.03 s, last error timeout, "SD: no card". `inject-sd-wrong-format` (231330): Failed at 2.05 s, last
+error id mismatch, "SD: no FAT32 volume, reformat as FAT32". `sd-irq-negative` (231415): INTE0 0x1f, the INTE0
+check FAILs, the other four PASS. `LOG_BACKEND_TYPE` 0, saved, `reboot --yes` (231521, 231607): SD Absent NONE,
+"SD: logging off", no card init line in the boot's log; 1, saved, reboot: Ok with the notice. NOT seen: a real
+card removal or insertion, a real exFAT card, a second card type, errors in service (the ladder on a real
+card fault); the 10-minute run against `main` (milestone check G) was started but not read when this was
+written.
 
 ## Settings in flash
 
@@ -808,6 +878,7 @@ What each cargo feature does under the watchdog:
 | `stall-core0` | 1.2 s spin: a "core 0 stalled" text, no reset; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
 | `sd-fat-probe`, `sd-fat-format`, `sd-fat-paced` | probe P3 of the SD logging design (`src/sd_probe.rs`): from 20.5 s a core-0 task builds the SD bus (PIO0 SM0, DMA channel 4 on `DMA_IRQ_1`), mounts the FAT32 volume of MBR partition 1, writes, reads back and compares `LOGS/P3TEST.BIN` (16 MiB) and un-mounts, yielding at every card access; `sd-fat-format` first writes a new MBR and formats the card FAT32 (erases it). Measured 2026-11-15 (logs 222457 format, 223053 probe): every probe check PASS, stalls begun 0, no reset; but while the card was written the flight core's IMU rates fell by 1 to 6 % and its gaps over 1.5 P per 10 s rose 10 to 50 times (back to normal once the probe ended), so the SD path is not yet fit for a burst. `sd-fat-paced` (also: instead of the burst, 150 s at the logger's duty, one 4 KiB write every 700 ms and a flush each second): measured 2026-11-15 (logs 224159 with `xip-stat`, 224604 without), every check PASS, IMU rates within 0.2 % of the normal build, XIP misses within 3 % of idle; with `xip-stat` (223918) the burst doubled the XIP misses per second |
+| `inject-sd-no-card`, `inject-sd-wrong-format`, `sd-irq-negative` | the SD task's test hooks (every card `init` answers `NoCard`; block 0's partition type handed to the MBR check as 0x07) and the negative control of Q1-I1 (INTE0 bit 4 set before the SD register check, cleared after it): rows and `[FAIL]` lines only, no stall |
 | `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |
 | `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |

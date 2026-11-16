@@ -51,25 +51,25 @@ unless the HAL is given an explicit base.
 
 | Block | User | State machine | Words | Notes |
 |---|---|---|---|---|
-| PIO0 | microSD (`pio-sdmmc`) | SM0 | 21 | CHOSEN. Takes `&mut Common` + one SM + one DMA channel |
+| PIO0 | microSD (`pio-sdmmc`) | SM0 | 21 | BUILT (`src/sd.rs`, core 0, 2026-11-15): the SD task builds the whole `Pio` (SM1-3 unused and dropped) and builds it again for every start, recovery and restart. Takes `&mut Common` + one SM + one DMA channel |
 | PIO0 | Status LED (`ws2812c`, PIO transport) | SM1 | 4 | CHOSEN. Takes `&mut Common` + one SM. 25 of 32 words used; SM2, SM3 free |
 | PIO1 | ESC telemetry (`pio-uart` `UartRx`) | SM0 | 13 | CHOSEN. Borrows `&mut Common`. 19 words and SM1-3 free |
 | PIO2 | DShot (`dshot` `PioDshot`) | SM0 | 15 | CHOSEN. The driver needs SM0 and takes the block's `Common` by value, so nothing else lives in PIO2 while it runs |
 | PIO2 | ESC passthrough (`pio-uart` `OneWire`) | SM0 | 27 | CHOSEN. EXCLUSIVE IN TIME with DShot (15 + 27 > 32): DShot is released, `OneWire` built for the session, then released and DShot rebuilt, as the passthrough demo does |
 
-## DMA (16 channels, all on `DMA_IRQ_0`; one handler entry per channel in a single `bind_interrupts!`)
+## DMA (16 channels; embassy-rp's on `DMA_IRQ_0`, the SD card's on `DMA_IRQ_1`)
 
 | Channel | User | Notes |
 |---|---|---|
 | 0, 1 | SPI0 (ICM-45686) | Core 1, BUILT (`src/imu1.rs`, inside core 1's entry). The HAL's async SPI takes two channels (as every bench does; not checked in `spi.rs`) |
 | 2, 3 | SPI1 (LSM6DSK320X) | Core 1, BUILT (`src/imu2.rs`, inside core 1's entry). One `bind_interrupts!` for channels 0-3 (`DmaIrqs`, `src/main.rs`); the `f4-negative` control builds channel 6 on core 0 |
-| 4 | microSD | BLOCKED: the driver requires one, the SD belongs on core 0, and DMA is flight-core-only for now (rule 6) |
+| 4 | microSD | Core 0, BUILT (`src/sd.rs`, 2026-11-15): programmed by `pio-sdmmc` itself through the PAC (no embassy-rp `dma::Channel`), completing on `DMA_IRQ_1`, enabled only in core 0's NVIC (INTE1 = 1 << 4; checked at start-up with INTE0, INTE2, INTE3) |
 | 5 | DShot reply capture | Core 1. The driver requires one |
 | 6-15 | free | The ADC (battery) runs WITHOUT DMA (it is on core 0: see the rule below); the flash driver needs none |
 
 ## Interrupts to bind
 
-`DMA_IRQ_0` (channels 0-6), `PIO0_IRQ_0`, `PIO1_IRQ_0`, `PIO2_IRQ_0`, `I2C0_IRQ`, `I2C1_IRQ`, `UART0_IRQ` and
+`DMA_IRQ_0` (core 1: channels 0-3, 5 with DShot), `DMA_IRQ_1` (core 0: channel 4, `pio_sdmmc::pio::DmaIrqHandler<SdWaker>`, priority P3, set by the driver), `PIO0_IRQ_0` (the SD bus's `Pio`), `PIO1_IRQ_0`, `PIO2_IRQ_0`, `I2C0_IRQ`, `I2C1_IRQ`, `UART0_IRQ` and
 `UART1_IRQ` (buffered UARTs), `ADC_IRQ_FIFO`, `USBCTRL_IRQ`. Taken by the HAL itself: `TIMER0_IRQ_0` (the time
 driver, alarm 0), `IO_IRQ_BANK0` (all `Input::wait_for_*`, no binding needed; priority P3), and `DMA_IRQ_0`'s
 priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through the bank interrupt.
@@ -103,10 +103,15 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 4. The servo pads 4 and 5 carry the magnetometer's interrupt and the GNSS PPS on the bench: servo outputs on
    slice 2 are not available while that wiring stands.
 5. Nothing may be added to PIO0, PIO1 or PIO2 that uses pins below GPIO32 only.
-6. DMA is used on the flight core (core 1) ONLY: embassy-rp 0.10 puts every channel on `DMA_IRQ_0` with one
-   shared status register, so two cores would race. `DMA_IRQ_0` is disabled on core 0 before core 1 starts and
-   core 0 builds no DMA channel. The microSD therefore waits for a way to route a channel to a second DMA
-   interrupt line on core 0 (a HAL change).
+6. `DMA_IRQ_0` and the embassy-rp DMA channels belong to core 1: embassy-rp 0.10 puts every channel it builds
+   on `DMA_IRQ_0` and its transfers abort with a read-modify-write of the shared `CHAN_ABORT`. `DMA_IRQ_0` is
+   disabled on core 0 before core 1 starts, and core 0 never builds an embassy-rp `dma::Channel`. Core 0's one
+   channel, the SD card's channel 4, goes through the driver's own path (decision-sd-logging Q1): set in INTE1
+   only, completing on `DMA_IRQ_1` in core 0's NVIC, cleared through INTS1; core 0 never read-modify-writes a
+   DMA register shared across channels (INTR, INTEn, INTFn, INTSn, CHAN_ABORT, MULTI_CHAN_TRIGGER): only SET/CLR
+   alias writes and single-bit plain writes. Start-up checks: `DMA_IRQ_0` off on core 0 (F4), and after the SD
+   bus is built INTE0 = core 1's channels, INTE1 = 1 << 4, INTE2 = INTE3 = 0, `DMA_IRQ_1` on in core 0 and off
+   in core 1.
 7. A driver is constructed on the core that owns its interrupt (the HAL enables the NVIC line in the
    constructor, on the calling core). The timer interrupt is always on core 0; a flash write must come from
    core 0 and pauses core 1.
@@ -135,5 +140,5 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 ## Not yet decided or measured
 
 Whether the two IMUs' SPI really need DMA at the rates used; stack and static RAM
-per task; what the loaded I/O core does to the flight core (milestone FD4); how the microSD gets its DMA channel.
+per task; what the loaded I/O core does to the flight core (milestone FD4); the flight core's IMU figures under sustained card work (the shared XIP cache; facts-sd-logging C2).
 A microSD logger needs a buffer that rides through the card's stalls: on the one card tested (SanDisk 64 GB, `pio-sdmmc`, 2026-11-11) a single write call sometimes took 30 to 132 ms; the driver does not retry.
