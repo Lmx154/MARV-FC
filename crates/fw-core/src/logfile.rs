@@ -42,18 +42,29 @@ pub const fn next_number(last: Option<u32>) -> u32 {
     }
 }
 
+/// The decimal digit of `n` worth `scale` (1, 10, 100, ...), as ASCII.
+const fn digit(n: u32, scale: u32) -> u8 {
+    b'0' + (n / scale % 10) as u8
+}
+
 /// The file name of log `n`: 8 decimal digits, zero padded, then `.BIN` (`00000007.BIN`). A number
 /// of more than 8 digits keeps its low 8 (log numbers never exceed 500).
 pub const fn file_name(n: u32) -> [u8; FILE_NAME_LEN] {
-    let mut name = *b"00000000.BIN";
-    let mut rest = n % 100_000_000;
-    let mut i = 8;
-    while i > 0 {
-        i -= 1;
-        name[i] = b'0' + (rest % 10) as u8;
-        rest /= 10;
-    }
-    name
+    let n = n % 100_000_000;
+    [
+        digit(n, 10_000_000),
+        digit(n, 1_000_000),
+        digit(n, 100_000),
+        digit(n, 10_000),
+        digit(n, 1_000),
+        digit(n, 100),
+        digit(n, 10),
+        digit(n, 1),
+        b'.',
+        b'B',
+        b'I',
+        b'N',
+    ]
 }
 
 /// The log number a file name carries: exactly 8 ASCII digits, a dot and `BIN` in any case

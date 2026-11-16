@@ -918,11 +918,12 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (179 tests, and 2 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (243 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
-| `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake). The only module with `unsafe`. Tested with two host threads over 10^7 writes; statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
+| `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake), `LogRing` (the SD logger's single-producer single-consumer byte ring for whole records: a record goes in whole or not at all, drops counted, wait-free both ways, usable from either core). The only module with `unsafe`. Tested with two host threads over 10^7 writes (`LogRing`: 10^6 random operations against a model, and 4 x 10^5 records between two threads); statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
+| `logfile` | The SD log files' rules, pure: log numbers 1 to 500 then 1 again, the 8.3 name `NNNNNNNN.BIN` and its parse, `LASTLOG.TXT` (format, parse, the last-number rule), and the clean-up planner (one deletion per call, the oldest log in ring order, from the sum of the log sizes and the volume size; "card full" under 8 MiB) |
 | `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
 | `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |
 | `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The tables are the firmware's (`crates/fw-settings/src/`, one file per device) |

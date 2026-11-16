@@ -24,12 +24,12 @@ pub const NUM_TYPES: usize = TYPES.len();
 /// The longest record of the table (the FMT, 89 bytes).
 const MAX_RECORD: usize = {
     let mut max = 0;
-    let mut i = 0;
-    while i < TYPES.len() {
-        if TYPES[i].length as usize > max {
-            max = TYPES[i].length as usize;
+    let mut rest = TYPES.as_slice();
+    while let [def, tail @ ..] = rest {
+        if def.length as usize > max {
+            max = def.length as usize;
         }
-        i += 1;
+        rest = tail;
     }
     max
 };
