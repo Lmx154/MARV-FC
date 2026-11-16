@@ -124,6 +124,9 @@ static VERIFY_BUF: ConstStaticCell<VerifyBuf> = ConstStaticCell::new(VerifyBuf([
 
 /// Log bytes a download step reads at most (10 LOG_DATA).
 const READ_CHUNK: usize = 10 * CHUNK;
+/// A read handle with nothing to read is closed after this long (the station sends no
+/// LOG_REQUEST_END after a complete download).
+const READER_IDLE: Duration = Duration::from_secs(2);
 /// Room a whole read step needs in the hand-over ring.
 const READ_ROOM: usize = READ_CHUNK + 10 * DATA_HEADER;
 /// The download's read buffer.
@@ -1220,6 +1223,8 @@ struct Reader<'f, 'v, 'a> {
     size: u64,
     /// The file offset.
     at: u64,
+    /// When it was last opened, moved or read.
+    used: Instant,
     file: LogFile<'f, 'v, 'a>,
 }
 
@@ -1260,7 +1265,7 @@ impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
         if let Some(reader) = &self.reader {
             let keep = match self.job {
                 Job::Data { id, end, .. } => id == reader.number && end <= reader.size,
-                Job::Done => true,
+                Job::Done => reader.used.elapsed() < READER_IDLE,
                 _ => false,
             };
             if !keep {
@@ -1333,6 +1338,7 @@ impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
                                 number: id,
                                 size: u64::from(size),
                                 at: 0,
+                                used: Instant::now(),
                                 file,
                             })
                         }
@@ -1350,7 +1356,10 @@ impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
                 if reader.at != pos {
                     let sought = reader.file.seek(SeekFrom::Start(pos)).await;
                     match sought {
-                        Ok(at) if at == pos => reader.at = at,
+                        Ok(at) if at == pos => {
+                            reader.at = at;
+                            reader.used = Instant::now();
+                        }
                         r => {
                             defmt::info!(
                                 "[INFO] SD: download: log {=u32}: seek to {=u64} B ended at {}",
@@ -1386,6 +1395,7 @@ impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
                             ofs += chunk.len() as u64;
                         }
                         reader.at = ofs;
+                        reader.used = Instant::now();
                         self.job = if ofs >= end {
                             Job::Done
                         } else {

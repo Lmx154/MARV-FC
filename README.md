@@ -556,6 +556,26 @@ written.
   next open (boot, RESTART or recovery), so a log that grows past the reserve is not trimmed until then. A
   RESTART request that arrives during the clean-up waits for the log to open. The file system is never asked for
   free space.
+- Logs over USB (SD4, the contract: decision-sd-logging "SD4" and MARV-GCS `docs/link-contract.md` section 11):
+  ArduPilot's MAVLink log download on the USB link only: LOG_REQUEST_LIST 117 -> LOG_ENTRY 118, LOG_REQUEST_DATA
+  119 -> LOG_DATA 120, LOG_REQUEST_END 122. Not offered: LOG_ERASE 121, the radio (its node has no accept list,
+  so a request there is dropped and counted as an unknown message), MAVFTP. `id` is the log's number, `time_utc`
+  0, `size` bytes (the open log: its size at the last flush, so it is listed and can be downloaded while it
+  grows). A request for a log that does not exist gets nothing; `ofs` at or past the end one LOG_DATA with count
+  0. A new LOG_REQUEST_DATA or LOG_REQUEST_LIST replaces the running transfer; LOG_REQUEST_END, the station's
+  HEARTBEAT older than 3 s or the link going down stop it. Requests that arrive before the start gate opens
+  are dropped (the station retries), and so are requests while the SD row is not Ok (no card, starting,
+  recovering, the clean-up before a log opens): no answer at all, not even the empty entry.
+  How (`src/logdl.rs`): the USB link runs its own copy of the node's driver (`drive` in `main.rs`, mirroring
+  mavlink-device `run.rs` at dfdb11a) so that `receive_with` hands the three requests over; each request gets
+  a new generation number and wakes the SD task. The SD task answers from its listing and reads the log
+  through a second, read-only file handle, only when no log piece and no flush is due, one step at a time (a
+  request taken, the handle opened, moved or closed, or at most 900 bytes read), and hands whole records
+  tagged with the generation through a 4 KiB `LogRing`; the USB node's LOG_DATA stream slot (5 ms) sends at
+  most 4 per 5 ms and drops records of an older generation, so a replaced transfer's bytes are never sent. A
+  handle with nothing left to read is closed after 2 s. `[STAT]` of the USB link: transfers, bytes sent, the
+  SD task's longest download step, and the longest time a piece or flush waited for one (an upper bound: the
+  step's whole duration).
 - Test hooks (Cargo.toml): `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (the first open's
   clean-up after boot is told a volume of the reserve plus the listed bytes minus one: the oldest log is deleted
   before the log opens), `inject-log-delete-big` (the first open's clean-up after boot is told a volume of the
