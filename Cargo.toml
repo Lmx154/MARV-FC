@@ -189,7 +189,7 @@ sd-irq-negative = []
 # tools/run.sh then requires that failure (exit 1) before it flashes.
 ram-negative = []
 # The board check of the RAM-code design (src/xip_park.rs, decision-ram-code-20261115 Q5): 30 s after
-# start a 1 s window of both cores' XIP accesses (more than 10^6), then core 0 parks 1.0 s in SRAM with
+# start a 1 s window of both cores' XIP accesses (more than 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with
 # interrupts off and the XIP accesses counted meanwhile (core 1's) must be 0 with both IMUs sampling;
 # with ram-negative at least 1000. Not together with xip-stat.
 xip-park = []
