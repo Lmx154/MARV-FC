@@ -54,6 +54,8 @@ pub mod task {
     pub const GNSS: u8 = 12;
     /// The radio receiver's port and the radio's MAVLink node (`rc_link`).
     pub const RC: u8 = 13;
+    /// The SD card's device task (`sd`).
+    pub const SD: u8 = 14;
     /// A check feature's own task.
     pub const TEST: u8 = 9;
     /// The flight core's liveness task (`fbeat`).
@@ -79,6 +81,7 @@ pub const fn task_name(id: u8) -> &'static str {
         task::BATT => "BATT",
         task::GNSS => "GNSS",
         task::RC => "RC",
+        task::SD => "SD",
         task::TEST => "TEST",
         task::FBEAT => "FBEAT",
         task::IMU1 => "IMU1",
@@ -805,13 +808,14 @@ mod tests {
                 names.push(n);
             }
         }
-        assert_eq!(names.len(), 16);
+        assert_eq!(names.len(), 17);
         assert_eq!(
             (task_name(task::MAG), task_name(task::BATT)),
             ("MAG", "BATT")
         );
         assert_eq!(task_name(task::GNSS), "GNSS");
         assert_eq!(task_name(task::RC), "RC");
+        assert_eq!(task_name(task::SD), "SD");
         assert_eq!(
             (task_name(task::IMU1), task_name(task::IMU2)),
             ("IMU1", "IMU2")

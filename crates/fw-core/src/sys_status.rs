@@ -17,7 +17,8 @@
 //! | GNSS | GPS |
 //! | RC (receiver) | RC_RECEIVER |
 //! | BATT | BATTERY |
-//! | SD, PSRAM, LED, ESC | none |
+//! | SD | LOGGING |
+//! | PSRAM, LED, ESC | none |
 //!
 //! A device with no row in the slice sets no bit; two rows of one device are ORed.
 
@@ -68,7 +69,8 @@ pub struct SensorMasks {
     pub health: u32,
 }
 
-/// The SYS_STATUS bits of a device; 0 for the devices that have none (SD, PSRAM, LED, ESC).
+/// The SYS_STATUS bits of a device (the SD card is LOGGING, as in ArduPilot); 0 for the devices that
+/// have none (PSRAM, LED, ESC).
 pub fn sensor_bits(device: MarvDevice) -> u32 {
     match device {
         MarvDevice::MARV_DEVICE_IMU1 => {
@@ -86,8 +88,8 @@ pub fn sensor_bits(device: MarvDevice) -> u32 {
         MarvDevice::MARV_DEVICE_GNSS => MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_GPS.bits(),
         MarvDevice::MARV_DEVICE_RC => MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_RC_RECEIVER.bits(),
         MarvDevice::MARV_DEVICE_BATT => MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_BATTERY.bits(),
-        MarvDevice::MARV_DEVICE_SD
-        | MarvDevice::MARV_DEVICE_PSRAM
+        MarvDevice::MARV_DEVICE_SD => MavSysStatusSensor::MAV_SYS_STATUS_LOGGING.bits(),
+        MarvDevice::MARV_DEVICE_PSRAM
         | MarvDevice::MARV_DEVICE_LED
         | MarvDevice::MARV_DEVICE_ESC => 0,
     }
@@ -284,6 +286,7 @@ mod tests {
             MarvDevice::MARV_DEVICE_GNSS => 0x20,
             MarvDevice::MARV_DEVICE_RC => 0x1_0000,
             MarvDevice::MARV_DEVICE_BATT => 0x200_0000,
+            MarvDevice::MARV_DEVICE_SD => 0x100_0000,
             _ => 0,
         }
     }
@@ -311,7 +314,7 @@ mod tests {
         }
         assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_IMU1), 0x03);
         assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_IMU2), 0x6_0000);
-        assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_SD), 0);
+        assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_SD), 0x100_0000);
         assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_ESC), 0);
         // 3D_MAG2 (0x80000) is unused by every device.
         for device in ALL_DEVICES {
@@ -344,6 +347,7 @@ mod tests {
                 MavSysStatusSensor::MAV_SYS_STATUS_SENSOR_BATTERY,
                 0x200_0000,
             ),
+            (MavSysStatusSensor::MAV_SYS_STATUS_LOGGING, 0x100_0000),
         ];
         for (flag, literal) in pairs {
             assert_eq!(flag.bits(), literal, "{flag:?}");
@@ -432,9 +436,9 @@ mod tests {
             masks_with(rows, ignores_stuck)
         }
         let (violations, _) = check_exhaustive(buggy);
-        // The 6 non-receiver devices with a bit, each with Ok + stuck, 2 present x 2 locked.
+        // The 7 non-receiver devices with a bit, each with Ok + stuck, 2 present x 2 locked.
         assert!(violations > 0);
-        assert_eq!(violations, 6 * 4);
+        assert_eq!(violations, 7 * 4);
     }
 
     #[test]
@@ -489,9 +493,9 @@ mod tests {
             ),
         ];
         let m = sensor_masks(&rows);
-        assert_eq!(m.present, 0x0207_000F);
-        assert_eq!(m.enabled, 0x0007_002F);
-        assert_eq!(m.health, 0x0001_0003);
+        assert_eq!(m.present, 0x0307_000F);
+        assert_eq!(m.enabled, 0x0107_002F);
+        assert_eq!(m.health, 0x0101_0003);
         assert_eq!(sensor_masks(&[]), SensorMasks::default());
     }
 

@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the 25 parameters of BARO, MAG, BATT and the two IMUs' calibration offsets (see Parameters),
+  second, the parameter protocol over the 26 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and the SD card's `LOG_BACKEND_TYPE` (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -362,7 +362,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT and the IMUs' offsets (after it); `fw_settings::TABLE` joins them (25 entries: 5 + 5 + 3 + 12). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets and SD (after it); `fw_settings::TABLE` joins them (26 entries: 5 + 5 + 3 + 12 + 1). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 

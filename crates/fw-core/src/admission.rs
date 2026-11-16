@@ -181,8 +181,9 @@ fn classify_device(params: &[f32; 7]) -> Result<Classified, Refusal> {
         Some(4) => MarvDevice::MARV_DEVICE_MAG,
         Some(5) => MarvDevice::MARV_DEVICE_GNSS,
         Some(6) => MarvDevice::MARV_DEVICE_BATT,
-        // RC, SD, PSRAM, LED, ESC: devices of the dialect that this build does not serve.
-        Some(7 | 9 | 10 | 11 | 12) => return Err(Refusal::Denied(NOT_YET)),
+        Some(9) => MarvDevice::MARV_DEVICE_SD,
+        // RC, PSRAM, LED, ESC: devices of the dialect that this build does not serve.
+        Some(7 | 10 | 11 | 12) => return Err(Refusal::Denied(NOT_YET)),
         _ => return Err(Refusal::Denied("unknown device")),
     };
     if restart {
@@ -549,6 +550,7 @@ mod tests {
             (DEV, dev(4.0, 1.0), long(DeviceRestart(MARV_DEVICE_MAG))),
             (DEV, dev(5.0, 1.0), long(DeviceRestart(MARV_DEVICE_GNSS))),
             (DEV, dev(6.0, 1.0), long(DeviceRestart(MARV_DEVICE_BATT))),
+            (DEV, dev(9.0, 1.0), long(DeviceRestart(MARV_DEVICE_SD))),
             (DEV, dev(1.0, 2.0), long(DeviceSelfTest(MARV_DEVICE_IMU1))),
             (DEV, dev(2.0, 2.0), long(DeviceSelfTest(MARV_DEVICE_IMU2))),
             (DEV, dev(4.0, 2.0), long(DeviceSelfTest(MARV_DEVICE_MAG))),
@@ -585,7 +587,7 @@ mod tests {
             (REB, p(&[(0, 1.0), (1, 1.0)])),
             (DEV, dev(7.0, 1.0)),
             (DEV, dev(8.0, 1.0)),
-            (DEV, dev(9.0, 1.0)),
+            (DEV, dev(9.0, 2.0)),
             (DEV, dev(13.0, 1.0)),
             (DEV, dev(0.0, 1.0)),
             (DEV, dev(1.0, 0.0)),
