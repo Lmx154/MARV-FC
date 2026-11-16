@@ -1,8 +1,9 @@
 //! The radio: the ExpressLRS receiver on UART0 through `rc-port`, which follows the receiver
 //! between CRSF (420000 baud) and MAVLink (460800 baud) by itself. This module only REPORTS: the
-//! RC row (no health machine, no recovery), RC_CHANNELS for USB, the `[STAT] RC:` line, the BATT
-//! value as CRSF telemetry, and the radio's MAVLink node (link 1, active only while the port is
-//! locked on MAVLink). Nothing here uses the sticks, arms, or decides about link loss or authority.
+//! RC row (no health machine, no recovery), RC_CHANNELS and the mapped sticks (MANUAL_CONTROL) for
+//! USB, the `[STAT] RC:` line, the BATT value as CRSF telemetry, and the radio's MAVLink node (link
+//! 1, active only while the port is locked on MAVLink). Nothing here acts on the sticks, arms, or
+//! decides about link loss or authority.
 //!
 //! UART0 as the bench (`rc-port/hil/src/bin/rc_link.rs`) set it up: `BufferedUart` (interrupt
 //! driven, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART
