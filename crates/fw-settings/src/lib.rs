@@ -31,7 +31,8 @@ pub mod sd;
 use fw_core::params::ParamDef;
 
 /// The number of parameters of the whole firmware.
-pub const COUNT: usize = baro::COUNT + mag::COUNT + batt::COUNT + imu::COUNT + sd::COUNT + rc::COUNT;
+pub const COUNT: usize =
+    baro::COUNT + mag::COUNT + batt::COUNT + imu::COUNT + sd::COUNT + rc::COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC.
 pub static TABLE: [ParamDef; COUNT] = concat();
