@@ -1,0 +1,971 @@
+//! The on-board log format: ArduPilot DataFlash `.BIN` records (design: decision-sd-logging, Q3).
+//!
+//! This module only turns plain values into bytes in a caller's buffer. It has no state, no file,
+//! no ring and no clock: every function writes exactly one record (or the whole header) at the
+//! start of `out` and returns the number of bytes written, or 0 when `out` is too small (nothing
+//! is written then; every record is longer than 0 bytes, so 0 is unambiguous).
+//!
+//! # Record layout
+//!
+//! `A3 95 <type> <payload>`, little-endian, fixed length per type. The payload is the columns of
+//! the type in order, each with the size of its format character:
+//!
+//! | Char | Size | Meaning                                                       |
+//! |------|------|---------------------------------------------------------------|
+//! | `B`  | 1    | `u8`                                                          |
+//! | `H`  | 2    | `u16`                                                         |
+//! | `h`  | 2    | `i16`                                                         |
+//! | `c`  | 2    | `i16`, value x 100 (readers divide by 100)                    |
+//! | `I`  | 4    | `u32`                                                         |
+//! | `e`  | 4    | `i32`, value x 100 (readers divide by 100)                    |
+//! | `f`  | 4    | `f32`                                                         |
+//! | `L`  | 4    | `i32`, latitude or longitude in 1e-7 degree                   |
+//! | `Q`  | 8    | `u64`                                                         |
+//! | `n`  | 4    | `char[4]`, NUL padded                                         |
+//! | `N`  | 16   | `char[16]`, NUL padded                                        |
+//! | `Z`  | 64   | `char[64]`, NUL padded                                        |
+//!
+//! Text is copied up to its first NUL and truncated to the field size (a full field has no
+//! terminator), as ArduPilot's `strncpy` does. There is no `d` (the firmware has no 64-bit float).
+//!
+//! # The file
+//!
+//! [`write_header`] writes the FMT of FMT (type 128, length 89), then one FMT for every other
+//! type of [`TYPES`]; the start records and the data follow, in any order. Every data type has
+//! `TimeUS` (board microseconds, `Q`) as its first column. There is no FMTU, UNIT or MULT.
+//!
+//! The table [`TYPES`] is the single description of all types: the length of a record is computed
+//! from its format string when the table is built (a wrong format character is a compile error),
+//! so the length that goes into a FMT record and the length of the encoded record cannot differ
+//! (invariant Q3-I1).
+
+/// First byte of every record.
+pub const HEAD1: u8 = 0xA3;
+/// Second byte of every record.
+pub const HEAD2: u8 = 0x95;
+/// Bytes of the record header: `HEAD1`, `HEAD2`, the type.
+pub const HEADER_LEN: usize = 3;
+
+/// Description of one record type: the data of its FMT record.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RecordDef {
+    /// Type number (the third byte of every record of this type).
+    pub type_id: u8,
+    /// Name, at most 4 bytes.
+    pub name: &'static str,
+    /// One format character per column, at most 16.
+    pub format: &'static str,
+    /// Column names separated by commas, at most 64 bytes.
+    pub columns: &'static str,
+    /// Length of a whole record in bytes, header included.
+    pub length: u8,
+}
+
+/// Size in bytes of the payload column that format character `c` describes; 0 for a character
+/// this module does not know.
+const fn char_size(c: u8) -> usize {
+    match c {
+        b'B' => 1,
+        b'H' | b'h' | b'c' => 2,
+        b'I' | b'e' | b'f' | b'L' | b'n' => 4,
+        b'Q' => 8,
+        b'N' => 16,
+        b'Z' => 64,
+        _ => 0,
+    }
+}
+
+/// Length of a record with format string `format`: the header plus its columns, or 0 if a
+/// character is unknown.
+const fn record_len(format: &str) -> usize {
+    let mut rest = format.as_bytes();
+    let mut len = HEADER_LEN;
+    while let [c, tail @ ..] = rest {
+        let size = char_size(*c);
+        if size == 0 {
+            return 0;
+        }
+        len += size;
+        rest = tail;
+    }
+    len
+}
+
+const fn def(
+    type_id: u8,
+    name: &'static str,
+    format: &'static str,
+    columns: &'static str,
+) -> RecordDef {
+    let len = record_len(format);
+    assert!(len > HEADER_LEN && len <= 255, "bad format string");
+    assert!(name.len() <= 4, "name over 4 bytes");
+    assert!(format.len() <= 16, "format over 16 bytes");
+    assert!(columns.len() <= 64, "columns over 64 bytes");
+    RecordDef {
+        type_id,
+        name,
+        format,
+        columns,
+        length: len as u8,
+    }
+}
+
+/// Type number of the FMT record, as in ArduPilot.
+pub const ID_FMT: u8 = 128;
+/// Type number of PARM.
+pub const ID_PARM: u8 = 129;
+/// Type number of MSG.
+pub const ID_MSG: u8 = 130;
+/// Type number of IMU.
+pub const ID_IMU: u8 = 131;
+/// Type number of BARO.
+pub const ID_BARO: u8 = 132;
+/// Type number of MAG.
+pub const ID_MAG: u8 = 133;
+/// Type number of GPS.
+pub const ID_GPS: u8 = 134;
+/// Type number of BAT.
+pub const ID_BAT: u8 = 135;
+/// Type number of RCIN.
+pub const ID_RCIN: u8 = 136;
+/// Type number of DEV.
+pub const ID_DEV: u8 = 137;
+/// Type number of DSF.
+pub const ID_DSF: u8 = 138;
+
+/// FMT: describes a type (89 bytes).
+pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
+/// PARM: one parameter, its value and its default.
+pub const PARM: RecordDef = def(ID_PARM, "PARM", "QNff", "TimeUS,Name,Value,Default");
+/// MSG: one status text.
+pub const MSG: RecordDef = def(ID_MSG, "MSG", "QZ", "TimeUS,Message");
+/// IMU: one sample of one IMU (rad/s, m/s^2, degC).
+pub const IMU: RecordDef = def(
+    ID_IMU,
+    "IMU",
+    "QBfffffff",
+    "TimeUS,I,GyrX,GyrY,GyrZ,AccX,AccY,AccZ,T",
+);
+/// BARO: pressure (Pa) and temperature (centi-degC, shown as degC).
+pub const BARO: RecordDef = def(ID_BARO, "BARO", "QBfc", "TimeUS,I,Press,Temp");
+/// MAG: field in milligauss (microtesla x 10).
+pub const MAG: RecordDef = def(ID_MAG, "MAG", "QBhhh", "TimeUS,I,MagX,MagY,MagZ");
+/// GPS: one fix.
+pub const GPS: RecordDef = def(
+    ID_GPS,
+    "GPS",
+    "QBBIHBcLLeff",
+    "TimeUS,I,Status,GMS,GWk,NSats,HDop,Lat,Lng,Alt,Spd,GCrs",
+);
+/// BAT: battery voltage (V) and current (A).
+pub const BAT: RecordDef = def(ID_BAT, "BAT", "QBff", "TimeUS,Inst,Volt,Curr");
+/// RCIN: 14 receiver channels (us).
+pub const RCIN: RecordDef = def(
+    ID_RCIN,
+    "RCIN",
+    "QHHHHHHHHHHHHHH",
+    "TimeUS,C1,C2,C3,C4,C5,C6,C7,C8,C9,C10,C11,C12,C13,C14",
+);
+/// DEV: one row of the device status table.
+pub const DEV: RecordDef = def(
+    ID_DEV,
+    "DEV",
+    "QBBBIIIHHH",
+    "TimeUS,Id,State,Err,Smp,Errs,TOs,Rec,Att,Ovf",
+);
+/// DSF: the logger's own statistics.
+pub const DSF: RecordDef = def(ID_DSF, "DSF", "QIHIIII", "TimeUS,Dp,Blk,Bytes,FMn,FMx,FAv");
+
+/// Every record type of the file, FMT first, in the order of the header.
+pub const TYPES: [RecordDef; 11] = [FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF];
+
+/// Size of the header sequence: the FMT of FMT and one FMT for each other type.
+pub const HEADER_SEQUENCE_LEN: usize = TYPES.len() * FMT.length as usize;
+
+/// Writes one record into the start of a buffer.
+struct Writer<'a> {
+    buf: &'a mut [u8],
+    pos: usize,
+}
+
+impl<'a> Writer<'a> {
+    /// Starts a record of type `def`: `None` (nothing written) if `buf` is shorter than the record.
+    fn start(buf: &'a mut [u8], def: &RecordDef) -> Option<Self> {
+        if buf.len() < usize::from(def.length) {
+            return None;
+        }
+        let mut w = Writer { buf, pos: 0 };
+        w.bytes(&[HEAD1, HEAD2, def.type_id]);
+        Some(w)
+    }
+
+    fn bytes(&mut self, src: &[u8]) {
+        if let Some(dst) = self.buf.get_mut(self.pos..self.pos + src.len()) {
+            dst.copy_from_slice(src);
+        }
+        self.pos += src.len();
+    }
+
+    fn u8(&mut self, v: u8) {
+        self.bytes(&[v]);
+    }
+
+    fn u16(&mut self, v: u16) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn i16(&mut self, v: i16) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn u32(&mut self, v: u32) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn i32(&mut self, v: i32) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn u64(&mut self, v: u64) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    fn f32(&mut self, v: f32) {
+        self.bytes(&v.to_le_bytes());
+    }
+
+    /// A text field of `size` bytes: `text` up to its first NUL, truncated, then NUL padding.
+    fn text(&mut self, text: &[u8], size: usize) {
+        let mut ended = false;
+        for i in 0..size {
+            let c = if ended {
+                0
+            } else {
+                text.get(i).copied().unwrap_or(0)
+            };
+            ended = c == 0;
+            self.u8(c);
+        }
+    }
+}
+
+/// Writes the FMT record that describes `def` (89 bytes). Returns 89, or 0 if `out` is shorter.
+pub fn fmt_record(def: &RecordDef, out: &mut [u8]) -> usize {
+    let Some(mut w) = Writer::start(out, &FMT) else {
+        return 0;
+    };
+    w.u8(def.type_id);
+    w.u8(def.length);
+    w.text(def.name.as_bytes(), 4);
+    w.text(def.format.as_bytes(), 16);
+    w.text(def.columns.as_bytes(), 64);
+    w.pos
+}
+
+/// Writes the header sequence: the FMT of FMT, then one FMT for each other type of [`TYPES`].
+/// Returns [`HEADER_SEQUENCE_LEN`], or 0 (nothing written) if `out` is shorter.
+pub fn write_header(out: &mut [u8]) -> usize {
+    if out.len() < HEADER_SEQUENCE_LEN {
+        return 0;
+    }
+    let mut at = 0;
+    for def in &TYPES {
+        let Some(rest) = out.get_mut(at..) else {
+            return 0;
+        };
+        at += fmt_record(def, rest);
+    }
+    at
+}
+
+/// PARM: parameter `name` (at most 16 bytes) with its `value` (an I32 parameter as `f32`) and
+/// `default`. 35 bytes.
+pub fn encode_parm(out: &mut [u8], time_us: u64, name: &[u8], value: f32, default: f32) -> usize {
+    let Some(mut w) = Writer::start(out, &PARM) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.text(name, 16);
+    w.f32(value);
+    w.f32(default);
+    w.pos
+}
+
+/// MSG: one status text, truncated to 64 bytes. 75 bytes.
+pub fn encode_msg(out: &mut [u8], time_us: u64, text: &[u8]) -> usize {
+    let Some(mut w) = Writer::start(out, &MSG) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.text(text, 64);
+    w.pos
+}
+
+/// IMU: instance `inst` (0 or 1), angular rate in rad/s, acceleration in m/s^2, temperature in
+/// degC. `time_us` is the sample's own time. 40 bytes.
+pub fn encode_imu(
+    out: &mut [u8],
+    time_us: u64,
+    inst: u8,
+    gyro_rad_s: [f32; 3],
+    accel_m_s2: [f32; 3],
+    temp_c: f32,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &IMU) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    for v in gyro_rad_s.into_iter().chain(accel_m_s2) {
+        w.f32(v);
+    }
+    w.f32(temp_c);
+    w.pos
+}
+
+/// `v` x 100 rounded to the nearest integer (halves away from zero), saturating; NaN gives 0.
+fn centi(v: f32) -> i32 {
+    let scaled = v * 100.0;
+    // `as` from f32 to i32 saturates and maps NaN to 0.
+    (if scaled < 0.0 {
+        scaled - 0.5
+    } else {
+        scaled + 0.5
+    }) as i32
+}
+
+/// BARO: instance `inst`, pressure in Pa, temperature in degC (stored as an `i16` of centi-degC,
+/// saturating). 18 bytes.
+pub fn encode_baro(out: &mut [u8], time_us: u64, inst: u8, press_pa: f32, temp_c: f32) -> usize {
+    let Some(mut w) = Writer::start(out, &BARO) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    w.f32(press_pa);
+    let c = centi(temp_c).clamp(i32::from(i16::MIN), i32::from(i16::MAX));
+    w.i16(c as i16);
+    w.pos
+}
+
+/// MAG: instance `inst`, field in milligauss (microtesla x 10). 18 bytes.
+pub fn encode_mag(out: &mut [u8], time_us: u64, inst: u8, field_mgauss: [i16; 3]) -> usize {
+    let Some(mut w) = Writer::start(out, &MAG) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    for v in field_mgauss {
+        w.i16(v);
+    }
+    w.pos
+}
+
+/// The values of one GPS record.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gps {
+    /// Receiver instance.
+    pub inst: u8,
+    /// 0 none, 1 no fix, 2 2D, 3 3D.
+    pub status: u8,
+    /// Milliseconds of the GPS week (see [`gps_week_ms`]); 0 before a time is known.
+    pub gms: u32,
+    /// GPS week; 0 before a time is known.
+    pub gwk: u16,
+    /// Satellites used.
+    pub nsats: u8,
+    /// Horizontal DOP x 100 (the column shows DOP; values over 327.67 saturate).
+    pub hdop_x100: u16,
+    /// Latitude in 1e-7 degree.
+    pub lat_e7: i32,
+    /// Longitude in 1e-7 degree.
+    pub lng_e7: i32,
+    /// Altitude above mean sea level in centimetres (the column shows metres).
+    pub alt_cm: i32,
+    /// Ground speed in m/s.
+    pub speed_m_s: f32,
+    /// Course over ground in degrees.
+    pub course_deg: f32,
+}
+
+/// GPS: one fix. 42 bytes.
+pub fn encode_gps(out: &mut [u8], time_us: u64, g: &Gps) -> usize {
+    let Some(mut w) = Writer::start(out, &GPS) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(g.inst);
+    w.u8(g.status);
+    w.u32(g.gms);
+    w.u16(g.gwk);
+    w.u8(g.nsats);
+    w.i16(i16::try_from(g.hdop_x100).unwrap_or(i16::MAX));
+    w.i32(g.lat_e7);
+    w.i32(g.lng_e7);
+    w.i32(g.alt_cm);
+    w.f32(g.speed_m_s);
+    w.f32(g.course_deg);
+    w.pos
+}
+
+/// BAT: instance `inst`, voltage in V, current in A. 20 bytes.
+pub fn encode_bat(out: &mut [u8], time_us: u64, inst: u8, volt: f32, curr: f32) -> usize {
+    let Some(mut w) = Writer::start(out, &BAT) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    w.f32(volt);
+    w.f32(curr);
+    w.pos
+}
+
+/// RCIN: the 14 channels in microseconds. 39 bytes.
+pub fn encode_rcin(out: &mut [u8], time_us: u64, channels_us: &[u16; 14]) -> usize {
+    let Some(mut w) = Writer::start(out, &RCIN) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for &c in channels_us {
+        w.u16(c);
+    }
+    w.pos
+}
+
+/// The values of one DEV record (one row of the device status table).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dev {
+    /// Row id.
+    pub id: u8,
+    /// Health state.
+    pub state: u8,
+    /// Error code.
+    pub err: u8,
+    /// Samples.
+    pub samples: u32,
+    /// Errors.
+    pub errors: u32,
+    /// Time-outs.
+    pub timeouts: u32,
+    /// Recoveries.
+    pub recoveries: u16,
+    /// Attempts.
+    pub attempts: u16,
+    /// Overflows.
+    pub overflows: u16,
+}
+
+/// DEV: one device status row. 32 bytes.
+pub fn encode_dev(out: &mut [u8], time_us: u64, d: &Dev) -> usize {
+    let Some(mut w) = Writer::start(out, &DEV) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(d.id);
+    w.u8(d.state);
+    w.u8(d.err);
+    w.u32(d.samples);
+    w.u32(d.errors);
+    w.u32(d.timeouts);
+    w.u16(d.recoveries);
+    w.u16(d.attempts);
+    w.u16(d.overflows);
+    w.pos
+}
+
+/// The values of one DSF record (the logger's statistics).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Dsf {
+    /// Records dropped since the log began.
+    pub dropped: u32,
+    /// 512-byte blocks written; only the low 16 bits are stored (ArduPilot's `uint16_t`).
+    pub blocks: u32,
+    /// Bytes written.
+    pub bytes: u32,
+    /// Smallest free space of the ring over the last second.
+    pub free_min: u32,
+    /// Largest free space of the ring over the last second.
+    pub free_max: u32,
+    /// Mean free space of the ring over the last second.
+    pub free_avg: u32,
+}
+
+/// DSF: the logger's statistics. 33 bytes.
+pub fn encode_dsf(out: &mut [u8], time_us: u64, d: &Dsf) -> usize {
+    let Some(mut w) = Writer::start(out, &DSF) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u32(d.dropped);
+    w.u16((d.blocks & 0xFFFF) as u16);
+    w.u32(d.bytes);
+    w.u32(d.free_min);
+    w.u32(d.free_max);
+    w.u32(d.free_avg);
+    w.pos
+}
+
+/// Days from 1970-01-01 to `y-m-d` (proleptic Gregorian, `m` 1 to 12, `d` 1 to 31), after
+/// Howard Hinnant's `days_from_civil`.
+const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = y.div_euclid(400);
+    let yoe = y - era * 400;
+    let mp = (m + 9) % 12;
+    let doy = (153 * mp + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Days from 1970-01-01 to the GPS epoch, 1980-01-06.
+const GPS_EPOCH_DAYS: i64 = 3_657;
+/// Leap seconds between GPS time and UTC since 2017-01-01 (no leap second is scheduled).
+const LEAP_SECONDS: i64 = 18;
+const SECONDS_PER_WEEK: i64 = 604_800;
+
+/// GPS week and milliseconds of the week for a UTC date and time, GPS time being UTC plus 18
+/// leap seconds. Integer arithmetic only. Returns `(0, 0)` ("no time known") for a date before
+/// the GPS epoch, a field out of range (month 1 to 12, day 1 to 31, hour under 24, minute under
+/// 60, second up to 60, millisecond under 1000) or a week beyond `u16`.
+#[must_use]
+pub fn gps_week_ms(
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    millis: u16,
+) -> (u16, u32) {
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 60
+        || millis > 999
+    {
+        return (0, 0);
+    }
+    let days = days_from_civil(i64::from(year), i64::from(month), i64::from(day)) - GPS_EPOCH_DAYS;
+    if days < 0 {
+        return (0, 0);
+    }
+    let secs = days * 86_400
+        + i64::from(hour) * 3_600
+        + i64::from(minute) * 60
+        + i64::from(second)
+        + LEAP_SECONDS;
+    let (Ok(week), Ok(ms)) = (
+        u16::try_from(secs / SECONDS_PER_WEEK),
+        u32::try_from((secs % SECONDS_PER_WEEK) * 1_000 + i64::from(millis)),
+    ) else {
+        return (0, 0);
+    };
+    (week, ms)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::vec::Vec;
+
+    fn cat(parts: &[&[u8]]) -> Vec<u8> {
+        parts.concat()
+    }
+
+    /// One encoded sample of every type (type id, bytes), with values that are not special.
+    fn one_of_each() -> Vec<(u8, Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut b = [0u8; 256];
+        let g = Gps {
+            status: 3,
+            ..Gps::default()
+        };
+        let n = fmt_record(&PARM, &mut b);
+        out.push((ID_FMT, b[..n].to_vec()));
+        let n = encode_parm(&mut b, 1, b"X", 1.0, 2.0);
+        out.push((ID_PARM, b[..n].to_vec()));
+        let n = encode_msg(&mut b, 1, b"text");
+        out.push((ID_MSG, b[..n].to_vec()));
+        let n = encode_imu(&mut b, 1, 1, [1.0; 3], [2.0; 3], 3.0);
+        out.push((ID_IMU, b[..n].to_vec()));
+        let n = encode_baro(&mut b, 1, 0, 1.0, 2.0);
+        out.push((ID_BARO, b[..n].to_vec()));
+        let n = encode_mag(&mut b, 1, 0, [1, 2, 3]);
+        out.push((ID_MAG, b[..n].to_vec()));
+        let n = encode_gps(&mut b, 1, &g);
+        out.push((ID_GPS, b[..n].to_vec()));
+        let n = encode_bat(&mut b, 1, 0, 1.0, 2.0);
+        out.push((ID_BAT, b[..n].to_vec()));
+        let n = encode_rcin(&mut b, 1, &[1500; 14]);
+        out.push((ID_RCIN, b[..n].to_vec()));
+        let n = encode_dev(&mut b, 1, &Dev::default());
+        out.push((ID_DEV, b[..n].to_vec()));
+        let n = encode_dsf(&mut b, 1, &Dsf::default());
+        out.push((ID_DSF, b[..n].to_vec()));
+        out
+    }
+
+    /// Q3-I1: the length of every encoded record equals the length its FMT announces, and the
+    /// table is consistent (one column per format character, unique types, distinct names).
+    #[test]
+    fn q3_i1_record_length_equals_fmt_length() {
+        let samples = one_of_each();
+        assert_eq!(samples.len(), TYPES.len());
+        let mut header = [0u8; HEADER_SEQUENCE_LEN];
+        assert_eq!(write_header(&mut header), HEADER_SEQUENCE_LEN);
+        for (i, def) in TYPES.iter().enumerate() {
+            assert_eq!(samples[i].0, def.type_id);
+            // Length the FMT record of this type announces (byte 4 of the record).
+            let fmt = &header[i * 89..(i + 1) * 89];
+            assert_eq!(fmt[3], def.type_id);
+            assert_eq!(usize::from(fmt[4]), samples[i].1.len(), "type {}", def.name);
+            assert_eq!(usize::from(def.length), samples[i].1.len());
+            assert_eq!(samples[i].1[..3], [HEAD1, HEAD2, def.type_id]);
+            // Columns: one name per format character, the first is TimeUS for data types.
+            assert_eq!(
+                def.columns.split(',').count(),
+                def.format.len(),
+                "{}",
+                def.name
+            );
+            if def.type_id != ID_FMT {
+                assert!(def.columns.starts_with("TimeUS,"));
+                assert!(def.format.starts_with('Q'));
+            }
+            for other in &TYPES[..i] {
+                assert_ne!(other.type_id, def.type_id);
+                assert_ne!(other.name, def.name);
+            }
+        }
+        // A reader that only knows the FMT lengths walks the sample to its exact end.
+        let all: Vec<u8> = samples.iter().flat_map(|(_, b)| b.clone()).collect();
+        let mut at = 0;
+        for _ in 0..TYPES.len() {
+            assert_eq!(all[at..at + 2], [HEAD1, HEAD2]);
+            let t = all[at + 2];
+            at += usize::from(TYPES.iter().find(|d| d.type_id == t).unwrap().length);
+        }
+        assert_eq!(at, all.len());
+    }
+
+    /// Q3-I2: the FMT of FMT, byte for byte.
+    #[test]
+    fn q3_i2_fmt_of_fmt_is_byte_exact() {
+        let mut want = [0u8; 89];
+        // 0..3 header, 3 type 128, 4 length 89 (0x59).
+        want[..5].copy_from_slice(&[0xA3, 0x95, 0x80, 0x80, 0x59]);
+        // 5..9 name "FMT" + NUL.
+        want[5..9].copy_from_slice(&[0x46, 0x4D, 0x54, 0x00]);
+        // 9..25 format "BBnNZ" + 11 NUL.
+        want[9..14].copy_from_slice(&[0x42, 0x42, 0x6E, 0x4E, 0x5A]);
+        // 25..89 columns "Type,Length,Name,Format,Columns" (31 bytes) + 33 NUL.
+        want[25..56].copy_from_slice(b"Type,Length,Name,Format,Columns");
+        let mut got = [0xEEu8; 100];
+        assert_eq!(fmt_record(&FMT, &mut got), 89);
+        assert_eq!(got[..89], want);
+        assert_eq!(
+            got[89..],
+            [0xEE; 11],
+            "nothing beyond the record is touched"
+        );
+        assert_eq!(fmt_record(&FMT, &mut [0u8; 88]), 0);
+    }
+
+    #[test]
+    fn header_sequence_is_11_fmt_records() {
+        assert_eq!(HEADER_SEQUENCE_LEN, 979);
+        let mut buf = [0u8; 1000];
+        assert_eq!(write_header(&mut buf), 979);
+        assert_eq!(write_header(&mut [0u8; 978]), 0);
+        for (i, def) in TYPES.iter().enumerate() {
+            let rec = &buf[i * 89..(i + 1) * 89];
+            assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
+            assert_eq!(rec[3], def.type_id);
+            assert_eq!(rec[4], def.length);
+        }
+        // The FMT of GPS by hand: type 134 = 0x86, length 42 = 0x2A, "GPS", its format.
+        let gps = &buf[6 * 89..7 * 89];
+        assert_eq!(gps[3..9], [0x86, 0x2A, b'G', b'P', b'S', 0]);
+        assert_eq!(gps[9..25], *b"QBBIHBcLLeff\0\0\0\0");
+    }
+
+    /// The table, as the file announces it (also printed into the report by hand).
+    #[test]
+    fn table_lengths() {
+        let lens: Vec<(&str, u8)> = TYPES.iter().map(|d| (d.name, d.length)).collect();
+        assert_eq!(
+            lens,
+            [
+                ("FMT", 89),
+                ("PARM", 35),
+                ("MSG", 75),
+                ("IMU", 40),
+                ("BARO", 18),
+                ("MAG", 18),
+                ("GPS", 42),
+                ("BAT", 20),
+                ("RCIN", 39),
+                ("DEV", 32),
+                ("DSF", 33)
+            ]
+        );
+    }
+
+    #[test]
+    fn golden_parm() {
+        // A3 95 81 | time 1 | "A" + 15 NUL | 1.0 = 00 00 80 3F | 2.0 = 00 00 00 40
+        let mut b = [0u8; 35];
+        assert_eq!(encode_parm(&mut b, 1, b"A", 1.0, 2.0), 35);
+        let want = cat(&[
+            &[0xA3, 0x95, 0x81],
+            &[1, 0, 0, 0, 0, 0, 0, 0],
+            &[0x41],
+            &[0; 15],
+            &[0x00, 0x00, 0x80, 0x3F],
+            &[0x00, 0x00, 0x00, 0x40],
+        ]);
+        assert_eq!(b.as_slice(), want);
+    }
+
+    #[test]
+    fn golden_msg_and_text_rules() {
+        // A3 95 82 | time 2 | "Hi" + 62 NUL
+        let mut b = [0u8; 75];
+        assert_eq!(encode_msg(&mut b, 2, b"Hi"), 75);
+        assert_eq!(
+            b.as_slice(),
+            cat(&[
+                &[0xA3, 0x95, 0x82, 2, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x69],
+                &[0; 62]
+            ])
+        );
+        // 70 bytes are cut at 64 (no terminator); text after a NUL is dropped.
+        assert_eq!(encode_msg(&mut b, 2, &[b'x'; 70]), 75);
+        assert_eq!(b[11..], [b'x'; 64]);
+        assert_eq!(encode_msg(&mut b, 2, b"a\0b"), 75);
+        assert_eq!(b[11..14], [b'a', 0, 0]);
+        // PARM name of 20 bytes is cut at 16.
+        let mut p = [0u8; 35];
+        encode_parm(&mut p, 0, &[b'N'; 20], 0.0, 0.0);
+        assert_eq!(p[11..27], [b'N'; 16]);
+        assert_eq!(p[27..31], [0; 4]);
+    }
+
+    #[test]
+    fn golden_imu() {
+        // A3 95 83 | time 3 | I 1 | gyro 1.0, 2.0, -1.0 | acc 0.5, 3.0, 4.0 | T 2.0
+        // 1.0 00 00 80 3F, 2.0 00 00 00 40, -1.0 00 00 80 BF, 0.5 00 00 00 3F,
+        // 3.0 00 00 40 40, 4.0 00 00 80 40
+        let mut b = [0u8; 40];
+        assert_eq!(
+            encode_imu(&mut b, 3, 1, [1.0, 2.0, -1.0], [0.5, 3.0, 4.0], 2.0),
+            40
+        );
+        let want = cat(&[
+            &[0xA3, 0x95, 0x83, 3, 0, 0, 0, 0, 0, 0, 0, 1],
+            &[0, 0, 0x80, 0x3F, 0, 0, 0, 0x40, 0, 0, 0x80, 0xBF],
+            &[0, 0, 0, 0x3F, 0, 0, 0x40, 0x40, 0, 0, 0x80, 0x40],
+            &[0, 0, 0, 0x40],
+        ]);
+        assert_eq!(b.as_slice(), want);
+    }
+
+    #[test]
+    fn golden_baro() {
+        // A3 95 84 | time 4 | I 0 | 100000.0 = 0x47C35000 = 00 50 C3 47 | 25.5 degC = 2550 = 0x09F6
+        let mut b = [0u8; 18];
+        assert_eq!(encode_baro(&mut b, 4, 0, 100_000.0, 25.5), 18);
+        assert_eq!(
+            b,
+            [
+                0xA3, 0x95, 0x84, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x50, 0xC3, 0x47, 0xF6, 0x09
+            ]
+        );
+        // -0.005 degC rounds away from zero to -1; saturation at the i16 range.
+        encode_baro(&mut b, 4, 0, 0.0, -0.005);
+        assert_eq!(b[16..], [0xFF, 0xFF]);
+        encode_baro(&mut b, 4, 0, 0.0, 1000.0);
+        assert_eq!(b[16..], [0xFF, 0x7F]);
+    }
+
+    #[test]
+    fn golden_mag() {
+        // A3 95 85 | time 5 | I 1 | 1000 = E8 03 | -1 = FF FF | -1000 = 0xFC18 = 18 FC
+        let mut b = [0u8; 18];
+        assert_eq!(encode_mag(&mut b, 5, 1, [1000, -1, -1000]), 18);
+        assert_eq!(
+            b,
+            [
+                0xA3, 0x95, 0x85, 5, 0, 0, 0, 0, 0, 0, 0, 1, 0xE8, 0x03, 0xFF, 0xFF, 0x18, 0xFC
+            ]
+        );
+    }
+
+    #[test]
+    fn golden_gps() {
+        // A3 95 86 | time 6 | I 0 | status 3 | GMS 18000 = 0x4650 = 50 46 00 00 | GWk 2445 =
+        // 0x098D = 8D 09 | NSats 12 | HDop 95 = 5F 00 | Lat 0x01020304 = 04 03 02 01 |
+        // Lng -1 = FF FF FF FF | Alt 123456 = 0x1E240 = 40 E2 01 00 | Spd 1.0 | GCrs 2.0
+        let g = Gps {
+            inst: 0,
+            status: 3,
+            gms: 18_000,
+            gwk: 2445,
+            nsats: 12,
+            hdop_x100: 95,
+            lat_e7: 0x0102_0304,
+            lng_e7: -1,
+            alt_cm: 123_456,
+            speed_m_s: 1.0,
+            course_deg: 2.0,
+        };
+        let mut b = [0u8; 42];
+        assert_eq!(encode_gps(&mut b, 6, &g), 42);
+        let want = cat(&[
+            &[0xA3, 0x95, 0x86, 6, 0, 0, 0, 0, 0, 0, 0, 0, 3],
+            &[0x50, 0x46, 0, 0, 0x8D, 0x09, 12, 0x5F, 0],
+            &[4, 3, 2, 1, 0xFF, 0xFF, 0xFF, 0xFF, 0x40, 0xE2, 1, 0],
+            &[0, 0, 0x80, 0x3F, 0, 0, 0, 0x40],
+        ]);
+        assert_eq!(b.as_slice(), want);
+        // HDop above the i16 range saturates.
+        let mut g2 = g;
+        g2.hdop_x100 = 60_000;
+        encode_gps(&mut b, 6, &g2);
+        assert_eq!(b[20..22], [0xFF, 0x7F]);
+    }
+
+    #[test]
+    fn golden_bat() {
+        // A3 95 87 | time 7 | Inst 0 | 3.0 = 00 00 40 40 | 0.5 = 00 00 00 3F
+        let mut b = [0u8; 20];
+        assert_eq!(encode_bat(&mut b, 7, 0, 3.0, 0.5), 20);
+        assert_eq!(
+            b,
+            [
+                0xA3, 0x95, 0x87, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0x40, 0, 0, 0, 0x3F
+            ]
+        );
+    }
+
+    #[test]
+    fn golden_rcin() {
+        // A3 95 88 | time 8 | C1 1500 = DC 05 | C2 1000 = E8 03 | C3..C14 0
+        let mut ch = [0u16; 14];
+        ch[0] = 1500;
+        ch[1] = 1000;
+        let mut b = [0u8; 39];
+        assert_eq!(encode_rcin(&mut b, 8, &ch), 39);
+        let want = cat(&[
+            &[
+                0xA3, 0x95, 0x88, 8, 0, 0, 0, 0, 0, 0, 0, 0xDC, 0x05, 0xE8, 0x03,
+            ],
+            &[0; 24],
+        ]);
+        assert_eq!(b.as_slice(), want);
+    }
+
+    #[test]
+    fn golden_dev() {
+        // A3 95 89 | time 9 | Id 7 | State 2 | Err 1 | Smp 0x01020304 | Errs 5 | TOs 6 | Rec 7 |
+        // Att 8 | Ovf 9
+        let d = Dev {
+            id: 7,
+            state: 2,
+            err: 1,
+            samples: 0x0102_0304,
+            errors: 5,
+            timeouts: 6,
+            recoveries: 7,
+            attempts: 8,
+            overflows: 9,
+        };
+        let mut b = [0u8; 32];
+        assert_eq!(encode_dev(&mut b, 9, &d), 32);
+        assert_eq!(
+            b,
+            [
+                0xA3, 0x95, 0x89, 9, 0, 0, 0, 0, 0, 0, 0, 7, 2, 1, 4, 3, 2, 1, 5, 0, 0, 0, 6, 0, 0,
+                0, 7, 0, 8, 0, 9, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn golden_dsf() {
+        // A3 95 8A | time 10 | Dp 1 | Blk 0x10001 stored as 0x0001 | Bytes 3 | FMn 4 | FMx 5 | FAv 6
+        let d = Dsf {
+            dropped: 1,
+            blocks: 0x1_0001,
+            bytes: 3,
+            free_min: 4,
+            free_max: 5,
+            free_avg: 6,
+        };
+        let mut b = [0u8; 33];
+        assert_eq!(encode_dsf(&mut b, 10, &d), 33);
+        assert_eq!(
+            b,
+            [
+                0xA3, 0x95, 0x8A, 10, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3, 0, 0, 0, 4, 0, 0,
+                0, 5, 0, 0, 0, 6, 0, 0, 0
+            ]
+        );
+    }
+
+    #[test]
+    fn too_small_buffer_writes_nothing() {
+        let mut b = [0x55u8; 17];
+        assert_eq!(encode_baro(&mut b, 1, 0, 1.0, 1.0), 0);
+        assert_eq!(b, [0x55; 17]);
+        assert_eq!(encode_rcin(&mut [0u8; 38], 1, &[0; 14]), 0);
+        assert_eq!(encode_dsf(&mut [], 1, &Dsf::default()), 0);
+    }
+
+    #[test]
+    fn gps_week_known_dates() {
+        // The GPS epoch, 1980-01-06 00:00:00 UTC: day 0, week 0; GPS time is 18 s ahead of UTC:
+        // 18 s = 18000 ms.
+        assert_eq!(gps_week_ms(1980, 1, 6, 0, 0, 0, 0), (0, 18_000));
+        // 2026-11-15 00:00:00 UTC. Days from 1980-01-06 to 2026-01-06: 46 years x 365 = 16790
+        // plus 12 leap days (1980, 84, 88, 92, 96, 2000, 04, 08, 12, 16, 20, 24) = 16802. Day of
+        // year of Nov 15 = 304 + 15 = 319, of Jan 6 = 6: 313 more. 17115 days = 2445 x 7 exactly,
+        // so week 2445, day 0 of the week (a Sunday). Seconds into the week: 18 (leap) = 18000 ms.
+        assert_eq!(gps_week_ms(2026, 11, 15, 0, 0, 0, 0), (2445, 18_000));
+        // The same date at 12:34:56.789 UTC: (12 x 3600 + 34 x 60 + 56 + 18) s = 45314 s
+        // = 45_314_000 ms + 789 ms.
+        assert_eq!(
+            gps_week_ms(2026, 11, 15, 12, 34, 56, 789),
+            (2445, 45_314_789)
+        );
+        // Across the week boundary: 2026-11-14 23:59:42.000 UTC + 18 s = 2026-11-15 00:00:00 GPS
+        // time = week 2445, 0 ms; one millisecond earlier it is the last millisecond of week 2444
+        // (604800 s x 1000 - 1 = 604_799_999).
+        assert_eq!(gps_week_ms(2026, 11, 14, 23, 59, 42, 0), (2445, 0));
+        assert_eq!(
+            gps_week_ms(2026, 11, 14, 23, 59, 41, 999),
+            (2444, 604_799_999)
+        );
+        // A leap day: 2024-03-01 is one day (86_400 s) after 2024-02-29.
+        let (w1, m1) = gps_week_ms(2024, 2, 29, 0, 0, 0, 0);
+        let (w2, m2) = gps_week_ms(2024, 3, 1, 0, 0, 0, 0);
+        assert_eq!(
+            (i64::from(w2) - i64::from(w1)) * 604_800_000 + i64::from(m2) - i64::from(m1),
+            86_400_000
+        );
+    }
+
+    #[test]
+    fn gps_week_no_time() {
+        assert_eq!(gps_week_ms(1980, 1, 5, 23, 59, 59, 999), (0, 0));
+        assert_eq!(gps_week_ms(2026, 0, 15, 0, 0, 0, 0), (0, 0));
+        assert_eq!(gps_week_ms(2026, 13, 15, 0, 0, 0, 0), (0, 0));
+        assert_eq!(gps_week_ms(2026, 11, 0, 0, 0, 0, 0), (0, 0));
+        assert_eq!(gps_week_ms(2026, 11, 15, 24, 0, 0, 0), (0, 0));
+        assert_eq!(gps_week_ms(2026, 11, 15, 0, 60, 0, 0), (0, 0));
+        assert_eq!(gps_week_ms(2026, 11, 15, 0, 0, 0, 1000), (0, 0));
+        assert_eq!(gps_week_ms(9999, 12, 31, 0, 0, 0, 0), (0, 0));
+    }
+}
