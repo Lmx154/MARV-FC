@@ -133,7 +133,8 @@ loop over a firmware-side `DeviceAdapter` (`data_ready`, `start`, `acquire`, `st
 `recover`, `restart`, `counters`, `self_test`: implemented for IMU1, IMU2 and MAG, "unsupported" for the rest). The loop steps the device's
 `fw_core::health::Health` and carries out its action. Sampling is `select(with_timeout(T, data ready),
 wake)` with T = max(3 P, 10 ms) (GNSS: its own 2.5 s); a timeout makes ONE status read: data waiting = a missed edge, read it;
-nothing = a deadline miss. Every bus call is awaited to completion, never inside a `select` or a timeout.
+nothing = a deadline miss. The device loop awaits every bus call to completion, never inside a `select` or a
+timeout of its own; the one deadline is inside the I2C bus wrapper of BARO and MAG (see the paragraph "A hung I2C transfer" below).
 A start, `recover` or `restart` that returns `Ok` only says the bus and the device answer: the loop then
 waits for ONE fresh sample (`with_timeout(T, data ready)`, then one `acquire` awaited to completion) before
 it tells `Health` the step worked; a timeout or a failed `acquire` counts as a failure (a failed `recover`
@@ -347,6 +348,10 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   The normal build with the deadline (`...-192012.log`, 310 s): BARO Ok 49.90/s and MAG Ok 100.10/s over the
   last 10 s, errors 0, timeouts 0, no `timed out` line (no spurious time-out from the 4 ms deadline), both
   `I2Cx bus at boot` lines, the other rows Ok, 7 `[PASS]`, watchdog stalls begun 0.
+  A settings save during a run (`...-194641.log`, the reviewer's run): the save stalled core 0 for 43.5 ms,
+  ten times the 4 ms deadline; no `timed out` line, BARO and MAG errors 0 and recoveries 0 before and after
+  (the deadline a save overlaps is discarded and the wait goes on with the same transfer). Not seen: a real
+  hang right after a save.
 
 - `FEATURES=inject-gnss-silent tools/run.sh 100`: 10 s after GNSS's first good sample the adapter stops seeing sentences (the wrapper swallows the
   fixes; the receiver keeps talking) until a RESTART request (`device restart GNSS`). Shows the long path of a device that stays silent:
