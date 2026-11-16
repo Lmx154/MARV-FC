@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the 26 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and the SD card's `LOG_BACKEND_TYPE` (see Parameters),
+  second, the parameter protocol over the 70 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets, the SD card's `LOG_BACKEND_TYPE` and the RC stick mapping (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -364,7 +364,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets and SD (after it); `fw_settings::TABLE` joins them (26 entries: 5 + 5 + 3 + 12 + 1). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD and RC (after it); `fw_settings::TABLE` joins them in that order (70 entries: 5 + 5 + 3 + 12 + 1 + 44). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -440,6 +440,29 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 | Name | Default | Range | Means |
 |---|---|---|---|
 | `LOG_BACKEND_TYPE` | 1 | 0 to 1 | 0: no logging, the SD task never touches the card and the row is Absent with the text "SD: logging off"; 1: the SD card (ArduPilot's name; ArduPilot's other values are not offered) |
+
+### RC parameters
+
+`crates/fw-settings/src/rc.rs`, 44 `I32` parameters, device RC (7), all `Live` (the next computation reads them; no reboot, no
+validator). ArduPilot's names for channels 1 to 8 (`RCn_*`) and for the function map (`RCMAP_*`); the table is appended last, so no
+other parameter changed its index. `RCn_MIN`, `RCn_TRIM` and `RCn_MAX` are calibration results (`param reset-calibration` resets
+them). There is no check between parameters (MIN below TRIM below MAX, a unique map): the normaliser gives a value for every in-range
+combination, and 0 when MAX is not above MIN. In this change the parameters and the pure normaliser exist (host tested); nothing
+sends the normalised sticks yet.
+
+| Name (n = 1 to 8) | Default | Range | Means |
+|---|---|---|---|
+| `RCn_MIN` | 1100 | 800 to 2200 | channel n's value at the low end, microseconds |
+| `RCn_TRIM` | 1500 | 800 to 2200 | channel n's centre, microseconds |
+| `RCn_MAX` | 1900 | 800 to 2200 | channel n's value at the high end, microseconds |
+| `RCn_REVERSED` | 0 | 0 to 1 | 1: the channel is reversed (angle negated; throttle mirrored between MIN and MAX) |
+| `RCn_DZ` | 0 | 0 to 200 | dead zone in microseconds: around TRIM for roll, pitch and yaw, above MIN for throttle |
+| `RCMAP_ROLL` | 1 | 1 to 8 | the channel that is roll |
+| `RCMAP_PITCH` | 2 | 1 to 8 | the channel that is pitch |
+| `RCMAP_THROTTLE` | 3 | 1 to 8 | the channel that is throttle |
+| `RCMAP_YAW` | 4 | 1 to 8 | the channel that is yaw |
+
+Order in the table: for n = 1 to 8 `RCn_MIN`, `RCn_TRIM`, `RCn_MAX`, `RCn_REVERSED`, `RCn_DZ`, then the four `RCMAP_*`.
 
 ## SD card (device row 9)
 
@@ -521,7 +544,7 @@ written.
   time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
   status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 26 parameters when a log opens and after
+  text ring's third cursor: the boot texts first), PARM for all 70 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second).
@@ -1074,9 +1097,9 @@ the host (244 tests, and 4 doc tests); the binary uses every module listed below
 | `text_ring` | The STATUSTEXT ring for the ground-station links: 8 entries, a read cursor per link (each text reaches each link once, in order), the oldest dropped and counted for a link more than 8 behind, so a slow or absent link holds back nobody; 2 sticky slots (the boot report) kept until every link took them, taken first |
 
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
-`settings_to_config` with its validator (today `baro`, `mag`, `batt` and `imu`; `baro` is over the `bmp581` driver's `Config`, without the
+`settings_to_config` with its validator (today `baro`, `mag`, `batt`, `imu` and `rc`, the last with the RC stick normaliser, no validator; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (23 tests, the first six: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (32 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store
