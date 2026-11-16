@@ -60,6 +60,8 @@ mod sd_probe;
 mod settings;
 mod store;
 mod watchdog;
+#[cfg(feature = "xip-park")]
+mod xip_park;
 #[cfg(feature = "xip-stat")]
 mod xip_probe;
 
@@ -1092,6 +1094,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(stall()));
     #[cfg(feature = "save-loop")]
     spawner.spawn(defmt::unwrap!(settings::save_loop()));
+    #[cfg(feature = "xip-park")]
+    spawner.spawn(defmt::unwrap!(xip_park::task()));
     #[cfg(feature = "wdg-scratch-probe")]
     spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 

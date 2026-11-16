@@ -39,7 +39,7 @@ ROOTS = [
     (r"^DMA_IRQ_0$", True),
     (r"^IO_IRQ_BANK0$", True),
     (r"^SIO_IRQ_FIFO$", True),
-    (r"16marv_v2_firmware8xip_park\d*\w*$", False),  # feature xip-park only
+    (r"16marv_v2_firmware8xip_park10park_core0$", False),  # feature xip-park only
 ]
 
 TERMINAL = re.compile(
