@@ -118,7 +118,10 @@ mod tests {
         b[SIGNATURE + 1] = 0x00;
         assert_eq!(partition1(&b, CARD), Err(WrongFormat::NoSignature));
         assert_eq!(partition1(&[0; 512], CARD), Err(WrongFormat::NoSignature));
-        assert_eq!(partition1(&[0xff; 512], CARD), Err(WrongFormat::NoSignature));
+        assert_eq!(
+            partition1(&[0xff; 512], CARD),
+            Err(WrongFormat::NoSignature)
+        );
     }
 
     #[test]

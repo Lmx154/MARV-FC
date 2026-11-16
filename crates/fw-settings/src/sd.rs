@@ -39,8 +39,14 @@ mod tests {
         assert_eq!(def.default, ParamValue::I32(1));
         assert_eq!(params.get(0), Some(ParamValue::I32(1)));
         assert_eq!(params.set(0, ParamValue::I32(0)), Ok(ParamValue::I32(0)));
-        assert_eq!(params.set(0, ParamValue::I32(2)), Err(ParamError::OutOfRange));
-        assert_eq!(params.set(0, ParamValue::I32(-1)), Err(ParamError::OutOfRange));
+        assert_eq!(
+            params.set(0, ParamValue::I32(2)),
+            Err(ParamError::OutOfRange)
+        );
+        assert_eq!(
+            params.set(0, ParamValue::I32(-1)),
+            Err(ParamError::OutOfRange)
+        );
         assert_eq!(params.get(0), Some(ParamValue::I32(0)));
         // Reboot: nothing to configure and nothing live.
         assert_eq!(params.take_configure_mask(), 0);

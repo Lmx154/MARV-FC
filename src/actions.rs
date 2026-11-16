@@ -3,7 +3,7 @@
 //! final ACK goes only to the origin link (the book's rule). `armed` and `hil` are false until
 //! the arming code and the HIL source exist.
 //!
-//! Built: restart of every registry row (IMU1, IMU2, BARO, MAG, GNSS, BATT), the self-test of
+//! Built: restart of every registry row (IMU1, IMU2, BARO, MAG, GNSS, BATT, SD), the self-test of
 //! MAG, IMU1 and IMU2 (the driver's test, then the restart under the same request number; one
 //! STATUSTEXT with the result before the final ACK), parameters to defaults (all, calibration),
 //! save to and reload from the flash settings region (`settings`), reboot (the watchdog monitor
@@ -75,6 +75,7 @@ fn action_name(action: Action) -> &'static str {
         Action::DeviceRestart(MarvDevice::MARV_DEVICE_MAG) => "restart MAG",
         Action::DeviceRestart(MarvDevice::MARV_DEVICE_GNSS) => "restart GNSS",
         Action::DeviceRestart(MarvDevice::MARV_DEVICE_BATT) => "restart BATT",
+        Action::DeviceRestart(MarvDevice::MARV_DEVICE_SD) => "restart SD",
         Action::DeviceRestart(_) => "restart",
         Action::DeviceSelfTest(_) => "self-test",
     }

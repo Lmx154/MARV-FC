@@ -31,8 +31,9 @@
 //! `wdg-scratch-probe`: the watchdog checks (`watchdog`).
 #![no_std]
 #![no_main]
-// The SD probe's file-system futures nest deeper than the default limit allows for their layout.
-#![cfg_attr(feature = "sd-fat-probe", recursion_limit = "256")]
+// The SD task's and the SD probe's file-system futures nest deeper than the default limit allows
+// for their layout.
+#![recursion_limit = "256"]
 
 mod actions;
 mod baro;
@@ -51,6 +52,8 @@ mod imu_inject;
 mod inject;
 mod mag;
 mod rc;
+#[cfg(not(feature = "sd-fat-probe"))]
+mod sd;
 #[cfg(feature = "sd-fat-probe")]
 mod sd_probe;
 mod settings;
@@ -138,6 +141,9 @@ static CORE1_ACTLR: AtomicU32 = AtomicU32::new(0);
 static CORE1_ACTLR_READ: AtomicBool = AtomicBool::new(false);
 /// Core 1's `DMA_IRQ_0` after it built IMU1's and IMU2's SPI: 0 not read yet, 1 disabled, 2 enabled.
 static CORE1_DMA_IRQ0: AtomicU8 = AtomicU8::new(0);
+/// Core 1's `DMA_IRQ_1` (the SD card's line, core 0 only), read at the same point; stored before
+/// `CORE1_DMA_IRQ0`, so it is published once that is: 0 not read yet, 1 disabled, 2 enabled.
+pub static CORE1_DMA_IRQ1: AtomicU8 = AtomicU8::new(0);
 
 /// Core 1's stack and executor.
 const CORE1_STACK_BYTES: usize = 16 * 1024;
@@ -244,13 +250,12 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
     // Built here so that the DMA and GPIO interrupts are enabled on this core's NVIC.
     let imu1 = imu1::adapter(imu1_parts);
     let imu2 = imu2::adapter(imu2_parts);
-    let dma_on = interrupt::DMA_IRQ_0.is_enabled();
-    CORE1_DMA_IRQ0.store(1 + u8::from(dma_on), Ordering::Release);
-    #[cfg(feature = "sd-fat-probe")]
-    sd_probe::CORE1_DMA_IRQ1.store(
+    CORE1_DMA_IRQ1.store(
         1 + u8::from(interrupt::DMA_IRQ_1.is_enabled()),
         Ordering::Release,
     );
+    let dma_on = interrupt::DMA_IRQ_0.is_enabled();
+    CORE1_DMA_IRQ0.store(1 + u8::from(dma_on), Ordering::Release);
     let executor = EXECUTOR1.init(Executor::new());
     executor.run(|spawner| {
         #[cfg(not(feature = "no-fbeat"))]
@@ -1049,6 +1054,18 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
+    // The SD card's device task; in a build of the SD probe the probe owns the card instead.
+    #[cfg(not(feature = "sd-fat-probe"))]
+    spawner.spawn(defmt::unwrap!(sd::task(sd::Parts {
+        pio: p.PIO0,
+        dma: p.DMA_CH4,
+        clk: p.PIN_32,
+        cmd: p.PIN_33,
+        dat0: p.PIN_28,
+        dat1: p.PIN_29,
+        dat2: p.PIN_30,
+        dat3: p.PIN_31,
+    })));
     #[cfg(feature = "sd-fat-probe")]
     spawner.spawn(defmt::unwrap!(sd_probe::task(sd_probe::Parts {
         pio: p.PIO0,

@@ -11,7 +11,7 @@
 //! listed, and the un-mount. Every call is awaited to its end (Q2-I1); every file is closed, which
 //! flushes it, before it is dropped (Q2-I2).
 
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::Ordering;
 
 use atomic_waker::AtomicWaker;
 use block_device_adapters::{BufStream, StreamSlice};
@@ -28,7 +28,7 @@ use fw_flight::tagged;
 use pio_sdmmc::pio::{DmaIrqHandler, DmaWaker, PioBus, PioBusConfig};
 use pio_sdmmc::{Block, Config, SdCard};
 
-use crate::check;
+use crate::{CORE1_DMA_IRQ1, check};
 
 /// The SD card's channel (resources.md DMA row 4).
 const CH: usize = 4;
@@ -59,9 +59,6 @@ const PACED_PIECES: usize = PACED_TICKS.div_ceil(PACED_WRITE_TICKS) as usize;
 type Sd = SdCard<PioBus<'static, PIO0, 0>>;
 type Volume = StreamSlice<BufStream<Sd, 512>>;
 type Fs<'a> = FileSystem<&'a mut Volume, DefaultTimeProvider, LossyOemCpConverter>;
-
-/// Core 1's `DMA_IRQ_1` as it read it after building the IMUs: 0 not read yet, 1 disabled, 2 enabled.
-pub static CORE1_DMA_IRQ1: AtomicU8 = AtomicU8::new(0);
 
 /// The waker of the SD bus's DMA completion (the driver keeps no static state, CONTRACT A6).
 static SD_WAKER: AtomicWaker = AtomicWaker::new();

@@ -242,7 +242,7 @@ pub struct Device {
 /// Request bit: apply the stored settings to the running device.
 const REQ_APPLY: u8 = 1;
 /// Request bit: restart the device, from any state.
-const REQ_RESTART: u8 = 2;
+pub(crate) const REQ_RESTART: u8 = 2;
 /// Request bit: self-test the device, then restart it as for `REQ_RESTART`, from any state.
 const REQ_SELF_TEST: u8 = 4;
 
@@ -361,11 +361,11 @@ impl Device {
         self.self_test_rows.load(Ordering::Relaxed)
     }
 
-    fn take_request(&self, bit: u8) -> bool {
+    pub(crate) fn take_request(&self, bit: u8) -> bool {
         self.request.fetch_and(!bit, Ordering::AcqRel) & bit != 0
     }
 
-    fn requested(&self, bit: u8) -> bool {
+    pub(crate) fn requested(&self, bit: u8) -> bool {
         self.request.load(Ordering::Acquire) & bit != 0
     }
 
@@ -373,8 +373,15 @@ impl Device {
         self.status.lock(Cell::get)
     }
 
-    fn set_status(&self, status: DeviceStatus) {
+    pub(crate) fn set_status(&self, status: DeviceStatus) {
         self.status.lock(|cell| cell.set(status));
+    }
+
+    /// Publishes the outcome of restart request `number` (a task with its own loop, `sd`).
+    #[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
+    pub(crate) fn finish_restart(&self, number: u32, ok: bool) {
+        self.restart_outcome
+            .store(number << 1 | u32::from(ok), Ordering::Release);
     }
 
     fn period(&self) -> Duration {
@@ -394,7 +401,7 @@ impl Device {
         (self.period() * 20).max(STUCK_FLOOR)
     }
 
-    fn mark(&self) {
+    pub(crate) fn mark(&self) {
         self.progress.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -432,8 +439,8 @@ impl Device {
     }
 }
 
-/// The number of registry rows.
-pub const DEVICE_COUNT: usize = 6;
+/// The number of registry rows (the SD row is not in a build of the SD probe, which owns the card).
+pub const DEVICE_COUNT: usize = if cfg!(feature = "sd-fat-probe") { 6 } else { 7 };
 /// IMU1's row, backed by the flight core.
 pub static IMU1: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU1,
@@ -457,8 +464,20 @@ pub static GNSS: Device = Device::new(MarvDevice::MARV_DEVICE_GNSS, "GNSS", crat
     .with_deadline_us(crate::gnss::DEADLINE_US);
 /// The battery monitor's row.
 pub static BATT: Device = Device::new(MarvDevice::MARV_DEVICE_BATT, "BATT", crate::batt::PERIOD_US);
+/// The SD card's row (`sd`): P = 1 s, so stuck after 20 s.
+#[cfg(not(feature = "sd-fat-probe"))]
+pub static SD: Device = Device::new(MarvDevice::MARV_DEVICE_SD, "SD", crate::sd::PERIOD_US);
 /// The registry.
-pub static DEVICES: [&Device; DEVICE_COUNT] = [&IMU1, &IMU2, &BARO, &MAG, &GNSS, &BATT];
+pub static DEVICES: [&Device; DEVICE_COUNT] = [
+    &IMU1,
+    &IMU2,
+    &BARO,
+    &MAG,
+    &GNSS,
+    &BATT,
+    #[cfg(not(feature = "sd-fat-probe"))]
+    &SD,
+];
 
 /// The row of device `id`.
 pub fn find(id: MarvDevice) -> Option<&'static Device> {
@@ -491,6 +510,14 @@ static NOTICES: Channel<CriticalSectionRawMutex, (&'static Device, Notice), 8> =
 
 fn now_ms() -> u64 {
     Instant::now().as_millis()
+}
+
+/// Hands a health transition to the supervisor for its text (a task with its own loop, `sd`).
+#[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
+pub(crate) fn notify(dev: &'static Device, report: Report) {
+    if NOTICES.try_send((dev, Notice::Report(report))).is_err() {
+        defmt::warn!("[INFO] {=str}: notice queue full", dev.name);
+    }
 }
 
 pub fn state_name(state: State) -> &'static str {
@@ -775,7 +802,7 @@ async fn fresh_sample<A: DeviceAdapter>(
 }
 
 /// A timeout or stuck window that a flash save overlapped: not a health event.
-fn discard_for_save(dev: &Device, what: &str) {
+pub(crate) fn discard_for_save(dev: &Device, what: &str) {
     SAVE_DISCARDS.fetch_add(1, Ordering::Relaxed);
     defmt::info!(
         "[INFO] {=str}: {=str} discarded, a flash save overlapped it",
@@ -813,7 +840,7 @@ async fn read<A: DeviceAdapter>(
     }
 }
 
-async fn sleep_until(dev: &Device, until_ms: u64) {
+pub(crate) async fn sleep_until(dev: &Device, until_ms: u64) {
     let until = Instant::from_millis(until_ms);
     loop {
         let now = Instant::now();
