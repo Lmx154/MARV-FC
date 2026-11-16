@@ -590,6 +590,12 @@ searching, so no RCIN):
   volume un-mounted on the missing card in under 2 ms (ok false, no hang), four recovery attempts "no card",
   Failed 5.5 s after the pull with the text "SD: failed (bus)"; with the card back, `device restart SD` gave Ok
   in 329 ms and log 14.
+- Clean-up before the log opens (2026-11-16, `-105045.log`, `-105233.log`): `inject-log-small-volume`: "SD: clean-up,
+  deleting log 2" at 0.56 s, `LOGS/00000002.BIN` (1 294 336 B) deleted in 210 ms, then the log opened at 0.80 s,
+  SD Ok. `inject-log-delete-big`: logs 3 (9 453 568 B, 1.35 s), 4 (512 000 B, 77 ms) and 5 (161 218 560 B,
+  22.9 s) deleted one after the other, the log opened 24.9 s after boot; during the 22.9 s (the stuck limit is 20 s)
+  the SD row was Starting, never flagged stuck, then Ok; the other rows Ok with 0 errors, IMU 803.5 / 800.7,
+  watchdog stalls begun 0; the log then written at 10.4 blocks/s, overflows 0, in the 210 s run.
 - NOT seen: a power cut, a real write error on a present card, card full, a second card type, RCIN records (no
   transmitter), the logger without the debugger attached.
 
