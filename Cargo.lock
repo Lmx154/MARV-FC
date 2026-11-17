@@ -291,7 +291,7 @@ checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 [[package]]
 name = "crsf-codec"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/crsf-codec.git?rev=61a087889395e5c63bb73f80d2dde678f22f95a7#61a087889395e5c63bb73f80d2dde678f22f95a7"
+source = "git+https://github.com/Lmx154/crsf-codec.git?rev=2d12a55246ba1b0729c65004c6012015760da1d2#2d12a55246ba1b0729c65004c6012015760da1d2"
 
 [[package]]
 name = "crunchy"
@@ -1427,7 +1427,7 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 [[package]]
 name = "rc-port"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/rc-port.git?rev=5d5f6bdb6062ea454eee69fb1df484c79d8bcff6#5d5f6bdb6062ea454eee69fb1df484c79d8bcff6"
+source = "git+https://github.com/Lmx154/rc-port.git?rev=fe5560259d2588f12b66d36fe9aaae719a95f2eb#fe5560259d2588f12b66d36fe9aaae719a95f2eb"
 dependencies = [
  "crsf-codec",
  "embassy-rp",

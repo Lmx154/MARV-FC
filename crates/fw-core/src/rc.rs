@@ -114,6 +114,69 @@ pub fn crsf_sticks(
     (from_crsf && now_us.saturating_sub(at_us) < FRESH_US).then_some(channels)
 }
 
+/// The values of a CRSF GPS frame (type 0x02), in the units of its `Gps` struct in `crsf-codec`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrsfGps {
+    /// Degrees times 1e7.
+    pub latitude_e7: i32,
+    /// Degrees times 1e7.
+    pub longitude_e7: i32,
+    /// 0.1 km/h.
+    pub groundspeed_dkmh: u16,
+    /// 0.01 degree.
+    pub heading_cdeg: u16,
+    /// Metres above mean sea level, within [`CRSF_MIN_ALTITUDE_M`] to [`CRSF_MAX_ALTITUDE_M`].
+    pub altitude_m: i32,
+    /// Satellites used.
+    pub satellites: u8,
+}
+
+/// Lowest altitude sent, in m: Betaflight's wire value 0 (`betaflight-telemetry-crsf.c`, `crsfFrameGps`:
+/// `constrain(altCm / 100 + 1000, 0, 5000)`).
+pub const CRSF_MIN_ALTITUDE_M: i32 = -1000;
+/// Highest altitude sent, in m: Betaflight's wire value 5000.
+pub const CRSF_MAX_ALTITUDE_M: i32 = 4000;
+
+/// The GNSS sample's values as a CRSF GPS frame's: speed mm/s to 0.1 km/h rounded half up
+/// (`(mm_s * 36 + 500) / 1000`, Betaflight's `(cm_s * 36 + 50) / 100` from a finer unit, clamped to
+/// `u16`), altitude mm to whole metres (floor) clamped to -1000..=4000 m as Betaflight does.
+///
+/// Before a fix, and after a loss, the frame carries zeros (as Betaflight and ArduPilot send their
+/// zeroed GPS state before a first fix); unlike them it does not hold the last position after a loss.
+/// Every `None` is sent as 0 (an altitude of 0 m, satellites 0).
+pub fn crsf_gps(
+    lat_e7: Option<i32>,
+    lon_e7: Option<i32>,
+    alt_mm: Option<i32>,
+    speed_mm_s: Option<u32>,
+    course_cdeg: Option<u16>,
+    sats_used: Option<u8>,
+) -> CrsfGps {
+    let speed_dkmh = (u64::from(speed_mm_s.unwrap_or(0)) * 36 + 500) / 1000;
+    CrsfGps {
+        latitude_e7: lat_e7.unwrap_or(0),
+        longitude_e7: lon_e7.unwrap_or(0),
+        groundspeed_dkmh: u16::try_from(speed_dkmh).unwrap_or(u16::MAX),
+        heading_cdeg: course_cdeg.unwrap_or(0),
+        altitude_m: alt_mm
+            .unwrap_or(0)
+            .div_euclid(1000)
+            .clamp(CRSF_MIN_ALTITUDE_M, CRSF_MAX_ALTITUDE_M),
+        satellites: sats_used.unwrap_or(0),
+    }
+}
+
+/// Whether the GNSS row's latest sample (read at `sample_t_us`) is newer than the one last sent as a
+/// GPS frame (`last_sent_us`; `None` before the first): then this call of the telemetry hook sends
+/// the GPS frame (fix or no fix), otherwise the battery frame. Betaflight's "on each new solution".
+pub fn gps_frame_due(sample_t_us: Option<u64>, last_sent_us: Option<u64>) -> bool {
+    match (sample_t_us, last_sent_us) {
+        (Some(t), Some(sent)) => t > sent,
+        (Some(_), None) => true,
+        (None, _) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +337,101 @@ mod tests {
             Some(ch),
             "clock behind"
         );
+    }
+
+    #[test]
+    fn crsf_gps_converts_a_made_up_sample() {
+        // 45.0 N, 9.0 E (made up), 123.456 m, 5.5 m/s = 19.8 km/h, course 270.25, 9 satellites.
+        let g = crsf_gps(
+            Some(450_000_000),
+            Some(90_000_000),
+            Some(123_456),
+            Some(5_500),
+            Some(27_025),
+            Some(9),
+        );
+        assert_eq!(
+            g,
+            CrsfGps {
+                latitude_e7: 450_000_000,
+                longitude_e7: 90_000_000,
+                groundspeed_dkmh: 198,
+                heading_cdeg: 27_025,
+                altitude_m: 123,
+                satellites: 9,
+            }
+        );
+        let south_west = crsf_gps(
+            Some(-450_000_000),
+            Some(-90_000_000),
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(
+            (south_west.latitude_e7, south_west.longitude_e7),
+            (-450_000_000, -90_000_000)
+        );
+    }
+
+    #[test]
+    fn crsf_gps_clamps_altitude_like_betaflight() {
+        let alt = |mm| crsf_gps(None, None, Some(mm), None, None, None).altitude_m;
+        assert_eq!(alt(-1_001_000), -1000);
+        assert_eq!(alt(-1_000_000), -1000);
+        assert_eq!(alt(4_000_000), 4000);
+        assert_eq!(alt(4_001_000), 4000);
+        assert_eq!(alt(i32::MAX), 4000);
+        assert_eq!(alt(i32::MIN), -1000);
+        assert_eq!(alt(-1), -1, "floor, not truncation");
+        assert_eq!(alt(999), 0);
+    }
+
+    #[test]
+    fn crsf_gps_rounds_speed_half_up_and_clamps() {
+        let sp = |mm_s| crsf_gps(None, None, None, Some(mm_s), None, None).groundspeed_dkmh;
+        assert_eq!(sp(0), 0);
+        assert_eq!(sp(138), 5, "138 mm/s = 4.968 dkmh");
+        assert_eq!(sp(13), 0, "0.468 dkmh rounds down");
+        assert_eq!(sp(14), 1, "0.504 dkmh rounds up");
+        assert_eq!(sp(5_500), 198);
+        assert_eq!(sp(u32::MAX), u16::MAX);
+    }
+
+    #[test]
+    fn crsf_gps_without_a_fix_carries_zeros() {
+        let g = crsf_gps(None, None, None, None, None, Some(3));
+        assert_eq!(
+            g,
+            CrsfGps {
+                latitude_e7: 0,
+                longitude_e7: 0,
+                groundspeed_dkmh: 0,
+                heading_cdeg: 0,
+                altitude_m: 0,
+                satellites: 3,
+            }
+        );
+        assert_eq!(crsf_gps(None, None, None, None, None, None).satellites, 0);
+    }
+
+    #[test]
+    fn gps_frame_is_due_once_per_new_sample() {
+        assert!(gps_frame_due(Some(5), None), "first sample");
+        assert!(
+            gps_frame_due(Some(2_000_000), Some(1_000_000)),
+            "newer sample"
+        );
+        assert!(
+            !gps_frame_due(Some(1_000_000), Some(1_000_000)),
+            "already sent"
+        );
+        assert!(
+            !gps_frame_due(Some(500_000), Some(1_000_000)),
+            "older than the one sent"
+        );
+        assert!(!gps_frame_due(None, None), "no sample");
+        assert!(!gps_frame_due(None, Some(1)), "no sample");
     }
 }

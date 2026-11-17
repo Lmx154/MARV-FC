@@ -27,7 +27,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::health::Counters;
-use fw_core::rc::{PortMode, RcInput, RcVerdict, crsf_sticks, verdict};
+use fw_core::rc::{PortMode, RcInput, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, verdict};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
 use mavlink_device::dialect::{MANUAL_CONTROL_DATA, MavState, RC_CHANNELS_DATA};
@@ -36,13 +36,15 @@ use mavlink_device::{
     CommandOutcome, CommandRequest, Config as NodeConfig, LateAck, Outgoing, ParamStore,
     ParamValue, Stream, StreamSlot, Telemetry, Texts,
 };
-use rc_port::crsf_codec::{Battery, LinkStatistics, MAX_FRAME_LEN, encode_battery};
+use rc_port::crsf_codec::{
+    Battery, Gps, LinkStatistics, MAX_FRAME_LEN, encode_battery, encode_gps,
+};
 use rc_port::{
     Config, Hooks, MAVLINK_BAUD, Mode, RadioStatus, RcPort, Report, SetBaud, Source, Stats, TxBusy,
 };
 use static_cell::StaticCell;
 
-use crate::device::{BATT, Reading, Sample};
+use crate::device::{BATT, GNSS, Reading, Sample};
 
 bind_interrupts!(struct Irqs {
     UART0_IRQ => BufferedInterruptHandler<UART0>;
@@ -262,7 +264,10 @@ pub fn manual_control(now_us: u64) -> Option<MANUAL_CONTROL_DATA> {
 }
 
 /// The port's hooks: copy into `SHARED`, never block, never format.
-struct RcHooks;
+struct RcHooks {
+    /// The GNSS sample (its `t_us`) last sent as a GPS frame.
+    last_gps_us: Option<u64>,
+}
 
 impl Hooks for RcHooks {
     fn report(&mut self, report: Report) {
@@ -280,9 +285,40 @@ impl Hooks for RcHooks {
         });
     }
 
-    /// The BATT row's latest sample while younger than 1 s (remaining percent and capacity are
-    /// not estimated: 0).
+    /// The GPS frame from the GNSS row's latest sample when it is newer than the one last sent as
+    /// GPS (fix or no fix: `fw_core::rc::crsf_gps`, zeros without a fix); otherwise the BATT row's
+    /// latest sample while younger than 1 s (remaining percent and capacity are not estimated: 0).
     fn crsf_frame(&mut self, now_us: u64, out: &mut [u8; MAX_FRAME_LEN]) -> Option<usize> {
+        if let Some(Sample {
+            reading:
+                Reading::Gnss {
+                    lat_e7,
+                    lon_e7,
+                    alt_mm,
+                    speed_mm_s,
+                    course_cdeg,
+                    sats_used,
+                    ..
+                },
+            t_us,
+            ..
+        }) = GNSS.latest.try_get()
+            && gps_frame_due(Some(t_us), self.last_gps_us)
+        {
+            let g = crsf_gps(lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used);
+            let gps = Gps {
+                latitude_e7: g.latitude_e7,
+                longitude_e7: g.longitude_e7,
+                groundspeed_dkmh: g.groundspeed_dkmh,
+                heading_cdeg: g.heading_cdeg,
+                altitude_m: g.altitude_m,
+                satellites: g.satellites,
+            };
+            if let Ok(n) = encode_gps(&gps, out) {
+                self.last_gps_us = Some(t_us);
+                return Some(n);
+            }
+        }
         let Some(Sample {
             reading:
                 Reading::Batt {
@@ -522,7 +558,7 @@ async fn rc_link(
         last_out_of_turn: false,
         sent_state: [None; crate::ROWS],
     };
-    let mut hooks = RcHooks;
+    let mut hooks = RcHooks { last_gps_us: None };
     loop {
         let end = port
             .run(
