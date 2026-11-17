@@ -885,17 +885,24 @@ What each link carries:
 | HEARTBEAT, SYS_STATUS | 1 Hz each | 1 Hz each |
 | MARV_DEVICE_STATUS | 7 rows, 4 per message batch every 500 ms | one row per second: a row whose state changed since it was last sent on the radio goes out of turn, at most every other message (the message after it is the in-turn one), else in turn |
 | GPS_RAW_INT | 1 Hz | every 2 s |
-| HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | none |
+| HIGHRES_IMU (`id` 0: IMU1 with the magnetometer), SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | 1 Hz each, built by the same functions as on USB (`push_highres_imu`, `push_scaled_imu2`, `push_scaled_pressure` in `main.rs`), so the fields are the USB link's; the Sensors tab's messages |
 | RC_CHANNELS (65) | 5 Hz while stick reports are younger than 1 s: 16 channels in us, `chancount` 16, `rssi` = CRSF uplink LQ x 254 / 100, or RADIO_STATUS `rssi` in MAVLink mode, 255 without a fresh figure | none |
 | MANUAL_CONTROL (69) | 5 Hz (fastest 50 Hz, like RC_CHANNELS) while the latest stick report is from CRSF and younger than 1 s (`fw_core::rc::crsf_sticks`; a MAVLink RC_CHANNELS_OVERRIDE report never feeds it): `target` 1, `x` pitch, `y` roll, `z` throttle (0 to 1000), `r` yaw, each from the RC parameters (`fw_settings::rc::RcMap::axes`), `buttons` and the extension fields 0. Computed in the USB link task when the stream is due (`rc::manual_control`: one `SHARED` lock for the sticks, then one store access that copies the 44 values by index; not in the RC hook, not on core 1). Reported only; no value is held or invented when the sticks are stale | none |
 | STATUSTEXT | the ring, link 0 | the ring, link 1 |
 | Parameters, commands | on request; ACKs on the origin link | the same; no automatic push |
 
-The radio's budget from the frame sizes (MAVLink 2, 12 bytes of framing): HEARTBEAT 21 B/s, SYS_STATUS up
-to 43 B/s, one MARV_DEVICE_STATUS up to 42 B/s, GPS_RAW_INT up to 64 B per 2 s = 32 B/s: about 138 B/s
-plus texts (up to 66 B each), inside the design's 120 to 180 B/s of the roughly 500 B/s measured. The
-streams' fastest interval is their default, so a station cannot raise it; the node's own slowdown from
-RADIO_STATUS stays on. In CRSF mode the port sends the battery frame at most every 100 ms from the BATT
+The radio's budget from the frame sizes (MAVLink 2 as our dialect crate encodes them, 12 bytes of framing; trailing zero bytes of a payload are not sent; sizes got by encoding one message of each type with `marv-dialect` at the pinned commit `af6baa1` in a scratch program, outside this repository): HEARTBEAT 21 B/s, SYS_STATUS up
+to 43 B/s, one MARV_DEVICE_STATUS up to 42 B/s, GPS_RAW_INT up to 64 B per 2 s = 32 B/s, HIGHRES_IMU 74 B/s (the
+`id` byte, 0, is not sent), SCALED_IMU2 36 B/s, SCALED_PRESSURE 26 B/s (28 with a non-zero `temperature_press_diff`, which
+is always 0): at most about 274 B/s plus texts (up to 66 B each). Counted at the UART (`sent MAVLink` in `[STAT] RC:`, MAVLink 460800
+mode, GPS fix present, 2026-11-16, transmitter on in its MAVLink model): 2 700 B in every 10 s from 10 s to 90 s, 270 B/s,
+against about 134 B/s before the three streams (2026-11-15). The owner's ELRS settings are 250 Hz packet rate, telemetry
+ratio 1:2, switch mode hybrid; ExpressLRS's documentation gives about 590 B/s of telemetry at 250 Hz (UNVERIFIED: read from a
+summarised web page, not checked against the source or on the air), of which 270 to 274 B/s is 46 to 47 %. The air link's own
+framing of MAVLink and its share left for the receiver's link statistics are not known here, so this is the rule's margin, not
+a measured air figure. The streams' fastest interval is their default, so a station cannot raise it (it can slow or stop one
+with SET_MESSAGE_INTERVAL); the node's own slowdown from RADIO_STATUS `txbuf` stays on. RC_CHANNELS and MANUAL_CONTROL are not
+on the radio: in MAVLink mode there are no CRSF sticks. In CRSF mode the port sends the battery frame at most every 100 ms from the BATT
 row's latest sample while it is younger than 1 s (remaining percent and capacity 0: not estimated).
 
 A parameter change on one link is answered (echoed) on that link only; both nodes use the one store

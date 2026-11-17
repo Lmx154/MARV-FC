@@ -129,6 +129,12 @@ sticks, then one store lock to copy 44 values by index (a 44-entry `Option<Param
 not in its future); the mapping is computed outside both locks. Nothing is added to core 1 (`tools/check-ram-code.py` passes
 unchanged).
 
+Radio sensor streams (2026-11-16, branch `wip-radio`, normal build, against the F1/F2 row above): `.text` 500 760 (+712), `.ram_text` 125 860 (+0), `.data` 43 892 (+0),
+`.bss` 108 908 (+256), `.uninit` 1 024; static SRAM 279 684 B, free 244 604 B (238 KiB). `rc::SLOTS` is now 6 stream slots (200 B in the ELF; the
+old size was not measured); the rest of the `.bss` growth is not investigated (the `rc_link` task's future is the likely place). No new task, static of its own, interrupt or DMA
+channel; the three builders read `IMU1`, `IMU2`, `BARO` and `MAG` `latest` (a critical-section `Watch`: one copy of the sample each) from
+the `SWI_IRQ_0` executor on core 0, as the radio's GPS_RAW_INT and SYS_STATUS already read `GNSS` and `BATT`. Nothing is added to core 1 (`tools/check-ram-code.py` passes unchanged).
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow
