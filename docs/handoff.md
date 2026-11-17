@@ -163,7 +163,12 @@ on 2026-11-15 at 4 g / 250 dps on an older firmware (110 and 1066 gaps over 1.5 
 difference is not attributed here (the flight core has moved to SRAM since, the configuration is not the only change). Seen and left: one
 `[WARN] Overrun error (embassy_rp src/uart/buffered.rs)` at about 0.06 s of every boot, before any device row.
 
-The same measurements are re-taken on this branch only for the defaults and the 400 Hz case (the board run of this branch, below in the log of the work, if present); the rest stands as a measurement of the chip settings.
+On this branch (`wip-imu-params`, 2026-11-17, three `tools/run.sh` sessions, logs `marv-v2-firmware-20261117-160121.log`, `-160447.log`, `-160812.log`; the record was empty before, sector A sequence 241): the boot line reads
+`[INFO] IMU1: 16 g, 2000 dps, 800 Hz (until the next reboot)` and the same for IMU2; the RAM-code check passes; at the defaults IMU1 803.5 to 803.6, IMU2 800.7, BARO 49.8 and MAG 100.1 per second, 0 errors,
+timeouts, missed edges, overflows and recoveries, no ERROR or panic. `marv-cli --debug param set IMU1_ODR_HZ 400` answered "IMU1_ODR_HZ: applies after reboot" and the rate stayed 803.5 (80 s to 100 s lines);
+`param save` (settings save: sector B, sequence 242, 1 entry, 44 bytes, stall 44 164 us); after the restart the boot line read 400 Hz and IMU1 ran at 401.79 to 401.71 per second (IMU2 800.7, 0 errors, also at 170 s); set back to 800 and saved
+(sector A, sequence 243, 0 entries, stall 40 772 us); after the restart the line read 800 Hz, IMU1 803.6, IMU2 800.7, and the record had 0 entries. The firmware's range check refuses nothing at these values;
+a value in range that the chip does not offer (for example 300 Hz) is stored and saved, and puts that IMU back to its defaults at the next boot with a WARNING (host-tested, not seen on the board).
 
 ## In progress: SD card logging
 
