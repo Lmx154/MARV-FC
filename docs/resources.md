@@ -11,7 +11,7 @@ input GPIO21 through `IO_IRQ_BANK0`), the BMM350 magnetometer on core 0 (2026-11
 `DMA_IRQ_0`, INT1 on GPIO15 through core 1's `IO_IRQ_BANK0`, all built inside core 1's entry closure; start-up checks:
 `DMA_IRQ_0` enabled on core 1, not on core 0), IMU2, the LSM6DSK320X, on core 1 (2026-11-15: SPI1 at 8 MHz mode 0
 with DMA channels 2 and 3 on `DMA_IRQ_0`, INT1 on GPIO7 through core 1's `IO_IRQ_BANK0`, INT2 GPIO6 unused,
-built inside core 1's entry closure next to IMU1; 800 Hz, the high-g channel off) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
+built inside core 1's entry closure next to IMU1; configured once at boot from `IMU2_ACC_FS`, `IMU2_GYR_FS`, `IMU2_ODR_HZ`, default 800 Hz, the high-g channel off) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
 see the table below); no other device, PIO block or DMA channel of this plan has run in it yet.
 
 ## Fixed by the board (`docs/pinout.md`)
@@ -139,6 +139,12 @@ Radio sensor streams (2026-11-16, branch `wip-radio`, normal build, against the 
 old size was not measured); the rest of the `.bss` growth is not investigated (the `rc_link` task's future is the likely place). No new task, static of its own, interrupt or DMA
 channel; the three builders read `IMU1`, `IMU2`, `BARO` and `MAG` `latest` (a critical-section `Watch`: one copy of the sample each) from
 the `SWI_IRQ_0` executor on core 0, as the radio's GPS_RAW_INT and SYS_STATUS already read `GNSS` and `BATT`. Nothing is added to core 1 (`tools/check-ram-code.py` passes unchanged).
+
+IMU chip settings (2026-11-17, branch `wip-imu-params`, normal build): `.text` 503 048, `.ram_text` 126 520, `.data` 43 940, `.bss` 109 732, `.uninit` 1 024
+(absolute, `arm-none-eabi-size -A`; the rows above are from other branches, so no delta is claimed). The change reads both IMUs' setups in `main` before `spawn_core1`. No new task,
+interrupt, DMA channel or cross-core cell: each setup (the chip's `Config`, the two full scales and the period, plain data) is moved by value into `imu1::Parts` / `imu2::Parts`, i.e. into core 1's
+entry closure, as the pins and DMA channels are; `fw_settings` code runs on core 0 only (the adapters on core 1 only read the plain data), `REQ_APPLY` stays reserved for the flight rows.
+`tools/check-ram-code.py` passes unchanged (roots 4, 129 functions, 67 548 B in SRAM, 204 data objects).
 
 SRAM8 and SRAM9 (4 KB each) are unused.
 

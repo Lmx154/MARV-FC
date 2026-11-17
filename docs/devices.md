@@ -38,6 +38,7 @@ Pins: see `pinout.md`, SPI0 / ICM-45686.
 - Measured output rate: internal oscillator 200.895 Hz for a nominal 200 Hz; external clock 200.000 Hz. On the
   external clock the rate is exact up to 3.2 kHz but 6388.7 Hz at the 6.4 kHz setting. The external-clock set-up
   also changes the ICM's filter path, so compare noise only with the filter path held equal.
+- Firmware configuration (README, IMU parameters): full scale, gyro range and rate come from `IMU1_ACC_FS`, `IMU1_GYR_FS` and `IMU1_ODR_HZ` at boot, fixed until the next reboot (defaults 16 g, 2000 dps, 800 Hz, both sensors, internal clock, INT1 data-ready latched); rates above 800 Hz are not offered (one read per data-ready, no FIFO).
 
 ## LSM6DSK320X (STMicroelectronics, IMU with high-g channel on SPI1)
 
@@ -72,6 +73,7 @@ Pins: see `pinout.md`, SPI1 / LSM6DSK320X.
 - ODR accuracy in normal high-performance mode is not specified (the +-1 %/+-3 % figures on p13 are for
   high-accuracy-ODR mode). Measured: the output rate runs 1.8 % below nominal (the ODR setting is not recorded).
 - High-g zero-g offset: +-250 mg typical (Table 3, p12).
+- Firmware configuration: full scale, gyro range and rate come from `IMU2_ACC_FS`, `IMU2_GYR_FS` and `IMU2_ODR_HZ` at boot, fixed until the next reboot (defaults 16 g, 2000 dps, 800 Hz through the high-accuracy ODR set "800", code 960; low-g data-ready latched on INT1, high-g off). SCALED_IMU2's int16 mrad/s gyro fields saturate at 32.767 rad/s (about 1877 dps).
 
 ## BMP581 (Bosch Sensortec, barometer on I2C1)
 

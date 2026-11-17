@@ -36,11 +36,11 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
 
 ## Done and proven on the board
 
-- **Two cores.** Core 1 is the flight core: both IMUs at 800 Hz, nothing else. Core 0 does everything else.
+- **Two cores.** Core 1 is the flight core: both IMUs (configured once at boot from `IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`; default 16 g, 2000 dps, 800 Hz), nothing else. Core 0 does everything else.
   Data crosses only through lock-free cells.
 - **Seven device rows:** IMU1, IMU2, BARO, MAG, GNSS, BATT (supervised: health states, recovery ladder,
   operator restart) and RC (report only: "the radio link is up").
-- **Parameters:** 25, with ranges and per-device validation. A write takes effect in RAM; flash is written
+- **Parameters:** 76 (the last six are the IMUs' chip settings, `Reboot` class: they apply after save and reboot; range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
@@ -62,6 +62,108 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   at once, with no reboot and no save; `RC1_MIN 700` refused with "RC1_MIN: out of range"; 0 RC UART overruns in 320 s (also 0 on
   `main` in 320 s). Not yet seen: the transmitter's MAVLink model giving no MANUAL_CONTROL (checked with the owner), and the
   station side (Radio tab, calibration).
+
+### Sensor configurations on the board (B-a, B-b)
+
+The station's sensor presets (a station feature: each preset is several of these parameters set at once, a verified combination; nothing of
+them is in the firmware) use the combinations below. They were measured on 2026-11-17 on the branch `wip-presets` (the firmware with the preset
+selectors; the chip settings, the driver configurations and the code on core 1 are the same as on this branch), debugger attached, USB power,
+battery out, motors on, no propellers; each configuration is named here by its values. BARO and MAG fields were set with
+`marv-cli`, no save. Rate: samples in the `[STAT]` lines over the window shown (the first, partial line after the change left out),
+against the chip's rate. Errors, timeouts, missed edges, overflows, recoveries and config restored: 0 in every line. Noise (a measurement, not a
+pass/fail): the bench at rest, from a 66 s `marv-cli record` of the same window (first 6 s dropped), SCALED_PRESSURE and HIGHRES_IMU
+xmag/ymag/zmag, both at 25 messages per second (the stream's own rate, so BARO 50/100 Hz and MAG 100/200 Hz are sampled, not averaged). Pressure sd
+is after a 1 s moving mean is removed (the raw sd over 60 s is mostly drift); field sd likewise, per axis.
+
+| BARO configuration (ODR, pressure OSR code, temperature OSR code, IIR P/T) | Configuration line | Rate (window) | vs chip | Pressure sd (raw), model |
+|---|---|---|---|---|
+| 50 Hz, 4, 1, IIR 0/0 | 50.056 Hz, P code 4, T code 1, IIR 0/0 | 49.83/s (60 s) | -0.45 % | 0.179 Pa (1.04), 0.21 |
+| 100 Hz, 3, 0, IIR 0/0 | 100.299 Hz, 3, 0, 0/0 | 99.78/s (50 s) | -0.52 % | 0.250 Pa (0.38), 0.30 |
+| 25 Hz, 5, 1, IIR P code 2 (coefficient 3) | 25.005 Hz, 5, 1, IIR P code 2 | 24.88/s (50 s) | -0.50 % | 0.058 Pa (1.11), 0.057 |
+| 10 Hz, 7, 3, IIR 0/0 | 10.0 Hz, 7, 3, 0/0 | 9.975/s (40 s) | -0.25 % | 0.089 Pa (0.68), 0.08 |
+
+| MAG configuration (`MAG_ODR_HZ`, `MAG_AVG`) | Configuration line | Rate (window) | vs chip | Field sd x/y/z (raw), model x/y and z |
+|---|---|---|---|---|
+| 100 Hz, averaging 2 (code 1) | 100.0 Hz, Avg2 | 100.15/s (60 s) | +0.15 % | 148/150/338 nT (159/166/458), 190 and 450 |
+| 200 Hz, averaging 2 | 200.0 Hz, Avg2 | 200.30/s (50 s) | +0.15 % | 154/154/367 nT (171/160/408), 190 and 450 |
+| 100 Hz, averaging 4 (code 2) | 100.0 Hz, Avg4 | 100.14/s (50 s) | +0.14 % | 125/126/307 nT (144/146/387), 134 and 318 |
+| 50 Hz, averaging 8 (code 3) | 50.0 Hz, Avg8 | 50.08/s (50 s) | +0.16 % | 104/104/292 nT (119/121/364), 95 and 225 |
+
+BARO: the 50 Hz configuration over the 100 Hz one is 0.72 against the model's 0.70; the 25 Hz and 10 Hz ones are at the model. MAG: every configuration is at or
+below the model, but the fall with the averaging is slower than 1/sqrt(N): averaging 4 over 2 is 0.84 (model 0.71), 8 over
+2 is 0.70 (model 0.50); z is flatter still (0.91, 0.86). Not explained (a floor from the bench's field or the 25/s
+sampling are candidates); the model holds as a bound, not as a prediction. The windows of the last three BARO rows are shorter than
+60 s because the 10 s lines fall between the 69 s steps. The BARO and MAG fields are `Configure` class: a write applies at once (about 50 ms), as seen in these runs.
+
+IMU configurations. Both IMUs get the same combination except where the chip differs (IMU2's accelerometer stops at 16 g and its gyroscope starts at 250 dps). Each was set with
+`param set IMUn_ACC_FS`, `IMUn_GYR_FS` and `IMUn_ODR_HZ` (the firmware answers "<NAME>: applies after reboot"), `param save`, reboot. Four saves in all (b to e, on `wip-presets`);
+`SAVE_EPOCH` is not a parameter on this firmware, the save line's "epoch 1" stayed 1. A write alone changes nothing on the chip: with the fields at 8 g / 1000 dps / 400 Hz in RAM (written through the selectors of
+`wip-presets`), 120 to 150 s of the run read 803.5/800.7 per second and the gyro step was unchanged, also after `device restart IMU1`
+(the line holding the restart read 798.6/s, the 60 ms of the restart): the restart does not apply a new setting, only the next boot does.
+
+Reboot 246: `marv-cli reboot --yes` printed "reboot: accepted", exit 0; the firmware logged "final ACK ... handed to the link,
+reset due at 223245 ms" (100 ms after the ACK). probe-rs then ended with "Firmware exited unexpectedly: Exception" (no RTT
+after it). The board came back by itself: `/dev/ttyACM1` was there again 15 s after the command; the SD log of that boot had the new steps. The boot lines
+themselves go to defmt only, so they were read from a new `tools/run.sh` started after it (it builds, flashes the same ELF and resets; the stored settings are what the 246 boot had loaded).
+For the other runs the reboot was that new `tools/run.sh` (kill of the old probe-rs, new session), not 246.
+
+Saves on `wip-presets` (the "settings save" line, then the next boot's "settings boot" line): b: sector B, sequence 238, 8 entries; c: sector A,
+239, 6 entries; d: sector B, 240, 5 entries; e: sector A, 241, 0 entries (every field at its default, the record is empty).
+The count is the entries that differ from the default (800 Hz, 16 g and 2000 dps are defaults, so they are not stored).
+
+Per configuration, 120 s (the 10 s to 130 s lines of `[STAT]`, 120 s of samples; the first line, which holds the start, is in the
+per-10 s minimum only: 798.8 and 795.4). Errors, timeouts, missed edges, overflows, recoveries, config restored: 0 in every line
+of every run; gaps over 1.5 P: 0; delay count after the start 0; watchdog stalls begun 0. The boot line is the
+`[INFO] IMUn: <g> g, <dps> dps, <hz> Hz (until the next reboot)` of the run (on `wip-presets` the same line also carried a preset id and name).
+
+| Configuration (IMU1 / IMU2) | Rate IMU1 / IMU2 (vs chip) | \|a\| IMU1 / IMU2 (vs 9.81) | Gyro step IMU1 / IMU2 (LSB) |
+|---|---|---|---|
+| 8 g, 1000 dps, 400 Hz both | 401.78 / 400.35 per s (+0.45 % / +0.09 %) | 9.870 / 9.630 (+0.6 % / -1.8 %) | 0.0305 / 0.0350 dps (0.0305 / 0.035) |
+| 4 g, 250 dps, 800 Hz / 4 g, 500 dps, 800 Hz | 803.56 / 800.71 (+0.45 % / +0.09 %) | 9.867 / 9.638 (+0.6 % / -1.8 %) | 0.00763 / 0.0175 dps (0.0076 / 0.0175) |
+| 32 g, 4000 dps, 800 Hz / 16 g, 4000 dps, 800 Hz | 803.56 / 800.71 (same) | 9.859 / 9.641 (+0.5 % / -1.7 %) | 0.1221 / 0.1400 dps (0.122 / 0.14) |
+| 16 g, 2000 dps, 800 Hz both (the defaults; 600 s, below) | 803.56 / 800.71 | 9.868 / 9.637 (+0.6 % / -1.8 %) | 0.0610 / 0.0700 dps (0.061 / 0.07) |
+
+Step: the figures are the smallest non-zero step of consecutive IMU records (GyrX, GyrY, GyrZ
+agree on all three axes), 2750 records per IMU per 110 s window (14750 in the 600 s). Rates are the firmware's `[STAT]`; |a| is
+the firmware's `|accel|` from the flight core line, averaged over the window (the SD log's |a| agrees to 0.01). IMU2 reads
+9.63 at every range, as before; the chip is not judged here.
+
+Gyro at rest, mean of the firmware's `[STAT] IMUn mean of 1000 samples` lines (sd in mrad/s, per axis x/y/z, then in dps and
+over the design's Low noise model in dps; mean in mrad/s, calibration offsets all 0, so these are the raw zero-rate readings):
+
+| IMU, configuration | sd x/y/z (mrad/s) | sd x/y/z (dps) | model | sd / model x, y, z | mean x/y/z (mrad/s) |
+|---|---|---|---|---|---|
+| IMU1 16 g, 2000 dps, 800 Hz (600 s) | 1.382 / 1.396 / 2.057 | 0.079 / 0.080 / 0.118 | 0.0780 | 1.01, 1.03, 1.51 | 5.05 / -2.42 / 2.02 |
+| IMU1 4 g, 250 dps, 800 Hz | 1.430 / 1.404 / 1.996 | 0.082 / 0.080 / 0.114 | 0.0760 | 1.08, 1.06, 1.50 | 4.98 / -2.37 / 2.00 |
+| IMU1 32 g, 4000 dps, 800 Hz | 1.472 / 1.471 / 2.140 | 0.084 / 0.084 / 0.123 | 0.0838 | 1.01, 1.01, 1.46 | 5.05 / -2.43 / 1.98 |
+| IMU1 8 g, 1000 dps, 400 Hz | 1.048 / 1.009 / 1.445 | 0.060 / 0.058 / 0.083 | 0.0545 | 1.10, 1.06, 1.52 | 5.02 / -2.45 / 2.01 |
+| IMU2 16 g, 2000 dps, 800 Hz (600 s) | 1.014 / 0.978 / 1.932 | 0.058 / 0.056 / 0.111 | 0.0786 | 0.74, 0.71, 1.41 | 3.07 / -3.29 / -3.10 |
+| IMU2 4 g, 500 dps, 800 Hz | 1.006 / 0.999 / 1.961 | 0.058 / 0.057 / 0.112 | 0.0762 | 0.76, 0.75, 1.48 | 3.07 / -3.28 / -3.12 |
+| IMU2 16 g, 4000 dps, 800 Hz | 1.192 / 1.216 / 2.046 | 0.068 / 0.070 / 0.117 | 0.0861 | 0.79, 0.81, 1.36 | 3.02 / -3.24 / -3.10 |
+| IMU2 8 g, 1000 dps, 400 Hz | 0.822 / 0.762 / 1.302 | 0.047 / 0.044 / 0.075 | 0.0547 | 0.86, 0.80, 1.36 | 3.06 / -3.28 / -3.13 |
+
+Noise against the model (expected at or below): NOT met as a bound. IMU1's x and y are at the model (1.01
+to 1.10 times it) in every configuration, z is about 1.5 times; IMU2's x and y are below it (0.71 to 0.86), z about 1.4 times. Both
+chips have z 1.4 to 1.5 times x and y in every configuration, the same on two chips, so the excess in z is probably the bench or the
+board (motors attached, not a per-chip noise) rather than the chips' noise; not isolated here. The fall from 800 to 400 Hz
+is 0.76 (IMU1) and 0.81 (IMU2) on x, against the model's 0.70 and 0.70, so the dependence on bandwidth is as modelled; the
+range changes the sd little (2000 dps over 4000 dps: 0.94 and 0.85, the model's 0.93 and 0.91). Offsets carry: the
+means do not move with the configuration beyond the scatter between runs of one configuration: IMU1's spread over the four is 0.07 /
+0.08 / 0.04 mrad/s, IMU2's 0.05 / 0.05 / 0.03 (the first boot at the defaults of that session, 10 min before the 600 s one, read IMU2 y
+-3.37 against -3.29), against about 0.05 mrad/s for the mean of 1000 samples (sd 1.0 to 2.0 over the square root of 1000);
+the 10 s means move by +-0.1 within a run. So no range-dependent offset is visible at this resolution, and no "recalibrate after a change of
+range" note is needed.
+
+Defaults (16 g, 2000 dps, 800 Hz), 600 s (log `marv-v2-firmware-20261117-141123.log`, SD log 53, the lines of 10 s to 610 s): rows Ok in all 61 lines,
+0 errors, timeouts, missed edges, overflows, recoveries and config restored, delay count after the start 0, watchdog stalls
+begun 0. IMU1 803.56 samples/s (482135 samples in 600 s; 803.48 mean of the 10 s lines), largest
+gap 1697 us, 0 gaps over 1.5 P, verify steps 18 to 276 us (20422), 618 passes; IMU2 800.71 samples/s (480426), largest gap
+1781 us, 0 gaps over 1.5 P, steps 13 to 138 us (19535), 610 passes. The 10-minute figures in the README before this were taken
+on 2026-11-15 at 4 g / 250 dps on an older firmware (110 and 1066 gaps over 1.5 P, largest gaps 2442 and 3410 us); the
+difference is not attributed here (the flight core has moved to SRAM since, the configuration is not the only change). Seen and left: one
+`[WARN] Overrun error (embassy_rp src/uart/buffered.rs)` at about 0.06 s of every boot, before any device row.
+
+The same measurements are re-taken on this branch only for the defaults and the 400 Hz case (the board run of this branch, below in the log of the work, if present); the rest stands as a measurement of the chip settings.
 
 ## In progress: SD card logging
 

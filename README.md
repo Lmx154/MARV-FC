@@ -45,8 +45,7 @@ It has no flight functionality.
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
   enabled on core 0 after core 1 started.
 
-Not in it yet: IMU configuration parameters (fixed configurations for now; the IMU calibration
-offsets and the gyro, accelerometer and compass calibrations exist, see Calibrations), IMU2's
+Not in it yet: IMU2's
 high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit, the SD card.
 
 ## Flight-core device loop
@@ -71,8 +70,10 @@ into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and l
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
 (20 tests).
 
-IMU1's fixed configuration: 4 g, 250 dps, 800 Hz on both sensors, internal clock (as `icm45686_smoke` ran
-it on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
+IMU1's configuration comes from `IMU1_ACC_FS`, `IMU1_GYR_FS` and `IMU1_ODR_HZ` at boot, fixed until the next reboot; the
+defaults are 16 g, 2000 dps, 800 Hz on both sensors (`fw_settings::imu::imu1_setup`: read once in `main` after `settings::boot`, logged as
+`[INFO] IMU1: 16 g, 2000 dps, 800 Hz (until the next reboot)`, and moved into core 1's entry by value; its sample period is the row's P and the task's),
+internal clock (the base of `icm45686_smoke` on this board), data-ready on INT1 in latched mode (high until INT1_STATUS0 is read, as `icm45686_int1`
 showed), waited for by level, so a sample that arrives while the task is busy is not lost; 800 Hz because
 the ICM-45686 has no 1 kHz rate. Single-sample mode
 (`read()` on every data-ready signal, the driver README's single-sample path), with INT1_STATUS0 (clear on
@@ -83,8 +84,9 @@ set only while the latest MAG sample is younger than 1 s (the same rule for the 
 `voltage_battery` (mV) and `current_battery` (cA) of the latest BATT sample while it is younger than 1 s (65535 and -1, MAVLink's "unknown", while there is none or it is older);
 `battery_remaining` stays -1.
 
-IMU2's fixed configuration (`src/imu2.rs`): 4 g, 500 dps, both sensors at 800 Hz: the high-accuracy ODR set
-"800" with the ODR code that is 960 Hz in the normal mode, as `lsm6dsk320x_modes` (check 4) ran it on this
+IMU2's configuration (`src/imu2.rs`) comes from `IMU2_ACC_FS`, `IMU2_GYR_FS` and `IMU2_ODR_HZ` at boot, fixed until the next reboot; the defaults
+are 16 g, 2000 dps, 800 Hz (`fw_settings::imu::imu2_setup`, handed over as IMU1's): both sensors at the chosen rate, all through the high-accuracy ODR set
+"800" (800 Hz is the ODR code that is 960 Hz in the normal mode), as `lsm6dsk320x_modes` (check 4) ran it on this
 board (800.664 Hz there; the datasheet gives +-1 % over temperature and supply with the gyroscope on). The
 normal mode offers 480 or 960 Hz, and its 960 Hz ran at 942.66 Hz on this unit. The driver's default filters
 (gyroscope LPF1 and low-g LPF2 off, data-ready mask on), high-g accelerometer off, no FIFO, SPI mode 0 at
@@ -97,18 +99,20 @@ Its values go to the station (with the `IMU2_GYR_OFF*` and `IMU2_ACC_OFF*` offse
 as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
-Measured with both IMUs and the incremental verify (2026-11-15, 10-minute clean run, log
-`marv-v2-firmware-20261115-114930.log`): five rows Ok throughout, 0 transitions after the start, 0 errors,
-timeouts, missed edges and recoveries, delay count after the start 0, watchdog stalls begun 0. IMU1 803.52
-samples/s (its own rate: nothing lost), largest gap 2442 us, 110 gaps over 1.5 P (10 across a step), steps 134
-to 946 us, 608 passes; IMU2 800.48 samples/s (bench 800.664 Hz), largest gap 3410 us, 1066 gaps over 1.5 P (79
-across a step), steps 84 to 489 us, 600 passes. Gaps and long polls are REPORTED, not a pass criterion: the
+Measured with both IMUs at the defaults (16 g, 2000 dps, 800 Hz) and the incremental verify (2026-11-17, 600 s clean run, log
+`marv-v2-firmware-20261117-141123.log`, the 10 s to 610 s lines; taken on `wip-presets` 1b72c67, whose chip settings for these values are the same as
+this branch's): every device row Ok with no transition after the start, 0 errors, timeouts, missed edges, overflows and recoveries, delay count after the start 0,
+watchdog stalls begun 0. IMU1 803.56 samples/s (its own rate: nothing lost), largest gap 1697 us, 0 gaps over 1.5 P, verify steps 18 to 276 us, 618 passes; IMU2
+800.71 samples/s (bench 800.664 Hz), largest gap 1781 us, 0 gaps over 1.5 P, steps 13 to 138 us, 610 passes. Other configurations (4 g / 250 dps; 4 g / 500 dps; 400 Hz) are in
+`docs/handoff.md`, "IMU configurations on the board". History, not today's figures: the 10-minute run of 2026-11-15 (log `marv-v2-firmware-20261115-114930.log`), taken on
+an older firmware at 4 g / 250 dps, read IMU1 803.52 samples/s, largest gap 2442 us, 110 gaps over 1.5 P (10 across a step), steps 134 to 946 us, 608 passes, and IMU2 800.48 samples/s,
+largest gap 3410 us, 1066 gaps over 1.5 P (79 across a step), steps 84 to 489 us, 600 passes; what changed the gap count is not isolated. Gaps and long polls are REPORTED, not a pass criterion: the
 data-ready, one-read-per-sample scheme is Betaflight's, which loses a sample when the reader is late and does
 not count it; ArduPilot and PX4 avoid the loss with the chip's FIFO (kept in reserve here). An IMU row is
 accepted when it is Ok with 0 errors, timeouts and recoveries and its rate is within 1 % of the chip's own.
-The longest poll is 1.06 to 2.56 ms (IMU1) and 0.63 to 1.36 ms (IMU2) in every 10 s window, with
+In those runs of 2026-11-15 the longest poll was 1.06 to 2.56 ms (IMU1) and 0.63 to 1.36 ms (IMU2) in every 10 s window, with
 single-register steps, so it is not `verify`; while IMU2 was parked IMU1 had no new gap but still polls of
-about 1 ms. Three 620 s runs (logging as usual, `DEFMT_LOG=off`, `quiet-stat`) gave IMU1 63 / 37 / 42 gaps and
+about 1 ms. Three 620 s runs of that time (logging as usual, `DEFMT_LOG=off`, `quiet-stat`) gave IMU1 63 / 37 / 42 gaps and
 IMU2 379 / 279 / 199: logging on core 0 is NOT the main cause. The cause is not found; it belongs to the
 measurement of what disturbs the flight core, to be done before any control loop runs there (the features
 `latency-text` and `quiet-stat` and the per-poll latency figure exist for it). Facts and suspects:
@@ -364,7 +368,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD and RC (after it); `fw_settings::TABLE` joins them in that order (70 entries: 5 + 5 + 3 + 12 + 1 + 44). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (76 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -444,7 +448,7 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 ### RC parameters
 
 `crates/fw-settings/src/rc.rs`, 44 `I32` parameters, device RC (7), all `Live` (the next computation reads them; no reboot, no
-validator). ArduPilot's names for channels 1 to 8 (`RCn_*`) and for the function map (`RCMAP_*`); the table is appended last, so no
+validator). ArduPilot's names for channels 1 to 8 (`RCn_*`) and for the function map (`RCMAP_*`); the table follows SD's, and the six IMU chip settings (below) are appended after it, so no
 other parameter changed its index. `RCn_MIN`, `RCn_TRIM` and `RCn_MAX` are calibration results, but they are not `calibration` parameters:
 `param reset-calibration` (command 245, param1 = 3) resets sensor calibrations only and leaves them; `param reset-all` (param1 = 2) or a
 new radio calibration brings them back. There is no check between parameters (MIN below TRIM below MAX, a unique map): the normaliser gives a value for every in-range
@@ -464,6 +468,34 @@ else in the firmware reads them.
 | `RCMAP_YAW` | 4 | 1 to 8 | the channel that is yaw |
 
 Order in the table: for n = 1 to 8 `RCn_MIN`, `RCn_TRIM`, `RCn_MAX`, `RCn_REVERSED`, `RCn_DZ`, then the four `RCMAP_*`.
+
+### IMU parameters
+
+`crates/fw-settings/src/imu.rs` (`SETTINGS`, indices 70 to 75, appended after RC; the first 70 names keep their indices; the calibration offsets are above). Six `I32`
+parameters, all `Reboot` class: core 1 configures the IMUs once, at boot, so a write takes effect after `param save` and a reboot (the notice is
+"<NAME>: applies after reboot"; a reboot without a save drops it). IMU rates stop at 800 Hz: one read per data-ready edge, no FIFO. Nothing is saved without `param save`.
+
+| Name | Default | Range | Means |
+|---|---|---|---|
+| `IMU1_ACC_FS` | 16 | 2 to 32 | accelerometer full scale in g: 2, 4, 8, 16 or 32 |
+| `IMU1_GYR_FS` | 2000 | 125 to 4000 | gyroscope full scale in dps: 125, 250, 500, 1000, 2000 or 4000 |
+| `IMU1_ODR_HZ` | 800 | 25 to 800 | output data rate of both sensors in Hz: 25, 50, 100, 200, 400 or 800 |
+| `IMU2_ACC_FS` | 16 | 2 to 16 | the low-g accelerometer's full scale in g: 2, 4, 8 or 16 |
+| `IMU2_GYR_FS` | 2000 | 250 to 4000 | gyroscope full scale in dps: 250, 500, 1000, 2000 or 4000 |
+| `IMU2_ODR_HZ` | 800 | 25 to 800 | output data rate of both sensors in Hz: 25, 50, 100, 200, 400 or 800 (IMU2 through the high-accuracy ODR set "800", codes 30 to 960) |
+
+The store checks only the range of each value when it is written ("out of range" above 800 Hz or 16 g on IMU2). The chip's value set is checked at boot: `fw_settings::imu::imu1_setup` and
+`imu2_setup` (pure) turn the three values into the chip's configuration, the full scales the adapter scales with and the nominal sample period, and refuse a value the chip does not offer
+("not 2, 4, 8, 16 or 32", "not 125, 250, 500, 1000, 2000 or 4000", "not 2, 4, 8 or 16", "not 250, 500, 1000, 2000 or 4000", "rate not offered by the chip"), then the driver's own
+`Config::validate` ("combination not allowed by the chip"). The store runs no device validator for a `Reboot`-class write, so such a value is stored and saved like any in-range one; at the next boot the
+IMU is put back to its `Configure`- and `Reboot`-class defaults in RAM (its calibration offsets stay, the flash is untouched) with one WARNING text "IMUn: stored settings invalid, defaults" and the
+log line carrying the setup's reason. The station offers only valid combinations (its sensor presets are several of these parameters set at once; they are a station feature, nothing of them is in the firmware); the combinations the station's presets use are
+measured in `docs/handoff.md`.
+
+Firmware glue: in `main`, after `settings::boot` and before core 1 starts, `store::imu1_setup` / `imu2_setup` give each IMU's setup, the rows' P is set from it, one line per IMU is logged
+(`[INFO] IMU1: 16 g, 2000 dps, 800 Hz (until the next reboot)`) and the setup is moved into `imu1::Parts` / `imu2::Parts`; the adapters
+configure, scale and time themselves with it (init, `apply`, RESTART, self-test, `verify_every`, the task's period). No cell carries a configuration into core 1, and
+`REQ_APPLY` stays reserved for the flight rows, so a change takes effect after save AND reboot.
 
 ## SD card (device row 9)
 
@@ -680,9 +712,11 @@ their default.
   (at boot and after a reload) each device's stored values go through that device's validator (the
   barometer: `fw_settings::baro::settings_to_config`, what `validate` runs); a set it refuses (for
   example a rate in the table's range that the chip does not offer, from a record of another firmware
-  version: `load` runs no validator) puts ALL of that device's parameters back to their defaults in RAM,
+  version: `load` runs no validator) puts that device's `Configure`- and `Reboot`-class parameters (not its `Live`
+  calibration offsets) back to their defaults in RAM,
   the flash untouched, with ONE WARNING text "BARO: stored settings invalid, defaults"; the device then
-  starts normally on its defaults (`param list` shows them; a save writes them). One log
+  starts normally on its defaults (`param list` shows them; a save writes them). This runs for BARO, MAG, IMU1 and IMU2
+  (the IMUs through `imu1_setup` / `imu2_setup`, whose refusal text is in the log line). One log
   line `[INFO] settings boot: <class>, sector, sequence, loaded, skipped; sector A <state>, sector B <state>;
   next save to sector <X> with sequence <N>`. The texts are queued before anything else and wait in the
   text ring until each link's station connects; the classification text ("none stored" / "stored record
@@ -1118,7 +1152,7 @@ the host (250 tests, and 4 doc tests); the binary uses every module listed below
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, `mag`, `batt`, `imu` and `rc`, the last with the RC stick normaliser, no validator; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (33 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (42 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store

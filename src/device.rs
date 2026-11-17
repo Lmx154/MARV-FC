@@ -441,7 +441,7 @@ impl Device {
 
 /// The number of registry rows (the SD row is not in a build of the SD probe, which owns the card).
 pub const DEVICE_COUNT: usize = if cfg!(feature = "sd-fat-probe") { 6 } else { 7 };
-/// The IMU rows' period before `main` sets it from the boot setup: 800 Hz, the Flight preset.
+/// The IMU rows' period before `main` sets it from the boot setup: 800 Hz, the default of `IMUn_ODR_HZ`.
 const IMU_BOOT_PERIOD_US: u32 = 1250;
 /// IMU1's row, backed by the flight core; its P is set at boot from `IMU1_ODR_HZ`.
 pub static IMU1: Device = Device::flight(
