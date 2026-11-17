@@ -129,6 +129,11 @@ sticks, then one store lock to copy 44 values by index (a 44-entry `Option<Param
 not in its future); the mapping is computed outside both locks. Nothing is added to core 1 (`tools/check-ram-code.py` passes
 unchanged).
 
+CRSF GPS frame (2026-11-16, branch `wip-crsf-gps`, normal build): `.text` 501 644, `.ram_text` 125 840, `.data` 43 892, `.bss` 108 564,
+`.uninit` 1 024 (for reference the F1 and F2 row above: `.text` 500 048, `.ram_text` 125 860, `.data` 43 892, `.bss` 108 652; not measured
+against `main` itself). The change adds one `Option<u64>` to the RC hook's own state (a local of the `rc_link` task, not a static), no task,
+interrupt or DMA channel; `rc-port` moved to `fe55602`. Nothing is added to core 1 (`tools/check-ram-code.py` passes unchanged).
+
 Radio sensor streams (2026-11-16, branch `wip-radio`, normal build, against the F1/F2 row above): `.text` 500 760 (+712), `.ram_text` 125 860 (+0), `.data` 43 892 (+0),
 `.bss` 108 908 (+256), `.uninit` 1 024; static SRAM 279 684 B, free 244 604 B (238 KiB). `rc::SLOTS` is now 6 stream slots (200 B in the ELF; the
 old size was not measured); the rest of the `.bss` growth is not investigated (the `rc_link` task's future is the likely place). No new task, static of its own, interrupt or DMA
