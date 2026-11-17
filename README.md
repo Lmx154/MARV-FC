@@ -445,8 +445,9 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 
 `crates/fw-settings/src/rc.rs`, 44 `I32` parameters, device RC (7), all `Live` (the next computation reads them; no reboot, no
 validator). ArduPilot's names for channels 1 to 8 (`RCn_*`) and for the function map (`RCMAP_*`); the table is appended last, so no
-other parameter changed its index. `RCn_MIN`, `RCn_TRIM` and `RCn_MAX` are calibration results (`param reset-calibration` resets
-them). There is no check between parameters (MIN below TRIM below MAX, a unique map): the normaliser gives a value for every in-range
+other parameter changed its index. `RCn_MIN`, `RCn_TRIM` and `RCn_MAX` are calibration results, but they are not `calibration` parameters:
+`param reset-calibration` (command 245, param1 = 3) resets sensor calibrations only and leaves them; `param reset-all` (param1 = 2) or a
+new radio calibration brings them back. There is no check between parameters (MIN below TRIM below MAX, a unique map): the normaliser gives a value for every in-range
 combination, and 0 when MAX is not above MIN. The normalised sticks are REPORTED as MANUAL_CONTROL (69) on USB only (see Radio); nothing
 else in the firmware reads them.
 
@@ -1117,7 +1118,7 @@ the host (250 tests, and 4 doc tests); the binary uses every module listed below
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, `mag`, `batt`, `imu` and `rc`, the last with the RC stick normaliser, no validator; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (32 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (33 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store

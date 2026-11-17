@@ -149,7 +149,7 @@ copies for the download checks.
 ## How to run things
 
 ```
-cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (250 + 4 doc, 32, 20 today)
+cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (250 + 4 doc, 33, 20 today)
 cargo build --release                                     # the firmware for the board
 tools/run.sh 120                                          # build, flash, run, log to logs/ for 120 s
 FEATURES=<feature> tools/run.sh 120                       # a test or measurement build (README lists them)

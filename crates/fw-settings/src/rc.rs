@@ -51,9 +51,9 @@ const fn channel(
     dz: &'static str,
 ) -> [ParamDef; PER_CHANNEL] {
     [
-        ParamDef::i32(min, DEVICE, 1100, US_MIN, US_MAX, Apply::Live).with_calibration(),
-        ParamDef::i32(trim, DEVICE, 1500, US_MIN, US_MAX, Apply::Live).with_calibration(),
-        ParamDef::i32(max, DEVICE, 1900, US_MIN, US_MAX, Apply::Live).with_calibration(),
+        ParamDef::i32(min, DEVICE, 1100, US_MIN, US_MAX, Apply::Live),
+        ParamDef::i32(trim, DEVICE, 1500, US_MIN, US_MAX, Apply::Live),
+        ParamDef::i32(max, DEVICE, 1900, US_MIN, US_MAX, Apply::Live),
         ParamDef::i32(rev, DEVICE, 0, 0, 1, Apply::Live),
         ParamDef::i32(dz, DEVICE, 0, 0, 200, Apply::Live),
     ]
@@ -71,7 +71,9 @@ const CH: [[ParamDef; PER_CHANNEL]; CHANNELS] = [
 ];
 
 /// The RC parameter table: for channels 1 to 8 MIN, TRIM, MAX, REVERSED, DZ, then the four function
-/// maps. MIN, TRIM and MAX are calibration results.
+/// maps. None is a `calibration` parameter: MIN, TRIM and MAX are calibration results, but "reset
+/// calibration" (`PREFLIGHT_STORAGE` param1 = 3) resets sensor calibrations only; the end points come
+/// back through "reset all" (param1 = 2) or a new radio calibration.
 pub static TABLE: [ParamDef; COUNT] = build();
 
 #[allow(clippy::indexing_slicing)] // the loops run exactly over the sources' lengths
@@ -323,9 +325,9 @@ mod tests {
         let mut it = TABLE.iter();
         for n in 1..=8 {
             for (suffix, default, min, max, calibration) in [
-                ("MIN", 1100, 800, 2200, true),
-                ("TRIM", 1500, 800, 2200, true),
-                ("MAX", 1900, 800, 2200, true),
+                ("MIN", 1100, 800, 2200, false),
+                ("TRIM", 1500, 800, 2200, false),
+                ("MAX", 1900, 800, 2200, false),
                 ("REVERSED", 0, 0, 1, false),
                 ("DZ", 0, 0, 200, false),
             ] {
@@ -358,6 +360,23 @@ mod tests {
         assert!(it.next().is_none());
         assert!("RCMAP_THROTTLE".len() <= 16);
         Params::<COUNT>::new(&TABLE).unwrap();
+    }
+
+    #[test]
+    fn reset_calibration_leaves_the_end_points_and_reset_all_resets_them() {
+        use mavlink_device::{ParamName, ParamStore};
+        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
+        let min = p.find(&ParamName::new("RC1_MIN").unwrap()).unwrap();
+        let off = p.find(&ParamName::new("MAG_OFFX").unwrap()).unwrap();
+        p.set(min, ParamValue::I32(1000)).unwrap();
+        p.set(off, ParamValue::F32(10.0)).unwrap();
+        assert_eq!(p.reset_calibration(), 1);
+        assert_eq!(p.get(off), Some(ParamValue::F32(0.0)));
+        assert_eq!(p.get(min), Some(ParamValue::I32(1000)));
+        p.set(off, ParamValue::F32(10.0)).unwrap();
+        assert_eq!(p.reset_all(), 2);
+        assert_eq!(p.get(off), Some(ParamValue::F32(0.0)));
+        assert_eq!(p.get(min), Some(ParamValue::I32(1100)));
     }
 
     #[test]
