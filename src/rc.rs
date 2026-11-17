@@ -52,17 +52,23 @@ const RX_GPIO: usize = 17;
 const RING_LEN: usize = 256;
 static TX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
 static RX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
-static SLOTS: StaticCell<[StreamSlot; 3]> = StaticCell::new();
+static SLOTS: StaticCell<[StreamSlot; 6]> = StaticCell::new();
 
 /// The radio node's streams (HEARTBEAT 1 Hz is the node's own). The fastest interval a station may
 /// ask for is the default, so the radio's budget cannot be raised from the ground.
 const SYS_STATUS_ID: u32 = 1;
 const DEVICE_STATUS_ID: u32 = 42421;
 const GPS_RAW_INT_ID: u32 = 24;
-const RADIO_STREAMS: [(u32, i32); 3] = [
+const HIGHRES_IMU_ID: u32 = 105;
+const SCALED_IMU2_ID: u32 = 116;
+const SCALED_PRESSURE_ID: u32 = 29;
+const RADIO_STREAMS: [(u32, i32); 6] = [
     (SYS_STATUS_ID, 1_000_000),
     (DEVICE_STATUS_ID, 1_000_000),
     (GPS_RAW_INT_ID, 2_000_000),
+    (HIGHRES_IMU_ID, 1_000_000),
+    (SCALED_IMU2_ID, 1_000_000),
+    (SCALED_PRESSURE_ID, 1_000_000),
 ];
 /// Stick reports and link figures older than this are not shown.
 const FRESH_US: u64 = 1_000_000;
@@ -371,7 +377,7 @@ impl TxBusy for CountingUart {
 /// The radio node's hooks (link 1): HEARTBEAT state, SYS_STATUS, one MARV_DEVICE_STATUS row per
 /// message (a row whose state changed since it was last sent on the radio goes out of turn, at most every
 /// other message; the message after it is the cursor's),
-/// GPS_RAW_INT, the texts of link 1, commands through the one book.
+/// GPS_RAW_INT, HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE, the texts of link 1, commands through the one book.
 struct RadioBoard {
     cursor: usize,
     last_out_of_turn: bool,
@@ -383,6 +389,9 @@ impl Telemetry for RadioBoard {
         match message_id {
             SYS_STATUS_ID => crate::push_sys_status(now_us, out),
             GPS_RAW_INT_ID => crate::push_gps_raw_int(now_us, out),
+            HIGHRES_IMU_ID => crate::push_highres_imu(now_us, out),
+            SCALED_IMU2_ID => crate::push_scaled_imu2(now_us, out),
+            SCALED_PRESSURE_ID => crate::push_scaled_pressure(now_us, out),
             DEVICE_STATUS_ID => {
                 let messages: [Option<MARV_DEVICE_STATUS_DATA>; crate::ROWS] =
                     core::array::from_fn(|i| crate::device_message(i, now_us));

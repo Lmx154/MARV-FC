@@ -424,140 +424,152 @@ pub fn push_sys_status(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     .is_ok()
 }
 
+/// HIGHRES_IMU (id 0) from IMU1's latest sample and the magnetometer's.
+pub fn push_highres_imu(now_us: u64, out: &mut Outgoing<'_>) -> bool {
+    let Some(sample) = IMU1.latest.try_get() else {
+        return false;
+    };
+    let Reading::Imu {
+        gyro_rads: [xgyro, ygyro, zgyro],
+        accel_ms2: [xacc, yacc, zacc],
+        temperature_c,
+    } = sample.reading
+    else {
+        return false;
+    };
+    // A field is shown as updated only while its latest sample is younger than 1 s.
+    let fresh = |t_us: u64| now_us.saturating_sub(t_us) < STALE_US;
+    let (imu_values, imu_flags) = if fresh(sample.t_us) {
+        (
+            [xacc, yacc, zacc, xgyro, ygyro, zgyro, temperature_c],
+            HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XACC
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YACC
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZACC
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XGYRO
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YGYRO
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZGYRO
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE,
+        )
+    } else {
+        ([f32::NAN; 7], HighresImuUpdatedFlags::empty())
+    };
+    let [xacc, yacc, zacc, xgyro, ygyro, zgyro, temperature_c] = imu_values;
+    // The magnetometer's latest sample, in gauss (1 G = 100 uT).
+    let (mag, mag_flags) = match MAG.latest.try_get() {
+        Some(Sample {
+            reading:
+                Reading::Mag {
+                    field_ut: [x, y, z],
+                    ..
+                },
+            t_us,
+            ..
+        }) if fresh(t_us) => (
+            [x / 100.0, y / 100.0, z / 100.0],
+            HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XMAG
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YMAG
+                | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZMAG,
+        ),
+        _ => ([f32::NAN; 3], HighresImuUpdatedFlags::empty()),
+    };
+    out.push(&HIGHRES_IMU_DATA {
+        time_usec: sample.t_us,
+        xacc,
+        yacc,
+        zacc,
+        xgyro,
+        ygyro,
+        zgyro,
+        xmag: mag[0],
+        ymag: mag[1],
+        zmag: mag[2],
+        abs_pressure: f32::NAN,
+        diff_pressure: f32::NAN,
+        pressure_alt: f32::NAN,
+        temperature: temperature_c,
+        fields_updated: imu_flags | mag_flags,
+        id: 0,
+    })
+    .is_ok()
+}
+
+/// SCALED_IMU2 from IMU2's latest sample while it is younger than 1 s.
+pub fn push_scaled_imu2(now_us: u64, out: &mut Outgoing<'_>) -> bool {
+    let Some(sample) = IMU2.latest.try_get() else {
+        return false;
+    };
+    let Reading::Imu {
+        gyro_rads: [xgyro, ygyro, zgyro],
+        accel_ms2: [xacc, yacc, zacc],
+        temperature_c,
+    } = sample.reading
+    else {
+        return false;
+    };
+    // No fresh sample: no message (integer fields have no "unknown" value).
+    if now_us.saturating_sub(sample.t_us) >= STALE_US {
+        return false;
+    }
+    let mg = |a: f32| (a * (1000.0 / STANDARD_GRAVITY)) as i16;
+    let mrads = |w: f32| (w * 1000.0) as i16;
+    // 0 means "no temperature" in SCALED_IMU2: 0.00 C is sent as 0.01 C.
+    let temperature = match (temperature_c * 100.0) as i16 {
+        0 => 1,
+        t => t,
+    };
+    // The LSM6DSK320X has no magnetometer: those fields are 0.
+    out.push(&SCALED_IMU2_DATA {
+        time_boot_ms: u32::try_from(sample.t_us / 1000).unwrap_or(u32::MAX),
+        xacc: mg(xacc),
+        yacc: mg(yacc),
+        zacc: mg(zacc),
+        xgyro: mrads(xgyro),
+        ygyro: mrads(ygyro),
+        zgyro: mrads(zgyro),
+        xmag: 0,
+        ymag: 0,
+        zmag: 0,
+        temperature,
+    })
+    .is_ok()
+}
+
+/// SCALED_PRESSURE from the barometer's latest sample while it is younger than 1 s.
+pub fn push_scaled_pressure(now_us: u64, out: &mut Outgoing<'_>) -> bool {
+    let Some(sample) = BARO.latest.try_get() else {
+        return false;
+    };
+    let Reading::Baro {
+        pressure_pa,
+        temperature_c,
+    } = sample.reading
+    else {
+        return false;
+    };
+    // No fresh sample (the barometer failed): no message rather than a stale value.
+    if now_us.saturating_sub(sample.t_us) >= STALE_US {
+        return false;
+    }
+    out.push(&SCALED_PRESSURE_DATA {
+        time_boot_ms: u32::try_from(sample.t_us / 1000).unwrap_or(u32::MAX),
+        press_abs: pressure_pa / 100.0,
+        press_diff: 0.0,
+        temperature: (temperature_c * 100.0) as i16,
+        temperature_press_diff: 0,
+    })
+    .is_ok()
+}
+
 impl Telemetry for Board {
     fn sample(&mut self, message_id: u32, now_us: u64, out: &mut Outgoing<'_>) -> bool {
         if message_id == HIGHRES_IMU_ID {
-            let Some(sample) = IMU1.latest.try_get() else {
-                return false;
-            };
-            let Reading::Imu {
-                gyro_rads: [xgyro, ygyro, zgyro],
-                accel_ms2: [xacc, yacc, zacc],
-                temperature_c,
-            } = sample.reading
-            else {
-                return false;
-            };
-            // A field is shown as updated only while its latest sample is younger than 1 s.
-            let fresh = |t_us: u64| now_us.saturating_sub(t_us) < STALE_US;
-            let (imu_values, imu_flags) = if fresh(sample.t_us) {
-                (
-                    [xacc, yacc, zacc, xgyro, ygyro, zgyro, temperature_c],
-                    HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XACC
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YACC
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZACC
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZGYRO
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_TEMPERATURE,
-                )
-            } else {
-                ([f32::NAN; 7], HighresImuUpdatedFlags::empty())
-            };
-            let [xacc, yacc, zacc, xgyro, ygyro, zgyro, temperature_c] = imu_values;
-            // The magnetometer's latest sample, in gauss (1 G = 100 uT).
-            let (mag, mag_flags) = match MAG.latest.try_get() {
-                Some(Sample {
-                    reading:
-                        Reading::Mag {
-                            field_ut: [x, y, z],
-                            ..
-                        },
-                    t_us,
-                    ..
-                }) if fresh(t_us) => (
-                    [x / 100.0, y / 100.0, z / 100.0],
-                    HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_XMAG
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_YMAG
-                        | HighresImuUpdatedFlags::HIGHRES_IMU_UPDATED_ZMAG,
-                ),
-                _ => ([f32::NAN; 3], HighresImuUpdatedFlags::empty()),
-            };
-            return out
-                .push(&HIGHRES_IMU_DATA {
-                    time_usec: sample.t_us,
-                    xacc,
-                    yacc,
-                    zacc,
-                    xgyro,
-                    ygyro,
-                    zgyro,
-                    xmag: mag[0],
-                    ymag: mag[1],
-                    zmag: mag[2],
-                    abs_pressure: f32::NAN,
-                    diff_pressure: f32::NAN,
-                    pressure_alt: f32::NAN,
-                    temperature: temperature_c,
-                    fields_updated: imu_flags | mag_flags,
-                    id: 0,
-                })
-                .is_ok();
+            return push_highres_imu(now_us, out);
         }
         if message_id == SCALED_IMU2_ID {
-            let Some(sample) = IMU2.latest.try_get() else {
-                return false;
-            };
-            let Reading::Imu {
-                gyro_rads: [xgyro, ygyro, zgyro],
-                accel_ms2: [xacc, yacc, zacc],
-                temperature_c,
-            } = sample.reading
-            else {
-                return false;
-            };
-            // No fresh sample: no message (integer fields have no "unknown" value).
-            if now_us.saturating_sub(sample.t_us) >= STALE_US {
-                return false;
-            }
-            let mg = |a: f32| (a * (1000.0 / STANDARD_GRAVITY)) as i16;
-            let mrads = |w: f32| (w * 1000.0) as i16;
-            // 0 means "no temperature" in SCALED_IMU2: 0.00 C is sent as 0.01 C.
-            let temperature = match (temperature_c * 100.0) as i16 {
-                0 => 1,
-                t => t,
-            };
-            // The LSM6DSK320X has no magnetometer: those fields are 0.
-            return out
-                .push(&SCALED_IMU2_DATA {
-                    time_boot_ms: u32::try_from(sample.t_us / 1000).unwrap_or(u32::MAX),
-                    xacc: mg(xacc),
-                    yacc: mg(yacc),
-                    zacc: mg(zacc),
-                    xgyro: mrads(xgyro),
-                    ygyro: mrads(ygyro),
-                    zgyro: mrads(zgyro),
-                    xmag: 0,
-                    ymag: 0,
-                    zmag: 0,
-                    temperature,
-                })
-                .is_ok();
+            return push_scaled_imu2(now_us, out);
         }
         if message_id == SCALED_PRESSURE_ID {
-            let Some(sample) = BARO.latest.try_get() else {
-                return false;
-            };
-            let Reading::Baro {
-                pressure_pa,
-                temperature_c,
-            } = sample.reading
-            else {
-                return false;
-            };
-            // No fresh sample (the barometer failed): no message rather than a stale value.
-            if now_us.saturating_sub(sample.t_us) >= STALE_US {
-                return false;
-            }
-            return out
-                .push(&SCALED_PRESSURE_DATA {
-                    time_boot_ms: u32::try_from(sample.t_us / 1000).unwrap_or(u32::MAX),
-                    press_abs: pressure_pa / 100.0,
-                    press_diff: 0.0,
-                    temperature: (temperature_c * 100.0) as i16,
-                    temperature_press_diff: 0,
-                })
-                .is_ok();
+            return push_scaled_pressure(now_us, out);
         }
         if message_id == GPS_RAW_INT_ID {
             return push_gps_raw_int(now_us, out);
