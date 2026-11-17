@@ -100,8 +100,7 @@ as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has n
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
 Measured with both IMUs at the defaults (16 g, 2000 dps, 800 Hz) and the incremental verify (2026-11-17, 600 s clean run, log
-`marv-v2-firmware-20261117-141123.log`, the 10 s to 610 s lines; taken on `wip-presets` 1b72c67, whose chip settings for these values are the same as
-this branch's): every device row Ok with no transition after the start, 0 errors, timeouts, missed edges, overflows and recoveries, delay count after the start 0,
+`marv-v2-firmware-20261117-141123.log`, the 10 s to 610 s lines; taken with an earlier build whose chip settings for these values are the same): every device row Ok with no transition after the start, 0 errors, timeouts, missed edges, overflows and recoveries, delay count after the start 0,
 watchdog stalls begun 0. IMU1 803.56 samples/s (its own rate: nothing lost), largest gap 1697 us, 0 gaps over 1.5 P, verify steps 18 to 276 us, 618 passes; IMU2
 800.71 samples/s (bench 800.664 Hz), largest gap 1781 us, 0 gaps over 1.5 P, steps 13 to 138 us, 610 passes. Other configurations (4 g / 250 dps; 4 g / 500 dps; 400 Hz) are in
 `docs/handoff.md`, "IMU configurations on the board". History, not today's figures: the 10-minute run of 2026-11-15 (log `marv-v2-firmware-20261115-114930.log`), taken on

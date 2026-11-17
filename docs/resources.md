@@ -119,7 +119,7 @@ futures), `.uninit` 1 024; static SRAM 274 908 B, free 249 380 B (243 KiB). New 
 `logdl::WAKE` (a `Signal`), the counters `TRANSFERS`, `BYTES_SENT`, `STEP_MAX_US`, `LATE_MAX_US`. No new task,
 interrupt, DMA channel or flight-core change.
 
-F1 and F2 (2026-11-16, branch `wip-rcmap`, normal build, against `main` 6f26fc2: `.text` 492 588, `.ram_text` 122 340, `.data` 43 536,
+F1 and F2 (2026-11-16, normal build, against `main` 6f26fc2: `.text` 492 588, `.ram_text` 122 340, `.data` 43 536,
 `.bss` 107 996): `.text` 500 048 (+7 460), `.ram_text` 125 860 (+3 520), `.data` 43 892 (+356), `.bss` 108 652 (+656), `.uninit` 1 024;
 static SRAM 279 428 B (the sum, as the earlier rows). The growth is mostly F1's 44-entry parameter table (`.ram_text`: the rule puts every constant in SRAM) and its
 store values (`.bss`). F2 adds no static, no task, no interrupt and no DMA channel: one byte in the existing `rc::SHARED`
@@ -140,7 +140,7 @@ old size was not measured); the rest of the `.bss` growth is not investigated (t
 channel; the three builders read `IMU1`, `IMU2`, `BARO` and `MAG` `latest` (a critical-section `Watch`: one copy of the sample each) from
 the `SWI_IRQ_0` executor on core 0, as the radio's GPS_RAW_INT and SYS_STATUS already read `GNSS` and `BATT`. Nothing is added to core 1 (`tools/check-ram-code.py` passes unchanged).
 
-IMU chip settings (2026-11-17, branch `wip-imu-params`, normal build): `.text` 503 048, `.ram_text` 126 520, `.data` 43 940, `.bss` 109 732, `.uninit` 1 024
+IMU chip settings (2026-11-17, normal build): `.text` 503 048, `.ram_text` 126 520, `.data` 43 940, `.bss` 109 732, `.uninit` 1 024
 (absolute, `arm-none-eabi-size -A`; the rows above are from other branches, so no delta is claimed). The change reads both IMUs' setups in `main` before `spawn_core1`. No new task,
 interrupt, DMA channel or cross-core cell: each setup (the chip's `Config`, the two full scales and the period, plain data) is moved by value into `imu1::Parts` / `imu2::Parts`, i.e. into core 1's
 entry closure, as the pins and DMA channels are; `fw_settings` code runs on core 0 only (the adapters on core 1 only read the plain data), `REQ_APPLY` stays reserved for the flight rows.

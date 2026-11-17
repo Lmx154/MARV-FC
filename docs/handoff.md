@@ -53,7 +53,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   the bus is cleared and rebuilt by the normal recovery ladder.
 - **Ground station:** Devices view, parameter editing with Save, command buttons, the configure/operate gate.
   `marv-cli` covers the same from a shell; a full companion session over USB passed on this desktop.
-- **RC mapping, reported only (branch `wip-rcmap`, not in `main`):** 44 RC parameters (`RCn_MIN/TRIM/MAX/REVERSED/DZ` for
+- **RC mapping, reported only:** 44 RC parameters (`RCn_MIN/TRIM/MAX/REVERSED/DZ` for
   channels 1 to 8, `RCMAP_ROLL/PITCH/THROTTLE/YAW`, all `Live`) and MANUAL_CONTROL (69) on USB at 5 Hz (fastest 50 Hz) from the
   CRSF sticks only, while the latest stick report is younger than 1 s (a MAVLink override never feeds it). Nothing reads the values
   except the encoder: no arming, failsafe, mode or output. Computed in the USB task (`rc::manual_control`), not in the RC hook and not
@@ -66,8 +66,8 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
 ### Sensor configurations on the board (B-a, B-b)
 
 The station's sensor presets (a station feature: each preset is several of these parameters set at once, a verified combination; nothing of
-them is in the firmware) use the combinations below. They were measured on 2026-11-17 on the branch `wip-presets` (the firmware with the preset
-selectors; the chip settings, the driver configurations and the code on core 1 are the same as on this branch), debugger attached, USB power,
+them is in the firmware) use the combinations below. They were measured on 2026-11-17 with an earlier build that set them through preset selectors (removed
+since; the chip settings, the driver configurations and the code on core 1 are the same as in `main`), debugger attached, USB power,
 battery out, motors on, no propellers; each configuration is named here by its values. BARO and MAG fields were set with
 `marv-cli`, no save. Rate: samples in the `[STAT]` lines over the window shown (the first, partial line after the change left out),
 against the chip's rate. Errors, timeouts, missed edges, overflows, recoveries and config restored: 0 in every line. Noise (a measurement, not a
@@ -96,9 +96,9 @@ sampling are candidates); the model holds as a bound, not as a prediction. The w
 60 s because the 10 s lines fall between the 69 s steps. The BARO and MAG fields are `Configure` class: a write applies at once (about 50 ms), as seen in these runs.
 
 IMU configurations. Both IMUs get the same combination except where the chip differs (IMU2's accelerometer stops at 16 g and its gyroscope starts at 250 dps). Each was set with
-`param set IMUn_ACC_FS`, `IMUn_GYR_FS` and `IMUn_ODR_HZ` (the firmware answers "<NAME>: applies after reboot"), `param save`, reboot. Four saves in all (b to e, on `wip-presets`);
-`SAVE_EPOCH` is not a parameter on this firmware, the save line's "epoch 1" stayed 1. A write alone changes nothing on the chip: with the fields at 8 g / 1000 dps / 400 Hz in RAM (written through the selectors of
-`wip-presets`), 120 to 150 s of the run read 803.5/800.7 per second and the gyro step was unchanged, also after `device restart IMU1`
+`param set IMUn_ACC_FS`, `IMUn_GYR_FS` and `IMUn_ODR_HZ` (the firmware answers "<NAME>: applies after reboot"), `param save`, reboot. Four saves in all (b to e, on that earlier build);
+`SAVE_EPOCH` is not a parameter on this firmware, the save line's "epoch 1" stayed 1. A write alone changes nothing on the chip: with the fields at 8 g / 1000 dps / 400 Hz in RAM (written through that
+build's selectors), 120 to 150 s of the run read 803.5/800.7 per second and the gyro step was unchanged, also after `device restart IMU1`
 (the line holding the restart read 798.6/s, the 60 ms of the restart): the restart does not apply a new setting, only the next boot does.
 
 Reboot 246: `marv-cli reboot --yes` printed "reboot: accepted", exit 0; the firmware logged "final ACK ... handed to the link,
@@ -107,14 +107,14 @@ after it). The board came back by itself: `/dev/ttyACM1` was there again 15 s af
 themselves go to defmt only, so they were read from a new `tools/run.sh` started after it (it builds, flashes the same ELF and resets; the stored settings are what the 246 boot had loaded).
 For the other runs the reboot was that new `tools/run.sh` (kill of the old probe-rs, new session), not 246.
 
-Saves on `wip-presets` (the "settings save" line, then the next boot's "settings boot" line): b: sector B, sequence 238, 8 entries; c: sector A,
+Saves on that earlier build (the "settings save" line, then the next boot's "settings boot" line): b: sector B, sequence 238, 8 entries; c: sector A,
 239, 6 entries; d: sector B, 240, 5 entries; e: sector A, 241, 0 entries (every field at its default, the record is empty).
 The count is the entries that differ from the default (800 Hz, 16 g and 2000 dps are defaults, so they are not stored).
 
 Per configuration, 120 s (the 10 s to 130 s lines of `[STAT]`, 120 s of samples; the first line, which holds the start, is in the
 per-10 s minimum only: 798.8 and 795.4). Errors, timeouts, missed edges, overflows, recoveries, config restored: 0 in every line
 of every run; gaps over 1.5 P: 0; delay count after the start 0; watchdog stalls begun 0. The boot line is the
-`[INFO] IMUn: <g> g, <dps> dps, <hz> Hz (until the next reboot)` of the run (on `wip-presets` the same line also carried a preset id and name).
+`[INFO] IMUn: <g> g, <dps> dps, <hz> Hz (until the next reboot)` of the run (on that earlier build the same line also carried a preset id and name).
 
 | Configuration (IMU1 / IMU2) | Rate IMU1 / IMU2 (vs chip) | \|a\| IMU1 / IMU2 (vs 9.81) | Gyro step IMU1 / IMU2 (LSB) |
 |---|---|---|---|
@@ -163,7 +163,7 @@ on 2026-11-15 at 4 g / 250 dps on an older firmware (110 and 1066 gaps over 1.5 
 difference is not attributed here (the flight core has moved to SRAM since, the configuration is not the only change). Seen and left: one
 `[WARN] Overrun error (embassy_rp src/uart/buffered.rs)` at about 0.06 s of every boot, before any device row.
 
-On this branch (`wip-imu-params`, 2026-11-17, three `tools/run.sh` sessions, logs `marv-v2-firmware-20261117-160121.log`, `-160447.log`, `-160812.log`; the record was empty before, sector A sequence 241): the boot line reads
+On the IMU-settings build now in `main` (2026-11-17, three `tools/run.sh` sessions, logs `marv-v2-firmware-20261117-160121.log`, `-160447.log`, `-160812.log`; the record was empty before, sector A sequence 241): the boot line reads
 `[INFO] IMU1: 16 g, 2000 dps, 800 Hz (until the next reboot)` and the same for IMU2; the RAM-code check passes; at the defaults IMU1 803.5 to 803.6, IMU2 800.7, BARO 49.8 and MAG 100.1 per second, 0 errors,
 timeouts, missed edges, overflows and recoveries, no ERROR or panic. `marv-cli --debug param set IMU1_ODR_HZ 400` answered "IMU1_ODR_HZ: applies after reboot" and the rate stayed 803.5 (80 s to 100 s lines);
 `param save` (settings save: sector B, sequence 242, 1 entry, 44 bytes, stall 44 164 us); after the restart the boot line read 400 Hz and IMU1 ran at 401.79 to 401.71 per second (IMU2 800.7, 0 errors, also at 170 s); set back to 800 and saved
@@ -179,7 +179,7 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 
 | Step | What | State |
 |---|---|---|
-| P2 | DMA on the second interrupt line, on the board | done (branch `wip-sd-p2`, pushed, not in `main`) |
+| P2 | DMA on the second interrupt line, on the board | done: a probe build, measured on 2026-11-15 and then removed (DMA channel 4 on `DMA_IRQ_1` on core 0, yielding between copies, about 5.5 s from 30.5 s: no stall, no reset, stalls begun 0) |
 | SD1 | The driver's new DMA back-end | done, reviewed, `pio-sdmmc` `main` = `424fd58` |
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
 | P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done (branch `wip-sd-p3`, merged into `wip-sd2`; the probes stay as features) |
@@ -210,8 +210,8 @@ copies for the download checks.
 - Late IMU samples: with the flight core in SRAM (branch `wip-ram-code`) a 200 s run of the normal build shows
   0 samples later than 1.5 P per 10 s window for both IMUs (before: 6 to 20 and 23 to 53), largest gaps 1.6
   and 1.7 ms, rates within 1 %, no errors (2026-11-16, debugger attached; not repeated without one). The
-  shared XIP cache was their main cause (README "Flight core in SRAM"; facts-sd-logging C3). Measurement
-  builds of the earlier search are on branch `wip-csstat`.
+  shared XIP cache was their main cause (README "Flight core in SRAM"; facts-sd-logging C3). Its measurement
+  builds were removed once their results were recorded here.
 - About 0.1 receive errors per second on the radio UART in normal running.
 
 **Never exercised on real hardware**
