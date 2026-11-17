@@ -22,42 +22,15 @@ use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
 };
-use lsm6dsk320x::{
-    AccelFullScale, ChannelResult, Config, DataReady, DataReadyMode, Error, GyroFullScale,
-    HaodrSet, IntRouting, Lsm6dsk320x, Odr, OperatingMode, SelfTestConfig,
-};
+use fw_settings::imu::Imu2Setup;
+use lsm6dsk320x::{ChannelResult, Error, Lsm6dsk320x, SelfTestConfig};
 
 /// The cells between core 0 and the IMU2 task.
 pub static CELLS: ImuCells = ImuCells::new();
 /// The IMU2 task's longest stretch without a yield and its yield count.
 static STRETCH: Stretch = Stretch::new();
 
-/// Nominal sample period P: 800 Hz, the high-accuracy ODR set "800" with the ODR code that is
-/// 960 Hz in the normal mode. The normal mode offers 480 or 960 Hz, and its 960 Hz ran at
-/// 942.66 Hz on this board (the clock trim); the set "800" ran at 800.664 Hz in
-/// `lsm6dsk320x_modes` (datasheet: +-1 % over temperature and supply with the gyroscope on).
-pub const PERIOD_US: u32 = 1250;
 const SPI_HZ: u32 = 8_000_000;
-const ACCEL_FS: AccelFullScale = AccelFullScale::G4;
-const GYRO_FS: GyroFullScale = GyroFullScale::Dps500;
-
-/// As `lsm6dsk320x_modes` ran it on this board: 4 g, 500 dps, both sensors at the ODR code 960 in
-/// the high-accuracy ODR set "800" (check 4), the driver's default filters (LPF1 and LPF2 off, the
-/// data-ready mask on), high-g off, no FIFO; the low-g data-ready on INT1 only, LATCHED
-/// (push-pull, active high): asserted until the output registers are read, as check 5 ("latched")
-/// showed. So `data_ready` waits for the level: a sample that arrived while the task was busy (for
-/// example in `verify`) is not lost.
-fn config() -> Config {
-    Config::new()
-        .with_accel_fs(ACCEL_FS)
-        .with_accel_odr(Odr::Hz960)
-        .with_gyro_fs(GYRO_FS)
-        .with_gyro_odr(Odr::Hz960)
-        .with_mode(OperatingMode::HighAccuracyOdr(HaodrSet::Base800))
-        .with_int1(IntRouting::new().with_data_ready(DataReady::new().with_accel(true)))
-        .with_int2(IntRouting::new())
-        .with_data_ready_mode(DataReadyMode::Latched)
-}
 
 /// The peripherals IMU2 owns, moved into core 1's entry.
 pub struct Parts {
@@ -71,6 +44,9 @@ pub struct Parts {
     pub rx_dma: Peri<'static, DMA_CH3>,
     /// The offsets core 0 publishes, subtracted from every sample.
     pub offsets: TripleReader<'static, ImuOffsets>,
+    /// The chip's configuration, its full scales and the sample period, read from the settings at
+    /// boot; handed over by value, so no cell carries it (`fw_settings::imu::imu2_setup`).
+    pub setup: Imu2Setup,
 }
 
 type Dev = ExclusiveDevice<Spi<'static, SPI1, spi::Async>, Output<'static>, NoDelay>;
@@ -82,6 +58,8 @@ pub struct Lsm6dsk320xAdapter {
     calls: u32,
     step: usize,
     offsets: TripleReader<'static, ImuOffsets>,
+    /// The boot setup: `init`, `apply` and the restart configure with it, `acquire` scales with it.
+    setup: Imu2Setup,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -118,6 +96,7 @@ impl Lsm6dsk320xAdapter {
             calls: 0,
             step: 0,
             offsets: p.offsets,
+            setup: p.setup,
         }
     }
 
@@ -129,7 +108,8 @@ impl Lsm6dsk320xAdapter {
     /// Software reset, identity check and the configuration.
     async fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<DevError>> {
         self.step = 0;
-        self.call().init(delay, &config()).await.map(|_| ())
+        let config = self.setup.config;
+        self.call().init(delay, &config).await.map(|_| ())
     }
 }
 
@@ -153,8 +133,10 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
         let all = self.call().read_all().await.map_err(|e| kind(&e))?;
         let (offsets, _) = self.offsets.read();
-        let (gyro_rads, accel_ms2) =
-            offsets.remove(all.gyro.gyro_rads(GYRO_FS), all.accel.accel_ms2(ACCEL_FS));
+        let (gyro_rads, accel_ms2) = offsets.remove(
+            all.gyro.gyro_rads(self.setup.gyro_fs),
+            all.accel.accel_ms2(self.setup.accel_fs),
+        );
         Ok(ImuReading {
             gyro_rads,
             accel_ms2,
@@ -189,7 +171,7 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     /// K = samples per second / registers per pass: one pass in about 1 s.
     fn verify_every(&self) -> u32 {
         let steps = u32::try_from(self.chip.verify_steps()).unwrap_or(u32::MAX);
-        (1_000_000 / PERIOD_US / steps.max(1)).max(1)
+        (1_000_000 / self.setup.period_us.max(1) / steps.max(1)).max(1)
     }
 
     /// INT1 is latched: high while a sample waits.
@@ -200,8 +182,9 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     /// Configure in place, then one read discarded (a data-ready flag survives `configure`).
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
         self.step = 0;
+        let config = self.setup.config;
         self.call()
-            .configure(delay, &config())
+            .configure(delay, &config)
             .await
             .map_err(|e| kind(&e))?;
         self.call()
@@ -271,13 +254,13 @@ const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::Persistent;
 const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::VerifyMismatch;
 
 #[embassy_executor::task]
-pub async fn task(adapter: Adapter) -> ! {
+pub async fn task(adapter: Adapter, period_us: u32) -> ! {
     match ImuTask::new(
         &CELLS,
         adapter,
         SpinDelay,
         crate::now_us,
-        PERIOD_US,
+        period_us,
         Limits::DESIGN,
     ) {
         Some(task) => {

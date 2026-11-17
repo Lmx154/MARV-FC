@@ -441,18 +441,20 @@ impl Device {
 
 /// The number of registry rows (the SD row is not in a build of the SD probe, which owns the card).
 pub const DEVICE_COUNT: usize = if cfg!(feature = "sd-fat-probe") { 6 } else { 7 };
-/// IMU1's row, backed by the flight core.
+/// The IMU rows' period before `main` sets it from the boot setup: 800 Hz, the Flight preset.
+const IMU_BOOT_PERIOD_US: u32 = 1250;
+/// IMU1's row, backed by the flight core; its P is set at boot from `IMU1_ODR_HZ`.
 pub static IMU1: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU1,
     "IMU1",
-    crate::imu1::PERIOD_US,
+    IMU_BOOT_PERIOD_US,
     &crate::imu1::CELLS,
 );
-/// IMU2's row, backed by the flight core.
+/// IMU2's row, backed by the flight core; its P is set at boot from `IMU2_ODR_HZ`.
 pub static IMU2: Device = Device::flight(
     MarvDevice::MARV_DEVICE_IMU2,
     "IMU2",
-    crate::imu2::PERIOD_US,
+    IMU_BOOT_PERIOD_US,
     &crate::imu2::CELLS,
 );
 /// The barometer's row.

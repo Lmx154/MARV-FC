@@ -24,41 +24,15 @@ use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
 };
-use icm45686::{
-    AccelFullScale, AxisVerdict, ClockSource, Config, Error, GyroFullScale, Icm45686, Int1Config,
-    Int1Mode, Odr, SelfTestConfig,
-};
+use fw_settings::imu::Imu1Setup;
+use icm45686::{AxisVerdict, Error, Icm45686, SelfTestConfig};
 
 /// The cells between core 0 and the IMU1 task.
 pub static CELLS: ImuCells = ImuCells::new();
 /// The IMU1 task's longest stretch without a yield and its yield count.
 static STRETCH: Stretch = Stretch::new();
 
-/// Nominal sample period P: 800 Hz, the output data rate nearest to 1 kHz that the bench proved
-/// (the ICM-45686 has no 1 kHz rate: 800 Hz or 1.6 kHz).
-pub const PERIOD_US: u32 = 1250;
 const SPI_HZ: u32 = 8_000_000;
-const ACCEL_FS: AccelFullScale = AccelFullScale::G4;
-const GYRO_FS: GyroFullScale = GyroFullScale::Dps250;
-
-/// As `icm45686_smoke` ran it on this board ("800 Hz internal clock"): 4 g, 250 dps, 800 Hz on
-/// both sensors, internal clock, the driver's default filters, no FIFO; data-ready on INT1 in
-/// LATCHED mode (push-pull, active high): asserted until INT1_STATUS0 is read, as
-/// `icm45686_int1` ("I3 latched") showed on this board. So `data_ready` waits for the level: a
-/// sample that arrived while the task was busy (for example in `verify`) is not lost.
-fn config() -> Config {
-    Config::new()
-        .with_accel_fs(ACCEL_FS)
-        .with_gyro_fs(GYRO_FS)
-        .with_accel_odr(Odr::Hz800)
-        .with_gyro_odr(Odr::Hz800)
-        .with_clock(ClockSource::Internal)
-        .with_int1(
-            Int1Config::new()
-                .with_data_ready(true)
-                .with_mode(Int1Mode::Latched),
-        )
-}
 
 /// The peripherals IMU1 owns, moved into core 1's entry.
 pub struct Parts {
@@ -72,6 +46,9 @@ pub struct Parts {
     pub rx_dma: Peri<'static, DMA_CH1>,
     /// The offsets core 0 publishes, subtracted from every sample.
     pub offsets: TripleReader<'static, ImuOffsets>,
+    /// The chip's configuration, its full scales and the sample period, read from the settings at
+    /// boot; handed over by value, so no cell carries it (`fw_settings::imu::imu1_setup`).
+    pub setup: Imu1Setup,
 }
 
 type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>;
@@ -127,6 +104,8 @@ pub struct Icm45686Adapter {
     /// owned registers is rebuilt by the driver at every call).
     steps: usize,
     offsets: TripleReader<'static, ImuOffsets>,
+    /// The boot setup: `init`, `apply` and the restart configure with it, `acquire` scales with it.
+    setup: Imu1Setup,
 }
 
 fn kind<E>(error: &Error<E>) -> ErrorKind {
@@ -164,6 +143,7 @@ impl Icm45686Adapter {
             step: 0,
             steps: 0,
             offsets: p.offsets,
+            setup: p.setup,
         }
     }
 
@@ -175,7 +155,7 @@ impl Icm45686Adapter {
     /// Init and configure, then one status read: INT1_STATUS0 is clear-on-read, so the first
     /// sample's status is not the reset's.
     async fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<DevError>> {
-        let config = config();
+        let config = self.setup.config;
         self.step = 0;
         let init = self.call().init(delay, &config).await;
         self.steps = self.chip.verify_steps();
@@ -209,8 +189,10 @@ impl ImuAdapter for Icm45686Adapter {
         }
         let sample = self.call().read().await.map_err(|e| kind(&e))?;
         let (offsets, _) = self.offsets.read();
-        let (gyro_rads, accel_ms2) =
-            offsets.remove(sample.gyro_rads(GYRO_FS), sample.accel_ms2(ACCEL_FS));
+        let (gyro_rads, accel_ms2) = offsets.remove(
+            sample.gyro_rads(self.setup.gyro_fs),
+            sample.accel_ms2(self.setup.accel_fs),
+        );
         Ok(ImuReading {
             gyro_rads,
             accel_ms2,
@@ -247,7 +229,7 @@ impl ImuAdapter for Icm45686Adapter {
     /// K = samples per second / registers per pass: one pass in about 1 s.
     fn verify_every(&self) -> u32 {
         let steps = u32::try_from(self.steps).unwrap_or(u32::MAX);
-        (1_000_000 / PERIOD_US / steps.max(1)).max(1)
+        (1_000_000 / self.setup.period_us.max(1) / steps.max(1)).max(1)
     }
 
     /// INT1 is latched: high while a sample waits.
@@ -256,7 +238,7 @@ impl ImuAdapter for Icm45686Adapter {
     }
 
     async fn apply<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), ErrorKind> {
-        let config = config();
+        let config = self.setup.config;
         self.step = 0;
         let configured = self.call().configure(delay, &config).await;
         self.steps = self.chip.verify_steps();
@@ -324,13 +306,13 @@ const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::Persistent;
 const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::MissedEdge;
 
 #[embassy_executor::task]
-pub async fn task(adapter: Adapter) -> ! {
+pub async fn task(adapter: Adapter, period_us: u32) -> ! {
     match ImuTask::new(
         &CELLS,
         adapter,
         SpinDelay,
         crate::now_us,
-        PERIOD_US,
+        period_us,
         Limits::DESIGN,
     ) {
         Some(task) => {

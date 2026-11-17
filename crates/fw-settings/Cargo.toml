@@ -17,3 +17,6 @@ bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac83258
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26" }
 # `MarvDevice` (the device ids of the parameter tables); the same commit as fw-core's.
 mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c" }
+# The IMU drivers' `Config` types (same commits as the binary's, without `defmt`).
+icm45686 = { git = "https://github.com/Lmx154/icm45686-rs.git", rev = "78b13c709acc2464194c08731434750b85799927" }
+lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "447e881bbfa43ad216563f6ed751c1936b771952" }

@@ -74,6 +74,36 @@ pub fn mag_config() -> Result<bmm350::Config, &'static str> {
     .unwrap_or(Err("store not ready"))
 }
 
+/// The three stored values of IMU `imu` (0 = IMU1, 1 = IMU2): the accelerometer full scale in g,
+/// the gyroscope full scale in dps, the rate in Hz.
+pub fn imu_values(imu: usize) -> Option<(i32, i32, i32)> {
+    let names = (
+        fw_settings::imu::ACC_FS.get(imu)?,
+        fw_settings::imu::GYR_FS.get(imu)?,
+        fw_settings::imu::ODR_HZ.get(imu)?,
+    );
+    with(|params| {
+        let get = |name: &str| match params.get_named(name) {
+            Some(ParamValue::I32(v)) => Some(v),
+            _ => None,
+        };
+        Some((get(names.0)?, get(names.1)?, get(names.2)?))
+    })
+    .flatten()
+}
+
+/// IMU1's whole setup from the stored values (read once, at boot, before core 1 starts).
+pub fn imu1_setup() -> Result<fw_settings::imu::Imu1Setup, &'static str> {
+    let (acc, gyr, odr) = imu_values(0).ok_or("store not ready")?;
+    fw_settings::imu::imu1_setup(acc, gyr, odr)
+}
+
+/// IMU2's whole setup from the stored values (read once, at boot, before core 1 starts).
+pub fn imu2_setup() -> Result<fw_settings::imu::Imu2Setup, &'static str> {
+    let (acc, gyr, odr) = imu_values(1).ok_or("store not ready")?;
+    fw_settings::imu::imu2_setup(acc, gyr, odr)
+}
+
 /// The magnetometer's calibration offsets in microtesla (X, Y, Z), read for every sample.
 pub fn mag_offsets() -> [f32; 3] {
     with(|params| {

@@ -291,6 +291,7 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
     CORE1_VTOR.store(vtor, Ordering::Release);
     CORE1_ACTLR.store(read_actlr(), Ordering::Relaxed);
     CORE1_ACTLR_READ.store(true, Ordering::Release);
+    let (imu1_period_us, imu2_period_us) = (imu1_parts.setup.period_us, imu2_parts.setup.period_us);
     // Built here so that the DMA and GPIO interrupts are enabled on this core's NVIC.
     let imu1 = imu1::adapter(imu1_parts);
     let imu2 = imu2::adapter(imu2_parts);
@@ -306,10 +307,10 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
         if let Ok(token) = fbeat() {
             spawner.spawn(token);
         }
-        if let Ok(token) = imu1::task(imu1) {
+        if let Ok(token) = imu1::task(imu1, imu1_period_us) {
             spawner.spawn(token);
         }
-        if let Ok(token) = imu2::task(imu2) {
+        if let Ok(token) = imu2::task(imu2, imu2_period_us) {
             spawner.spawn(token);
         }
     })
@@ -1024,6 +1025,29 @@ async fn stall() {
     }
 }
 
+/// The two IMUs' setups from the stored settings (`IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`), read
+/// once at boot after `settings::boot` (which refused and reset an invalid combination, so the read
+/// succeeds) and handed to core 1 by value. One line per IMU; a change takes effect after the next
+/// reboot.
+fn imu_setups() -> (fw_settings::imu::Imu1Setup, fw_settings::imu::Imu2Setup) {
+    for n in 0..2usize {
+        let (g, dps, hz) = store::imu_values(n).unwrap_or((0, 0, 0));
+        defmt::info!(
+            "[INFO] IMU{=usize}: {=i32} g, {=i32} dps, {=i32} Hz (until the next reboot)",
+            n + 1,
+            g,
+            dps,
+            hz
+        );
+    }
+    let (Ok(setup1), Ok(setup2)) = (store::imu1_setup(), store::imu2_setup()) else {
+        defmt::panic!("[FAIL] IMU setup refused after the boot reset");
+    };
+    device::IMU1.set_period_us(setup1.period_us);
+    device::IMU2.set_period_us(setup2.period_us);
+    (setup1, setup2)
+}
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
@@ -1093,6 +1117,7 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "corrupt-newest")]
     settings::corrupt_newest();
     settings::boot();
+    let (imu1_setup, imu2_setup) = imu_setups();
     calibration::init();
     let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
@@ -1107,6 +1132,7 @@ async fn main(spawner: Spawner) {
         tx_dma: p.DMA_CH0,
         rx_dma: p.DMA_CH1,
         offsets: imu1_offsets,
+        setup: imu1_setup,
     };
     let imu2_parts = imu2::Parts {
         spi: p.SPI1,
@@ -1118,6 +1144,7 @@ async fn main(spawner: Spawner) {
         tx_dma: p.DMA_CH2,
         rx_dma: p.DMA_CH3,
         offsets: imu2_offsets,
+        setup: imu2_setup,
     };
     unsafe extern "C" {
         static __vector_table: u32;

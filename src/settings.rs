@@ -189,11 +189,11 @@ fn reason(error: LoadError) -> &'static str {
     }
 }
 
-/// After a load: each device's stored values through its validator (`settings_to_config`, what
-/// the device's `validate` runs). A refused set goes back to the device's defaults in RAM (the
-/// flash is not touched) and the device's name and the reason are returned, so the device starts
-/// on valid values.
-fn check_devices() -> [Option<(&'static str, &'static str)>; 2] {
+/// After a load: each device's stored values through its validator (`settings_to_config` and the
+/// IMUs' `imuN_setup`, what the device's `validate` runs). A refused set goes back to the device's
+/// `Configure`- and `Reboot`-class defaults in RAM (its calibration offsets stay; the flash is not
+/// touched) and the device's name and the reason are returned, so the device starts on valid values.
+fn check_devices() -> [Option<(&'static str, &'static str)>; 4] {
     [
         reset_if_refused(
             MarvDevice::MARV_DEVICE_BARO,
@@ -205,6 +205,16 @@ fn check_devices() -> [Option<(&'static str, &'static str)>; 2] {
             "MAG",
             store::mag_config().err(),
         ),
+        reset_if_refused(
+            MarvDevice::MARV_DEVICE_IMU1,
+            "IMU1",
+            store::imu1_setup().err(),
+        ),
+        reset_if_refused(
+            MarvDevice::MARV_DEVICE_IMU2,
+            "IMU2",
+            store::imu2_setup().err(),
+        ),
     ]
 }
 
@@ -215,15 +225,9 @@ fn reset_if_refused(
 ) -> Option<(&'static str, &'static str)> {
     let reason = refused?;
     let id = device as u8;
-    store::with(|p| {
-        for def in fw_settings::TABLE.iter().filter(|d| d.device == id) {
-            if let Ok(param) = ParamName::new(def.name) {
-                let _ = p.load(&param, def.default);
-            }
-        }
-    });
+    store::with(|p| fw_settings::reset_device_settings(p, id));
     defmt::warn!(
-        "[INFO] settings: {=str} stored settings refused ({=str}): {=str} parameters to their defaults in RAM, flash unchanged",
+        "[INFO] settings: {=str} stored settings refused ({=str}): {=str} settings to their defaults in RAM, flash unchanged",
         name,
         reason,
         name
