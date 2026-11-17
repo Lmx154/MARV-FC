@@ -46,7 +46,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
 - **Watchdog:** resets when either core stops answering, keeps a record of why, reports it at the next boot.
 - **Radio (ELRS):** both receiver modes. CRSF model: sticks at about 245 per second, battery telemetry shown
-  on the transmitter. MAVLink model: telemetry over the air (about 134 B/s; since `wip-radio` 270 B/s with HIGHRES_IMU, SCALED_IMU2 and SCALED_PRESSURE at 1 Hz, counted at the UART, not yet seen on the air). Mode switches both ways while
+  on the transmitter; since `wip-crsf-gps` also a GPS frame (position, speed, heading, altitude, satellites) per new GNSS sample, 1 Hz, in place of that call's battery frame (host-tested; not yet seen on the transmitter's screen). MAVLink model: telemetry over the air (about 134 B/s; since `wip-radio` 270 B/s with HIGHRES_IMU, SCALED_IMU2 and SCALED_PRESSURE at 1 Hz, counted at the UART, not yet seen on the air). Mode switches both ways while
   running; transmitter off and on in each mode. The owner uses the CRSF model for sticks and the MAVLink model
   for telemetry only.
 - **I2C faults:** both buses are cleared at every boot; a hung transfer times out (ArduPilot's formula) and
@@ -149,7 +149,7 @@ copies for the download checks.
 ## How to run things
 
 ```
-cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (244 + 4 doc, 23, 20 today)
+cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (250 + 4 doc, 32, 20 today)
 cargo build --release                                     # the firmware for the board
 tools/run.sh 120                                          # build, flash, run, log to logs/ for 120 s
 FEATURES=<feature> tools/run.sh 120                       # a test or measurement build (README lists them)

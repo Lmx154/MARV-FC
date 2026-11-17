@@ -858,7 +858,7 @@ priority P3 (0xC0, embassy-rp's lowest level: below the hardware interrupts at P
 `SWI_IRQ_1` at P1, above thread mode): UART0 as `BufferedUart`
 (interrupt driven, `UART0_IRQ`, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pad's pull-up turned
 on after the UART is built (embassy-rp 0.10 leaves it without a pull; the start line logs pull-up, pull-down
-and the line level). `rc-port` (`5d5f6bd`) follows the receiver between CRSF (420000) and MAVLink (460800)
+and the line level). `rc-port` (`fe55602`) follows the receiver between CRSF (420000) and MAVLink (460800)
 by itself; it carries the radio's MAVLink node (system 1, component 1, link 1). Everything the task
 shares with thread mode (the parameter store, the action book, the text ring, the rows, the settings
 storage) is a critical-section mutex or an atomic, none held across an await. Its watchdog id is stored
@@ -902,8 +902,18 @@ summarised web page, not checked against the source or on the air), of which 270
 framing of MAVLink and its share left for the receiver's link statistics are not known here, so this is the rule's margin, not
 a measured air figure. The streams' fastest interval is their default, so a station cannot raise it (it can slow or stop one
 with SET_MESSAGE_INTERVAL); the node's own slowdown from RADIO_STATUS `txbuf` stays on. RC_CHANNELS and MANUAL_CONTROL are not
-on the radio: in MAVLink mode there are no CRSF sticks. In CRSF mode the port sends the battery frame at most every 100 ms from the BATT
-row's latest sample while it is younger than 1 s (remaining percent and capacity 0: not estimated).
+on the radio: in MAVLink mode there are no CRSF sticks. In CRSF mode the port calls the telemetry hook at most every 100 ms. On each call, if the GNSS row's
+latest sample is newer than the one last sent as a GPS frame, the hook sends a GPS frame (CRSF type 0x02: latitude, longitude, groundspeed,
+heading, altitude, satellites) built from it, in place of that call's battery frame (Betaflight's rule, "on each new solution"); otherwise it
+sends the battery frame from the BATT row's latest sample while it is younger than 1 s (remaining percent and capacity 0: not
+estimated). At the GNSS's 1 Hz that is 1 GPS frame and about 9 battery frames per second. Values (`fw_core::rc::crsf_gps`, host-tested): latitude and
+longitude in 1e-7 degree; groundspeed in 0.1 km/h, `(mm/s * 36 + 500) / 1000` (Betaflight's `(cm/s * 36 + 50) / 100` from a finer unit),
+at most 65 535; heading is the course over ground in 0.01 degree; altitude is the height above mean sea level in whole metres (floor),
+clamped to -1000 to 4000 m (wire value 0 to 5000), Betaflight's rule (`crsfFrameGps`: `constrain(altCm / 100 + 1000, 0, 5000)`); satellites
+are the satellites used. Before a fix, and after a loss, the frame carries zeros (as Betaflight and ArduPilot send their zeroed GPS state
+before a first fix); unlike them it does not hold the last position after a loss. Every value the sample lacks is sent as 0 (altitude 0 m,
+satellites 0). The frame comes from `crsf-codec` (`2d12a55`, through `rc-port` `fe55602`). The hook only copies: it reads the GNSS and BATT
+rows' latest samples, encodes into the port's buffer and remembers the sent sample's time.
 
 A parameter change on one link is answered (echoed) on that link only; both nodes use the one store
 (`store::Store`), whose critical-section mutex serialises writes from the two links. Texts: the ring
@@ -1083,7 +1093,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (244 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (250 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
