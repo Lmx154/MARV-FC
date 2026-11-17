@@ -915,8 +915,8 @@ RADIO_STATUS per second, `rssi` 254, `txbuf` 100, slowdown 0, row OK, link up, h
 nothing else, 0 lost, 133.9 B/s; `devices --for 10` showed all 7 rows; `param set` over UDP refused by
 the station ("this link is operate-only", status 4, no write on the board); `param list` over UDP got all
 25 within 60 s; a text reached both links once; a USB gyro calibration with the radio up kept its text
-before its ACK. Not yet run: anything in CRSF mode, the transmitter switched off in either mode, a
-command over the radio.
+before its ACK. CRSF mode has run since (2026-11-16: RC_CHANNELS and MANUAL_CONTROL on USB, RCIN in the
+SD log). Not yet run: the transmitter switched off in either mode, a command over the radio.
 
 ## Device drivers
 
