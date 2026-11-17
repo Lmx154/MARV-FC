@@ -85,7 +85,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Core 1 stack | a `static`, 16 KB default, set from stack painting | DECIDED |
 | Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, `pause_on_debug(true)`, only while `BEAT0` and `PONG` both changed less than 200 ms ago; scratch registers 0 to 3 hold the reset record (layout version 2; 4 to 7 are the boot ROM's). BUILT | DECIDED |
 
-## Internal SRAM (measured from the ELF, normal build, 2026-11-16, branch `wip-ram-code`)
+## Internal SRAM (measured from the ELF, normal build, 2026-11-16)
 
 | Item | Bytes | Note |
 |---|---|---|
@@ -97,7 +97,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | static use | 221 220 | 0x20000000 to `__euninit` 0x20036024 |
 | free, up to 0x20080000 | 303 068 (296 KiB) | core 0's stack grows down into it from the top; link ASSERT: at least 32 KiB (`_stack_start - __euninit`); core 0's stack depth is not measured |
 
-SD3 (2026-11-16, branch `wip-sd3`, normal build): `.data` 39 388 (+34 840: the log ring `logger::RING`, 32 824 B,
+SD3 (2026-11-16, normal build): `.data` 39 388 (+34 840: the log ring `logger::RING`, 32 824 B,
 and the listing `sd::SIZES`, 2 004 B, are in `.data`, not `.bss`, because their initial values are not all zero:
 the ring's statistics window starts with its minimum at `u32::MAX`, the listing's empty slot is `u32::MAX`; they
 cost the same RAM and their size again in flash; accepted by the lead on 2026-11-16 rather than changing the
@@ -109,7 +109,7 @@ At the merged head (after the clean-up moved before the log's opening): `.text` 
 `.data` 39 388, `.bss` 106 732, `.uninit` 1 024; static SRAM 269 036 B, free 255 252 B (249 KiB). The move cost
 about 62 KB of flash code (the file system's delete path is now part of the open sequence): not investigated.
 
-SD4 (2026-11-16, branch `wip-sd4`, normal build): `.text` 492 588 (+7 484), `.ram_text` 122 340 (+576, the
+SD4 (2026-11-16, normal build): `.text` 492 588 (+7 484), `.ram_text` 122 340 (+576, the
 second `LogRing` size's methods), `.data` 43 536 (+4 148: the hand-over ring `logdl::HANDOVER`, 4 152 B, in
 `.data` for the same reason as `logger::RING`), `.bss` 107 996 (+1 264: the read buffer `sd::READ_BUF` 900 B,
 the request `logdl::REQUEST` 16 B, the wake signal, four counters, the SD task's and the USB task's larger
@@ -129,12 +129,12 @@ sticks, then one store lock to copy 44 values by index (a 44-entry `Option<Param
 not in its future); the mapping is computed outside both locks. Nothing is added to core 1 (`tools/check-ram-code.py` passes
 unchanged).
 
-CRSF GPS frame (2026-11-16, branch `wip-crsf-gps`, normal build): `.text` 501 644, `.ram_text` 125 840, `.data` 43 892, `.bss` 108 564,
+CRSF GPS frame (2026-11-16, normal build): `.text` 501 644, `.ram_text` 125 840, `.data` 43 892, `.bss` 108 564,
 `.uninit` 1 024 (for reference the F1 and F2 row above: `.text` 500 048, `.ram_text` 125 860, `.data` 43 892, `.bss` 108 652; not measured
 against `main` itself). The change adds one `Option<u64>` to the RC hook's own state (a local of the `rc_link` task, not a static), no task,
 interrupt or DMA channel; `rc-port` moved to `fe55602`. Nothing is added to core 1 (`tools/check-ram-code.py` passes unchanged).
 
-Radio sensor streams (2026-11-16, branch `wip-radio`, normal build, against the F1/F2 row above): `.text` 500 760 (+712), `.ram_text` 125 860 (+0), `.data` 43 892 (+0),
+Radio sensor streams (2026-11-16, normal build, against the F1/F2 row above): `.text` 500 760 (+712), `.ram_text` 125 860 (+0), `.data` 43 892 (+0),
 `.bss` 108 908 (+256), `.uninit` 1 024; static SRAM 279 684 B, free 244 604 B (238 KiB). `rc::SLOTS` is now 6 stream slots (200 B in the ELF; the
 old size was not measured); the rest of the `.bss` growth is not investigated (the `rc_link` task's future is the likely place). No new task, static of its own, interrupt or DMA
 channel; the three builders read `IMU1`, `IMU2`, `BARO` and `MAG` `latest` (a critical-section `Watch`: one copy of the sample each) from

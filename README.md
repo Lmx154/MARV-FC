@@ -1176,7 +1176,7 @@ assumes an x86_64 Linux host; on another host, pass your own `--target`.
 
 Design: `~/Documents/MARV-V2-drivers/_plan/decision-ram-code-20261115.md` (the owner: "run from PSRAM or RAM
 not flash"; the PSRAM sits behind the same 16 kB XIP cache as the flash, so this is internal SRAM). Since
-branch `wip-ram-code` the flight core executes only from internal SRAM once `core1_main` has started, so it no
+2026-11-16 the flight core executes only from internal SRAM once `core1_main` has started, so it no
 longer shares the XIP cache with core 0, whose misses under card work slowed it (facts-sd-logging C2).
 
 - In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks, `fw_flight`'s imu and liveness
@@ -1229,8 +1229,8 @@ longer shares the XIP cache with core 0, whose misses under card work slowed it 
 
 `memory.x` gives the program `FLASH` 2040K (0x10000000 to 0x101FE000) and reserves the last 8 KB of the
 2 MiB flash, 0x101FE000 to 0x10200000, as the `SETTINGS` region for the settings record (`src/settings.rs`;
-the only range the firmware erases or programs). The map of the normal build (2026-11-16, branch
-`wip-ram-code`, from `arm-none-eabi-size -A` and the linker symbols):
+the only range the firmware erases or programs). The map of the normal build (2026-11-16,
+from `arm-none-eabi-size -A` and the linker symbols):
 
 | Where | What | Bytes |
 |---|---|---|

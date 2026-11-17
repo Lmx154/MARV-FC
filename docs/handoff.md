@@ -1,7 +1,6 @@
 # MARV V2 firmware: hand-off
 
-State on 2026-11-15, late evening; the flight core in SRAM added on 2026-11-16 (branch `wip-ram-code`, not
-in `main`). Written for whoever picks the work up next, human or agent. It says what
+State on 2026-11-15, late evening; the flight core in SRAM added on 2026-11-16. Written for whoever picks the work up next, human or agent. It says what
 is built and proven, what is in progress, and what is left. It is an overview: the details and the evidence
 are in the documents it points to.
 
@@ -46,7 +45,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
 - **Watchdog:** resets when either core stops answering, keeps a record of why, reports it at the next boot.
 - **Radio (ELRS):** both receiver modes. CRSF model: sticks at about 245 per second, battery telemetry shown
-  on the transmitter; since `wip-crsf-gps` also a GPS frame (position, speed, heading, altitude, satellites) per new GNSS sample, 1 Hz, in place of that call's battery frame (host-tested; not yet seen on the transmitter's screen). MAVLink model: telemetry over the air (about 134 B/s; since `wip-radio` 270 B/s with HIGHRES_IMU, SCALED_IMU2 and SCALED_PRESSURE at 1 Hz, counted at the UART, not yet seen on the air). Mode switches both ways while
+  on the transmitter; also a GPS frame (position, speed, heading, altitude, satellites) per new GNSS sample, 1 Hz, in place of that call's battery frame (host-tested; not yet seen on the transmitter's screen). MAVLink model: telemetry over the air (about 134 B/s; now 270 B/s with HIGHRES_IMU, SCALED_IMU2 and SCALED_PRESSURE at 1 Hz, counted at the UART, not yet seen on the air). Mode switches both ways while
   running; transmitter off and on in each mode. The owner uses the CRSF model for sticks and the MAVLink model
   for telemetry only.
 - **I2C faults:** both buses are cleared at every boot; a hung transfer times out (ArduPilot's formula) and
@@ -182,10 +181,10 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | P2 | DMA on the second interrupt line, on the board | done: a probe build, measured on 2026-11-15 and then removed (DMA channel 4 on `DMA_IRQ_1` on core 0, yielding between copies, about 5.5 s from 30.5 s: no stall, no reset, stalls begun 0) |
 | SD1 | The driver's new DMA back-end | done, reviewed, `pio-sdmmc` `main` = `424fd58` |
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
-| P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done (branch `wip-sd-p3`, merged into `wip-sd2`; the probes stay as features) |
+| P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done, in `main` (the probes stay as features) |
 | SD2 | The SD card as a device row (mount, capacity, health) | done, merged into `main` (README "SD card") |
-| SD3 | The log writer and what is logged | built, branch `wip-sd3` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. A real card removal seen (Failed 5.5 s after the pull, restart Ok in 329 ms), and three logs read on a PC with pymavlink 2.4.50 `mavlogdump.py` (no bad bytes). Not yet: a power cut, UAV Log Viewer |
-| SD4 | Log list and download over USB (`marv-cli logs list/get`) | firmware half built, branch `wip-sd4` (README "Logging", "Logs over USB"): list, download (logs 8 and 13 byte-identical to the card-reader copies, twice), absent log, end marker, take-over, END and the 3 s HEARTBEAT rule seen on the board with a throw-away pymavlink client; the station's half on MARV-GCS `wip-logs` |
+| SD3 | The log writer and what is logged | done, in `main` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. A real card removal seen (Failed 5.5 s after the pull, restart Ok in 329 ms), and three logs read on a PC with pymavlink 2.4.50 `mavlogdump.py` (no bad bytes). Not yet: a power cut, UAV Log Viewer |
+| SD4 | Log list and download over USB (`marv-cli logs list/get`) | done, in `main` (README "Logging", "Logs over USB"): list, download (logs 8 and 13 byte-identical to the card-reader copies, twice), absent log, end marker, take-over, END and the 3 s HEARTBEAT rule seen on the board with a throw-away pymavlink client; the station's half on MARV-GCS `wip-logs` |
 
 The card in the slot is a scratch card and may be erased (owner's word). The owner has a USB card reader:
 logs copied off the card with it were read with ArduPilot's reader (2026-11-16) and serve as reference
@@ -207,7 +206,7 @@ copies for the download checks.
   loop and for full-rate logging).
 
 **Known and parked**
-- Late IMU samples: with the flight core in SRAM (branch `wip-ram-code`) a 200 s run of the normal build shows
+- Late IMU samples: with the flight core in SRAM a 200 s run of the normal build shows
   0 samples later than 1.5 P per 10 s window for both IMUs (before: 6 to 20 and 23 to 53), largest gaps 1.6
   and 1.7 ms, rates within 1 %, no errors (2026-11-16, debugger attached; not repeated without one). The
   shared XIP cache was their main cause (README "Flight core in SRAM"; facts-sd-logging C3). Its measurement
