@@ -26,6 +26,8 @@
 
 use core::f32::consts::PI;
 
+use crate::rotation::Rotation;
+
 /// Standard gravity, m/s^2 (ArduPilot `GRAVITY_MSS`).
 pub const GRAVITY_MSS: f32 = 9.806_65;
 
@@ -169,6 +171,36 @@ impl ImuOffsets {
         )
     }
 
+    /// The published sample from a chip sample, in the order the adapters apply: `mount` (the
+    /// chip's fixed rotation), then the offsets removed (they are in the board frame), then `board`
+    /// (`AHRS_ORIENTATION`). The result is in the body frame.
+    #[inline(always)]
+    pub fn publish(
+        &self,
+        mount: Rotation,
+        board: Rotation,
+        gyro_rads: [f32; 3],
+        accel_ms2: [f32; 3],
+    ) -> ([f32; 3], [f32; 3]) {
+        let (gyro, accel) = self.remove(mount.rotate(gyro_rads), mount.rotate(accel_ms2));
+        (board.rotate(gyro), board.rotate(accel))
+    }
+
+    /// The board-frame sample (`mount * chip`, offsets not removed) from a published one:
+    /// `board^T * published + offsets`. Core 0 un-rotates with the `board` core 1 applied (the boot
+    /// value), so the calibrations measure in the frame the offsets are stored in.
+    pub fn unpublish(
+        &self,
+        board: Rotation,
+        gyro_rads: [f32; 3],
+        accel_ms2: [f32; 3],
+    ) -> ([f32; 3], [f32; 3]) {
+        self.restore(
+            board.rotate_inverse(gyro_rads),
+            board.rotate_inverse(accel_ms2),
+        )
+    }
+
     /// The raw sample again from a calibrated one: `calibrated + offsets`.
     pub fn restore(&self, gyro_rads: [f32; 3], accel_ms2: [f32; 3]) -> ([f32; 3], [f32; 3]) {
         (
@@ -269,9 +301,20 @@ impl GyroCal {
     }
 }
 
-/// One IMU's one-position accelerometer calibration (the IMU's +Z axis up).
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// The gravity a level, still accelerometer reads in the body frame (FRD), m/s^2: specific force,
+/// up (ArduPilot `simple_accel_cal`: `rotated_gravity(0, 0, -GRAVITY_MSS)`).
+pub const BODY_GRAVITY_MSS: [f32; 3] = [0.0, 0.0, -GRAVITY_MSS];
+
+/// The gravity a level, still accelerometer reads in the board frame, m/s^2: `board^T * (0, 0, -g)`
+/// (the samples the calibration sees are un-rotated with the `board` core 1 applied).
+pub fn board_gravity(board: Rotation) -> [f32; 3] {
+    board.rotate_inverse(BODY_GRAVITY_MSS)
+}
+
+/// One IMU's one-position accelerometer calibration (the vehicle level, +Z of the body down).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AccelCal {
+    expected: [f32; 3],
     fresh: Fresh,
     sum: [f32; 3],
     in_window: u32,
@@ -281,9 +324,11 @@ pub struct AccelCal {
 }
 
 impl AccelCal {
-    /// No sample yet.
-    pub const fn new() -> Self {
+    /// No sample yet. `expected_ms2` is what a level, still accelerometer reads in the frame of the
+    /// samples pushed: the board frame, where it is [`board_gravity`] (`board^T * (0, 0, -g)`).
+    pub const fn new(expected_ms2: [f32; 3]) -> Self {
         Self {
+            expected: expected_ms2,
             fresh: Fresh(None),
             sum: [0.0; 3],
             in_window: 0,
@@ -312,7 +357,7 @@ impl AccelCal {
             && d.iter().map(|x| x * x).sum::<f32>() < ACCEL_CONVERGENCE_MSS * ACCEL_CONVERGENCE_MSS
         {
             let mean = add(last, average).map(|x| 0.5 * x);
-            let offset = sub(mean, [0.0, 0.0, GRAVITY_MSS]);
+            let offset = sub(mean, self.expected);
             self.done = Some(if offset.iter().all(|o| o.abs() <= ACCEL_OFFSET_MAX_MSS) {
                 Ok(offset)
             } else {
@@ -523,15 +568,16 @@ pub struct Run {
 }
 
 impl Run {
-    /// A run over the IMUs that are Ok; [`Failure::NoImu`] when none is.
-    pub fn start(kind: Kind, ok: [bool; IMUS]) -> Result<Self, Failure> {
+    /// A run over the IMUs that are Ok; [`Failure::NoImu`] when none is. `board` is the
+    /// `AHRS_ORIENTATION` core 1 applies (the boot value), which the accelerometer reference needs.
+    pub fn start(kind: Kind, ok: [bool; IMUS], board: Rotation) -> Result<Self, Failure> {
         if !ok.iter().any(|o| *o) {
             return Err(Failure::NoImu);
         }
         let imus = ok.map(|o| {
             o.then_some(match kind {
                 Kind::Gyro => Imu::Gyro(GyroCal::new()),
-                Kind::Accel => Imu::Accel(AccelCal::new()),
+                Kind::Accel => Imu::Accel(AccelCal::new(board_gravity(board))),
             })
         });
         Ok(Self {
@@ -641,11 +687,11 @@ mod tests {
 
     #[test]
     fn a_still_gyro_record_gives_its_mean_as_the_offset() {
-        let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
+        let mut run = Run::start(Kind::Gyro, [true, true], Rotation::None).unwrap();
         // +-1 mrad/s noise around the bias, mean exactly the bias over whole pairs.
         let out = feed(&mut run, |seq| {
             let n = if seq % 2 == 0 { 0.001 } else { -0.001 };
-            (BIAS.map(|b| b + n), [0.0, 0.0, GRAVITY_MSS])
+            (BIAS.map(|b| b + n), BODY_GRAVITY_MSS)
         });
         let Outcome::Done([Some(a), Some(b)]) = out else {
             panic!("{out:?}");
@@ -664,7 +710,7 @@ mod tests {
         let at = GYRO_MOVING_SD_RADS / factor;
         for (scale, expect_moving) in [(0.99, false), (1.01, true)] {
             let d = at * scale;
-            let mut run = Run::start(Kind::Gyro, [true, false]).unwrap();
+            let mut run = Run::start(Kind::Gyro, [true, false], Rotation::None).unwrap();
             let out = feed(&mut run, |seq| {
                 let x = if seq % 2 == 0 { d } else { -d };
                 ([x, 0.0, 0.0], [0.0; 3])
@@ -683,7 +729,7 @@ mod tests {
     #[test]
     fn a_large_still_gyro_mean_is_the_offset_there_is_no_limit_but_the_stores() {
         // 20 rad/s (1146 dps) steady: a working gyro at its scale; the store's range decides.
-        let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
+        let mut run = Run::start(Kind::Gyro, [true, true], Rotation::None).unwrap();
         let out = feed(&mut run, |_| ([0.0, 20.0, -20.0], [0.0; 3]));
         let Outcome::Done([Some(a), Some(_)]) = out else {
             panic!("{out:?}");
@@ -701,12 +747,12 @@ mod tests {
         g.push(8, BIAS);
         g.push(8, BIAS);
         assert_eq!(g.count(), 2);
-        let mut a = AccelCal::new();
+        let mut a = AccelCal::new(BODY_GRAVITY_MSS);
         for _ in 0..(ACCEL_WINDOW * 3) {
-            a.push(3, [0.0, 0.0, GRAVITY_MSS]);
+            a.push(3, [0.0, 0.0, -GRAVITY_MSS]);
         }
         assert_eq!(a.windows(), 0);
-        let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
+        let mut run = Run::start(Kind::Gyro, [true, true], Rotation::None).unwrap();
         for seq in 0..(GYRO_SAMPLES - 1) {
             run.push(0, seq, BIAS, [0.0; 3]);
             run.push(0, seq, BIAS, [0.0; 3]);
@@ -717,9 +763,9 @@ mod tests {
     }
 
     #[test]
-    fn the_level_accel_offset_is_the_mean_minus_gravity_on_z() {
-        let mean = [0.15, -0.21, GRAVITY_MSS + 0.08];
-        let mut run = Run::start(Kind::Accel, [true, true]).unwrap();
+    fn the_level_accel_offset_is_the_mean_minus_body_gravity_on_z() {
+        let mean = [0.15, -0.21, -GRAVITY_MSS + 0.08];
+        let mut run = Run::start(Kind::Accel, [true, true], Rotation::None).unwrap();
         let out = feed(&mut run, |seq| {
             let n = if seq % 2 == 0 { 0.01 } else { -0.01 };
             ([0.0; 3], mean.map(|m| m + n))
@@ -730,7 +776,7 @@ mod tests {
         assert!(close(a, [0.15, -0.21, 0.08], 1e-4), "{a:?}");
         assert_eq!(a, b);
         // Converged on the second average: 1 s of samples.
-        let mut cal = AccelCal::new();
+        let mut cal = AccelCal::new(BODY_GRAVITY_MSS);
         for seq in 0..(2 * ACCEL_WINDOW) {
             cal.push(seq, mean);
         }
@@ -742,10 +788,10 @@ mod tests {
     fn the_accel_convergence_limit_is_ardupilots() {
         // Each average differs from the previous one by `step` on X.
         for (step, converges) in [(0.049f32, true), (0.051, false)] {
-            let mut cal = AccelCal::new();
+            let mut cal = AccelCal::new(BODY_GRAVITY_MSS);
             for seq in 0..(ACCEL_WINDOW * ACCEL_WINDOWS + 10) {
                 let w = (seq / ACCEL_WINDOW) as f32;
-                cal.push(seq, [w * step, 0.0, GRAVITY_MSS]);
+                cal.push(seq, [w * step, 0.0, -GRAVITY_MSS]);
             }
             if converges {
                 assert!(matches!(cal.result(), Some(Ok(_))), "{step}");
@@ -759,9 +805,10 @@ mod tests {
 
     #[test]
     fn an_accel_offset_beyond_gravity_fails() {
-        // Z reading about 0 (on its side): the Z offset is about -g; a little beyond fails.
-        for (z, ok) in [(0.01f32, true), (-0.01, false)] {
-            let mut run = Run::start(Kind::Accel, [true, false]).unwrap();
+        // Z reading about 0 (on its side): the Z offset is about +g (the level reading is -g); a
+        // little beyond fails.
+        for (z, ok) in [(-0.01f32, true), (0.01, false)] {
+            let mut run = Run::start(Kind::Accel, [true, false], Rotation::None).unwrap();
             let out = feed(&mut run, |_| ([0.0; 3], [0.0, 0.0, z]));
             if ok {
                 assert!(matches!(out, Outcome::Done([Some(_), None])), "{z} {out:?}");
@@ -777,7 +824,7 @@ mod tests {
 
     #[test]
     fn a_cancelled_run_gives_no_offset() {
-        let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
+        let mut run = Run::start(Kind::Gyro, [true, true], Rotation::None).unwrap();
         for seq in 0..60 {
             run.push(0, seq, BIAS, [0.0; 3]);
             run.push(1, seq, BIAS, [0.0; 3]);
@@ -792,9 +839,9 @@ mod tests {
 
     #[test]
     fn a_missing_imu_is_skipped_and_none_fails() {
-        assert_eq!(Run::start(Kind::Gyro, [false, false]), Err(Failure::NoImu));
-        assert_eq!(Run::start(Kind::Accel, [false, false]), Err(Failure::NoImu));
-        let mut run = Run::start(Kind::Gyro, [false, true]).unwrap();
+        assert_eq!(Run::start(Kind::Gyro, [false, false], Rotation::None), Err(Failure::NoImu));
+        assert_eq!(Run::start(Kind::Accel, [false, false], Rotation::None), Err(Failure::NoImu));
+        let mut run = Run::start(Kind::Gyro, [false, true], Rotation::None).unwrap();
         assert!(!run.includes(0) && run.includes(1));
         // Samples for the skipped IMU are ignored; the run ends on IMU2 alone.
         let out = feed(&mut run, |_| (BIAS, [0.0; 3]));
@@ -803,13 +850,97 @@ mod tests {
         };
         assert!(close(b, BIAS, 1e-6));
         // One IMU moving fails the whole run, naming it.
-        let mut run = Run::start(Kind::Gyro, [true, true]).unwrap();
+        let mut run = Run::start(Kind::Gyro, [true, true], Rotation::None).unwrap();
         for seq in 0..GYRO_SAMPLES {
             let x = if seq % 2 == 0 { 0.2 } else { -0.2 };
             run.push(0, seq, BIAS, [0.0; 3]);
             run.push(1, seq, [x, 0.0, 0.0], [0.0; 3]);
         }
         assert_eq!(run.outcome(), Outcome::Failed(Failure::Moving, Some(1)));
+    }
+
+    /// H3: with the board rotation B = YAW_90 (not its own inverse) and nonzero offsets on every
+    /// axis, the path chip sample -> published (`publish`, as the adapters apply it) -> core 0
+    /// (`unpublish`) gives the chip sample rotated by the mount M, and both calibrations recover the
+    /// injected offsets. The accel reference is `B^T * (0, 0, -g)`.
+    const MOUNT: Rotation = Rotation::Roll180;
+    const GYRO_OFF: [f32; 3] = [0.012, -0.034, 0.005];
+    const ACCEL_OFF: [f32; 3] = [0.15, -0.21, 0.08];
+
+    /// A still, level vehicle seen by the chip: the board-frame truth `B^T * body gravity` plus the
+    /// accelerometer offset and the gyro offset, as the chip reports them (M is its own inverse).
+    fn chip_sample(board: Rotation) -> ([f32; 3], [f32; 3]) {
+        let accel_board = board_gravity(board);
+        let accel_board = [
+            accel_board[0] + ACCEL_OFF[0],
+            accel_board[1] + ACCEL_OFF[1],
+            accel_board[2] + ACCEL_OFF[2],
+        ];
+        (MOUNT.rotate_inverse(GYRO_OFF), MOUNT.rotate_inverse(accel_board))
+    }
+
+    #[test]
+    fn publish_and_unpublish_give_the_mounted_chip_sample_with_a_non_involutive_board() {
+        let board = Rotation::Yaw90;
+        let off = ImuOffsets {
+            gyro_rads: GYRO_OFF,
+            accel_ms2: ACCEL_OFF,
+        };
+        let (gyro, accel) = ([0.3, -0.7, 1.1], [1.0, -2.0, 3.0]);
+        let (pg, pa) = off.publish(MOUNT, board, gyro, accel);
+        // Body frame: B * (M * raw - off).
+        assert!(close(
+            pg,
+            board.rotate(sub(MOUNT.rotate(gyro), GYRO_OFF)),
+            1e-6
+        ));
+        assert!(close(
+            pa,
+            board.rotate(sub(MOUNT.rotate(accel), ACCEL_OFF)),
+            1e-6
+        ));
+        // Core 0 gets M * raw back (not B * M * raw, not B^T^T).
+        let (g2, a2) = off.unpublish(board, pg, pa);
+        assert!(close(g2, MOUNT.rotate(gyro), 1e-5), "{g2:?}");
+        assert!(close(a2, MOUNT.rotate(accel), 1e-5), "{a2:?}");
+    }
+
+    #[test]
+    fn the_calibrations_recover_the_injected_offsets_through_a_yaw_90_board() {
+        let board = Rotation::Yaw90;
+        // The offsets in force while measuring are zero: the published sample is B * (M * chip).
+        let (chip_gyro, chip_accel) = chip_sample(board);
+        let (pg, pa) = ImuOffsets::ZERO.publish(MOUNT, board, chip_gyro, chip_accel);
+        // Level and still: the body frame reads (0, 0, -g) plus the offset rotated by B.
+        let (g, a) = ImuOffsets::ZERO.unpublish(board, pg, pa);
+        let mut run = Run::start(Kind::Gyro, [true, true], board).unwrap();
+        let out = feed(&mut run, |_| (g, a));
+        let Outcome::Done([Some(og), Some(_)]) = out else {
+            panic!("{out:?}");
+        };
+        assert!(close(og, GYRO_OFF, 1e-5), "{og:?}");
+        let mut run = Run::start(Kind::Accel, [true, true], board).unwrap();
+        let out = feed(&mut run, |_| (g, a));
+        let Outcome::Done([Some(oa), Some(ob)]) = out else {
+            panic!("{out:?}");
+        };
+        assert!(close(oa, ACCEL_OFF, 1e-4), "{oa:?}");
+        assert_eq!(oa, ob);
+    }
+
+    /// The accel reference is (0, 0, -g) for B = 0 and (0, 0, +g) for B = ROLL_180; B^T for YAW_90.
+    #[test]
+    fn the_accel_reference_is_the_body_gravity_in_the_board_frame() {
+        assert_eq!(board_gravity(Rotation::None), [0.0, 0.0, -GRAVITY_MSS]);
+        assert_eq!(board_gravity(Rotation::Roll180), [0.0, 0.0, GRAVITY_MSS]);
+        // YAW_90 leaves z alone and the level gravity has no x or y.
+        assert!(close(
+            board_gravity(Rotation::Yaw90),
+            [0.0, 0.0, -GRAVITY_MSS],
+            1e-6
+        ));
+        // A tilted body vector shows the transpose: B^T (1, 0, 0) for YAW_90 is (0, -1, 0).
+        assert_eq!(Rotation::Yaw90.rotate_inverse([1.0, 0.0, 0.0]), [0.0, -1.0, 0.0]);
     }
 
     #[test]
