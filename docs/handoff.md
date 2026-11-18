@@ -39,7 +39,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   Data crosses only through lock-free cells.
 - **Seven device rows:** IMU1, IMU2, BARO, MAG, GNSS, BATT (supervised: health states, recovery ladder,
   operator restart) and RC (report only: "the radio link is up").
-- **Parameters:** 78 (the last eight are the IMUs' chip settings, `AHRS_ORIENTATION` and `MAG_ORIENT`; the six chip settings are `Reboot` class: they apply after save and reboot; range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
+- **Parameters:** 78 (the last eight: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`) and `MAG_ORIENT` (`Live`); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
