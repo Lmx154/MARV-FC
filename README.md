@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the 70 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets, the SD card's `LOG_BACKEND_TYPE` and the RC stick mapping (see Parameters),
+  second, the parameter protocol over the 78 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping and the sensor orientation (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -581,7 +581,7 @@ written.
   time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
   status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 70 parameters when a log opens and after
+  text ring's third cursor: the boot texts first), PARM for all 78 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second).
