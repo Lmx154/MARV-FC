@@ -192,9 +192,9 @@ copies for the download checks.
 
 ## Left open
 
-**Waiting on the owner**
-- The magnetometer is not mounted (it hangs on its cable). The real compass calibration waits for the mount.
-  The firmware has no compass-orientation setting: either mount it aligned with the board or add one then.
+**In progress**
+- Sensor orientation: the magnetometer is mounted (2026-11-17: +X right, +Y forward, +Z up; the IMUs: +X forward,
+  +Y left, +Z up) and the firmware has no orientation handling yet; the real compass calibration waits for it.
 
 **Not built**
 - ESC in the firmware: the DShot driver and the passthrough work as driver crates with bench programs, but
