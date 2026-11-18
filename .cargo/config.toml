@@ -16,3 +16,7 @@ target = "thumbv8m.main-none-eabihf"
 
 [env]
 DEFMT_LOG = "info"
+# defmt-rtt's buffer (its build script reads this; default 1024 B). probe-rs sets the channel to
+# block-if-full; the boot logging filled 1 KiB and held core 0's interrupts off for 6 to 13 ms (55 to
+# 117 ms after a burst of UART error WARNs), which overran the radio UART. 8 KiB holds those bursts.
+DEFMT_RTT_BUFFER_SIZE = "8192"

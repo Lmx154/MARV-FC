@@ -237,7 +237,19 @@ copies for the download checks.
   and 1.7 ms, rates within 1 %, no errors (2026-11-16, debugger attached; not repeated without one). The
   shared XIP cache was their main cause (README "Flight core in SRAM"; facts-sd-logging C3). Its measurement
   builds were removed once their results were recorded here.
-- About 0.1 receive errors per second on the radio UART in normal running.
+- (Closed 2026-11-18) The ~0.1 receive errors/s on the radio UART (2026-11-15, older build) do not reproduce on
+  today's build: 0 new RC errors in 320 s of CRSF lock (log 20261118-172835).
+
+**UART errors at boot (explained 2026-11-18, logs 20261118-162319 to -174800)**
+- The ~0.06 s RC `Overrun error` and the rare boots with ~200 framing / 10 break: a debugger artefact. probe-rs puts
+  the defmt RTT channel in block-if-full mode; once boot logging filled the 1 KiB buffer, defmt-rtt spun in its
+  critical section with core-0 interrupts off (6 to 117 ms) and UART0's 32-byte FIFO overflowed (and rc-port missed
+  its MAVLink lock window). Fixed: `DEFMT_RTT_BUFFER_SIZE = 8192` (.cargo/config.toml; +7 KiB RAM). 0 overruns in
+  9 boots on both models after; peak fill ~2 KiB. Without a debugger RTT never blocks.
+- Framing errors left at boot are expected and counted: UART0's first 50 ms search window listens at 460800 to a
+  420000 CRSF stream (~130 framing); UART1 joins the LC76G mid-way through its NMEA burst after a reset of the MCU
+  alone (~12 % of resets), counted as "errors before the first sentence" (accepted, as ArduPilot/Betaflight do).
+- Divisors are exact enough: 115207 (+0.006 %), 460829 (+0.006 %), 419874 (-0.030 %).
 
 **Never exercised on real hardware**
 - A failing self-test; a real I2C bus that sticks in the middle of a run (only an injected hang); a GNSS
@@ -246,9 +258,6 @@ copies for the download checks.
   target is not installed on this desktop).
 
 **Small things noticed, not changed**
-- `marv-cli devices` prints no flags column (the "self-test running" flag is only in the window).
-- `MARV-V2-drivers/CONTRACT.md` still says eight drivers and names a 1.0 gate the owner set aside.
-- An intermittent failure of one property test in `rc-port` (input not captured).
 - Core 0 has no working stack guard: `_stack_end` resolves to a flash address (`memory.x` inserts `.end_block`
   after `.uninit`, ahead of cortex-m-rt's `PROVIDE(_stack_end = .)`), and embassy-rp's
   `install_core0_stack_guard` is not called. The 32 KiB floor of the link ASSERT is checked on `__euninit`.
