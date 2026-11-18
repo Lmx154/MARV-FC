@@ -46,7 +46,7 @@ It has no flight functionality.
   enabled on core 0 after core 1 started.
 
 Not in it yet: IMU2's
-high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit, the SD card.
+high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit.
 
 ## Flight-core device loop
 
@@ -778,6 +778,8 @@ Features for the checks (off by default):
 
 Every IMU and compass value that leaves the board is in the body frame, FRD (x forward, y right, z down), as in MAVLink and ArduPilot: level and at rest the accelerometer reads z about -9.81 m/s^2 (specific force, up). The IMU adapters (core 1) apply the chip's fixed rotation (`ROLL_180`), then subtract the offsets (the board frame), then apply `AHRS_ORIENTATION`; the compass adapter (core 0) applies `MAG_ORIENT`, then subtracts `MAG_OFF*` (the body frame). The log's IMU and MAG records and the `[STAT]` lines carry the same values. Measurements made before this build (this README's, `docs/handoff.md`'s) and offsets and logs stored before it are in the chips' own axes, and the stored offsets must be redone. Design: `_plan/decision-orientation-20261117.md`.
 
+On 2026-11-18 the owner checked the IMU and compass signs on both IMUs (moved by hand), calibrated the gyroscopes, accelerometers and compass in the body frame, and saved the offsets to flash; they were kept after a reboot.
+
 ## Calibrations
 
 `marv-cli calibrate gyro`, `calibrate accel`, `calibrate compass` (MAV_CMD_PREFLIGHT_CALIBRATION 241) and
@@ -862,6 +864,8 @@ the success path can be shown on a board that cannot be turned: offsets (10, -20
 
 ### On the board (2026-11-15, MARV V2 Rev 1 at rest on the bench, nothing saved)
 
+(Later: on 2026-11-18 the owner calibrated this board by hand (gyro, accelerometer, compass) and saved the offsets to flash; they were kept after a reboot. The figures below are the 2026-11-15 ones.)
+
 Normal build: `calibrate accel` ACCEPTED, "accel cal: |IMU1| 285 |IMU2| 294 mm/s^2" printed before the exit
 (exit 0); `calibrate gyro` ACCEPTED, "gyro cal: |IMU1| 5417 |IMU2| 5412 urad/s"; `calibrate compass`: 0 to
 98 % over 30 s, then FAILED "compass cal: not rotated, radius 1 1 1 uT" (exit 1), `MAG_OFF*` still 0; a run
@@ -884,7 +888,7 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 
 | Command (`marv-cli`) | What it does today |
 |---|---|
-| `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT`, `SD` (every row of the registry) | raises the barometer's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
+| `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT`, `SD` (every row of the registry) | raises that device's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
 | `param reset-calibration --yes` | `Params::reset_calibration`, the same way: the twelve `IMUx_*_OFF*` and the three `MAG_OFF*` go to 0 and the IMU offsets are pushed to the flight core; ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
@@ -995,11 +999,11 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | bmm350 | <https://github.com/Lmx154/bmm350-rs> | BMM350 magnetometer (I2C) |
 | lc76g | <https://github.com/Lmx154/lc76g-rs> | LC76G GNSS receiver (UART) |
 | pio-sdmmc | <https://github.com/Lmx154/pio-sdmmc-rs> | SD card on the RP2350 PIO, 4-bit SD bus |
-| qmi-psram | <https://github.com/Lmx154/qmi-psram-rs> | 16 MiB QSPI PSRAM on the RP2350 QMI |
-| ws2812c | <https://github.com/Lmx154/ws2812c-rs> | WS2812C status LED (PIO) |
 | usb-cdc | <https://github.com/Lmx154/usb-cdc> | bytes over the board's USB port (CDC-ACM), the link to the ground station |
 | mavlink-device | <https://github.com/Lmx154/mavlink-device> | the board's MAVLink layer on any byte stream (with the `marv` dialect) |
 | rc-port | <https://github.com/Lmx154/rc-port> | the ELRS receiver's UART: CRSF and MAVLink, with its `crsf-codec` |
+
+The `qmi-psram` (PSRAM) and `ws2812c` (status LED) drivers exist in their own repositories but are not dependencies of the firmware: it uses neither the PSRAM nor the LED yet.
 
 For what each driver offers and how to use it, read the README in its own repository. What was proven
 on the board, what the firmware has to respect, and what is still open: the Measured section of each driver's README.
@@ -1136,7 +1140,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (250 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (254 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
@@ -1154,13 +1158,15 @@ the host (250 tests, and 4 doc tests); the binary uses every module listed below
 | `calib` | Gyroscope, one-position accelerometer and compass calibration, pure: samples in (per IMU, a sample counted once), a per-IMU offset or the reason for the failure out; Betaflight's gyro rule (1.25 s mean, moving when the standard deviation exceeds the threshold) |
 | `selftest` | A device self-test as its result crosses from the device's task to the action: the verdict and the failed axes as a bit mask (never figures), the action's final result and its one STATUSTEXT |
 | `watchdog` | The watchdog's pure decisions: the monitor's feed rule, the task-id table and the boot report |
+| `i2c` | The I2C transfer deadline (twice the time on the wire, at least 4 ms, as ArduPilot) and the rule for a bus after a timed-out transfer: refused until the bus is cleared and rebuilt |
+| `rotation` | Sensor orientation: ArduPilot's rotations 0 to 15 (flat mountings, right side up or upside down, in 45-degree yaw steps) as plain 3x3 matrices; runs from SRAM because the flight core calls it for every IMU sample |
 | `rc` | The radio receiver's row (RC): whether the radio link is up, from what the receiver port reports; report only, no health machine |
 | `text_ring` | The STATUSTEXT ring for the ground-station links: 8 entries, a read cursor per link (each text reaches each link once, in order), the oldest dropped and counted for a link more than 8 behind, so a slow or absent link holds back nobody; 2 sticky slots (the boot report) kept until every link took them, taken first |
 
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, `mag`, `batt`, `imu` and `rc`, the last with the RC stick normaliser, no validator; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (42 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (46 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store

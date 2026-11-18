@@ -1,8 +1,9 @@
 //! Pure `no_std` core of the MARV V2 firmware: the logic that is tested on the host.
-//! Empty skeleton for the foundation layer: nothing is implemented yet.
+//! Device health, parameters, record codecs, command admission, calibration maths and the lock-free
+//! cells between the two cores.
 #![no_std]
-// `deny`, not `forbid`: the `xcore` module (lock-free cells) will need atomics and possibly
-// `unsafe`, and `forbid` cannot be relaxed for a single module.
+// `deny`, not `forbid`: the `xcore` module (lock-free cells) uses `unsafe`, and `forbid` cannot be
+// relaxed for a single module.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(
@@ -40,11 +41,3 @@ pub mod sys_status;
 pub mod text_ring;
 pub mod watchdog;
 pub mod xcore;
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn skeleton_builds() {
-        assert_eq!(1 + 1, 2);
-    }
-}

@@ -1,16 +1,16 @@
-//! MARV V2 firmware, the two-core skeleton with the device layer (design: decision-foundation,
-//! two-core amendment).
+//! MARV V2 firmware: two cores and the device layer (design: decision-foundation, two-core
+//! amendment).
 //!
 //! Core 0, the I/O core: `usb_link` (a MAVLink node, system 1 component 1, on USB), `supervisor`
 //! (10 ms tick: the flight core's liveness ping at 10 Hz, the start-up checks, the devices' stuck
 //! check and transition texts, `[STAT]` lines every 10 s), `beat0`, and one task per core-0 device
-//! (`device`): the barometer (`baro`). Core 1, the flight core: `fw_flight::liveness`, IMU1
-//! (`imu1`: the ICM-45686 on SPI0 with DMA channels 0 and 1) and IMU2 (`imu2`: the LSM6DSK320X on
+//! (`device`: barometer, magnetometer, GNSS, battery, SD card), the radio receiver (`rc`). Core 1,
+//! the flight core: `fw_flight::liveness`, IMU1 (`imu1`: the ICM-45686 on SPI0 with DMA channels 0 and 1) and IMU2 (`imu2`: the LSM6DSK320X on
 //! SPI1 with DMA channels 2 and 3), both built inside core 1's entry and running `fw_flight::imu`.
 //! The cores share only the atomics and `fw_core::xcore` cells (in `imu1::CELLS`, `imu2::CELLS`
 //! and below), in internal SRAM. Telemetry adds HIGHRES_IMU (id 0, IMU1), SCALED_IMU2 (IMU2) and
 //! SCALED_PRESSURE (BARO) at 25 Hz. The parameters
-//! (`store`, the barometer's five) and the commands (`actions`) are built; the parameters are read
+//! (`store`, every device's table) and the commands (`actions`) are built; the parameters are read
 //! from the flash settings region at boot and written there only on an explicit save (`settings`).
 //! The hardware watchdog (`watchdog`) is started first thing and fed by its monitor on `SWI_IRQ_1`
 //! only while `BEAT0` and `PONG` advance; the boot report says why the last reset happened. It
@@ -1088,7 +1088,7 @@ async fn main(spawner: Spawner) {
         );
     }
     defmt::info!(
-        "[INFO] MARV V2 fw {=str}: two-core skeleton",
+        "[INFO] MARV V2 fw {=str}: two cores",
         env!("CARGO_PKG_VERSION")
     );
     #[cfg(feature = "xip-stat")]
@@ -1099,8 +1099,6 @@ async fn main(spawner: Spawner) {
     defmt::info!("[INFO] bmm350: {}", type_name::<bmm350::Info>());
     defmt::info!("[INFO] lc76g: {}", type_name::<lc76g::Config>());
     defmt::info!("[INFO] pio-sdmmc: {}", type_name::<pio_sdmmc::Config>());
-    defmt::info!("[INFO] qmi-psram: {}", type_name::<qmi_psram::Config>());
-    defmt::info!("[INFO] ws2812c: {}", type_name::<ws2812c::Rgb>());
 
     let actlr0 = read_actlr();
     check(

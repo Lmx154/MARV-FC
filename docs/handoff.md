@@ -1,6 +1,6 @@
 # MARV V2 firmware: hand-off
 
-State on 2026-11-15, late evening; the flight core in SRAM added on 2026-11-16. Written for whoever picks the work up next, human or agent. It says what
+State on 2026-11-18; written first on 2026-11-15 and brought up to date since. Written for whoever picks the work up next, human or agent. It says what
 is built and proven, what is in progress, and what is left. It is an overview: the details and the evidence
 are in the documents it points to.
 
@@ -8,9 +8,9 @@ are in the documents it points to.
 
 | Thing | Place | State |
 |---|---|---|
-| Firmware | `~/Documents/MARV-V2-firmware` (GitHub `Lmx154/MARV-FC`) | `main` is current and pushed |
+| Firmware | `~/Documents/MARV-V2-firmware` (GitHub `Lmx154/MARV-FC`) | `main` is current and pushed; the only branch is `main` (the orientation build is merged), and the tag `rollback-20261117` marks the state before it |
 | Driver crates, one repo each | `~/Documents/MARV-V2-drivers/<crate>` | every repo on `main`, equal to its remote |
-| Ground station and `marv-cli` | `~/Documents/MARV-GCS` | `main` = `mvp`, pushed |
+| Ground station and `marv-cli` | `~/Documents/MARV-GCS` | `main`, pushed; the station's log work (list and download) is merged there |
 | Working plan (the log of everything, with the owner's words verbatim) | `docs/plan.md` in the firmware repo (git-ignored, local) | current |
 | Design decisions and measured facts | `~/Documents/MARV-V2-drivers/_plan/` | see below |
 
@@ -45,7 +45,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
 - **Watchdog:** resets when either core stops answering, keeps a record of why, reports it at the next boot.
 - **Radio (ELRS):** both receiver modes. CRSF model: sticks at about 245 per second, battery telemetry shown
-  on the transmitter; also a GPS frame (position, speed, heading, altitude, satellites) per new GNSS sample, 1 Hz, in place of that call's battery frame (host-tested; not yet seen on the transmitter's screen). MAVLink model: telemetry over the air (about 134 B/s; now 270 B/s with HIGHRES_IMU, SCALED_IMU2 and SCALED_PRESSURE at 1 Hz, counted at the UART, not yet seen on the air). Mode switches both ways while
+  on the transmitter; also a GPS frame (position, speed, heading, altitude, satellites) per new GNSS sample, 1 Hz, in place of that call's battery frame (host-tested; the owner saw the GPS telemetry on the Pocket on 2026-11-18). MAVLink model: telemetry over the air (about 134 B/s; now 270 B/s with HIGHRES_IMU, SCALED_IMU2 and SCALED_PRESSURE at 1 Hz, counted at the UART, not yet seen on the air). Mode switches both ways while
   running; transmitter off and on in each mode. The owner uses the CRSF model for sticks and the MAVLink model
   for telemetry only.
 - **I2C faults:** both buses are cleared at every boot; a hung transfer times out (ArduPilot's formula) and
@@ -183,8 +183,8 @@ when the card stalls; card reader first, then MAVLink log download over USB.
 | P1 | The `.BIN` encoder (`fw_core::dflog`), read back by ArduPilot's `mavlogdump.py` | done, in `main` |
 | P3 | Format and mount the card inside the firmware, 16 MiB write and read-back | done, in `main` (the probes stay as features) |
 | SD2 | The SD card as a device row (mount, capacity, health) | done, merged into `main` (README "SD card") |
-| SD3 | The log writer and what is logged | done, in `main` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. A real card removal seen (Failed 5.5 s after the pull, restart Ok in 329 ms), and three logs read on a PC with pymavlink 2.4.50 `mavlogdump.py` (no bad bytes). Not yet: a power cut, UAV Log Viewer |
-| SD4 | Log list and download over USB (`marv-cli logs list/get`) | done, in `main` (README "Logging", "Logs over USB"): list, download (logs 8 and 13 byte-identical to the card-reader copies, twice), absent log, end marker, take-over, END and the 3 s HEARTBEAT rule seen on the board with a throw-away pymavlink client; the station's half on MARV-GCS `wip-logs` |
+| SD3 | The log writer and what is logged | done, in `main` (README "Logging"): 30-minute run with 3 saves, an 8.5-hour soak, both read back on the board with 0 bad bytes; RESTART, the write-fail injection and the clean-up seen. A real card removal seen (Failed 5.5 s after the pull, restart Ok in 329 ms), and three logs read on a PC with pymavlink 2.4.50 `mavlogdump.py` (no bad bytes). A power cut passed (owner, 2026-11-18). Not yet: UAV Log Viewer |
+| SD4 | Log list and download over USB (`marv-cli logs list/get`) | done, in `main` (README "Logging", "Logs over USB"): list, download (logs 8 and 13 byte-identical to the card-reader copies, twice), absent log, end marker, take-over, END and the 3 s HEARTBEAT rule seen on the board with a throw-away pymavlink client; the station's half is in MARV-GCS `main`; on 2026-11-18 the owner's USB drop in the middle of a download (the station's fix) passed |
 
 The card in the slot is a scratch card and may be erased (owner's word). The owner has a USB card reader:
 logs copied off the card with it were read with ArduPilot's reader (2026-11-16) and serve as reference
@@ -192,13 +192,14 @@ copies for the download checks.
 
 ## Left open
 
-**In progress**
-- Sensor orientation: the magnetometer is mounted (2026-11-17: +X right, +Y forward, +Z up; the IMUs: +X forward,
-  +Y left, +Z up). Design: `_plan/decision-orientation-20261117.md`; built on branch `wip-orientation` (host tests
-  and the still-vehicle board checks below; the owner's hands-on steps are not done). Every output becomes body FRD and the
-  stored offsets (`IMUn_GYR_OFF*`, `IMUn_ACC_OFF*`, `MAG_OFF*`) were measured in chip axes: the calibrations must be
-  redone (gyro, accel, compass), and the real compass calibration waits for that.
-  - **Orientation on the board (still)** (2026-11-17, `wip-orientation` at `05ae38d`, tree clean, four `tools/run.sh` sessions,
+**Sensor orientation (done, in `main`)**
+- The magnetometer is mounted +X right, +Y forward, +Z up; the IMUs +X forward, +Y left, +Z up. Design:
+  `_plan/decision-orientation-20261117.md`. Every output is body FRD. Owner's hands-on results, 2026-11-18: the IMU and
+  compass sign checks passed on both IMUs (moved by hand); gyroscope, accelerometer and compass were calibrated and the
+  offsets SAVED to flash (kept after a reboot); the RC calibration was saved; the radio checks passed (Pocket GPS
+  telemetry, transmitter off, the MAVLink model over UDP); the station's presets BARO and IMU1 were checked. The board
+  therefore holds calibrated offsets now; the measurements below were taken before, with all offsets 0.
+  - **Orientation on the board, still vehicle** (2026-11-17, the build that became `main`, then at `05ae38d`, tree clean, four `tools/run.sh` sessions,
     logs `marv-v2-firmware-20261117-222029.log`, `-222449.log`, `-222634.log`, `-222819.log`; vehicle still on the bench, USB
     power, battery out, motors on, no propellers; the stored offsets are all 0; no calibration). B-0: the RAM-code check
     printed `PASS: nothing the flight core can reach after core1_main lies in XIP (0x10000000-0x1FFFFFFF)`; boot
@@ -217,14 +218,14 @@ copies for the download checks.
     0 entries, 20 bytes, stall 39917 us, verify ok`; after the restart `AHRS_ORIENTATION 0`, zacc -9.863 (IMU1) and -9.630 (IMU2),
     the record 0 entries (sector A sequence 245, sector B 244). One bump of the bench during the capture at 8 (one 25-message group,
     zacc up to 11.9) is in its means. Seen once, on the boot after save 1 only: about 200 `Framing error` and 10 `Break error` WARN
-    lines from `embassy_rp src/uart/buffered.rs` between 5 ms and 260 ms, none in the other three boots (not attributed). Still to do
-    with the owner: the hands-on sign checks (accel, gyro and compass signs, the `MAG_ORIENT` negative control) and the calibrations
-    (gyro, accel, compass), then the one save.
+    lines from `embassy_rp src/uart/buffered.rs` between 5 ms and 260 ms, none in the other three boots (not attributed). The hands-on
+    steps that followed are above.
 
 **Not built**
 - ESC in the firmware: the DShot driver and the passthrough work as driver crates with bench programs, but
   the firmware has no ESC row, no passthrough through its USB port, no stop on signal loss; the board's
   current scale and ESC serial telemetry are not done. See `docs/handoff-esc-link.md`.
+- The estimator (next).
 - Status LED. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
   the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
 - Full-rate IMU data from the flight core to core 0 (a ring is reserved in the design; needed for a control
@@ -280,7 +281,7 @@ copies for the download checks.
 ## How to run things
 
 ```
-cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (250 + 4 doc, 33, 20 today)
+cargo host-test -p fw-core -p fw-settings -p fw-flight   # host tests (254 + 4 doc, 46, 20 today)
 cargo build --release                                     # the firmware for the board
 tools/run.sh 120                                          # build, flash, run, log to logs/ for 120 s
 FEATURES=<feature> tools/run.sh 120                       # a test or measurement build (README lists them)

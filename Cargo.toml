@@ -24,8 +24,6 @@ bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac83258
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }
 lc76g = { git = "https://github.com/Lmx154/lc76g-rs.git", rev = "2ee54f927bd0ffb7c4f7a4978c84cc2af962f405", features = ["defmt"] }
 pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "424fd58b4beb7607e426c398494c836b4bfe1fb3", features = ["defmt", "embassy-rp-0-10", "block-device-driver-0-2"] }
-qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "591ca04501144fa40b66ed17262df836f258c076", features = ["rp2350", "defmt"] }
-ws2812c = { git = "https://github.com/Lmx154/ws2812c-rs.git", rev = "831c70b527a87bba9e63969d3c5632cf8a7ac892", features = ["defmt", "embassy-rp"] }
 
 # The firmware's own crates: the hardware-free logic and the flight-core tasks.
 fw-core = { path = "crates/fw-core" }
