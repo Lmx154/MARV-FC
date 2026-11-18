@@ -149,7 +149,7 @@ fn mag_offsets_in(params: &Params<COUNT>) -> [f32; 3] {
 
 /// The magnetometer's calibration offsets in microtesla (X, Y, Z), read for every sample.
 pub fn mag_offsets() -> [f32; 3] {
-    with(mag_offsets_in).unwrap_or([0.0; 3])
+    with(|params| mag_offsets_in(params)).unwrap_or([0.0; 3])
 }
 
 /// The battery monitor's configuration for the next sample from the stored values (a value that
