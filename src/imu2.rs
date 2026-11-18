@@ -22,7 +22,7 @@ use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
 };
-use fw_settings::imu::Imu2Setup;
+use fw_settings::imu::{IMU2_MOUNT as MOUNT, Imu2Setup};
 use lsm6dsk320x::{ChannelResult, Error, Lsm6dsk320x, SelfTestConfig};
 
 /// The cells between core 0 and the IMU2 task.
@@ -133,7 +133,9 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind> {
         let all = self.call().read_all().await.map_err(|e| kind(&e))?;
         let (offsets, _) = self.offsets.read();
-        let (gyro_rads, accel_ms2) = offsets.remove(
+        let (gyro_rads, accel_ms2) = offsets.publish(
+            MOUNT,
+            self.setup.board,
             all.gyro.gyro_rads(self.setup.gyro_fs),
             all.accel.accel_ms2(self.setup.accel_fs),
         );

@@ -10,8 +10,10 @@
 //!
 //! Calibration: the samples are the flight rows' latest ones as the supervisor mirrors them every
 //! 10 ms (about 100 per second per IMU), each counted once by its `seq`; the current offsets are
-//! added back, so the measurement is of the raw values. The decision is `fw_core::calib`. A result
-//! is written into the parameters and pushed; nothing is saved.
+//! added back, so the measurement is of the raw values: first un-rotated with the boot's
+//! `AHRS_ORIENTATION` (the offsets are in the board frame, between the chip's fixed rotation and
+//! the board's), so the measurement is in the frame the offsets are stored in. The decision is
+//! `fw_core::calib`. A result is written into the parameters and pushed; nothing is saved.
 //!
 //! The compass calibration is the same on the MAG row's latest sample (core 0's own device): the
 //! `MAG_OFF*` in force are added back to each sample, and the result is written to `MAG_OFF*`,
@@ -29,6 +31,7 @@ use fw_core::calib::{
     MagOutcome, Outcome, Run, Stats3, mag_raw, norm3, sqrt,
 };
 use fw_core::health::State;
+use fw_core::rotation::Rotation;
 use fw_core::xcore::{TripleBuffer, TripleReader, TripleWriter};
 use fw_settings::imu::{ACC_OFF, DEVICES, GYR_OFF};
 use mavlink_device::dialect::MavSeverity;
@@ -51,6 +54,8 @@ const ALL: u32 = (1 << DEVICES[0]) | (1 << DEVICES[1]);
 struct Core0 {
     writers: [TripleWriter<'static, ImuOffsets>; IMUS],
     in_force: [ImuOffsets; IMUS],
+    /// The `AHRS_ORIENTATION` core 1 applies, from the boot.
+    board: Rotation,
     run: Option<Run>,
     mag: Option<MagCal>,
     seen: [Option<u32>; IMUS],
@@ -90,8 +95,10 @@ pub fn readers() -> [TripleReader<'static, ImuOffsets>; IMUS] {
 }
 
 /// Takes the writers and pushes the stored offsets. Call after `settings::boot` and before core 1
-/// starts, so the first samples are corrected with them.
-pub fn init() {
+/// starts, so the first samples are corrected with them. `board` is the `AHRS_ORIENTATION` the
+/// adapters apply (the boot value, never the store's pending one): the samples core 0 sees are in
+/// the body frame, and are un-rotated with it before the offsets are added back.
+pub fn init(board: Rotation) {
     let [a, b] = &OFFSETS;
     let (Some(a), Some(b)) = (a.take_writer(), b.take_writer()) else {
         defmt::panic!("[FAIL] IMU offset writers taken twice");
@@ -100,6 +107,7 @@ pub fn init() {
         *c.borrow_mut() = Some(Core0 {
             writers: [a, b],
             in_force: [ImuOffsets::ZERO; IMUS],
+            board,
             run: None,
             mag: None,
             seen: [None; IMUS],
@@ -202,7 +210,7 @@ fn observe() -> Option<(Kind, Outcome, u8)> {
             }
             let off = core.in_force.get(imu).copied().unwrap_or(ImuOffsets::ZERO);
             if let Some(run) = core.run.as_mut() {
-                let (g, a) = off.restore(gyro_rads, accel_ms2);
+                let (g, a) = off.unpublish(core.board, gyro_rads, accel_ms2);
                 run.push(imu, seq, g, a);
             }
         }
@@ -216,7 +224,8 @@ fn observe() -> Option<(Kind, Outcome, u8)> {
 /// Ok, the text is sent and the action ends FAILED.
 pub fn start(kind: Kind) -> bool {
     let ok = latest().map(|(ok, _)| ok);
-    let run = match Run::start(kind, ok) {
+    let board = CORE0.lock(|c| c.borrow().as_ref().map(|core| core.board));
+    let run = match Run::start(kind, ok, board.unwrap_or_default()) {
         Ok(run) => run,
         Err(why) => {
             defmt::warn!("[INFO] {=str}: {=str}", name(kind), why.text());

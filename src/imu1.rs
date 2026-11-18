@@ -24,7 +24,7 @@ use fw_flight::imu::{
     ImuAdapter, ImuCells, ImuReading, ImuTask, Latency, Pending, StartFailure, VerifyError,
     VerifyStep,
 };
-use fw_settings::imu::Imu1Setup;
+use fw_settings::imu::{IMU1_MOUNT as MOUNT, Imu1Setup};
 use icm45686::{AxisVerdict, Error, Icm45686, SelfTestConfig};
 
 /// The cells between core 0 and the IMU1 task.
@@ -189,7 +189,9 @@ impl ImuAdapter for Icm45686Adapter {
         }
         let sample = self.call().read().await.map_err(|e| kind(&e))?;
         let (offsets, _) = self.offsets.read();
-        let (gyro_rads, accel_ms2) = offsets.remove(
+        let (gyro_rads, accel_ms2) = offsets.publish(
+            MOUNT,
+            self.setup.board,
             sample.gyro_rads(self.setup.gyro_fs),
             sample.accel_ms2(self.setup.accel_fs),
         );

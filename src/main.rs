@@ -1025,11 +1025,23 @@ async fn stall() {
     }
 }
 
-/// The two IMUs' setups from the stored settings (`IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`), read
-/// once at boot after `settings::boot` (which refused and reset an invalid combination, so the read
-/// succeeds) and handed to core 1 by value. One line per IMU; a change takes effect after the next
+/// The two IMUs' setups from the stored settings (`IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`,
+/// `AHRS_ORIENTATION`), read once at boot after `settings::boot` (which refused and reset an invalid
+/// combination, so the read succeeds) and handed to core 1 by value. The board's orientation is read
+/// here once, for both setups and for `calibration::init`, so core 0 un-rotates the calibration
+/// samples with the rotation core 1 applies. One line per IMU; a change takes effect after the next
 /// reboot.
-fn imu_setups() -> (fw_settings::imu::Imu1Setup, fw_settings::imu::Imu2Setup) {
+fn imu_setups() -> (
+    fw_settings::imu::Imu1Setup,
+    fw_settings::imu::Imu2Setup,
+    fw_core::rotation::Rotation,
+) {
+    let board = store::board();
+    defmt::info!(
+        "[INFO] AHRS_ORIENTATION {=i32}, MAG_ORIENT {=i32} (until the next reboot for the first)",
+        board.as_i32(),
+        store::mag_frame().0.as_i32()
+    );
     for n in 0..2usize {
         let (g, dps, hz) = store::imu_values(n).unwrap_or((0, 0, 0));
         defmt::info!(
@@ -1045,7 +1057,7 @@ fn imu_setups() -> (fw_settings::imu::Imu1Setup, fw_settings::imu::Imu2Setup) {
     };
     device::IMU1.set_period_us(setup1.period_us);
     device::IMU2.set_period_us(setup2.period_us);
-    (setup1, setup2)
+    (setup1.with_board(board), setup2.with_board(board), board)
 }
 
 #[embassy_executor::main]
@@ -1117,8 +1129,8 @@ async fn main(spawner: Spawner) {
     #[cfg(feature = "corrupt-newest")]
     settings::corrupt_newest();
     settings::boot();
-    let (imu1_setup, imu2_setup) = imu_setups();
-    calibration::init();
+    let (imu1_setup, imu2_setup, board) = imu_setups();
+    calibration::init(board);
     let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
     settings::fake_arm();

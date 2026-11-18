@@ -41,9 +41,9 @@ const READ_ATTEMPTS: u32 = 64;
 /// The physical values of one sample.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImuReading {
-    /// Angular rate, rad/s, chip axes.
+    /// Angular rate, rad/s, body frame (FRD), offsets removed.
     pub gyro_rads: [f32; 3],
-    /// Acceleration, m/s^2, chip axes.
+    /// Specific force, m/s^2, body frame (FRD), offsets removed: level and at rest z is about -9.81.
     pub accel_ms2: [f32; 3],
     /// Die temperature, degrees Celsius.
     pub temperature_c: f32,

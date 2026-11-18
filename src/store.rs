@@ -104,20 +104,52 @@ pub fn imu2_setup() -> Result<fw_settings::imu::Imu2Setup, &'static str> {
     fw_settings::imu::imu2_setup(acc, gyr, odr)
 }
 
+/// `AHRS_ORIENTATION`: the board's orientation (0 when it cannot be read). Read once at boot, in
+/// `imu_setups`, and handed by value to core 1 and to `calibration::init`.
+pub fn board() -> fw_core::rotation::Rotation {
+    fw_settings::imu::board_rotation(
+        with(
+            |params| match params.get_named(fw_settings::imu::AHRS_ORIENTATION) {
+                Some(ParamValue::I32(v)) => Some(v),
+                _ => None,
+            },
+        )
+        .flatten(),
+    )
+}
+
+/// The compass's orientation `MAG_ORIENT` and its calibration offsets in microtesla (X, Y, Z),
+/// read together for every sample: the rotation comes first, the offsets (body frame) after it.
+pub fn mag_frame() -> (fw_core::rotation::Rotation, [f32; 3]) {
+    with(|params| {
+        let orientation = match params.get_named(fw_settings::mag::ORIENT) {
+            Some(ParamValue::I32(v)) => Some(v),
+            _ => None,
+        };
+        (
+            fw_settings::mag::orientation(orientation),
+            mag_offsets_in(params),
+        )
+    })
+    .unwrap_or((fw_settings::mag::orientation(None), [0.0; 3]))
+}
+
+/// The three `MAG_OFF*` values of a store, microtesla.
+fn mag_offsets_in(params: &Params<COUNT>) -> [f32; 3] {
+    [
+        fw_settings::mag::OFF_X,
+        fw_settings::mag::OFF_Y,
+        fw_settings::mag::OFF_Z,
+    ]
+    .map(|name| match params.get_named(name) {
+        Some(ParamValue::F32(v)) => v,
+        _ => 0.0,
+    })
+}
+
 /// The magnetometer's calibration offsets in microtesla (X, Y, Z), read for every sample.
 pub fn mag_offsets() -> [f32; 3] {
-    with(|params| {
-        [
-            fw_settings::mag::OFF_X,
-            fw_settings::mag::OFF_Y,
-            fw_settings::mag::OFF_Z,
-        ]
-        .map(|name| match params.get_named(name) {
-            Some(ParamValue::F32(v)) => v,
-            _ => 0.0,
-        })
-    })
-    .unwrap_or([0.0; 3])
+    with(mag_offsets_in).unwrap_or([0.0; 3])
 }
 
 /// The battery monitor's configuration for the next sample from the stored values (a value that

@@ -13,7 +13,8 @@
 //!   `drivers/accgyro/accgyro.h`): 2.93 dps. Betaflight starts over when moving; here it fails.
 //! - Accelerometer, one position: ArduPilot `AP_InertialSensor::simple_accel_cal`: averages of 50
 //!   samples; two successive averages closer than `accel_convergence_limit` = 0.05 m/s^2 (length of
-//!   the difference) converge, the offset is their mean minus gravity; not converged within "up to
+//!   the difference) converge, the offset is their mean minus gravity (the specific force a level
+//!   vehicle reads, (0, 0, -g) in the body frame, in the board frame); not converged within "up to
 //!   10 seconds": failed. The largest offset accepted is ArduPilot's `AccelCalibrator::accept_result`
 //!   (`GRAVITY_MSS` per axis): `simple_accel_cal` itself has no limit.
 //! - Compass, minimum and maximum: Betaflight `compassUpdate` (`src/main/sensors/compass.c`, tags up
@@ -150,9 +151,9 @@ fn add(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 /// One IMU's offsets, what the adapter subtracts from every sample.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ImuOffsets {
-    /// Gyro offsets, rad/s.
+    /// Gyro offsets, rad/s, in the board frame (after the chip's fixed rotation, before `AHRS_ORIENTATION`).
     pub gyro_rads: [f32; 3],
-    /// Accelerometer offsets, m/s^2.
+    /// Accelerometer offsets, m/s^2, in the board frame.
     pub accel_ms2: [f32; 3],
 }
 
@@ -338,7 +339,8 @@ impl AccelCal {
         }
     }
 
-    /// Adds a raw sample (m/s^2) unless its `seq` was the previous one or the result is in.
+    /// Adds a raw sample (m/s^2, board frame) unless its `seq` was the previous one or the result
+    /// is in.
     pub fn push(&mut self, seq: u32, accel_ms2: [f32; 3]) {
         if !self.fresh.take(seq) || self.done.is_some() {
             return;
