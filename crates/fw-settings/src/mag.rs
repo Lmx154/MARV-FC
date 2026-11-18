@@ -7,6 +7,7 @@
 
 use bmm350::{Averaging, Config, ConfigError, OutputDataRate};
 use fw_core::params::{Apply, Candidate, ParamDef};
+use fw_core::rotation::{self, Rotation};
 use mavlink_device::marv::MarvDevice;
 
 const DEVICE: u8 = MarvDevice::MARV_DEVICE_MAG as u8;
@@ -23,6 +24,10 @@ pub const OFF_Y: &str = "MAG_OFFY";
 /// As [`OFF_X`], Z axis.
 pub const OFF_Z: &str = "MAG_OFFZ";
 
+/// The external compass's orientation, chip to vehicle: ArduPilot's `COMPASS_ORIENT` numbering
+/// (0 to 15, see `fw_core::rotation::Rotation`), applied before the offsets.
+pub const ORIENT: &str = "MAG_ORIENT";
+
 /// The number of magnetometer parameters.
 pub const COUNT: usize = 5;
 
@@ -35,6 +40,30 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(OFF_Y, DEVICE, 0.0, -200.0, 200.0, Apply::Live).with_calibration(),
     ParamDef::f32(OFF_Z, DEVICE, 0.0, -200.0, 200.0, Apply::Live).with_calibration(),
 ];
+
+/// The number of orientation parameters, appended after the other tables.
+pub const ORIENT_COUNT: usize = 1;
+
+/// `MAG_ORIENT`, appended to the firmware's table at index 77: the rotation from the chip's axes
+/// to the vehicle's (body FRD), applied to every sample before `MAG_OFF*` is subtracted; the
+/// offsets are in the body frame. Default 10, `ROLL_180_YAW_90`: the BMM350 with +X right, +Y
+/// forward, +Z up (the owner's axes). `Live`: read for every sample, as the offsets are.
+pub static ORIENT_TABLE: [ParamDef; ORIENT_COUNT] = [ParamDef::i32(
+    ORIENT,
+    DEVICE,
+    10,
+    rotation::MIN,
+    rotation::MAX,
+    Apply::Live,
+)];
+
+/// The stored `MAG_ORIENT` as a rotation (a value outside 0 to 15 cannot be stored; none reads as
+/// the default, 10).
+pub fn orientation(value: Option<i32>) -> Rotation {
+    value
+        .and_then(Rotation::from_i32)
+        .unwrap_or(Rotation::Roll180Yaw90)
+}
 
 /// The rates the chip offers, by the value of `MAG_ODR_HZ`.
 pub const RATES: [(f32, OutputDataRate); 9] = [
@@ -203,6 +232,22 @@ mod tests {
             };
             assert!(with(hz, max).is_ok(), "{hz} x{max}");
         }
+    }
+
+    /// H2: the default `MAG_ORIENT` maps the BMM350's axes (+X right, +Y forward, +Z up) to FRD:
+    /// chip +Y to body +X, chip +X to body +Y, chip +Z to body -Z.
+    #[test]
+    fn the_default_orientation_turns_the_chip_axes_into_frd() {
+        let ParamValue::I32(default) = ORIENT_TABLE[0].default else {
+            panic!("MAG_ORIENT is an i32");
+        };
+        let r = orientation(Some(default));
+        assert_eq!(default, 10);
+        assert_eq!(r, Rotation::Roll180Yaw90);
+        assert_eq!(r.rotate([0.0, 1.0, 0.0]), [1.0, 0.0, 0.0]);
+        assert_eq!(r.rotate([1.0, 0.0, 0.0]), [0.0, 1.0, 0.0]);
+        assert_eq!(r.rotate([0.0, 0.0, 1.0]), [0.0, 0.0, -1.0]);
+        assert_eq!(orientation(None), r);
     }
 
     #[test]

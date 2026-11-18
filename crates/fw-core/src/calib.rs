@@ -839,8 +839,14 @@ mod tests {
 
     #[test]
     fn a_missing_imu_is_skipped_and_none_fails() {
-        assert_eq!(Run::start(Kind::Gyro, [false, false], Rotation::None), Err(Failure::NoImu));
-        assert_eq!(Run::start(Kind::Accel, [false, false], Rotation::None), Err(Failure::NoImu));
+        assert_eq!(
+            Run::start(Kind::Gyro, [false, false], Rotation::None),
+            Err(Failure::NoImu)
+        );
+        assert_eq!(
+            Run::start(Kind::Accel, [false, false], Rotation::None),
+            Err(Failure::NoImu)
+        );
         let mut run = Run::start(Kind::Gyro, [false, true], Rotation::None).unwrap();
         assert!(!run.includes(0) && run.includes(1));
         // Samples for the skipped IMU are ignored; the run ends on IMU2 alone.
@@ -876,7 +882,10 @@ mod tests {
             accel_board[1] + ACCEL_OFF[1],
             accel_board[2] + ACCEL_OFF[2],
         ];
-        (MOUNT.rotate_inverse(GYRO_OFF), MOUNT.rotate_inverse(accel_board))
+        (
+            MOUNT.rotate_inverse(GYRO_OFF),
+            MOUNT.rotate_inverse(accel_board),
+        )
     }
 
     #[test]
@@ -940,7 +949,10 @@ mod tests {
             1e-6
         ));
         // A tilted body vector shows the transpose: B^T (1, 0, 0) for YAW_90 is (0, -1, 0).
-        assert_eq!(Rotation::Yaw90.rotate_inverse([1.0, 0.0, 0.0]), [0.0, -1.0, 0.0]);
+        assert_eq!(
+            Rotation::Yaw90.rotate_inverse([1.0, 0.0, 0.0]),
+            [0.0, -1.0, 0.0]
+        );
     }
 
     #[test]

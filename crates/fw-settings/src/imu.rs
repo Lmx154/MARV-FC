@@ -16,6 +16,7 @@
 
 use fw_core::calib::{ACCEL_OFFSET_MAX_MSS, GYRO_FULL_SCALE_RADS, IMUS};
 use fw_core::params::{Apply, ParamDef};
+use fw_core::rotation::{self, Rotation};
 use mavlink_device::marv::MarvDevice;
 
 const IMU1: u8 = MarvDevice::MARV_DEVICE_IMU1 as u8;
@@ -40,6 +41,17 @@ pub const ACC_FS: [&str; IMUS] = ["IMU1_ACC_FS", "IMU2_ACC_FS"];
 pub const GYR_FS: [&str; IMUS] = ["IMU1_GYR_FS", "IMU2_GYR_FS"];
 /// Per IMU (IMU1, IMU2): the output data rate in Hz of both sensors.
 pub const ODR_HZ: [&str; IMUS] = ["IMU1_ODR_HZ", "IMU2_ODR_HZ"];
+
+/// The board's orientation, board to vehicle: ArduPilot's name and numbering (0 to 15, see
+/// [`Rotation`]).
+pub const AHRS_ORIENTATION: &str = "AHRS_ORIENTATION";
+
+/// IMU1's (ICM-45686) fixed chip-to-board rotation, an hwdef line in ArduPilot's terms: the owner's
+/// axes are +X forward, +Y left, +Z up, the board's FRD (x forward, y right, z down) is
+/// `ROLL_180` of them (`x, -y, -z`).
+pub const IMU1_MOUNT: Rotation = Rotation::Roll180;
+/// IMU2's (LSM6DSK320X) fixed chip-to-board rotation: the same axes as IMU1, so `ROLL_180`.
+pub const IMU2_MOUNT: Rotation = Rotation::Roll180;
 
 /// The number of IMU calibration parameters.
 pub const COUNT: usize = 12;
@@ -98,8 +110,32 @@ pub static SETTINGS: [ParamDef; SETTINGS_COUNT] = [
     ParamDef::i32("IMU2_ODR_HZ", IMU2, 800, 25, 800, Apply::Reboot),
 ];
 
+/// The number of orientation parameters the IMUs read.
+pub const BOARD_COUNT: usize = 1;
+
+/// `AHRS_ORIENTATION`, appended to the firmware's table after the IMUs' chip settings (index 76):
+/// the rotation from the board's frame to the vehicle's (body FRD), applied by both IMU adapters
+/// after the offsets (ArduPilot: board orientation, next boot). Device 0, the system: a refused
+/// IMU setup never resets it. `Reboot`: it reaches core 1 by value at boot, no cell. Default 0:
+/// the board lies in the vehicle's axes.
+pub static BOARD: [ParamDef; BOARD_COUNT] = [ParamDef::i32(
+    AHRS_ORIENTATION,
+    0,
+    0,
+    rotation::MIN,
+    rotation::MAX,
+    Apply::Reboot,
+)];
+
+/// The stored `AHRS_ORIENTATION` as a rotation (a value outside 0 to 15 cannot be stored; none
+/// reads as no rotation).
+pub fn board_rotation(value: Option<i32>) -> Rotation {
+    value.and_then(Rotation::from_i32).unwrap_or_default()
+}
+
 /// One IMU's configuration for the boot: the chip's whole `Config`, the full scales the adapter
-/// scales the samples with (the same values as in `config`) and the nominal sample period.
+/// scales the samples with (the same values as in `config`), the nominal sample period and the
+/// board's orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImuSetup<C, A, G> {
     /// The driver's configuration: today's `config()` of the adapter with the three values in place.
@@ -110,6 +146,16 @@ pub struct ImuSetup<C, A, G> {
     pub gyro_fs: G,
     /// The nominal sample period in microseconds, 1e6 / the rate.
     pub period_us: u32,
+    /// `AHRS_ORIENTATION`: applied after the offsets, read once at boot. The setup functions give
+    /// no rotation; [`ImuSetup::with_board`] sets it.
+    pub board: Rotation,
+}
+
+impl<C, A, G> ImuSetup<C, A, G> {
+    /// The same setup with the board's orientation `board`.
+    pub fn with_board(self, board: Rotation) -> Self {
+        Self { board, ..self }
+    }
 }
 
 /// IMU1's setup (ICM-45686).
@@ -183,6 +229,7 @@ pub fn imu1_setup(acc_fs: i32, gyr_fs: i32, odr_hz: i32) -> Result<Imu1Setup, &'
         accel_fs,
         gyro_fs,
         period_us: period_us(odr_hz).ok_or(BAD_RATE)?,
+        board: Rotation::None,
     })
 }
 
@@ -235,6 +282,7 @@ pub fn imu2_setup(acc_fs: i32, gyr_fs: i32, odr_hz: i32) -> Result<Imu2Setup, &'
         accel_fs,
         gyro_fs,
         period_us: period_us(odr_hz).ok_or(BAD_RATE)?,
+        board: Rotation::None,
     })
 }
 
@@ -359,6 +407,18 @@ mod tests {
         assert_eq!(NOT_ALLOWED, "combination not allowed by the chip");
     }
 
+    /// H2: both IMUs' mounting turns chip gravity (0, 0, +g) at rest, level, into (0, 0, -g) (FRD,
+    /// specific force up), and +X forward, +Y left stay forward and right.
+    #[test]
+    fn the_imu_mounts_turn_chip_axes_into_frd() {
+        for mount in [IMU1_MOUNT, IMU2_MOUNT] {
+            assert_eq!(mount.rotate([0.0, 0.0, 9.81]), [0.0, 0.0, -9.81]);
+            assert_eq!(mount.rotate([1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
+            // Chip +Y is left: body -Y (right is positive).
+            assert_eq!(mount.rotate([0.0, 1.0, 0.0]), [0.0, -1.0, 0.0]);
+        }
+    }
+
     /// The whole firmware table, as the firmware builds the store.
     fn store() -> Params<{ crate::COUNT }> {
         Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap()
@@ -366,7 +426,7 @@ mod tests {
 
     #[test]
     fn the_six_settings_follow_rc_with_their_defaults_ranges_and_reboot_class() {
-        assert_eq!(crate::COUNT, 76);
+        assert_eq!(crate::COUNT, 78);
         let expected = [
             ("IMU1_ACC_FS", IMU1, 16, 2, 32),
             ("IMU1_GYR_FS", IMU1, 2000, 125, 4000),

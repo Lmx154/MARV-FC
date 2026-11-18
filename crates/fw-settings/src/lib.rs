@@ -38,10 +38,13 @@ pub const COUNT: usize = baro::COUNT
     + imu::COUNT
     + sd::COUNT
     + rc::COUNT
-    + imu::SETTINGS_COUNT;
+    + imu::SETTINGS_COUNT
+    + imu::BOARD_COUNT
+    + mag::ORIENT_COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
-/// then the IMUs' chip settings (appended, so the first 70 indices did not change).
+/// then the IMUs' chip settings, `AHRS_ORIENTATION` and `MAG_ORIENT` (appended, so the first 70
+/// indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
@@ -108,6 +111,18 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < imu::BOARD_COUNT {
+        out[n] = imu::BOARD[i];
+        n += 1;
+        i += 1;
+    }
+    i = 0;
+    while i < mag::ORIENT_COUNT {
+        out[n] = mag::ORIENT_TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -123,7 +138,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 76);
+        assert_eq!(COUNT, 78);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -131,7 +146,9 @@ mod tests {
             .chain(imu::TABLE.iter())
             .chain(sd::TABLE.iter())
             .chain(rc::TABLE.iter())
-            .chain(imu::SETTINGS.iter());
+            .chain(imu::SETTINGS.iter())
+            .chain(imu::BOARD.iter())
+            .chain(mag::ORIENT_TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
@@ -224,10 +241,106 @@ mod tests {
             "IMU2_ACC_FS",
             "IMU2_GYR_FS",
             "IMU2_ODR_HZ",
+            "AHRS_ORIENTATION",
+            "MAG_ORIENT",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
         }
+    }
+
+    /// H4: the two orientation parameters are appended after the first 76 (names unchanged in
+    /// order), with their ranges, defaults and classes; the 0 to 15 range is the whole validator.
+    #[test]
+    fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
+        use mavlink_device::ParamValue;
+        assert_eq!(COUNT, 78);
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
+        for (k, name) in [
+            "IMU1_ACC_FS",
+            "IMU1_GYR_FS",
+            "IMU1_ODR_HZ",
+            "IMU2_ACC_FS",
+            "IMU2_GYR_FS",
+            "IMU2_ODR_HZ",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert_eq!(TABLE[70 + k].name, *name);
+        }
+        let ahrs = &TABLE[76];
+        assert_eq!(ahrs.name, "AHRS_ORIENTATION");
+        assert_eq!(ahrs.name.len(), 16);
+        assert_eq!(ahrs.device, 0);
+        assert_eq!(ahrs.default, ParamValue::I32(0));
+        assert_eq!(
+            (ahrs.min, ahrs.max),
+            (ParamValue::I32(0), ParamValue::I32(15))
+        );
+        assert_eq!(ahrs.apply, Apply::Reboot);
+        assert!(!ahrs.calibration && !ahrs.read_only);
+        let mag = &TABLE[77];
+        assert_eq!(mag.name, "MAG_ORIENT");
+        assert_eq!(mag.device, mag::TABLE[0].device);
+        assert_eq!(mag.default, ParamValue::I32(10));
+        assert_eq!(
+            (mag.min, mag.max),
+            (ParamValue::I32(0), ParamValue::I32(15))
+        );
+        assert_eq!(mag.apply, Apply::Live);
+        assert!(!mag.calibration && !mag.read_only);
+        // The range is the validator: 0 and 15 are accepted, -1 and 16 refused.
+        for (i, name) in [(76u16, "AHRS_ORIENTATION"), (77, "MAG_ORIENT")] {
+            for ok in [0, 7, 15] {
+                assert_eq!(
+                    p.set(i, ParamValue::I32(ok)),
+                    Ok(ParamValue::I32(ok)),
+                    "{name}"
+                );
+            }
+            for bad in [-1, 16] {
+                assert_eq!(
+                    p.set(i, ParamValue::I32(bad)),
+                    Err(mavlink_device::ParamError::OutOfRange),
+                    "{name}"
+                );
+            }
+        }
+        // Every value of the range is a rotation.
+        for v in 0..=15 {
+            assert!(fw_core::rotation::Rotation::from_i32(v).is_some());
+        }
+        assert_eq!(imu::board_rotation(None), fw_core::rotation::Rotation::None);
+        assert_eq!(
+            mag::orientation(None),
+            fw_core::rotation::Rotation::Roll180Yaw90
+        );
+    }
+
+    /// A refused IMU setup puts `AHRS_ORIENTATION` back to nothing: it is device 0, never reset;
+    /// a refused magnetometer keeps `MAG_ORIENT` (`Live`).
+    #[test]
+    fn a_refused_device_keeps_the_orientation_parameters() {
+        use mavlink_device::ParamValue;
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        assert_eq!(
+            p.load(
+                &ParamName::new("AHRS_ORIENTATION").unwrap(),
+                ParamValue::I32(2)
+            ),
+            Ok(true)
+        );
+        assert_eq!(
+            p.load(&ParamName::new("MAG_ORIENT").unwrap(), ParamValue::I32(3)),
+            Ok(true)
+        );
+        reset_device_settings(&mut p, imu::DEVICES[0]);
+        reset_device_settings(&mut p, imu::DEVICES[1]);
+        reset_device_settings(&mut p, mag::TABLE[0].device);
+        assert_eq!(p.get_named("AHRS_ORIENTATION"), Some(ParamValue::I32(2)));
+        assert_eq!(p.get_named("MAG_ORIENT"), Some(ParamValue::I32(3)));
     }
 
     /// decision-sd-logging Q4: the start burst of a log (the header, a PARM for every parameter,
