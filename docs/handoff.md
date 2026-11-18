@@ -195,9 +195,31 @@ copies for the download checks.
 **In progress**
 - Sensor orientation: the magnetometer is mounted (2026-11-17: +X right, +Y forward, +Z up; the IMUs: +X forward,
   +Y left, +Z up). Design: `_plan/decision-orientation-20261117.md`; built on branch `wip-orientation` (host tests
-  only so far; the board checks and the owner's hands-on steps are not done). Every output becomes body FRD and the
+  and the still-vehicle board checks below; the owner's hands-on steps are not done). Every output becomes body FRD and the
   stored offsets (`IMUn_GYR_OFF*`, `IMUn_ACC_OFF*`, `MAG_OFF*`) were measured in chip axes: the calibrations must be
   redone (gyro, accel, compass), and the real compass calibration waits for that.
+  - **Orientation on the board (still)** (2026-11-17, `wip-orientation` at `05ae38d`, tree clean, four `tools/run.sh` sessions,
+    logs `marv-v2-firmware-20261117-222029.log`, `-222449.log`, `-222634.log`, `-222819.log`; vehicle still on the bench, USB
+    power, battery out, motors on, no propellers; the stored offsets are all 0; no calibration). B-0: the RAM-code check
+    printed `PASS: nothing the flight core can reach after core1_main lies in XIP (0x10000000-0x1FFFFFFF)`; boot
+    `AHRS_ORIENTATION 0, MAG_ORIENT 10`, both IMU lines `16 g, 2000 dps, 800 Hz`, no "settings refused", no ERROR, no panic;
+    `param get` gave 0 and 10; 20 s to 70 s of `[STAT]`: IMU1 803.54/s, IMU2 800.70/s, BARO 49.8/s, MAG 100.1/s, 0 errors,
+    timeouts, missed edges, overflows and recoveries. B-1 (level, at rest; the bench is not exactly level): IMU1 accel mean
+    (x, y, z) (-0.193, -0.028, -9.865) m/s^2, IMU2 (-0.182, +0.071, -9.632) (SCALED_IMU2 zacc -981.6 mG); gyro means IMU1
+    (+4.9, +2.5, -2.1) mrad/s, IMU2 (+3.0, +3.3, +3.1) (chip bias: the offsets are 0). Magnetometer (HIGHRES_IMU, gauss)
+    (+0.036, +0.180, +0.391), |B| 0.432 G (43.2 uT). B-M (no save; `MAG_OFF*` read 0; 15 s each, 375 messages; means in gauss;
+    10, then 0, then 10 again): 10a (+0.0360, +0.1802, +0.3918), 0 (+0.1794, +0.0346, -0.3886), 10b (+0.0350, +0.1801,
+    +0.3902); the mean of the two 10s minus (y_0, x_0, -z_0) = (+0.0009, +0.0008, +0.0024), 0.2 % to 0.6 % of |B|; the two 10s
+    differ by (0.0010, 0.0000, 0.0016): the captures drift by about that much, more than the noise of their means. B-A (2 saves):
+    `AHRS_ORIENTATION 8` answered "applies after reboot"; save 1 `settings save: sector B, sequence 244, 1 entries, 44 bytes,
+    stall 42427 us, verify ok`; after the restart the boot line read `AHRS_ORIENTATION 8` and zacc was +9.866 (IMU1) and +9.632
+    (IMU2), the accel and gyro y and z flipped, x unchanged, the magnetometer unchanged; back to 0, save 2 `sector A, sequence 245,
+    0 entries, 20 bytes, stall 39917 us, verify ok`; after the restart `AHRS_ORIENTATION 0`, zacc -9.863 (IMU1) and -9.630 (IMU2),
+    the record 0 entries (sector A sequence 245, sector B 244). One bump of the bench during the capture at 8 (one 25-message group,
+    zacc up to 11.9) is in its means. Seen once, on the boot after save 1 only: about 200 `Framing error` and 10 `Break error` WARN
+    lines from `embassy_rp src/uart/buffered.rs` between 5 ms and 260 ms, none in the other three boots (not attributed). Still to do
+    with the owner: the hands-on sign checks (accel, gyro and compass signs, the `MAG_ORIENT` negative control) and the calibrations
+    (gyro, accel, compass), then the one save.
 
 **Not built**
 - ESC in the firmware: the DShot driver and the passthrough work as driver crates with bench programs, but
