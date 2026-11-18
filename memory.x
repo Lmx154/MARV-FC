@@ -102,7 +102,7 @@ SECTIONS {
         *(.text.*10embassy_rp9multicore* .text.*10embassy_rp*6RegExt*)
         *(.text.*16embassy_executor3raw5waker* .text.*16embassy_executor3raw*8Executor* .text.*16embassy_executor8platform6thread*)
         *(.text.*12atomic_waker* .text.*12embassy_time5delay9block_for* .text.*12embassy_time7instant*)
-        *(.text.*7fw_core6health* .text.*7fw_core5xcore* .text.*16embedded_hal_bus3spi* .text.*15embassy_futures4join*)
+        *(.text.*7fw_core6health* .text.*7fw_core5xcore* .text.*7fw_core8rotation* .text.*16embedded_hal_bus3spi* .text.*15embassy_futures4join*)
         /* rustc merges identical functions into aliases, and the section keeps the name of the one it
          * kept: raw::Executor::spawn is SyncExecutor::spawn's, raw::Executor::poll is
          * InterruptExecutor::on_interrupt's, _critical_section_1_0_* are RpSpinlockCs's Impl. */

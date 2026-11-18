@@ -33,6 +33,7 @@ pub mod mbr;
 pub mod params;
 pub mod rc;
 pub mod record;
+pub mod rotation;
 pub mod scratch;
 pub mod selftest;
 pub mod sys_status;
