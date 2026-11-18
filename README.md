@@ -367,7 +367,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (76 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (78 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1: `AHRS_ORIENTATION` and `MAG_ORIENT` are appended last, indices 76 and 77). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -404,7 +404,7 @@ Every parameter write, accepted or refused, has an `[INFO] param <NAME> = <value
 
 ### MAG parameters
 
-`crates/fw-settings/src/mag.rs`, device MAG. The two configuration parameters are the `Configure` class (the whole candidate goes
+`crates/fw-settings/src/mag.rs`, device MAG (`MAG_ORIENT`, below the table, is appended at index 77). The two configuration parameters are the `Configure` class (the whole candidate goes
 through the driver's `Config::validate` before the value is stored); the three offsets are `Live` and `calibration`
 (`param reset-calibration` resets them); the compass calibration writes them (see Calibrations).
 
@@ -412,7 +412,8 @@ through the driver's `Config::validate` before the value is stored); the three o
 |---|---|---|---|---|
 | `MAG_ODR_HZ` | F32 | 100 | 1.5625 to 400 | output data rate in Hz: 400, 200, 100, 50, 25, 12.5, 6.25, 3.125 or 1.5625; refused otherwise ("rate not offered by the chip") |
 | `MAG_AVG` | I32 | 2 | 1 to 8 | samples averaged: 1, 2, 4 or 8 ("not 1, 2, 4 or 8"); the rate allows at most 1 at 400 Hz, 2 at 200 Hz, 4 at 100 Hz, 8 below ("averaging too high for the rate") |
-| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla subtracted from the field of that axis in every sample (by the core-0 adapter, `fw_settings::mag::apply_offsets`) |
+| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla subtracted from the field of that axis in every sample, in the body frame, after `MAG_ORIENT` (by the core-0 adapter, `fw_settings::mag::apply_offsets`) |
+| `MAG_ORIENT` | I32 | 10 | 0 to 15 | the external compass's orientation, chip to vehicle: ArduPilot's rotation numbers (`COMPASS_ORIENT`; 0 none, 1 to 7 yaw 45 to 315, 8 roll 180, 9 to 11 roll 180 and yaw 45 to 135, 12 pitch 180, 13 to 15 roll 180 and yaw 225 to 315, `fw_core::rotation`). 10 is `ROLL_180_YAW_90`: the BMM350 mounted +X right, +Y forward, +Z up. `Live`, applied to the next sample, before `MAG_OFF*`; the range is the whole check. Index 77 |
 
 ### BATT parameters
 
@@ -435,6 +436,10 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 |---|---|---|
 | `IMU1_GYR_OFFX`, `IMU1_GYR_OFFY`, `IMU1_GYR_OFFZ`, `IMU2_GYR_OFFX`, `IMU2_GYR_OFFY`, `IMU2_GYR_OFFZ` | -34.9066 to 34.9066 | gyro offset in rad/s: the gyros' full scale, 2000 dps (Betaflight's `GYRO_SCALE_2000DPS`), so the store holds any rate a working gyro reports |
 | `IMU1_ACC_OFFX`, `IMU1_ACC_OFFY`, `IMU1_ACC_OFFZ`, `IMU2_ACC_OFFX`, `IMU2_ACC_OFFY`, `IMU2_ACC_OFFZ` | -9.80665 to 9.80665 | accelerometer offset in m/s^2: ArduPilot's largest accepted offset, one gravity (`AccelCalibrator::accept_result`) |
+
+### IMU orientation parameter
+
+`AHRS_ORIENTATION` (`crates/fw-settings/src/imu.rs`, `BOARD`, index 76), `I32`, device 0 (the system; a refused IMU setup never resets it), default 0, range 0 to 15, `Reboot` class: the rotation from the board's frame to the vehicle's, ArduPilot's name and numbers (see `MAG_ORIENT`). Both IMU adapters apply it after the offsets. It is read once at boot and handed to core 1 by value (no cell), and the calibrations on core 0 use the same boot value, so a write applies after save and reboot. Each IMU also has a fixed chip-to-board rotation in code, `fw_settings::imu::IMU1_MOUNT` and `IMU2_MOUNT`, both `ROLL_180` (8): the IMUs' axes are +X forward, +Y left, +Z up, the body's FRD.
 
 ### SD parameter
 
@@ -769,6 +774,10 @@ Features for the checks (off by default):
   Put a clean record back afterwards (`param reset-all --yes`, `param save`).
 - The existing `no-fbeat`: `param save` ends FAILED "save failed: flight core not answering".
 
+## Frames
+
+Every IMU and compass value that leaves the board is in the body frame, FRD (x forward, y right, z down), as in MAVLink and ArduPilot: level and at rest the accelerometer reads z about -9.81 m/s^2 (specific force, up). The IMU adapters (core 1) apply the chip's fixed rotation (`ROLL_180`), then subtract the offsets (the board frame), then apply `AHRS_ORIENTATION`; the compass adapter (core 0) applies `MAG_ORIENT`, then subtracts `MAG_OFF*` (the body frame). The log's IMU and MAG records and the `[STAT]` lines carry the same values. Measurements made before this build (this README's, `docs/handoff.md`'s) and offsets and logs stored before it are in the chips' own axes, and the stored offsets must be redone. Design: `_plan/decision-orientation-20261117.md`.
+
 ## Calibrations
 
 `marv-cli calibrate gyro`, `calibrate accel`, `calibrate compass` (MAV_CMD_PREFLIGHT_CALIBRATION 241) and
@@ -814,11 +823,11 @@ out of range", "gyro calibration: no IMU Ok", "gyro calibration: IMUn not Ok, sk
 out); the result "gyro cal: |IMU1| N |IMU2| N urad/s" (the length of each IMU's offset vector). One IMU
 moving fails the whole run.
 
-### Accelerometer (`calibrate accel`, both IMUs, one position, +Z up)
+### Accelerometer (`calibrate accel`, both IMUs, one position, level)
 
 Method: ArduPilot `AP_InertialSensor::simple_accel_cal`: averages of 50 samples; two successive averages
 closer than `accel_convergence_limit` = 0.05 m/s^2 (length of the difference) converge, the offset is
-their mean minus gravity (0, 0, 9.80665); not converged within 20 averages ("up to 10 seconds"): failed.
+their mean minus gravity, the specific force a level vehicle reads: (0, 0, -9.80665) in the body frame (FRD), and its rotation by `AHRS_ORIENTATION`'s transpose in the board frame the offsets are stored in; not converged within 20 averages ("up to 10 seconds"): failed.
 The largest offset accepted per axis is one gravity (`AccelCalibrator::accept_result`, `GRAVITY_MSS`;
 `simple_accel_cal` itself has no limit). Duration: 1 s at the least, 10 s at the most. Texts: "accel
 calibration: moving" (not converged), "accel calibration: IMUn offset too large", "accel calibration: no IMU

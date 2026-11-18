@@ -146,6 +146,12 @@ interrupt, DMA channel or cross-core cell: each setup (the chip's `Config`, the 
 entry closure, as the pins and DMA channels are; `fw_settings` code runs on core 0 only (the adapters on core 1 only read the plain data), `REQ_APPLY` stays reserved for the flight rows.
 `tools/check-ram-code.py` passes unchanged (roots 4, 129 functions, 67 548 B in SRAM, 204 data objects).
 
+Sensor orientation (2026-11-17, `wip-orientation`, normal build): `.text` 505 088, `.ram_text` 127 976, `.data` 43 980, `.bss` 109 620, `.uninit` 1 024
+(absolute, `arm-none-eabi-size -A`; the row above is from another branch, so no delta is claimed). `fw_core::rotation` (a 3x3 table and two small functions) runs on core 1: `.text.*7fw_core8rotation*`
+is in `memory.x`, and `ImuOffsets::publish` is `#[inline(always)]` into the two adapters. The board's orientation (`AHRS_ORIENTATION`) is read once in `imu_setups` and moved by value into
+`ImuSetup.board`, i.e. into core 1's entry closure like the rest of the setup; core 0 keeps the same value in `calibration::Core0` (a field of the existing core-0 struct, never read by core 1). No new
+task, interrupt, DMA channel, cross-core cell or shared static (the two new `static`s are `ParamDef` tables, constant data read on core 0). `tools/check-ram-code.py` passes (roots 4, 130 functions, 68 048 B in SRAM, 209 data objects).
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow

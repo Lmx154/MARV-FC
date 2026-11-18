@@ -39,7 +39,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   Data crosses only through lock-free cells.
 - **Seven device rows:** IMU1, IMU2, BARO, MAG, GNSS, BATT (supervised: health states, recovery ladder,
   operator restart) and RC (report only: "the radio link is up").
-- **Parameters:** 76 (the last six are the IMUs' chip settings, `Reboot` class: they apply after save and reboot; range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
+- **Parameters:** 78 (the last eight are the IMUs' chip settings, `AHRS_ORIENTATION` and `MAG_ORIENT`; the six chip settings are `Reboot` class: they apply after save and reboot; range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
@@ -194,7 +194,10 @@ copies for the download checks.
 
 **In progress**
 - Sensor orientation: the magnetometer is mounted (2026-11-17: +X right, +Y forward, +Z up; the IMUs: +X forward,
-  +Y left, +Z up) and the firmware has no orientation handling yet; the real compass calibration waits for it.
+  +Y left, +Z up). Design: `_plan/decision-orientation-20261117.md`; built on branch `wip-orientation` (host tests
+  only so far; the board checks and the owner's hands-on steps are not done). Every output becomes body FRD and the
+  stored offsets (`IMUn_GYR_OFF*`, `IMUn_ACC_OFF*`, `MAG_OFF*`) were measured in chip axes: the calibrations must be
+  redone (gyro, accel, compass), and the real compass calibration waits for that.
 
 **Not built**
 - ESC in the firmware: the DShot driver and the passthrough work as driver crates with bench programs, but
