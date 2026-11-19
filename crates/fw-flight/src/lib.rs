@@ -3,6 +3,8 @@
 //! telemetry logic [`esc`] (pure), and [`tagged`], which names the task that ran last for the watchdog (`RUNNING1`).
 //! The flight step: [`step`] (`Flight`, called by IMU1's task per sample), [`gnc`] (the estimator, controller and
 //! allocator seams), [`gate`] (the gate and `MotorCommand`), [`tuning`] (the gains and limits).
+//! The first pair's parts, not yet wired into the step: [`alloc`] (`CardAllocator`), [`mahony`] (`Mahony`),
+//! [`pid`] (`CascadedPid`).
 //! Rule: no dependency on `embassy-time`, `embassy-sync` or `defmt`.
 #![no_std]
 #![forbid(unsafe_code)]
@@ -26,10 +28,14 @@ use core::pin::pin;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 use fw_core::xcore::Kick;
 
+pub mod alloc;
 pub mod esc;
 pub mod gate;
 pub mod gnc;
 pub mod imu;
+pub mod mahony;
+pub mod pid;
+mod quat;
 pub mod step;
 pub mod tuning;
 
