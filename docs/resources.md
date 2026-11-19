@@ -14,7 +14,8 @@ with DMA channels 2 and 3 on `DMA_IRQ_0`, INT1 on GPIO7 through core 1's `IO_IRQ
 built inside core 1's entry closure next to IMU1; configured once at boot from `IMU2_ACC_FS`, `IMU2_GYR_FS`, `IMU2_ODR_HZ`, default 800 Hz, the high-g channel off) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
 see the table below), and the four ESCs' DShot stream on core 1 (2026-11-18, `src/esc.rs`: `dshot` `PioDshot` on PIO2 SM0, GPIO36-39,
 reply capture on DMA channel 5 on `DMA_IRQ_0`, `PIO2_IRQ_0` bound and enabled on core 1 only, all built inside core 1's entry; Stop
-frames from every boot and command 13 in EDT bursts, never a throttle; built and checked statically, not yet run on the board); no
+frames from every boot and command 13 in EDT bursts, never a throttle; run on the board 2026-11-18, 4cfb1f0 and 0d25909, logs
+`20261118-191955` to `20261118-194637`, see the README, ESC telemetry); no
 other device, PIO block or DMA channel of this plan has run in it yet.
 
 ## Fixed by the board (`docs/pinout.md`)
@@ -222,7 +223,8 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    makes no XIP access. Guards: `tools/check-ram-code.py`, run by `tools/run.sh` on every build before
    flashing (a wrong result flashes nothing); the link ASSERTs for gross failure; on the board
    `FEATURES=xip-park` with its negative control `xip-park,ram-negative` (0 accesses in a 1 s window with
-   core 0 parked, 2026-11-16); run it again when the control loop or DShot lands. R2: core 1's VTOR points at
+   core 0 parked, 2026-11-16; again with the DShot task running, 2026-11-18, 0d25909: 0 accesses, log
+   `20261118-194106`, control 184 035, log `20261118-194357`); run it again when the control loop lands. R2: core 1's VTOR points at
    its vector table in SRAM (start-up check). R3: no constants in flash (link ASSERT
    `__erodata == __srodata`). R4: at least 32 KiB of SRAM above the statics for core 0's stack (link ASSERT on
    `_stack_end`, defined in `memory.x` as `__euninit` rounded up to 8; an overflow of RAM fails the link; at run

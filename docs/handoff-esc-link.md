@@ -43,7 +43,7 @@ Driver crates: `~/Documents/MARV-V2-drivers/<crate>`, accepted work on `main`, p
 | DShot back-end `PioDshot` | DONE: accepted, reviewed, pushed (dshot-rs main b7c823a, 2026-11-12 night). With the four motors attached: three zero-throttle runs passed (`dshot_smoke-20261113-022722`, `-022838`, `-022952`) and the spin test `dshot_spin` ran all four at up to 5 % (`dshot_spin-20261113-030326`, PASS); dshot-rs main `3557eb1` |
 | READMEs / "Works with" / package metadata | Done and pushed for the 14 other crates |
 | crates.io | Six crates prepared (icm45686, lsm6dsk320x, lc76g, bmm350 as `bmm350-async`, bmp581 as `bmp581-async`, esc-passthrough); nothing published (the owner's e-mail was not verified); PARKED by the owner |
-| Firmware DShot telemetry (`MARV-V2-firmware` `src/esc.rs`: Stop frames at 1 kHz from every boot, command 13 bursts, ESC_STATUS / ESC_INFO on USB, ESC row 12; design `_plan/decision-esc-telemetry-20261118.md`) | BUILT 2026-11-18, not yet run on the board |
+| Firmware DShot telemetry (`MARV-V2-firmware` `src/esc.rs`: Stop frames at 1 kHz from every boot, command 13 bursts, ESC_STATUS / ESC_INFO on USB, ESC row 12; design `_plan/decision-esc-telemetry-20261118.md`) | BUILT 2026-11-18; run on the board 2026-11-18 with the battery, Stop frames only (4cfb1f0 and 0d25909; logs `20261118-191955` to `20261118-194637`): all four online, EDT voltage and temperature, rpm 0, 1000 exchanges/s, error rate 0 after start-up; figures in the README, ESC telemetry |
 | ESC serial telemetry, firmware passthrough hookup, firmware arming rules | NOT STARTED |
 | Motors | Wired since 2026-11-13 ("motors are wired and ready to test"), no propellers; positions and directions: `docs/pinout.md`, bench configuration |
 
@@ -81,8 +81,13 @@ runs with the motors and the first spin test at the 5 % cap) are DONE. Still ope
   reference other than the ESC is needed.
 - ESC serial telemetry (measure the ESC's real baud rate first; `UartRx` tolerates -4.6 % to +3.9 %).
 - The firmware's hookup: the passthrough tap on the port shared with MAVLink and arming rules (arm when every line
-  has answered). The DShot stream with error counting is BUILT in the firmware (README, ESC telemetry), not yet run
-  on the board.
+  has answered). The DShot stream with error counting is BUILT in the firmware (README, ESC telemetry) and ran on
+  the board on 2026-11-18 (4cfb1f0 and 0d25909, logs `20261118-191955` to `20261118-194637`; Stop frames only).
+- The firmware's decode cost: not isolated; the shortest exchange (156-157 us, 0d25909, `20261118-193433`) bounds
+  decode, frame choice, wake and two clock reads at 11.4 us, against the 10 us tripwire.
+- Noticed (2026-11-18, not analysed): an RC UART framing/break burst after `xip-park`'s core-0 park (33 warnings,
+  logs `20261118-194106` / `20261118-194357`; 1 overrun on 2026-11-16); one RC UART overrun at a settings save
+  (`20261118-193433`).
 - Zero-throttle extras (beep commands, extended telemetry, decode cost) and the bench-review follow-ups of the plan
   log (the self-test for a short pulse at our release, the 53 ns tolerance, the arming block's position, `shorts_lost`
   and `ring_over` asserted per rate only in check 3).

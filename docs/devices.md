@@ -227,7 +227,8 @@ Pins: see `pinout.md`, status LED.
 
 - Facts measured on the bench: the `dshot` crate's README (cadence, start sequence, arming silence, extended
   telemetry). Motor positions and directions: `pinout.md`.
-- In the firmware (`src/esc.rs`, not yet run on the board): `PioDshot` on PIO2 SM0, DShot300 at 1 kHz from core 1,
+- In the firmware (`src/esc.rs`, run on the board 2026-11-18, 4cfb1f0 and 0d25909, logs `20261118-191955` to
+  `20261118-194637`; README, ESC telemetry): `PioDshot` on PIO2 SM0, DShot300 at 1 kHz from core 1,
   driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1. Device row 12 (ESC), report only: no health machine, no
   recovery (`fw_core::esc::verdict`).
 - The ESCs' current reading (153 to 160 A at rest) is not a current: the firmware never sends it.

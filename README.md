@@ -1227,7 +1227,41 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
   motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current.
 - Not built: arming, any throttle or motor test, the stop on signal loss, the ESCs' serial telemetry on GPIO34,
   the passthrough, the ESC row in the SD log, ESC messages on the radio.
-- Not yet run on the board: built, `tools/check-ram-code.py` PASS and the host tests only.
+- Measured on the board (2026-11-18, battery connected, motors fitted, no propellers, probe-rs attached). F3a at
+  4cfb1f0: logs `20261118-191955` (default), `20261118-192214` (`esc-off`), `20261118-192403` (default). F3b at
+  0d25909: `20261118-193433` (default, one settings save), `20261118-193820` (`esc-no-edt`), `20261118-194106`
+  (`xip-park`), `20261118-194357` (`xip-park,ram-negative`), `20261118-194637` (default).
+  - Start-up checks: 15 `[PASS]`, no `[FAIL]`; `PIO2_IRQ_0` enabled on core 1 and not on core 0; INTE0 0x2f.
+  - Online (row OK, ESC_INFO `info` 15) about 4.1 s after boot; the row dips to STARTING for about 0.7 s during the
+    ESCs' arming tune (one dropout per line) and is stable from about 5.4 s.
+  - 1000 exchanges/s (10 000 ±1 per 10 s); longest spacing 1.1-1.3 ms.
+  - Error rate 0 after 5.4 s on all four; about 940 non-replies per line before.
+  - ESC voltage M1 16.0 V, M2 15.25-15.75 V, M3 15.5 V, M4 15.5 V beside the board's 15.0 V (SYS_STATUS 14.99-15.02 V);
+    temperature M1 46-47, M2 32-33, M3 30-32, M4 42-43 degC. The ESCs' raw current reads 153-162 A at rest, hence NaN
+    on the link. rpm 0 in every ESC_STATUS.
+  - IMU rates unchanged against `esc-off` (192214): IMU1 803.450/s, largest gap 1416 us, longest run 616 us; IMU2
+    800.600/s, 1450 us, 266 us. With the ESC task (191955, 192403): IMU1 803.433-803.450/s, 1411-1487 us, 711-737 us;
+    IMU2 800.600/s, 1406-1847 us, 204-276 us.
+  - One settings save (193433): 45 ms stall, 44 frames lost, longest spacing 44.3 ms, all four stayed online,
+    `starts` 1.
+  - `esc-no-edt` control (193820): `info` 15, voltage NaN and temperature no-data (32767) on all four for the whole run.
+  - `xip-park` with the ESC task running (194106): 0 accesses with core 0 parked; 184 035 in the `ram-negative`
+    control (194357).
+  - Battery pulled and plugged back by the owner with the station (figures from the lead's reading of the station
+    recordings, not from these logs): row FAILED/TIMEOUT and `info` 0 within the same second; back online within a
+    second of power, voltage after about 2.3 s; a boot without battery reads ABSENT, then OK after plugging in. The
+    ESCs' bootloader v1 starts the application with frames already running, so the decision's fallback restart was
+    not built.
+  - Exchange duration: shortest 156-157 us. With 144.6 us for the frame and capture, that leaves 11.4 us for decode,
+    frame choice, wake and two clock reads (1 us resolution). The driver decision's 1500-cycle decode tripwire is
+    10 us: decode alone was not isolated, it is bounded above by 11.4 us. Longest 255-1358 us, which includes other
+    core-1 tasks' polls and, once, the save stall.
+  - Not measured: any throttle, anything but Stop frames and command 13, serial telemetry.
+- Known behaviour: when the battery is plugged in more than 5 s after boot, the ESC row can read FAILED/TIMEOUT for
+  under a second during the arming tune.
+- Noticed (2026-11-18, not analysed): an RC UART framing/break burst after `xip-park`'s core-0 park (33 warnings,
+  logs `20261118-194106` / `20261118-194357`; 1 overrun on 2026-11-16); one RC UART overrun at a settings save
+  (`20261118-193433`).
 
 ## Flight core in SRAM
 

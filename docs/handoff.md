@@ -222,7 +222,9 @@ copies for the download checks.
     steps that followed are above.
 
 **Not built**
-- ESC in the firmware: BUILT, not yet run on the board (2026-11-18, `src/esc.rs`): core 1 sends DShot300 Stop
+- ESC in the firmware: BUILT and run on the board with the battery (2026-11-18, 4cfb1f0 and 0d25909, logs
+  `20261118-191955` to `20261118-194637`: all four online, EDT voltage and temperature, rpm 0, 1000 exchanges/s,
+  IMU rates unchanged; README, ESC telemetry, "Measured on the board") (`src/esc.rs`): core 1 sends DShot300 Stop
   frames at 1 kHz on GPIO36-39 from every boot (command 13 in EDT bursts, never a throttle), the ESC row (device 12,
   report only), ESC_STATUS and ESC_INFO on USB; see the README, ESC telemetry. Not built: arming, throttle, motor
   test, passthrough through the USB port, the board's current scale, ESC serial telemetry on GPIO34. See
