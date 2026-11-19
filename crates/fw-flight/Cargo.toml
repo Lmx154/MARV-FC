@@ -16,8 +16,10 @@ embedded-hal-async = "1.0"
 # `embassy-rp-0-10` back-end is the binary's business (decision-esc-telemetry Q6, F2).
 dshot = { git = "https://github.com/Lmx154/dshot-rs.git", rev = "3557eb111097400c91277c5a69ddefce22c3be44" }
 # The vehicle card's `const` data (rotors, k_F, k_M, the level map, MIX), no_std by default
-# (decision-sim-card 7b). Temporary path form on branch `first-pair`: it becomes a git pin when the
-# MARV-sim repo has a remote (rulings file, section 4, question 2).
-marv-card = { path = "../../../MARV-sim/marv-card" }
+# (decision-sim-card 7b). Pinned to a commit of MARV-sim `main`, like a driver; to take a newer card change `rev`
+# and run `cargo update -p marv-card`. To build against a local checkout instead, add to the workspace Cargo.toml:
+#   [patch."https://github.com/Lmx154/MARV-sim.git"]
+#   marv-card = { path = "../MARV-sim/marv-card" }
+marv-card = { git = "https://github.com/Lmx154/MARV-sim.git", rev = "66f5e52eafc2f68281cbb046efb2d3b5751db6dd" }
 # sqrtf, sinf, cosf for the flight code (MIT, no dependencies; decision-first-pair 7b).
 libm = "0.2"
