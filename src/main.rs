@@ -296,6 +296,10 @@ fn core1_main(
     imu1_parts: imu1::Parts,
     imu2_parts: imu2::Parts,
     #[cfg(not(feature = "esc-off"))] esc_parts: esc::Parts,
+    #[cfg(not(feature = "esc-off"))] esc_test: fw_core::xcore::TripleReader<
+        'static,
+        fw_core::esc::TestCmd,
+    >,
 ) -> ! {
     let table = CORE1_VECTOR_TABLE.0.get() as u32;
     // SAFETY: the executing core's own VTOR; the table is aligned to 512 bytes and was filled by core
@@ -344,7 +348,7 @@ fn core1_main(
             spawner.spawn(token);
         }
         #[cfg(not(feature = "esc-off"))]
-        if let Some(Ok(token)) = esc_driver.map(esc::task) {
+        if let Some(Ok(token)) = esc_driver.map(|driver| esc::task(driver, esc_test)) {
             spawner.spawn(token);
         }
     })
@@ -948,6 +952,7 @@ async fn supervise() -> ! {
         #[cfg(feature = "latency-text")]
         devices.latency_text(now);
         actions::tick(now.as_millis());
+        esc::report();
         let ping = PING.load(Ordering::Relaxed);
         let pong = PONG.load(Ordering::Acquire);
         if pong == ping {
@@ -1281,6 +1286,11 @@ async fn main(spawner: Spawner) {
         dma: p.DMA_CH5,
         clk_sys_hz: embassy_rp::clocks::clk_sys_freq(),
     };
+    // The motor-test cell (as the IMU offsets): the reader goes to core 1, the writer stays here.
+    #[cfg(not(feature = "esc-off"))]
+    let esc_test = esc::test_reader();
+    #[cfg(not(feature = "esc-off"))]
+    actions::init_motor_test();
     unsafe extern "C" {
         static __vector_table: u32;
         static __vector_table_end: u32;
@@ -1299,6 +1309,8 @@ async fn main(spawner: Spawner) {
             imu2_parts,
             #[cfg(not(feature = "esc-off"))]
             esc_parts,
+            #[cfg(not(feature = "esc-off"))]
+            esc_test,
         )
     });
 

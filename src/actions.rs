@@ -16,11 +16,13 @@ use core::cell::{Cell, RefCell};
 use core::sync::atomic::Ordering;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use fw_core::admission::{Action, ActionBook, Effect};
+use fw_core::admission::{Action, ActionBook, Effect, MotorTest};
 use fw_core::calib::Kind;
+use fw_core::esc::TestCmd;
 use fw_core::selftest::{self, Verdict};
 
 use fw_core::watchdog::task;
+use fw_core::xcore::TripleWriter;
 use mavlink_device::dialect::MavSeverity;
 use mavlink_device::marv::{MarvDevice, MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck};
@@ -31,6 +33,30 @@ use crate::store;
 
 static BOOK: Mutex<CriticalSectionRawMutex, RefCell<ActionBook>> =
     Mutex::new(RefCell::new(ActionBook::new()));
+
+/// Core 0's motor test: the admission record and the writer of the flight core's command cell
+/// (`esc::TEST`). `None` until [`init_motor_test`]: with `esc-off` it is never set, and command 209
+/// is UNSUPPORTED.
+#[cfg_attr(feature = "esc-off", allow(dead_code))]
+struct Motor {
+    state: MotorTest,
+    cell: TripleWriter<'static, TestCmd>,
+}
+
+static MOTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<Motor>>> =
+    Mutex::new(RefCell::new(None));
+
+#[cfg(not(feature = "esc-off"))]
+/// Takes the cell's writer. Call once, on core 0, before core 1 starts (with the ESC task built).
+pub fn init_motor_test() {
+    let cell = crate::esc::test_writer();
+    MOTOR.lock(|m| {
+        *m.borrow_mut() = Some(Motor {
+            state: MotorTest::new(),
+            cell,
+        });
+    });
+}
 
 /// The number of the restart (or self-test) request the running `DeviceRestart` (`DeviceSelfTest`)
 /// action raised: the action ends only on that request's outcome (`Device::restart_outcome`, and
@@ -84,7 +110,18 @@ fn action_name(action: Action) -> &'static str {
 /// `Telemetry::command`: admits the command and starts its action. The answer is the book's
 /// (IN_PROGRESS 0 % for an admitted action; its final ACK follows through [`next_ack`]).
 pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
-    let decision = BOOK.lock(|b| b.borrow_mut().admit(req, link, false, false, now_ms));
+    if req.command == MavCmd::MAV_CMD_DO_MOTOR_TEST {
+        return motor_test(req, link, now_ms);
+    }
+    // While a motor-test spin runs, every other action is refused as if armed.
+    let decision = BOOK.lock(|b| {
+        let armed = MOTOR.lock(|m| {
+            m.borrow()
+                .as_ref()
+                .is_some_and(|m| m.state.spin_active(crate::now_us()))
+        });
+        b.borrow_mut().admit(req, link, armed, false, now_ms)
+    });
     defmt::info!(
         "[INFO] command {=u32} on link {=u8} from {=u8}/{=u8}: {=str}{=str}{=str}",
         req.command as u32,
@@ -104,6 +141,61 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
     }
     if decision.effect == Effect::CancelCalibration {
         crate::calibration::cancel();
+    }
+    decision.outcome
+}
+
+/// Command 209, `MAV_CMD_DO_MOTOR_TEST`: admitted by `fw_core::admission::MotorTest` (ACCEPTED at
+/// once, no IN_PROGRESS, nothing in the book), the whole `TestCmd` of an accepted command written to
+/// the flight core's cell. The same on every link. UNSUPPORTED when there is no ESC task (`esc-off`).
+fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
+    let decision = BOOK.lock(|b| {
+        MOTOR.lock(|m| {
+            let mut m = m.borrow_mut();
+            let m = m.as_mut()?;
+            let busy = b.borrow_mut().busy(now_ms);
+            let d = m.state.admit(&req.params, busy, false, crate::now_us());
+            if let Some(cmd) = d.cmd {
+                m.cell.write(cmd);
+            }
+            Some(d)
+        })
+    });
+    let Some(decision) = decision else {
+        defmt::info!(
+            "[INFO] command {=u32} on link {=u8} from {=u8}/{=u8}: UNSUPPORTED, no ESC task",
+            req.command as u32,
+            link,
+            req.sender.system_id,
+            req.sender.component_id
+        );
+        return CommandOutcome::new(MavResult::MAV_RESULT_UNSUPPORTED);
+    };
+    defmt::info!(
+        "[INFO] command {=u32} on link {=u8} from {=u8}/{=u8}: {=str}{=str}{=str}",
+        req.command as u32,
+        link,
+        req.sender.system_id,
+        req.sender.component_id,
+        result_name(decision.outcome.result),
+        if decision.text.is_some() { ", " } else { "" },
+        decision.text.unwrap_or("")
+    );
+    if let Some(reason) = decision.text {
+        crate::text(MavSeverity::MAV_SEVERITY_WARNING, reason);
+    }
+    if let Some(cmd) = decision.cmd {
+        if cmd.level == 0 {
+            defmt::info!("[INFO] motor test stop accepted: seq {=u32}", cmd.seq);
+        } else {
+            defmt::info!(
+                "[INFO] motor test M{=u8} spin accepted: seq {=u32}, level {=u16}, until {=u64} us",
+                decision.motor,
+                cmd.seq,
+                cmd.level,
+                cmd.until_us
+            );
+        }
     }
     decision.outcome
 }

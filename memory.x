@@ -93,6 +93,8 @@ SECTIONS {
         *(.text.SIO_IRQ_FIFO .text.DMA_IRQ_0 .text.IO_IRQ_BANK0 .text.PIO2_IRQ_0)
         *(.text._critical_section_1_0_acquire .text._critical_section_1_0_release .text._embassy_time_now)
         *(.text.__aeabi_mem* .text.*17compiler_builtins3mem*)
+        /* 64-bit division: dshot's PioDshot::new (core 1's start) divides u64 by u32 in some inlining layouts. */
+        *(.text.__aeabi_uldivmod .text.__udivmoddi4 .text.*17compiler_builtins3int19specialized_div_rem*)
         *(.text.*8icm45686* .text.*11lsm6dsk320x* .text.*5dshot*)
         *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness* .text.*9fw_flight3esc*)
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
