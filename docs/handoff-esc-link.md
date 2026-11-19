@@ -109,7 +109,7 @@ runs with the motors and the first spin test at the 5 % cap) are DONE. Still ope
 
 ## Rules for the bench
 
-- Zero throttle only, except the capped spin test the owner allowed on 2026-11-13 (5 % cap, props off, `dshot_spin`, feature `motor-test`) and its firmware form, the motor test (command 209, built 2026-11-18, not yet run on the board; README, ESC telemetry, Motor test); anything beyond it needs his word again. Never write to an ESC without the owner's word (settings
+- Zero throttle only, except the capped spin test the owner allowed on 2026-11-13 (5 % cap, props off, `dshot_spin`, feature `motor-test`) and its firmware form, the motor test (command 209, built and run on the board from the station on 2026-11-18; README, ESC telemetry, Motor test); anything beyond it needs his word again. Never write to an ESC without the owner's word (settings
   and flashing are the owner's, in the configurator). The PCB repo `~/Documents/kicad/MARV-V2` is read-only.
   Files under `_plan/ref/` are never executed. The board only through each crate's `tools/run.sh`.
 - Bench: battery in, propellers off (the owner's word, 2026-11-18); the firmware itself now sends Stop frames on
