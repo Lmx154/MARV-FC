@@ -207,8 +207,8 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
    buffer into it, atomic flags with a lock-free waker for requests). The seqlocks out of core 1: each IMU's status
    (`fw_flight::imu::ImuCells`), the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task) and the flight
-   step's output (`flight::OUT`, 2026-11-19: step count, step time, `MotorCommand`; writer taken once by IMU1's task,
-   read only by core 0's `[STAT] FLT:` line). The triple buffers into it: the IMU offsets
+   step's output (`flight::OUT`, 2026-11-19: step time, `MotorCommand`; writer taken once by IMU1's task; no reader
+   until the ESC task reads it in step 5). The triple buffers into it: the IMU offsets
    (`calibration::OFFSETS`) and the motor-test command (`esc::TEST`, a `TestCmd`; writer in core 0's `actions` state, reader
    taken before core 1 starts and moved into the esc task, which reads it at every exchange; 2026-11-18). Its IMU tasks wait through `SpinDelay`
    (`src/imu1.rs`): under 50 us a busy wait (the ICM-45686's 10 us waits in a verify step, so the sample loop
@@ -250,8 +250,7 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    `*16marv_v2_firmware3esc*` also moved the core-0 readers of `src/esc.rs` (about 21 KB) into SRAM.
    `*10embassy_rp3pio*` also moves core 0's PIO0 code (the SD bus's, about 2.4 KB). Removing `*5dshot*`
    makes the checker FAIL (13 functions). The flight step (2026-11-19) added
-   `*9fw_flight4step*`, `*9fw_flight3gnc*`, `*9fw_flight4gate*` and `*16marv_v2_firmware6flight*7Stepper*`
-   (`flight::stat`, core 0, stays in flash). With today's stand-ins the whole step is inlined into IMU1's
+   `*9fw_flight4step*`, `*9fw_flight3gnc*`, `*9fw_flight4gate*` and `*16marv_v2_firmware6flight*7Stepper*`. With today's stand-ins the whole step is inlined into IMU1's
    `ImuTask::once`, so the checker passes without them; with `Flight::step` forced out of line, removing them makes
    it FAIL (1 function, `Flight::step`). A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
    identical functions make the patterns inexact: three lines exist only for merged functions' sections). A

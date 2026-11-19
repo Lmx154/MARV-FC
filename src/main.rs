@@ -1029,7 +1029,6 @@ async fn supervise() -> ! {
             devices.stat(now);
             rc::stat(now);
             esc::stat(now);
-            flight::stat();
             calibration::stat();
             watchdog::stat();
             #[cfg(feature = "xip-stat")]

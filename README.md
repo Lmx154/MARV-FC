@@ -82,9 +82,11 @@ controller reset while disarmed, stick shaper, validity check, controller, alloc
 slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Today every stage is a stand-in (nothing
 valid, the controller refuses, the gate never arms), so every step gives Stop; the board image names them in
 `src/flight.rs` (`BoardFlight`). Only IMU1's sample goes in (IMU2, the slow sensors and RC come with later steps).
-After each step the task writes the step count, the step time and the command to the seqlock `flight::OUT`; its only
-reader is core 0's `[STAT] FLT:` line every 10 s (steps since boot, steps in the last 10 s, the latest step time,
-`command Stop`). The ESC task does not read it yet: it sends what it sent before (step 5).
+After each step the task writes the step time and the command to the seqlock `flight::OUT`. Nothing reads it yet: the
+ESC task sends what it sent before and starts reading it in step 5. There is no status line for it. A core-0
+`[STAT] FLT:` line was tried on 2026-11-19 (it showed 8035 steps per 10 s, the IMU1 rate, `command Stop`) and removed:
+with the probe attached, that one extra log line raised the ESC task's longest spacing from 1.09 to 1.26 ms (six runs
+without it) to 1.58 ms inside the 10 s `[STAT]` burst and 1.36 ms on a tick of its own; without the line it is 1.20 ms.
 
 IMU1's configuration comes from `IMU1_ACC_FS`, `IMU1_GYR_FS` and `IMU1_ODR_HZ` at boot, fixed until the next reboot; the
 defaults are 16 g, 2000 dps, 800 Hz on both sensors (`fw_settings::imu::imu1_setup`: read once in `main` after `settings::boot`, logged as
