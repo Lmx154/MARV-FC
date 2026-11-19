@@ -37,7 +37,9 @@ pub const ERPM_MAX: u32 = 1_000_000;
 /// The driver line of message element `element` (0 = M1 = line 3 ... 3 = M4 = line 0). The mapping
 /// is its own inverse. `None` for an element above 3.
 pub fn line_of_element(element: usize) -> Option<usize> {
-    LINES.checked_sub(1).and_then(|last| last.checked_sub(element))
+    LINES
+        .checked_sub(1)
+        .and_then(|last| last.checked_sub(element))
 }
 
 /// What the flight core knows about one line.
@@ -415,7 +417,10 @@ mod tests {
         assert_eq!(i.info, 0b1011);
         assert_eq!(i.failure_flags, [0; 4]);
         assert_eq!((i.index, i.count), (0, 4));
-        assert_eq!(i.connection_type, EscConnectionType::ESC_CONNECTION_TYPE_DSHOT);
+        assert_eq!(
+            i.connection_type,
+            EscConnectionType::ESC_CONNECTION_TYPE_DSHOT
+        );
         assert_eq!(i.time_usec, NOW);
         s.exchanges = 65_535;
         assert_eq!(esc_info(&s, NOW).unwrap().counter, 65_535);
@@ -481,15 +486,28 @@ mod tests {
             (status(0, true, 1, false, old), S::Failed, E::Timeout),
         ];
         for (k, (s, state, err)) in cases.into_iter().enumerate() {
-            assert_eq!(verdict(&s, NOW), Verdict { state, last_error: err }, "case {k}");
+            assert_eq!(
+                verdict(&s, NOW),
+                Verdict {
+                    state,
+                    last_error: err
+                },
+                "case {k}"
+            );
         }
         // Stale: exactly 1 s old is fresh, 1 s and 1 us is FAILED STUCK; a running start is not.
         let s = status(4, true, 1, false, old);
         assert_ne!(verdict(&s, NOW + FRESH_US).last_error, ErrorKind::Stuck);
         let stale = verdict(&s, NOW + FRESH_US + 1);
-        assert_eq!((stale.state, stale.last_error), (State::Failed, ErrorKind::Stuck));
+        assert_eq!(
+            (stale.state, stale.last_error),
+            (State::Failed, ErrorKind::Stuck)
+        );
         let running = status(4, true, 1, true, None);
-        assert_eq!(verdict(&running, NOW + 10 * FRESH_US).state, State::Starting);
+        assert_eq!(
+            verdict(&running, NOW + 10 * FRESH_US).state,
+            State::Starting
+        );
         // No start yet: STARTING while young, STUCK once a second has passed.
         let none = EscStatus::INITIAL;
         assert_eq!(verdict(&none, FRESH_US).state, State::Starting);
