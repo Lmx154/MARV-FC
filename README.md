@@ -4,7 +4,7 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: an ArduPilot-format `.BIN` log from boot; see SD card and Logging) and the radio receiver (RC, report only; see Radio), and IMU1, IMU2 and the four ESCs' DShot stream (telemetry only; see ESC telemetry) on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: an ArduPilot-format `.BIN` log from boot; see SD card and Logging) and the radio receiver (RC, report only; see Radio), and IMU1, IMU2 and the four ESCs' DShot stream (telemetry, and the props-off motor test; see ESC telemetry) on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
@@ -1211,8 +1211,8 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
   every 1 ms for ever (`fw_flight::esc::next_deadline`: a stall gives one late frame, never a burst). Driver line 0 is
   GPIO36 = M4 ... line 3 is GPIO39 = M1.
 - Frames: Stop on every line, except command 13 (extended telemetry on) in bursts of 10 frames on one line once
-  that line has answered for 1 s with no extended reply in the last 1 s, then a 1 s hold-off (`Esc::frames`). No
-  throttle is ever built. Nothing stops on errors; there is no lapse rule.
+  that line has answered for 1 s with no extended reply in the last 1 s, then a 1 s hold-off (`Esc::frames`). The
+  only throttle is the motor test's (see Motor test below). Nothing stops on errors; there is no lapse rule.
 - After every exchange the task publishes its counters and latest values to the seqlock `esc::ESC`; core 0 does all
   conversion. No timer, log or lock in the task.
 - USB only: ESC_STATUS (291) at 10 Hz (fastest 50 Hz) and ESC_INFO (290) at 1 Hz (fastest 10 Hz), neither sent while
@@ -1224,8 +1224,9 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
   (1 to 3, error TIMEOUT), FAILED (none after some good reply, TIMEOUT; or the data older than 1 s, STUCK). It sets
   no SYS_STATUS bit.
 - Core 0 prints `[STAT] ESC:` every 10 s: the row, exchanges, starts, longest spacing, longest exchange and shortest exchange (0 before the first), and per
-  motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current.
-- Not built: arming, any throttle or motor test, the stop on signal loss, the ESCs' serial telemetry on GPIO34,
+  motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current, and at
+  the end of the line `throttle frames N` (the throttle frames the flight core has sent since boot).
+- Not built: arming, any throttle but the motor test's, the stop on signal loss, the ESCs' serial telemetry on GPIO34,
   the passthrough, the ESC row in the SD log, ESC messages on the radio.
 - Measured on the board (2026-11-18, battery connected, motors fitted, no propellers, probe-rs attached). F3a at
   4cfb1f0: logs `20261118-191955` (default), `20261118-192214` (`esc-off`), `20261118-192403` (default). F3b at
@@ -1263,6 +1264,44 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
   logs `20261118-194106` / `20261118-194357`; 1 overrun on 2026-11-16); one RC UART overrun at a settings save
   (`20261118-193433`).
 
+### Motor test
+
+Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (amendment A, "lean"). Code:
+`fw_core::admission` (`classify_motor_test`, `MotorTest`), `src/actions.rs` (`motor_test`), `src/esc.rs` (`TEST`,
+`report`), `fw_flight::esc` (`Esc::frames`, `capped`). The station's field table: `docs/link-contract.md` section 15
+(MARV-GCS). **Propellers off only. Not yet run on the board.**
+
+- The command: `MAV_CMD_DO_MOTOR_TEST` (209), `COMMAND_LONG`, on every link the same way (the firmware does not check the
+  link; link contract section 9). param1 motor 1-4 (M1-M4, the ESC_STATUS order); param2 0 (percent); param3 throttle
+  0 to 5.0 % (0 = stop now); param4 duration above 0 up to 3.0 s (ignored for a stop); param5 0 or 1; param6 0 or 2;
+  param7 0. Anything else, NaN included, is DENIED with a STATUSTEXT `motor test: <reason>`. The level sent to the ESC
+  is round(param3 x 20) of 2000, at least 1 (the bench's mapping, `dshot_spin` `step_level`): 5 % is level 100.
+- The answers: a stop is ACCEPTED in every state. A spin is ACCEPTED at once (no IN_PROGRESS) unless another long
+  action is in the books or the vehicle is armed (always false today): TEMPORARILY_REJECTED. A spin while one runs
+  replaces it. While a spin runs, every other command that starts an action is TEMPORARILY_REJECTED (core 0 passes
+  "armed, or a spin is active" to the book; its own record: the last accepted spin's `until_us` not reached and no stop
+  accepted since). There are no pre-checks of the ESCs or the battery and no automatic stops on telemetry. With the
+  feature `esc-off` the command is UNSUPPORTED.
+- The path: core 0 admits the command (`MotorTest`), gives it a new `seq` (from 1, 0 skipped on a wrap; every accepted
+  spin or stop gets one), sets `until_us` = now + duration on the board timer, and writes the whole
+  `TestCmd { seq, line, level, until_us }` to the cell `esc::TEST`, a `TripleBuffer<TestCmd>` (writer in `actions`,
+  reader taken before core 1 starts and moved into the ESC task, which reads it wait-free at every exchange). Core 1
+  ends the spin on its own clock: at `until_us`, at 3 s from the spin's first throttle frame, on a stop, on a command with a
+  new `seq` (replaced), or if its own guard finds the level above the 5 % cap (`capped()` is the only constructor
+  of a `Throttle`). A hung core 0 cannot extend a spin. During a spin the tested line gets the throttle and the other
+  three Stop; no command 13 is sent, and a running EDT burst is cut.
+- The report (core 0, every 10 ms tick): when the status shows a new ending (its `seq` changed), one line
+  `[INFO] motor test M<n>: level L, ended by <cause> after <ms> ms` (cause: expiry, 3 s limit, stop, replaced, cap; ms
+  from the first throttle frame to the exchange that ended it; `never started` when no throttle frame was sent), and a
+  WARNING STATUSTEXT for a `cap` ending only. The accepted commands print `[INFO] motor test M<n> spin accepted: ...`
+  and `[INFO] motor test stop accepted: ...`. Core 1 never logs. `[STAT] ESC:` ends with `throttle frames N`.
+- Limits and risks: propellers off only; never measured above 5 % or with two motors. If core 1 hangs, no frames are
+  sent and the ESC's own cut-off (about 510 ms without frames) is the last resort. If the link drops during a spin it
+  runs to its end (at most 3 s); nothing repeats or holds it. The ESC task must be running: if the driver was not
+  built the row reads FAILED but a spin is still ACCEPTED and nothing turns.
+- Tests: `cargo host-test -p fw-core` (admission: `motor_test_*`), `-p fw-flight` (the frames and endings, M2-F1).
+- Not yet run on the board.
+
 ## Flight core in SRAM
 
 Design: `~/Documents/MARV-V2-drivers/_plan/decision-ram-code-20261115.md` (the owner: "run from PSRAM or RAM
@@ -1272,7 +1311,7 @@ longer shares the XIP cache with core 0, whose misses under card work slowed it 
 
 - In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks and the ESC task, `fw_flight`'s imu,
   liveness and esc modules, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
-  `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions, the handlers `DMA_IRQ_0`,
+  `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions and the 64-bit division, the handlers `DMA_IRQ_0`,
   `IO_IRQ_BANK0`, `SIO_IRQ_FIFO` and `PIO2_IRQ_0`, the critical-section and time functions), every constant (`.rodata`),
   and core 1's own vector table. Left in flash: core 1's panic paths and the launch trampoline that runs
   before `core1_main`.
@@ -1353,8 +1392,8 @@ Program in flash 505 436 B of 2040 KiB; static SRAM 221 220 B of 512 KiB.
 - `docs/handoff.md`: the overview for whoever picks the work up: what is done and proven, what is in progress
   (SD card logging), what is left, and the rules that are easy to break (2026-11-15).
 - `docs/handoff-esc-link.md`: the ESC link (DShot, AM32 passthrough, ESC telemetry input) and battery sensing: what the drivers
-  already do, the owner's decisions and what is still open for the firmware (DShot telemetry is built, see ESC telemetry;
-  passthrough, serial telemetry and arming are not).
+  already do, the owner's decisions and what is still open for the firmware (DShot telemetry and the props-off motor test are built,
+  see ESC telemetry; passthrough, serial telemetry and arming are not).
 - `docs/pinout.md`: the board pin assignment.
 - `docs/devices.md`: the devices on the board and what was measured on them.
 - `docs/resources.md`: who owns which pin, PIO state machine, DMA channel and interrupt, and the rules that follow.

@@ -1,7 +1,8 @@
 //! The four ESCs: bidirectional DShot300 at 1 kHz on PIO2 SM0, GPIO36-39 (driver line 0 = GPIO36 = M4
 //! ... line 3 = GPIO39 = M1), the reply capture on DMA channel 5 (`dshot` `PioDshot`). Design:
 //! `decision-esc-telemetry-20261118` Q1-Q3. Stop frames from every boot, and command 13 in the EDT
-//! bursts of `fw_flight::esc`; no throttle.
+//! bursts of `fw_flight::esc`; throttle only for the props-off motor test (command 209: one line, at
+//! most 5 %, 3 s, the command in the cell [`TEST`]; README, Motor test).
 //!
 //! [`driver`] and [`task`] run on core 1: [`driver`] is called inside core 1's entry, so
 //! `PIO2_IRQ_0` and the DMA channel's `DMA_IRQ_0` are enabled there, and [`task`] runs on core 1's

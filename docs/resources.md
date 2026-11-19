@@ -14,7 +14,7 @@ with DMA channels 2 and 3 on `DMA_IRQ_0`, INT1 on GPIO7 through core 1's `IO_IRQ
 built inside core 1's entry closure next to IMU1; configured once at boot from `IMU2_ACC_FS`, `IMU2_GYR_FS`, `IMU2_ODR_HZ`, default 800 Hz, the high-g channel off) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
 see the table below), and the four ESCs' DShot stream on core 1 (2026-11-18, `src/esc.rs`: `dshot` `PioDshot` on PIO2 SM0, GPIO36-39,
 reply capture on DMA channel 5 on `DMA_IRQ_0`, `PIO2_IRQ_0` bound and enabled on core 1 only, all built inside core 1's entry; Stop
-frames from every boot and command 13 in EDT bursts, never a throttle; run on the board 2026-11-18, 4cfb1f0 and 0d25909, logs
+frames from every boot and command 13 in EDT bursts, and the props-off motor test's capped throttle on one line (2026-11-18, built, not yet run on the board); the telemetry run on the board 2026-11-18, 4cfb1f0 and 0d25909, logs
 `20261118-191955` to `20261118-194637`, see the README, ESC telemetry); no
 other device, PIO block or DMA channel of this plan has run in it yet.
 
@@ -199,7 +199,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
 8. The flight core schedules no timer at all, takes no critical-section primitive of its own and
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
    buffer into it, atomic flags with a lock-free waker for requests). The seqlocks out of core 1: each IMU's status
-   (`fw_flight::imu::ImuCells`) and the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task). Its IMU tasks wait through `SpinDelay`
+   (`fw_flight::imu::ImuCells`) and the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task). The triple buffers into it: the IMU offsets
+   (`calibration::OFFSETS`) and the motor-test command (`esc::TEST`, a `TestCmd`; writer in core 0's `actions` state, reader
+   taken before core 1 starts and moved into the esc task, which reads it at every exchange; 2026-11-18). Its IMU tasks wait through `SpinDelay`
    (`src/imu1.rs`): under 50 us a busy wait (the ICM-45686's 10 us waits in a verify step, so the sample loop
    never yields inside one), from 50 us on clock polls with a yield between them. HARD RULE (lead's ruling,
    2026-11-15): no timer queue on the flight core at all, no `embassy_time::{Timer, Ticker, Delay}` and no

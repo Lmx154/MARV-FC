@@ -43,8 +43,9 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
 - **ESC telemetry:** run on the board with the battery (2026-11-18, 4cfb1f0 and 0d25909, logs `20261118-191955` to
   `20261118-194637`: all four online, EDT voltage and temperature, rpm 0, 1000 exchanges/s, IMU rates unchanged;
   README, ESC telemetry, "Measured on the board") (`src/esc.rs`): core 1 sends DShot300 Stop frames at 1 kHz on
-  GPIO36-39 from every boot (command 13 in EDT bursts, never a throttle), the ESC row, ESC_STATUS and ESC_INFO on
-  USB. The station's Motors tab shows it.
+  GPIO36-39 from every boot (command 13 in EDT bursts), the ESC row, ESC_STATUS and ESC_INFO on
+  USB. The station's Motors tab shows it. The props-off motor test is built (command 209, one motor at up to 5 % for up
+  to 3 s, core 1 ends the spin on its own clock; README, ESC telemetry, Motor test) and not yet run on the board.
 - **Parameters:** 79 (the last nine: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`) and `MOT_POLES` (`Live`, the motors' poles for the ESC rpm); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
@@ -228,7 +229,7 @@ copies for the download checks.
     steps that followed are above.
 
 **Not built**
-- ESC, beyond the telemetry above: arming, throttle, motor test, passthrough through the USB port, the board's
+- ESC, beyond the telemetry and the props-off motor test above: arming, any other throttle, passthrough through the USB port, the board's
   current scale, ESC serial telemetry on GPIO34. See `docs/handoff-esc-link.md`.
 - The estimator (next).
 - Status LED. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
