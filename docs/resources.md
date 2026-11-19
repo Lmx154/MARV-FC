@@ -95,7 +95,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | `.bss` | 103 972 | core 1's vector table (512 B at 0x2002b600) among it |
 | `.uninit` | 1 024 | |
 | static use | 221 220 | 0x20000000 to `__euninit` 0x20036024 |
-| free, up to 0x20080000 | 303 068 (296 KiB) | core 0's stack grows down into it from the top; link ASSERT: at least 32 KiB (`_stack_start - __euninit`); core 0's stack depth is not measured. `_stack_end` = `__euninit` rounded up to 8, MSPLIM is set to it at the start of `main` (fault on overflow) |
+| free, up to 0x20080000 | 303 068 (296 KiB) | core 0's stack grows down into it from the top; link ASSERT: at least 32 KiB (`_stack_start - _stack_end`); core 0's stack depth is not measured. `_stack_end` = `__euninit` rounded up to 8, MSPLIM is set to it at the start of `main` (fault on overflow) |
 
 SD3 (2026-11-16, normal build): `.data` 39 388 (+34 840: the log ring `logger::RING`, 32 824 B,
 and the listing `sd::SIZES`, 2 004 B, are in `.data`, not `.bss`, because their initial values are not all zero:
