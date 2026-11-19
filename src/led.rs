@@ -30,6 +30,9 @@ bind_interrupts!(struct Irqs {
 
 /// How often the task looks at the inputs (ms).
 const TICK_MS: u64 = 20;
+/// `LED_BRIGHT` is read from the store every this many ticks (13 x 20 ms = 260 ms), not at every tick: the
+/// name lookup holds the store's critical section, whose spinlock both cores share.
+const LEVEL_EVERY: u32 = 13;
 /// The latest GNSS sample counts for the green pulse while it is younger than this (us).
 const GNSS_FRESH_US: u64 = 3_000_000;
 /// `LED_BRIGHT` when the store cannot be read (the table's default).
@@ -66,8 +69,8 @@ fn log_open() -> bool {
     return true;
 }
 
-/// Everything the display reads, now.
-fn inputs(now_us: u64) -> Inputs {
+/// Everything the display reads, now, with the level last read from the store.
+fn inputs(now_us: u64, level: i32) -> Inputs {
     let sd = find(MarvDevice::MARV_DEVICE_SD).map_or(State::Absent, |d| d.row().state);
     let rows: [State; ROWS] = [
         IMU1.row().state,
@@ -90,7 +93,7 @@ fn inputs(now_us: u64) -> Inputs {
         calibrating: crate::calibration::calibrating(),
         log_open: log_open(),
         gnss_fix,
-        level: level(),
+        level,
     }
 }
 
@@ -118,7 +121,13 @@ async fn run(pio: Peri<'static, PIO1>, pin: Peri<'static, PIN_43>) {
     let mut led = Led::new();
     let mut shown: Option<Output> = None;
     let mut ticker = Ticker::every(Duration::from_millis(TICK_MS));
+    let mut tick: u32 = 0;
+    let mut level_now = DEFAULT_LEVEL;
     loop {
+        if tick.is_multiple_of(LEVEL_EVERY) {
+            level_now = level();
+        }
+        tick = tick.wrapping_add(1);
         match EVENT.swap(NONE, Ordering::Relaxed) {
             GOOD => led.event(true),
             BAD => led.event(false),
@@ -126,7 +135,7 @@ async fn run(pio: Peri<'static, PIO1>, pin: Peri<'static, PIN_43>) {
         }
         let now = Instant::now();
         let out = led.show(
-            &inputs(now.as_micros()),
+            &inputs(now.as_micros(), level_now),
             u32::try_from(now.as_millis()).unwrap_or(u32::MAX),
         );
         if shown != Some(out) {

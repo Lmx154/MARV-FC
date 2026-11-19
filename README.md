@@ -447,7 +447,7 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 
 `MOT_POLES` (`crates/fw-settings/src/esc.rs`, index 78), `I32`, device ESC (12), default 14, range 2 to 64, `Live`: the magnets (poles, not pole pairs) of each motor, for the rpm of ESC_STATUS (eRPM / (`MOT_POLES` / 2), rounded down). Core 0 reads it for every message, so it never reaches the flight core. Design: `_plan/decision-esc-telemetry-20261118.md`.
 
-`LED_BRIGHT` (`crates/fw-settings/src/led.rs`, index 79), `I32`, device 0 (the system: there is no LED device row), default 1, range 0 to 3, `Live`: the status LED's brightness, 0 off, 1 dim (20 of 255), 2 medium (80), 3 bright (255). The LED task reads it every 20 ms, so a write shows at once; it is saved only on the user's Save, like every parameter. See Status LED.
+`LED_BRIGHT` (`crates/fw-settings/src/led.rs`, index 79), `I32`, device 0 (the system: there is no LED device row), default 1, range 0 to 3, `Live`: the status LED's brightness, 0 off, 1 dim (20 of 255), 2 medium (80), 3 bright (255). The LED task reads it every 260 ms (13 ticks of 20 ms), so a write shows within about a quarter of a second; it is saved only on the user's Save, like every parameter. See Status LED.
 
 ### SD parameter
 
@@ -998,8 +998,8 @@ built, not flashed). Design: `_plan/decision-status-led-20261118.md`.
 
 The board's one status LED (D20, a WS2812C on GPIO43) shows the vehicle's state, decided by the firmware (nothing in the
 station). `src/led.rs` is a core-0 task (watchdog id LED = 19) on PIO1 state machine 1 with `PIO1_IRQ_0`, using the
-`ws2812c` driver; every 20 ms it reads the device rows, the motor test, the calibration flag, the open log, the GNSS
-sample and `LED_BRIGHT`, asks the pure `fw_core::led` what to show, and writes the LED only when the colour or the
+`ws2812c` driver; every 20 ms it reads the device rows, the motor test, the calibration flag, the open log and the GNSS
+sample (and `LED_BRIGHT` every 260 ms: the name lookup holds the parameter store's lock, which both cores share), asks the pure `fw_core::led` what to show, and writes the LED only when the colour or the
 brightness changed. If the PIO timing cannot be built the task logs one line and ends: nothing else depends on the LED.
 It has no device row and no cross-core cell.
 

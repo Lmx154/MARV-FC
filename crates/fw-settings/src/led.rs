@@ -9,6 +9,6 @@ pub const BRIGHT: &str = "LED_BRIGHT";
 pub const COUNT: usize = 1;
 
 /// `LED_BRIGHT`, appended to the firmware's table at index 79: `I32`, default 1 (dim), range 0 to 3,
-/// `Live` (the LED task on core 0 reads it every 20 ms; it never reaches the flight core). Device 0,
+/// `Live` (the LED task on core 0 reads it every 260 ms; it never reaches the flight core). Device 0,
 /// the system, like `AHRS_ORIENTATION`: there is no LED device row.
 pub static TABLE: [ParamDef; COUNT] = [ParamDef::i32(BRIGHT, 0, 1, 0, 3, Apply::Live)];
