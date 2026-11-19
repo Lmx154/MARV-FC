@@ -34,6 +34,95 @@ pub const STARTING_US: u64 = 5_000_000;
 /// An eRPM value above this is AM32's "not started yet" report, not a speed: it is not stored.
 pub const ERPM_MAX: u32 = 1_000_000;
 
+// Motor test (`decision-motor-test-20261118`, amendment A): the limits of `dshot_spin` (DS =
+// `dshot/hil/src/bin/dshot_spin.rs` at dshot 3557eb1) with the same values. The flight core checks
+// them on every frame (`fw_flight::esc`).
+
+/// The highest throttle level a motor test may send, of 2000: 5 % (DS:87-100, `CAP`, G3).
+pub const TEST_CAP: u16 = 100;
+const _: () = assert!(
+    TEST_CAP <= 200,
+    "TEST_CAP is above 200 (10 % throttle): refused"
+);
+const _: () = assert!(TEST_CAP >= 1, "TEST_CAP is 0: a throttle level is 1..=2000");
+
+/// No spin longer than this from its first throttle frame, in us (DS:146, `BURST_MAX_US`, G4).
+pub const TEST_BURST_MAX_US: u64 = 3_000_000;
+
+/// Time allowed between a limit check and the push it guards, in us (DS:152-153, `PUSH_MARGIN_US`).
+pub const TEST_PUSH_MARGIN_US: u64 = 1_000;
+
+/// The motor-test command core 0 hands to the flight core (one `TripleBuffer<TestCmd>`). A new
+/// `seq` is a new command; core 0 numbers from 1 (0 is [`TestCmd::INITIAL`]'s).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestCmd {
+    /// The command's number.
+    pub seq: u32,
+    /// The driver line to spin (0..=3; motor element `e` is line [`line_of_element`]`(e)`).
+    pub line: u8,
+    /// The throttle level, of 2000; 0 = stop.
+    pub level: u16,
+    /// No throttle frame at or after this board time, us.
+    pub until_us: u64,
+}
+
+impl TestCmd {
+    /// A stop: a reset never resumes a test.
+    pub const INITIAL: TestCmd = TestCmd {
+        seq: 0,
+        line: 0,
+        level: 0,
+        until_us: 0,
+    };
+}
+
+/// The spin running now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestSpin {
+    /// Its command's number.
+    pub seq: u32,
+    /// Its driver line.
+    pub line: u8,
+    /// Its throttle level, of 2000.
+    pub level: u16,
+    /// Board time of its first throttle frame, us.
+    pub first_us: u64,
+    /// Board time of its latest throttle frame, us.
+    pub last_us: u64,
+}
+
+/// Why a spin ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestCause {
+    /// Its `until_us` came.
+    Expiry,
+    /// [`TEST_BURST_MAX_US`] from its first throttle frame.
+    Limit,
+    /// A stop command (level 0).
+    Stop,
+    /// A command with a new `seq` replaced it.
+    Replaced,
+    /// The frame guard refused it: a level above [`TEST_CAP`] (or a line above 3).
+    Cap,
+}
+
+/// How the latest spin ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TestEnding {
+    /// Its command's number.
+    pub seq: u32,
+    /// Its driver line.
+    pub line: u8,
+    /// Its throttle level, of 2000.
+    pub level: u16,
+    /// Why it ended.
+    pub cause: TestCause,
+    /// Board time of its first throttle frame, us (`None`: none was sent).
+    pub first_us: Option<u64>,
+    /// Board time of the exchange that ended it (its first Stop frame), us.
+    pub at_us: u64,
+}
+
 /// The driver line of message element `element` (0 = M1 = line 3 ... 3 = M4 = line 0). The mapping
 /// is its own inverse. `None` for an element above 3.
 pub fn line_of_element(element: usize) -> Option<usize> {
@@ -114,6 +203,12 @@ pub struct EscStatus {
     pub min_exchange_us: u32,
     /// Per driver line.
     pub lines: [EscLine; LINES],
+    /// The motor-test spin running now.
+    pub test_spin: Option<TestSpin>,
+    /// How the latest spin ended.
+    pub test_ended: Option<TestEnding>,
+    /// Throttle frames sent since boot.
+    pub throttle_frames: u32,
 }
 
 impl EscStatus {
@@ -128,6 +223,9 @@ impl EscStatus {
         max_exchange_us: 0,
         min_exchange_us: u32::MAX,
         lines: [EscLine::INITIAL; LINES],
+        test_spin: None,
+        test_ended: None,
+        throttle_frames: 0,
     };
 
     /// The newest event of the snapshot (an exchange or the end of a start), us.
@@ -154,8 +252,8 @@ fn line(status: &EscStatus, element: usize) -> Option<&EscLine> {
 /// ESC_STATUS (291): rpm, voltage and current per motor. `None` when the snapshot is older than
 /// 1 s or no exchange has happened. `poles` is `MOT_POLES`.
 ///
-/// - rpm = eRPM / (`poles` / 2), rounded down; 0 for a stopped motor (eRPM 0) and for a line that
-///   is not answering.
+/// - rpm = eRPM / (`poles` / 2), rounded down, from the latest eRPM if it is younger than 100 ms;
+///   0 for a stopped motor (eRPM 0), for an older eRPM and for a line that is not answering.
 /// - voltage in volts when received within the last 1 s, else NaN.
 /// - current: always NaN (the ESCs' value is not a current).
 pub fn esc_status(status: &EscStatus, now_us: u64, poles: i32) -> Option<ESC_STATUS_DATA> {
@@ -170,7 +268,8 @@ pub fn esc_status(status: &EscStatus, now_us: u64, poles: i32) -> Option<ESC_STA
             continue;
         };
         if l.answering(now_us)
-            && let Some((erpm, _)) = l.erpm
+            && let Some((erpm, t)) = l.erpm
+            && now_us.saturating_sub(t) < ANSWER_US
         {
             *r = i32::try_from(u64::from(erpm) * 2 / poles).unwrap_or(i32::MAX);
         }
@@ -390,6 +489,30 @@ mod tests {
         assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 10_000);
         s.lines[2].last_good_us = Some(NOW - ANSWER_US);
         assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 0);
+    }
+
+    /// T9: the line answers (an extended reply now), its latest eRPM is 100 ms old or more.
+    #[test]
+    fn rpm_is_zero_when_the_latest_erpm_is_100_ms_old_while_the_line_answers() {
+        let mut s = live();
+        s.lines[2].last_extended_us = Some(NOW);
+        s.lines[2].erpm = Some((70_000, NOW - ANSWER_US + 1));
+        assert!(s.lines[2].answering(NOW));
+        assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 10_000);
+        s.lines[2].erpm = Some((70_000, NOW - ANSWER_US));
+        assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 0);
+        s.lines[2].erpm = Some((70_000, NOW - 5_000_000));
+        assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 0);
+    }
+
+    /// T8: a reset never resumes a test.
+    #[test]
+    fn the_initial_test_command_is_a_stop() {
+        assert_eq!(TestCmd::INITIAL.level, 0);
+        assert_eq!(TestCmd::INITIAL.seq, 0);
+        assert_eq!(EscStatus::INITIAL.test_spin, None);
+        assert_eq!(EscStatus::INITIAL.test_ended, None);
+        assert_eq!(EscStatus::INITIAL.throttle_frames, 0);
     }
 
     #[test]
