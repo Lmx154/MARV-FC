@@ -264,6 +264,7 @@ pub async fn task(adapter: Adapter, period_us: u32) -> ! {
         crate::now_us,
         period_us,
         Limits::DESIGN,
+        (),
     ) {
         Some(task) => {
             measured(

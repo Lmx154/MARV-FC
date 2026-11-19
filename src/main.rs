@@ -45,6 +45,7 @@ mod device;
 // With `esc-off` the ESC task is not built: only the core-0 readers of `esc` are used.
 #[cfg_attr(feature = "esc-off", allow(dead_code))]
 mod esc;
+mod flight;
 mod flight_latency;
 mod gnss;
 mod i2cbus;
@@ -1028,6 +1029,7 @@ async fn supervise() -> ! {
             devices.stat(now);
             rc::stat(now);
             esc::stat(now);
+            flight::stat();
             calibration::stat();
             watchdog::stat();
             #[cfg(feature = "xip-stat")]

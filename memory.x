@@ -97,6 +97,8 @@ SECTIONS {
         *(.text.__aeabi_uldivmod .text.__udivmoddi4 .text.*17compiler_builtins3int19specialized_div_rem*)
         *(.text.*8icm45686* .text.*11lsm6dsk320x* .text.*5dshot*)
         *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness* .text.*9fw_flight3esc*)
+        /* The flight step (IMU1's task calls it): fw_flight's step, gnc and gate, and the binary's Stepper; flight::stat (core 0) stays in flash. */
+        *(.text.*9fw_flight4step* .text.*9fw_flight3gnc* .text.*9fw_flight4gate* .text.*16marv_v2_firmware6flight*7Stepper*)
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
         /* esc: only its core-1 items (the driver's build, the task); its core-0 readers stay in flash. */
         *(.text.*16marv_v2_firmware3esc6driver* .text.*16marv_v2_firmware3esc4task* .text.*16marv_v2_firmware3esc11___task_task*)

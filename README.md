@@ -71,7 +71,20 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(20 tests).
+(32 tests and 1 doc test, the flight step's included).
+
+The flight step (build step 3 of the GNC plan; design: `~/Documents/MARV-V2-drivers/_plan/decision-sim-seams-20261119.md`).
+`fw_flight::step::Flight::step` runs once per good IMU1 sample, on core 1, inside IMU1's task, right after the sample
+is published: `ImuTask` hands each new sample to its `SampleSink` (IMU1's is `flight::Stepper`, which owns the
+`Flight`; IMU2's is `()`, which does nothing). The stages run in the order of the decision's rule R1 (estimator,
+controller reset while disarmed, stick shaper, validity check, controller, allocator, gate); the seams are in
+`fw_flight::gnc`, the gate and `MotorCommand` (only the gate can make a spinning one) in `fw_flight::gate`, the
+slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Today every stage is a stand-in (nothing
+valid, the controller refuses, the gate never arms), so every step gives Stop; the board image names them in
+`src/flight.rs` (`BoardFlight`). Only IMU1's sample goes in (IMU2, the slow sensors and RC come with later steps).
+After each step the task writes the step count, the step time and the command to the seqlock `flight::OUT`; its only
+reader is core 0's `[STAT] FLT:` line every 10 s (steps since boot, steps in the last 10 s, the latest step time,
+`command Stop`). The ESC task does not read it yet: it sends what it sent before (step 5).
 
 IMU1's configuration comes from `IMU1_ACC_FS`, `IMU1_GYR_FS` and `IMU1_ODR_HZ` at boot, fixed until the next reboot; the
 defaults are 16 g, 2000 dps, 800 Hz on both sensors (`fw_settings::imu::imu1_setup`: read once in `main` after `settings::boot`, logged as
@@ -1234,7 +1247,7 @@ refused only by the rate-against-oversampling rule with the refused sets listed,
 refusing before storing); it also builds for the board (`cargo build -p fw-settings --release`).
 
 `fw-flight` holds the flight core's liveness answer (`liveness`: waits on a `Kick`, copies `PING` into
-`PONG`) and the IMU device loop (`imu`, see Flight-core device loop). It must not depend on
+`PONG`), the IMU device loop (`imu`) and the flight step (`step`, `gnc`, `gate`), both under Flight-core device loop. It must not depend on
 `embassy-time`, `embassy-sync` or `defmt`; check it with
 `cargo tree -p fw-flight -e normal --depth 1 | grep -cE 'embassy-time|embassy-sync|defmt'` (prints 0).
 
@@ -1377,7 +1390,7 @@ not flash"; the PSRAM sits behind the same 16 kB XIP cache as the flash, so this
 longer shares the XIP cache with core 0, whose misses under card work slowed it (facts-sd-logging C2).
 
 - In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks and the ESC task, `fw_flight`'s imu,
-  liveness and esc modules, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
+  liveness, esc, step, gnc and gate modules and the binary's `flight::Stepper`, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
   `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions and the 64-bit division, the handlers `DMA_IRQ_0`,
   `IO_IRQ_BANK0`, `SIO_IRQ_FIFO` and `PIO2_IRQ_0`, the critical-section and time functions), every constant (`.rodata`),
   and core 1's own vector table. Left in flash: core 1's panic paths and the launch trampoline that runs

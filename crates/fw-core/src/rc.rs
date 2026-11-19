@@ -177,6 +177,29 @@ pub fn gps_frame_due(sample_t_us: Option<u64>, last_sent_us: Option<u64>) -> boo
     }
 }
 
+/// Moved unchanged from fw-settings::rc. Roll, pitch, yaw in -1..1 (right, forward, clockwise positive); throttle in
+/// 0..1 (0 at the bottom). Normalised on core 0 (decision-rc-mapping-20261116, 1.2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sticks {
+    /// Roll.
+    pub roll: f32,
+    /// Pitch.
+    pub pitch: f32,
+    /// Throttle.
+    pub throttle: f32,
+    /// Yaw.
+    pub yaw: f32,
+}
+
+/// One CRSF stick report as normalised sticks, with the board time it was read, us.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RcSample {
+    /// The normalised sticks.
+    pub sticks: Sticks,
+    /// Board time the report was read, us.
+    pub t_us: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

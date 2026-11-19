@@ -149,18 +149,8 @@ pub struct Axes {
     pub r: i16,
 }
 
-/// The four functions normalised: roll, pitch, yaw in -1 to 1, throttle in 0 to 1.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Sticks {
-    /// Roll.
-    pub roll: f32,
-    /// Pitch.
-    pub pitch: f32,
-    /// Throttle.
-    pub throttle: f32,
-    /// Yaw.
-    pub yaw: f32,
-}
+/// The four functions normalised: roll, pitch, yaw in -1 to 1, throttle in 0 to 1 (moved to `fw_core::rc`).
+pub use fw_core::rc::Sticks;
 
 fn int(v: Option<ParamValue>, def: &ParamDef) -> i32 {
     match v {

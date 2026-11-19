@@ -85,7 +85,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Core 0, the I/O core: thread-mode executor | `embassy_rp::init`, the time driver; usb_link (`usb-cdc`'s futures are not `Send`: built here), rc_link, baro, mag, gnss, batt, supervisor, actions, settings and flash_saver, beat0, led (BUILT 2026-11-18: `src/led.rs`, a 20 ms `Ticker`, PIO1 SM1, GPIO43; run on the board 2026-11-18 and seen by the owner, README, Status LED); later sd_logger | DECIDED (design, two-core amendment) |
 | Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only, priority 1 (BUILT: `src/watchdog.rs`) | DECIDED |
 | Core 0: `SWI_IRQ_0` | the receiver task `rc_link` alone, priority P3 (0xC0), below the monitor's `SWI_IRQ_1` (P1) (2026-11-15) | DECIDED |
-| Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2 (BUILT: `fw_flight::imu` over the LSM6DSK320X), fbeat (liveness, BUILT), esc (BUILT 2026-11-18: one DShot exchange per 1 ms, paced with `SpinDelay`; not spawned with `esc-off`); later the control loop, arming. The esc task's wait is a clock poll that wakes itself, so core 1's executor no longer sleeps: a core-1 load figure must come from task timings, not idle time. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
+| Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2 (BUILT: `fw_flight::imu` over the LSM6DSK320X), fbeat (liveness, BUILT), esc (BUILT 2026-11-18: one DShot exchange per 1 ms, paced with `SpinDelay`; not spawned with `esc-off`); the flight step runs inside imu1, once per sample, after the publish (BUILT 2026-11-19 with stand-ins: always Stop, `src/flight.rs`); later the control loop, arming. The esc task's wait is a clock poll that wakes itself, so core 1's executor no longer sleeps: a core-1 load figure must come from task timings, not idle time. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
 | Core 1 stack | a `static`, 16 KB default, set from stack painting; MSPLIM guard set by `spawn_core1` | DECIDED |
 | Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, `pause_on_debug(true)`, only while `BEAT0` and `PONG` both changed less than 200 ms ago; scratch registers 0 to 3 hold the reset record (layout version 2; 4 to 7 are the boot ROM's). BUILT | DECIDED |
 
@@ -206,7 +206,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
 8. The flight core schedules no timer at all, takes no critical-section primitive of its own and
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
    buffer into it, atomic flags with a lock-free waker for requests). The seqlocks out of core 1: each IMU's status
-   (`fw_flight::imu::ImuCells`) and the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task). The triple buffers into it: the IMU offsets
+   (`fw_flight::imu::ImuCells`), the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task) and the flight
+   step's output (`flight::OUT`, 2026-11-19: step count, step time, `MotorCommand`; writer taken once by IMU1's task,
+   read only by core 0's `[STAT] FLT:` line). The triple buffers into it: the IMU offsets
    (`calibration::OFFSETS`) and the motor-test command (`esc::TEST`, a `TestCmd`; writer in core 0's `actions` state, reader
    taken before core 1 starts and moved into the esc task, which reads it at every exchange; 2026-11-18). Its IMU tasks wait through `SpinDelay`
    (`src/imu1.rs`): under 50 us a busy wait (the ICM-45686's 10 us waits in a verify step, so the sample loop
@@ -247,7 +249,11 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    (`*16marv_v2_firmware3esc6driver*`, `*3esc4task*`, `*3esc11___task_task*`): the broad
    `*16marv_v2_firmware3esc*` also moved the core-0 readers of `src/esc.rs` (about 21 KB) into SRAM.
    `*10embassy_rp3pio*` also moves core 0's PIO0 code (the SD bus's, about 2.4 KB). Removing `*5dshot*`
-   makes the checker FAIL (13 functions). A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
+   makes the checker FAIL (13 functions). The flight step (2026-11-19) added
+   `*9fw_flight4step*`, `*9fw_flight3gnc*`, `*9fw_flight4gate*` and `*16marv_v2_firmware6flight*7Stepper*`
+   (`flight::stat`, core 0, stays in flash). With today's stand-ins the whole step is inlined into IMU1's
+   `ImuTask::once`, so the checker passes without them; with `Flight::step` forced out of line, removing them makes
+   it FAIL (1 function, `Flight::step`). A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
    identical functions make the patterns inexact: three lines exist only for merged functions' sections). A
    binary flashed without `tools/run.sh` skips the checker.
 

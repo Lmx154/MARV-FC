@@ -233,7 +233,9 @@ copies for the download checks.
 **Not built**
 - ESC, beyond the telemetry and the props-off motor test above: arming, any other throttle, passthrough through the USB port, the board's
   current scale, ESC serial telemetry on GPIO34. See `docs/handoff-esc-link.md`.
-- The estimator (next).
+- The estimator (next). The flight step it plugs into is built (2026-11-19, build step 3): `Flight::step` runs in
+  IMU1's task on core 1 once per sample, with stand-ins that always give Stop; output in the seqlock `flight::OUT`,
+  read only by core 0's `[STAT] FLT:` line; the ESC task does not read it yet (README, Flight-core device loop).
 - The PSRAM. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
   the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
 - Full-rate IMU data from the flight core to core 0 (a ring is reserved in the design; needed for a control

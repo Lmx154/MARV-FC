@@ -156,6 +156,17 @@ pub trait ImuAdapter {
     }
 }
 
+/// What the task does with each good sample right after publishing it, synchronously: IMU1's task runs
+/// the flight step, IMU2's passes `()`, which does nothing.
+pub trait SampleSink {
+    /// One good sample, just published. Must not wait.
+    fn sample(&mut self, sample: &ImuSample);
+}
+
+impl SampleSink for () {
+    fn sample(&mut self, _: &ImuSample) {}
+}
+
 /// A [`DelayNs`] that counts its waits (one per call).
 pub struct CountingDelay<D> {
     inner: D,
@@ -416,8 +427,8 @@ async fn edge_or_kick<F: Future<Output = ()>>(edge: F, kick: &Kick) -> Woken {
     .await
 }
 
-/// One IMU's flight-core task: its `Health`, its adapter, its published status.
-pub struct ImuTask<'a, A, D> {
+/// One IMU's flight-core task: its `Health`, its adapter, its published status, its sample sink.
+pub struct ImuTask<'a, A, D, S> {
     cells: &'a ImuCells,
     writer: SeqlockWriter<'a, ImuStatus>,
     adapter: A,
@@ -436,11 +447,12 @@ pub struct ImuTask<'a, A, D> {
     restart_run: Option<u32>,
     strong_first: bool,
     delays_at_start: Option<u32>,
+    sink: S,
 }
 
-impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
+impl<'a, A: ImuAdapter, D: DelayNs, S: SampleSink> ImuTask<'a, A, D, S> {
     /// The task for `cells` (`None` if their writer was taken already), with the nominal sample
-    /// period `period_us` (T = max(3 P, 10 ms)).
+    /// period `period_us` (T = max(3 P, 10 ms)); every good sample goes to `sink` once published.
     pub fn new(
         cells: &'a ImuCells,
         adapter: A,
@@ -448,6 +460,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
         now_us: fn() -> u64,
         period_us: u32,
         limits: Limits,
+        sink: S,
     ) -> Option<Self> {
         let writer = cells.status.take_writer()?;
         let mut health = Health::new(limits);
@@ -472,6 +485,7 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             restart_run: None,
             strong_first: false,
             delays_at_start: None,
+            sink,
         })
     }
 
@@ -483,8 +497,9 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
     }
 
     /// One step: takes the requests, carries out the machine's action, feeds the result back,
-    /// publishes.
+    /// publishes, then hands a new sample to the sink.
     pub async fn once(&mut self) {
+        let seq = self.seq;
         self.pending |= self.cells.kick.take();
         // A self-test request: the test, then the operator restart under the test's number, in
         // this step, so no sample or CHECK is taken between the two.
@@ -613,6 +628,11 @@ impl<'a, A: ImuAdapter, D: DelayNs> ImuTask<'a, A, D> {
             }
         }
         self.publish();
+        if self.seq != seq
+            && let Some(sample) = self.status.latest
+        {
+            self.sink.sample(&sample);
+        }
     }
 
     fn now_ms(&self) -> u64 {
@@ -1020,7 +1040,7 @@ mod tests {
         }
     }
 
-    type Task = ImuTask<'static, FakeAdapter, FakeDelay>;
+    type Task = ImuTask<'static, FakeAdapter, FakeDelay, ()>;
 
     fn setup() -> (&'static ImuCells, Task, Rc<RefCell<Fake>>) {
         NOW.with(|n| n.set(1_000_000));
@@ -1059,6 +1079,7 @@ mod tests {
             now,
             P_US as u32,
             Limits::DESIGN,
+            (),
         )
         .expect("first writer");
         (cells, task, fake)

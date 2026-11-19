@@ -309,14 +309,19 @@ const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::MissedEdge;
 
 #[embassy_executor::task]
 pub async fn task(adapter: Adapter, period_us: u32) -> ! {
-    match ImuTask::new(
-        &CELLS,
-        adapter,
-        SpinDelay,
-        crate::now_us,
-        period_us,
-        Limits::DESIGN,
-    ) {
+    // The flight code is built here, inside the task, on core 1, and owned by it.
+    let task = crate::flight::Stepper::new().and_then(|stepper| {
+        ImuTask::new(
+            &CELLS,
+            adapter,
+            SpinDelay,
+            crate::now_us,
+            period_us,
+            Limits::DESIGN,
+            stepper,
+        )
+    });
+    match task {
         Some(task) => {
             measured(
                 &STRETCH,
