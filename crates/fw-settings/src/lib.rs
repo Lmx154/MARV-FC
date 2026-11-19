@@ -337,7 +337,10 @@ mod tests {
         assert_eq!(def.name, "MOT_POLES");
         assert_eq!(def.device, 12);
         assert_eq!(def.default, ParamValue::I32(14));
-        assert_eq!((def.min, def.max), (ParamValue::I32(2), ParamValue::I32(64)));
+        assert_eq!(
+            (def.min, def.max),
+            (ParamValue::I32(2), ParamValue::I32(64))
+        );
         assert_eq!(def.apply, Apply::Live);
         assert!(!def.calibration && !def.read_only);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
