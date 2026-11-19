@@ -48,7 +48,7 @@ const SKIP_TEXTS: usize = 4;
 /// Entries the feature `save-foreign` adds to one save.
 const FOREIGN: usize = if cfg!(feature = "save-foreign") { 2 } else { 0 };
 
-/// The arm/save handshake; `ARMED` will be owned by the flight core's arming code.
+/// The arm/save handshake; `ARMED` is set and cleared by the flight core's gate (`fw_flight::gate`).
 pub static HANDSHAKE: Handshake = Handshake::new();
 /// Bumped after every flash stall.
 pub static SAVE_EPOCH: AtomicU32 = AtomicU32::new(0);

@@ -317,7 +317,7 @@ impl Hooks for RcHooks {
         };
         if self.crsf_reports.is_multiple_of(MAP_EVERY) {
             // One store access (not nested in `SHARED`) copies the 44 RC values; the map is built outside it.
-            self.map = crate::store::with(|p| {
+            let fresh = crate::store::with(|p| {
                 core::array::from_fn(|i| {
                     u16::try_from(fw_settings::rc::RC_OFFSET + i)
                         .ok()
@@ -327,6 +327,11 @@ impl Hooks for RcHooks {
             .map(|values: [Option<ParamValue>; fw_settings::rc::COUNT]| {
                 RcMap::from_values(&values)
             });
+            // If the store did not answer this time, keep the map we have: dropping it would stop the
+            // stick stream to the flight core until the next refresh.
+            if fresh.is_some() {
+                self.map = fresh;
+            }
         }
         self.crsf_reports = self.crsf_reports.wrapping_add(1);
         if let (Some(map), Some(w)) = (&self.map, &mut self.flight) {
