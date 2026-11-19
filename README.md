@@ -993,8 +993,14 @@ SD log). Not yet run: the transmitter switched off in either mode, a command ove
 
 ## Status LED
 
-Not yet run on the board: built and host-tested only (the display logic, `fw_core::led`, has host tests; the task has been
-built, not flashed). Design: `_plan/decision-status-led-20261118.md`.
+Run on the board on 2026-11-18 (commit 51651e2, flash log `logs/marv-v2-firmware-20261118-213111.log`: 15 PASS, 0 FAIL;
+the ESC cadence unchanged: 1000 exchanges/s, longest spacing 1.24 ms). Seen by the owner, in his words: "bring up worked,
+all 3 clicks the led functioned as expected". The bring-up was a reboot from the station (white, the nine-blink roll call,
+then the pulse); the three clicks were a motor-test spin (expected: solid purple), `LED_BRIGHT` set to 3 and back to 1
+(full brightness, then dim) and the battery unplugged and plugged back (a yellow pulse, then back). This is what the owner
+observed, not a measurement. Not seen on the board: the red double blink (no vital sensor failed), the calibration pattern,
+the save and calibration flashes, `LED_BRIGHT` 0 and 2, the green pulse. The display logic, `fw_core::led`, has host tests.
+Design: `_plan/decision-status-led-20261118.md`.
 
 The board's one status LED (D20, a WS2812C on GPIO43) shows the vehicle's state, decided by the firmware (nothing in the
 station). `src/led.rs` is a core-0 task (watchdog id LED = 19) on PIO1 state machine 1 with `PIO1_IRQ_0`, using the

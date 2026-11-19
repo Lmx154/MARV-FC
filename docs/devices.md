@@ -222,7 +222,7 @@ Pins: see `pinout.md`, status LED.
 - The pad input reads the driven waveform from another PIO block, so the line is checked without extra hardware.
 - Not verified in the driver's runs: the colours as seen by a person (the bring-up run was watched: red, green,
   blue, white).
-- In the firmware (`src/led.rs`, built, not yet run on the board): the driver at `faf1eb52a88ddf70f502a4a77d5d8facfbe44a0d` with its
+- In the firmware (`src/led.rs`, run on the board 2026-11-18, commit 51651e2, seen by the owner: README, Status LED): the driver at `faf1eb52a88ddf70f502a4a77d5d8facfbe44a0d` with its
   `embassy-rp` feature, `PioTransport` on PIO1 state machine 1 and GPIO43, driven from a core-0 task every 20 ms. The driver's
   brightness (`set_brightness`) carries the `LED_BRIGHT` level (0 off, 1 -> 20, 2 -> 80, 3 -> 255 of 255). What the LED shows:
   the README, Status LED. There is no LED device row (it cannot report back; `MARV_DEVICE_LED` stays unused).
