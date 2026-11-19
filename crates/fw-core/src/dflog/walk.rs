@@ -574,7 +574,9 @@ mod tests {
         s.push(ID_DEV, 9, |b| encode_dev(b, 9, &Dev::default()));
         s.push(ID_DSF, 10, |b| encode_dsf(b, 10, &Dsf::default()));
         s.push(ID_NAV, 11, |b| encode_nav(b, 11, [1.0; 4], [0.0; 3], 1));
-        s.push(ID_SETP, 12, |b| encode_setp(b, 12, 1, [1.0; 4], [0.0; 3], 1.0));
+        s.push(ID_SETP, 12, |b| {
+            encode_setp(b, 12, 1, [1.0; 4], [0.0; 3], 1.0)
+        });
         s.push(ID_DMD, 13, |b| encode_dmd(b, 13, true, 1.0, [0.0; 3], 0));
         s.push(ID_MOT, 14, |b| encode_mot(b, 14, true, 1, [1; 4], [2; 4]));
         s.push(ID_ESC, 15, |b| encode_esc(b, 15, [1; 4], [2; 4], [3; 4], 5));
