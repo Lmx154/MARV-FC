@@ -127,6 +127,9 @@ inject-imu2-persistent = ["inject-imu2"]
 inject-imu2-verify = ["inject-imu2"]
 # Internal: on when an IMU2 injection feature is on.
 inject-imu2 = ["inject-imu"]
+# With any IMU injection feature, the injection starts 60 s (not 5 s) after the first good sample, so the
+# vehicle can be armed first (src/imu_inject.rs; flight-gap decision, 2026-11-19).
+inject-late = []
 # Internal: on when an IMU injection feature is on (src/imu_inject.rs, the wrapper both IMUs use).
 inject-imu = []
 # Board checks of the ESC task (decision-esc-telemetry Q5), not for a release: esc-off: the ESC task is not

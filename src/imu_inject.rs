@@ -1,6 +1,6 @@
 //! Fault injection around a flight-core IMU adapter (features `inject-imu1-persistent`,
-//! `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify`), 5 s after the first
-//! good sample. One
+//! `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify`), 5 s (60 s with `inject-late`)
+//! after the first good sample. One
 //! wrapper for both IMUs: `imu1::adapter` and `imu2::adapter` wrap their adapter in [`Inject`]
 //! with their own cells and [`Mode`]. Runs on the flight core: no log, its state goes out through
 //! `injection()` and core 0 logs it.
@@ -48,7 +48,10 @@ pub struct Inject<A> {
 }
 
 impl<A> Inject<A> {
+    #[cfg(not(feature = "inject-late"))]
     const AFTER_US: u64 = 5_000_000;
+    #[cfg(feature = "inject-late")]
+    const AFTER_US: u64 = 60_000_000;
     #[cfg(feature = "inject-imu1-missed-edge")]
     const SWALLOW_US: u64 = 200_000;
 

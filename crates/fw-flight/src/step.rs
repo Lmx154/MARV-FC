@@ -158,7 +158,23 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         }
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
-        let nav = self.estimator.update(&inputs.sensors);
+        // A non-finite IMU value never reaches the estimator: no tilt, so the demand is refused and the gate stops.
+        let reading = &inputs.sensors.imu1.reading;
+        let finite = reading.gyro_rads.iter().all(|v| v.is_finite())
+            && reading.accel_ms2.iter().all(|v| v.is_finite());
+        let nav = if finite {
+            self.estimator.update(&inputs.sensors)
+        } else {
+            NavState {
+                t_us,
+                attitude: [1.0, 0.0, 0.0, 0.0],
+                rates_rads: [0.0; 3],
+                velocity_ms: [0.0; 3],
+                position_m: [0.0; 3],
+                valid: Valid::NONE,
+                sigma: None,
+            }
+        };
         if !self.gate.armed() {
             self.controller.reset();
         }
@@ -323,7 +339,7 @@ mod tests {
             &tuning,
             &HANDSHAKE,
         );
-        let out = flight.step(&inputs(1234));
+        let mut out = flight.step(&inputs(1234));
         assert_eq!(out.motors, MotorCommand::STOP);
         assert_eq!(out.motors.throttles(), None);
         assert_eq!(out.demand, Err(Refused));
@@ -331,6 +347,50 @@ mod tests {
         assert_eq!(out.t_us, 1234);
         assert_eq!(out.nav.t_us, 1234);
         assert!(!out.armed);
+
+        // I5: a NaN gyro sample while armed gives Stop and disarm without a call to the estimator; the next good
+        // sample gives a finite nav.
+        let level = |t_us: u64, gyro: [f32; 3]| {
+            let mut i = inputs(t_us);
+            i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -9.81];
+            i.sensors.imu1.reading.gyro_rads = gyro;
+            i
+        };
+        let report = |t_us: u64, arm: bool| RcSample {
+            sticks: Sticks {
+                roll: 0.0,
+                pitch: 0.0,
+                throttle: 0.0,
+                yaw: 0.0,
+            },
+            arm,
+            t_us,
+        };
+        let mut t = 2_000;
+        for arm in [false, true] {
+            t += 1_000;
+            let mut i = level(t, [0.0; 3]);
+            i.rc = Some(report(t, arm));
+            out = flight.step(&i);
+        }
+        assert!(out.armed && HANDSHAKE.armed());
+        assert!(out.motors.throttles().is_some());
+        t += 1_000;
+        let out = flight.step(&level(t, [0.0, f32::NAN, 0.0]));
+        assert_eq!(out.motors, MotorCommand::STOP);
+        assert!(!out.armed && !HANDSHAKE.armed());
+        assert_eq!(out.nav.valid, Valid::NONE);
+        assert_eq!(out.demand, Err(Refused));
+        t += 1_000;
+        let out = flight.step(&level(t, [0.0; 3]));
+        assert!(out.nav.valid.tilt);
+        assert!(
+            out.nav
+                .attitude
+                .iter()
+                .chain(&out.nav.rates_rads)
+                .all(|v| v.is_finite())
+        );
     }
 
     /// Estimator, controller and allocator in one: each call appends its digit to `log`

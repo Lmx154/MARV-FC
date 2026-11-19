@@ -20,7 +20,7 @@ use embedded_hal_async::delay::DelayNs;
 use fw_core::health::ErrorKind;
 use fw_core::sys_status::DeviceRow;
 use fw_core::xcore::{Seqlock, TripleBuffer, TripleReader};
-use fw_flight::esc::{Esc, EscStatus, TestCause, TestCmd, next_deadline};
+use fw_flight::esc::{Esc, EscStatus, TestCause, TestCmd, next_deadline, stale_spin};
 use mavlink_device::ParamValue;
 use mavlink_device::dialect::{ESC_INFO_DATA, ESC_STATUS_DATA, MavSeverity};
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
@@ -123,6 +123,9 @@ pub async fn task(mut drv: Driver, mut test: TripleReader<'static, TestCmd>) -> 
                 (0, fw_flight::gate::MotorCommand::STOP)
             }
         };
+        if stale_spin(flight.0, flight.1, t0) {
+            crate::settings::HANDSHAKE.disarm();
+        }
         let frames = esc.frames(t0, cmd, flight);
         let x = drv.exchange(frames).await;
         let t1 = crate::now_us();

@@ -10,6 +10,10 @@ use fw_core::handshake::Handshake;
 use fw_core::rc::RcSample;
 use marv_card::{IDLE_LEVEL, LEVEL_MAX};
 
+/// The gate disarms and the ESC task clears `ARMED` when the gap between flight steps exceeds this, us. 100 ms is the
+/// IMU loop's first recovery back-off (`fw_core::health`, `recovery_backoff_ms: [100, 300, 1000, 3000]`).
+pub const FLIGHT_GAP_DISARM_US: u64 = 100_000;
+
 /// What the ESC task sends: Stop on all four lines, or four throttles by DShot line. The field is private, so only
 /// `Gate::apply` can make a spinning command. No estimator, controller, allocator, runner or binary can.
 ///
@@ -42,6 +46,8 @@ impl MotorCommand {
 /// Arming and the RC-loss kill. One concrete type, not a trait, owned by `Flight`.
 pub struct Gate {
     armed: bool,
+    /// The previous step's time, us; `None` before the first.
+    last_step_us: Option<u64>,
     /// When the newest stick report was read, us; `None` before the first.
     last_rc_us: Option<u64>,
     /// A fresh report with the switch off was seen since the last disarm or refused arm.
@@ -59,6 +65,7 @@ impl Gate {
     pub(crate) fn new(tuning: &Tuning, handshake: &'static Handshake) -> Self {
         Self {
             armed: false,
+            last_step_us: None,
             last_rc_us: None,
             seen_off: false,
             handshake,
@@ -82,6 +89,13 @@ impl Gate {
         nav: &NavState,
         levels: Option<&MotorLevels>,
     ) -> MotorCommand {
+        // 0. A gap above the limit since the previous step, or armed while `ARMED` is clear: disarm.
+        let gap = self.last_step_us.map(|last| t_us.saturating_sub(last));
+        self.last_step_us = Some(t_us);
+        if gap.is_some_and(|g| g > FLIGHT_GAP_DISARM_US) || (self.armed && !self.handshake.armed())
+        {
+            self.disarm();
+        }
         // 1 to 3. RC loss: Stop and disarm.
         if let Some(r) = rc {
             self.last_rc_us = Some(r.t_us);
@@ -222,12 +236,16 @@ mod tests {
         assert!(gate.armed() && HANDSHAKE.armed());
 
         // RC loss: still armed at exactly the timeout, Stop one microsecond later.
+        // Stepped every FLIGHT_GAP_DISARM_US (a gap of exactly the limit does not trip the latch), so only RC loss acts.
         let last = t;
-        assert!(
-            step(&mut gate, last + TIMEOUT, None, levels)
-                .throttles()
-                .is_some()
-        );
+        for k in 1..=TIMEOUT / FLIGHT_GAP_DISARM_US {
+            let cmd = step(&mut gate, last + k * FLIGHT_GAP_DISARM_US, None, levels);
+            assert!(
+                cmd.throttles().is_some(),
+                "gap of exactly the limit, step {k}"
+            );
+        }
+        assert!(gate.armed() && HANDSHAKE.armed());
         let cmd = step(&mut gate, last + TIMEOUT + 1, None, levels);
         assert_stopped(&gate, cmd, "report older than the timeout");
         t = last + 2 * TIMEOUT;
@@ -249,5 +267,29 @@ mod tests {
         let cmd = cycle_on(&mut gate, &mut t);
         assert_stopped(&gate, cmd, "try_arm refused");
         HANDSHAKE.end_save();
+
+        // I1: a gap of exactly the limit stays armed; one microsecond more gives Stop and disarm; the switch still on
+        // stays Stop; a switch cycle arms again.
+        assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
+        t += FLIGHT_GAP_DISARM_US;
+        let cmd = step(&mut gate, t, None, levels);
+        assert!(cmd.throttles().is_some() && gate.armed() && HANDSHAKE.armed());
+        t += FLIGHT_GAP_DISARM_US + 1;
+        let cmd = step(&mut gate, t, None, levels);
+        assert_stopped(&gate, cmd, "gap over the limit");
+        t += 1_000;
+        let cmd = step(&mut gate, t, Some(report(t, true, 0.0)), levels);
+        assert_stopped(&gate, cmd, "after the gap, switch still on");
+        assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
+
+        // I2: the gate is never armed at the end of a step while ARMED is clear.
+        HANDSHAKE.disarm();
+        t += 1_000;
+        let cmd = step(&mut gate, t, None, levels);
+        assert_stopped(&gate, cmd, "ARMED cleared between steps");
+        t += 1_000;
+        let cmd = step(&mut gate, t, Some(report(t, true, 0.0)), levels);
+        assert_stopped(&gate, cmd, "ARMED cleared, switch still on");
+        assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
     }
 }

@@ -151,8 +151,9 @@ Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the firs
 `acquire`, `recover` and `restart` fails until `marv-cli device restart IMU1`; `inject-imu2-persistent` the
 same for IMU2 (`device restart IMU2`); `inject-imu2-verify`: one IMU2 verify step answers "mismatch" once
 (reconfigure, `config restored` 1); one wrapper serves both IMUs (`src/imu_inject.rs`). `FEATURES=inject-imu1-missed-edge
-tools/run.sh 60`: 5 s after the first good sample the data-ready edges are swallowed for 200 ms. The
-injection state goes out through the cells and core 0 logs it. `FEATURES=stall-core0 tools/run.sh 60`: one
+tools/run.sh 60`: 5 s after the first good sample the data-ready edges are swallowed for 200 ms. With the feature
+`inject-late` added (`FEATURES=inject-imu1-missed-edge,inject-late`) every IMU injection starts 60 s after the first
+good sample instead of 5 s, so the vehicle can be armed first (props off). The injection state goes out through the cells and core 0 logs it. `FEATURES=stall-core0 tools/run.sh 60`: one
 core-0 task spins 1.2 s without yielding 20 s after start and logs IMU1's and IMU2's samples before and after (F1).
 The watchdog survives that spin (fed again before 1.6 s without a feed; a "core 0 stalled" text, no reset); the
 feature does not act after a watchdog reset, so it does not loop.
@@ -1202,6 +1203,7 @@ What each cargo feature does under the watchdog:
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
 | `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
+| `inject-late` | with an IMU injection feature, the injection starts 60 s (not 5 s) after the first good sample; no other effect |
 | `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
 | `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; with `NO_CATCH_HARDFAULT=1` the core locks up and the watchdog resets it: "TimedOut, record false", measured), without it `[FAIL] ... no fault` and the statics below are overwritten |
 | `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
@@ -1357,8 +1359,12 @@ says otherwise.** Not yet checked on the board (`docs/handoff.md`).
   within 30 deg and no settings save running (`HANDSHAKE.try_arm()`); the motors then run at idle at zero throttle and
   the status LED is purple.
 - Disarms (Stop at once): the switch off; no new CRSF stick report for 1.0 s (`RC_FS_TIMEOUT`; the switch must then be
-  cycled to re-arm); a refusal by the controller while armed. The ESC task also sends Stop when the newest flight command
-  is older than 10 ms (`MOTOR_HOLD_MAX_US`), and the motors resume with the next step if the gate is still armed.
+  cycled to re-arm); a refusal by the controller while armed; a gap of more than 100 ms between flight steps
+  (`FLIGHT_GAP_DISARM_US`, the IMU loop's first recovery back-off; the gate disarms at its next step, and the ESC task
+  clears `ARMED` meanwhile when the newest spinning command is that old, so core 0 sees not armed; the switch must be
+  cycled to re-arm). The ESC task also sends Stop when the newest flight command is older than 10 ms
+  (`MOTOR_HOLD_MAX_US`), and the motors resume with the next step if the gate is still armed (a gap of 10 to 100 ms is
+  ridden through). A non-finite IMU1 value never reaches the estimator: that step gives Stop and disarm.
 - While armed or while flight throttles go out, core 0 refuses every action (saves, calibrations, restarts) and a
   motor-test spin (TEMPORARILY_REJECTED); a motor-test stop is still accepted. The motor test runs only while disarmed.
 - Gains and limits are constants in `fw_flight::tuning` (`Tuning::DEFAULT`) for now; no parameter changes them.

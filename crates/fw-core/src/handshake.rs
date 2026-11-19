@@ -1,9 +1,9 @@
 //! The arm/save handshake.
 //!
 //! Design: decision-foundation, two-core amendment, "Item 3, changes: the save, and arming".
-//! Arming and saving can never both win. Two flags: `ARMED`, stored only by the flight core, and
-//! `SAVE_INTENT`, stored only by core 0. Each side stores its own flag, then loads the other's,
-//! and backs out (clears its own flag) if the other is set. Every access is `SeqCst`: this is the
+//! Arming and saving can never both win. Two flags: `ARMED`, stored only by the flight core (set and cleared by the
+//! gate, and cleared by the ESC task on a stale spinning command; both run on the flight core), and `SAVE_INTENT`,
+//! stored only by core 0. Each side stores its own flag, then loads the other's, and backs out (clears its own flag) if the other is set. Every access is `SeqCst`: this is the
 //! store-then-load (Dekker) pattern, where release/acquire would let both loads read the old
 //! `false` (each store still in its core's write buffer); `SeqCst` puts the four accesses in one
 //! total order, so whichever load comes second in it sees the other side's store.

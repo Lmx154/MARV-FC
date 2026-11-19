@@ -14,7 +14,7 @@
 //! `decision-motor-test-20261118` amendment A, ported from `dshot_spin` (DS =
 //! `dshot/hil/src/bin/dshot_spin.rs` at dshot 3557eb1). Flight command: decision-first-pair-wiring-20261119, A2.
 
-use crate::gate::MotorCommand;
+use crate::gate::{FLIGHT_GAP_DISARM_US, MotorCommand};
 use dshot::{Command, LineCapture, LineFrame, Reply, Throttle, Value};
 pub use fw_core::esc::{
     ANSWER_US, ERPM_MAX, EscLine, EscStatus, FRESH_US, LINES, TEST_BURST_MAX_US, TEST_CAP,
@@ -43,6 +43,12 @@ pub fn hold(t_us: u64, cmd: MotorCommand, now_us: u64) -> MotorCommand {
     } else {
         cmd
     }
+}
+
+/// Whether `cmd`, stamped `t_us`, spins and is older than `FLIGHT_GAP_DISARM_US` at `now_us`: the ESC task then
+/// clears `ARMED`.
+pub fn stale_spin(t_us: u64, cmd: MotorCommand, now_us: u64) -> bool {
+    cmd.throttles().is_some() && now_us.saturating_sub(t_us) > FLIGHT_GAP_DISARM_US
 }
 
 /// The deadline of the exchange after the one due at `deadline_us`, given `now_us` (the time the
@@ -846,6 +852,12 @@ mod tests {
         );
         assert_eq!(hold(0, MotorCommand::STOP, 0), MotorCommand::STOP);
         assert_eq!(hold(0, MotorCommand::STOP, 50_000_000), MotorCommand::STOP);
+        // I3: `stale_spin` is true only for a spinning command older than FLIGHT_GAP_DISARM_US, not MOTOR_HOLD_MAX_US.
+        assert!(!stale_spin(5_000, spin, 5_000));
+        assert!(!stale_spin(5_000, spin, 5_001 + MOTOR_HOLD_MAX_US));
+        assert!(!stale_spin(5_000, spin, 5_000 + FLIGHT_GAP_DISARM_US));
+        assert!(stale_spin(5_000, spin, 5_001 + FLIGHT_GAP_DISARM_US));
+        assert!(!stale_spin(0, MotorCommand::STOP, 50_000_000));
     }
 
     /// A2: a spinning flight command gives its throttles on all four lines, cuts the EDT burst and
