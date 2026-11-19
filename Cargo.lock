@@ -1083,6 +1083,7 @@ dependencies = [
  "semihosting",
  "static_cell",
  "usb-cdc",
+ "ws2812c",
 ]
 
 [[package]]
@@ -1948,6 +1949,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae137229bcbd6cdf0f7b80a31df61766145077ddf49416a728b02cb3921ff3fc"
 dependencies = [
  "windows-link 0.2.1",
+]
+
+[[package]]
+name = "ws2812c"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/ws2812c-rs.git?rev=faf1eb52a88ddf70f502a4a77d5d8facfbe44a0d#faf1eb52a88ddf70f502a4a77d5d8facfbe44a0d"
+dependencies = [
+ "defmt",
+ "embassy-rp",
+ "embassy-time",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
 ]
 
 [[package]]

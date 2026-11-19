@@ -54,6 +54,7 @@ mod imu2;
 mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
+mod led;
 // In a probe build the SD task does not exist, so the SD side of `logdl` is unused there.
 #[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
 mod logdl;
@@ -1347,6 +1348,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(usb_link(tx, rx, link)));
     spawner.spawn(defmt::unwrap!(supervisor()));
     spawner.spawn(defmt::unwrap!(beat0()));
+    spawner.spawn(defmt::unwrap!(led::task(p.PIO1, p.PIN_43)));
     spawner.spawn(defmt::unwrap!(baro::task(baro::adapter(
         p.I2C1, p.PIN_23, p.PIN_22, p.PIN_21
     ))));

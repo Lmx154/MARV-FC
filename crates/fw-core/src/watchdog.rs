@@ -66,6 +66,8 @@ pub mod task {
     pub const IMU1: u8 = 17;
     /// IMU2's device task (flight core).
     pub const IMU2: u8 = 18;
+    /// The status LED's task (`led`).
+    pub const LED: u8 = 19;
 }
 
 /// The name of a task id ("?" for an unknown id).
@@ -89,6 +91,7 @@ pub const fn task_name(id: u8) -> &'static str {
         task::FBEAT => "FBEAT",
         task::IMU1 => "IMU1",
         task::IMU2 => "IMU2",
+        task::LED => "LED",
         _ => "?",
     }
 }
@@ -811,7 +814,7 @@ mod tests {
                 names.push(n);
             }
         }
-        assert_eq!(names.len(), 18);
+        assert_eq!(names.len(), 19);
         assert_eq!(
             (task_name(task::MAG), task_name(task::BATT)),
             ("MAG", "BATT")
@@ -824,5 +827,6 @@ mod tests {
             (task_name(task::IMU1), task_name(task::IMU2)),
             ("IMU1", "IMU2")
         );
+        assert_eq!(task_name(task::LED), "LED");
     }
 }

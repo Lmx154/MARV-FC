@@ -58,6 +58,15 @@ pub fn init_motor_test() {
     });
 }
 
+/// A motor-test spin is active (the status LED's purple). False when there is no ESC task (`esc-off`).
+pub fn motor_spin() -> bool {
+    MOTOR.lock(|m| {
+        m.borrow()
+            .as_ref()
+            .is_some_and(|m| m.state.spin_active(crate::now_us()))
+    })
+}
+
 /// The number of the restart (or self-test) request the running `DeviceRestart` (`DeviceSelfTest`)
 /// action raised: the action ends only on that request's outcome (`Device::restart_outcome`, and
 /// `Device::self_test_outcome`), never on an older one.
@@ -399,6 +408,25 @@ fn end(now_ms: u64, action: Action, result: MavResult) {
             action_name(action),
             result_name(result)
         );
+        led_event(action, result);
+    }
+}
+
+/// The status LED's flashes: a save or one of the three calibrations ended ACCEPTED (good) or FAILED
+/// (bad); a cancelled calibration and every other action show nothing.
+fn led_event(action: Action, result: MavResult) {
+    if matches!(
+        action,
+        Action::StorageSave
+            | Action::GyroCalibration
+            | Action::AccelCalibration
+            | Action::MagCalibration
+    ) {
+        match result {
+            MavResult::MAV_RESULT_ACCEPTED => crate::led::event(true),
+            MavResult::MAV_RESULT_FAILED => crate::led::event(false),
+            _ => {}
+        }
     }
 }
 
@@ -415,6 +443,7 @@ pub fn tick(now_ms: u64) {
             action_name(action),
             action.max_duration_ms()
         );
+        led_event(action, MavResult::MAV_RESULT_FAILED);
         if let Action::DeviceSelfTest(id) = action
             && let Some(dev) = find(id)
         {
