@@ -258,9 +258,16 @@ copies for the download checks.
   target is not installed on this desktop).
 
 **Small things noticed, not changed**
-- Core 0 has no working stack guard: `_stack_end` resolves to a flash address (`memory.x` inserts `.end_block`
-  after `.uninit`, ahead of cortex-m-rt's `PROVIDE(_stack_end = .)`), and embassy-rp's
-  `install_core0_stack_guard` is not called. The 32 KiB floor of the link ASSERT is checked on `__euninit`.
+- (Fixed on branch `stack-guard`.) Core 0's stack guard: `_stack_end` used to resolve to a flash address
+  (`memory.x` inserts `.end_block` after `.uninit`, ahead of cortex-m-rt's `PROVIDE(_stack_end = .)`) and
+  `install_core0_stack_guard` was not called. Now `memory.x` defines `_stack_end = ALIGN(__euninit, 8)` (the
+  true bottom of core 0's stack, in RAM), the 32 KiB ASSERT is checked on it, and `main` calls
+  `embassy_rp::install_core0_stack_guard()` first (it writes MSPLIM). An overflow is a HardFault (escalated
+  UsageFault STKOF); there is no fault handler, so without a debugger the core should spin in cortex-m-rt's default
+  HardFault loop and the watchdog reset it (like `hang-irqoff`: "TimedOut, record false"; not observed: the
+  probe stops the run first); under `probe-rs run` the hard-fault vector catch stops the
+  run ("Firmware exited unexpectedly: Exception"). Core 1 was already guarded: `spawn_core1` writes MSPLIM with
+  the bottom of `CORE1_STACK`. Negative control: `FEATURES=stack-negative`.
 - `python3 -m venv` does not work on this desktop (no ensurepip); `uv` does. A nightly Rust toolchain was
   installed by accident earlier (`rustup toolchain uninstall nightly` removes it).
 

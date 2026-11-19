@@ -1112,6 +1112,7 @@ What each cargo feature does under the watchdog:
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
 | `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
 | `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
+| `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; without a debugger the watchdog should then reset, not observed), without it `[FAIL] ... no fault` and the statics below are overwritten |
 | `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
 | `xip-park` | the board check of the flight core in SRAM (`src/xip_park.rs`), once, 30 s after a start the watchdog did not cause: a 1 s window of XIP accesses with both cores running (over 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with its interrupts off and the XIP accesses counted meanwhile, core 1's, must be exactly 0 while each IMU gains at least 790 samples and no error; with `xip-park,ram-negative` at least 1000. One "core 0 stalled 1.0 s" text, no reset. Not together with `xip-stat` |
 
@@ -1207,6 +1208,14 @@ longer shares the XIP cache with core 0, whose misses under card work slowed it 
   `build.rs`); the copy, `__wrap___pre_init`, runs first and then continues into embassy-rp's. Link ASSERTs:
   the three handlers lie in RAM, `.rodata` is empty, `.ram_text` is word-aligned, at least 32 KiB of RAM stay
   free above the statics for core 0's stack.
+- Stack guards: `memory.x` defines `_stack_end = ALIGN(__euninit, 8)` (cortex-m-rt's own default would be a
+  flash address, because `.end_block` is inserted after `.uninit`), and `main` calls
+  `embassy_rp::install_core0_stack_guard()` before anything else: MSPLIM = `_stack_end`, so a push below the
+  end of the statics is a HardFault (no handler: `probe-rs run` stops at its hard-fault catch; without a probe the default
+  loop should end in a watchdog reset, not observed). `spawn_core1` does the same for core 1 with the bottom of `CORE1_STACK`.
+  `FEATURES=stack-negative tools/run.sh 45` is the check: 10 s after start a core-0 task recurses to 2 KiB
+  below `_stack_end`; it must fault (the log ends after the `stack-negative:` line); a build without the
+  guard logs `[FAIL] stack-negative: ... no fault`.
 - Core 1's vector table: core 0 copies its own (69 words) into a 512-byte-aligned static before
   `spawn_core1`; the first statement of `core1_main` points core 1's VTOR at it. Start-up check:
   `[PASS] core 1 VTOR is its RAM vector table (0x2002b600)`.

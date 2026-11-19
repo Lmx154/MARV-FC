@@ -140,6 +140,10 @@ corrupt-newest = []
 # firmware version might (save-foreign).
 guard-negative = []
 save-foreign = []
+# NEGATIVE CONTROL of core 0's stack guard (memory.x `_stack_end`, MSPLIM): 10 s after a start the watchdog
+# did not cause, a core-0 task recurses until the stack pointer is 2 KiB below `_stack_end`: with the
+# guard it faults (the watchdog resets, boot report "TimedOut, record false"); without it `[FAIL]`.
+stack-negative = []
 # The watchdog checks (src/watchdog.rs), each acting once, 20 s after a start the watchdog did not
 # cause (so never again after the reset it provokes): the barometer's task spins forever without
 # yielding (hang-core0: core 0's executor stalls); IMU1's task on the flight core spins forever

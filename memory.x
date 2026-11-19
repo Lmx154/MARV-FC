@@ -124,6 +124,11 @@ ASSERT(DMA_IRQ_0 >= ORIGIN(RAM) && DMA_IRQ_0 < ORIGIN(RAM) + LENGTH(RAM), "ram-c
 ASSERT(IO_IRQ_BANK0 >= ORIGIN(RAM) && IO_IRQ_BANK0 < ORIGIN(RAM) + LENGTH(RAM), "ram-code: IO_IRQ_BANK0 not in RAM");
 ASSERT(__erodata == __srodata, "ram-code: constants left in flash");
 ASSERT(__siram_text % 4 == 0 && __eram_text % 4 == 0, "ram-code: .ram_text not word aligned");
-/* __euninit, not _stack_end: .end_block above is inserted after .uninit, so cortex-m-rt's
- * PROVIDE(_stack_end = .) that follows .uninit takes the end of the FLASH image. */
-ASSERT(_stack_start - __euninit >= 32K, "ram-code: under 32 KiB left for core 0's stack");
+/* Core 0's stack: from _stack_start (the top of RAM) down to _stack_end, the end of the statics.
+ * cortex-m-rt's own PROVIDE(_stack_end = .) follows .uninit, but .end_block (above) is inserted after
+ * .uninit and leaves the location counter in FLASH, so that default is a flash address. Defining the
+ * symbol here makes the PROVIDE a no-op. embassy_rp::install_core0_stack_guard (src/main.rs) writes
+ * it to MSPLIM; ALIGN(8) because MSPLIM bits 2:0 read as zero. */
+_stack_end = ALIGN(__euninit, 8);
+ASSERT(_stack_end >= ORIGIN(RAM) && _stack_end < ORIGIN(RAM) + LENGTH(RAM), "stack guard: _stack_end not in RAM");
+ASSERT(_stack_start - _stack_end >= 32K, "ram-code: under 32 KiB left for core 0's stack");

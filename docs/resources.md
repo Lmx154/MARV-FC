@@ -82,7 +82,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only, priority 1 (BUILT: `src/watchdog.rs`) | DECIDED |
 | Core 0: `SWI_IRQ_0` | the receiver task `rc_link` alone, priority P3 (0xC0), below the monitor's `SWI_IRQ_1` (P1) (2026-11-15) | DECIDED |
 | Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2 (BUILT: `fw_flight::imu` over the LSM6DSK320X), fbeat (liveness, BUILT); later the control loop, DShot, arming. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
-| Core 1 stack | a `static`, 16 KB default, set from stack painting | DECIDED |
+| Core 1 stack | a `static`, 16 KB default, set from stack painting; MSPLIM guard set by `spawn_core1` | DECIDED |
 | Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, `pause_on_debug(true)`, only while `BEAT0` and `PONG` both changed less than 200 ms ago; scratch registers 0 to 3 hold the reset record (layout version 2; 4 to 7 are the boot ROM's). BUILT | DECIDED |
 
 ## Internal SRAM (measured from the ELF, normal build, 2026-11-16)
@@ -95,7 +95,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | `.bss` | 103 972 | core 1's vector table (512 B at 0x2002b600) among it |
 | `.uninit` | 1 024 | |
 | static use | 221 220 | 0x20000000 to `__euninit` 0x20036024 |
-| free, up to 0x20080000 | 303 068 (296 KiB) | core 0's stack grows down into it from the top; link ASSERT: at least 32 KiB (`_stack_start - __euninit`); core 0's stack depth is not measured |
+| free, up to 0x20080000 | 303 068 (296 KiB) | core 0's stack grows down into it from the top; link ASSERT: at least 32 KiB (`_stack_start - __euninit`); core 0's stack depth is not measured. `_stack_end` = `__euninit` rounded up to 8, MSPLIM is set to it at the start of `main` (fault on overflow) |
 
 SD3 (2026-11-16, normal build): `.data` 39 388 (+34 840: the log ring `logger::RING`, 32 824 B,
 and the listing `sd::SIZES`, 2 004 B, are in `.data`, not `.bss`, because their initial values are not all zero:
@@ -213,7 +213,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    core 0 parked, 2026-11-16); run it again when the control loop or DShot lands. R2: core 1's VTOR points at
    its vector table in SRAM (start-up check). R3: no constants in flash (link ASSERT
    `__erodata == __srodata`). R4: at least 32 KiB of SRAM above the statics for core 0's stack (link ASSERT on
-   `__euninit`; an overflow of RAM fails the link). R5: the copy runs before anything uses SRAM code
+   `_stack_end`, defined in `memory.x` as `__euninit` rounded up to 8; an overflow of RAM fails the link; at run
+   time MSPLIM = `_stack_end` on core 0 and the bottom of `CORE1_STACK` on core 1, so an overflow of either stack
+   is a HardFault, not a silent write into the statics). R5: the copy runs before anything uses SRAM code
    (`__wrap___pre_init`, assembly, wrapped ahead of embassy-rp's `__pre_init`; a violation faults at once on
    every boot). Maintenance: a new core-1 interrupt (for example `PIO2_IRQ_0` for DShot) becomes a checker
    root and a pattern line in `memory.x`; a new flight crate (for example `*5dshot*`) gets a pattern line; a

@@ -28,7 +28,8 @@
 //! start-up check, then its line is disabled again before core 1 starts.
 //! Features `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign`: the
 //! settings checks (`settings`). Features `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`,
-//! `wdg-scratch-probe`: the watchdog checks (`watchdog`).
+//! `wdg-scratch-probe`: the watchdog checks (`watchdog`). Feature `stack-negative` (negative control of
+//! core 0's stack guard): 10 s after start the stack is run 2 KiB below `_stack_end`.
 #![no_std]
 #![no_main]
 // The SD task's and the SD probe's file-system futures nest deeper than the default limit allows
@@ -1025,6 +1026,62 @@ async fn stall() {
     }
 }
 
+/// Feature `stack-negative` (negative control of core 0's stack guard): one core-0 task recurses until
+/// the stack pointer is 2 KiB below `_stack_end`, writing every frame. With the guard the first
+/// push below `_stack_end` faults (no log line, then the watchdog resets); without it the task logs
+/// `[FAIL]` and the 2 KiB of statics under the stack hold the frames' pattern. Acts once, 10 s after a
+/// start the watchdog did not cause, so it does not loop through resets.
+#[cfg(feature = "stack-negative")]
+#[inline(never)]
+fn stack_dive(limit: u32, depth: u32) -> u32 {
+    let mut frame = [0u32; 64];
+    for (i, w) in frame.iter_mut().enumerate() {
+        // SAFETY: a write to a local.
+        unsafe { core::ptr::write_volatile(w, 0x5AC0_0000 | i as u32) };
+    }
+    let below = if cortex_m::register::msp::read() > limit {
+        stack_dive(limit, depth + 1)
+    } else {
+        depth
+    };
+    core::hint::black_box(&frame);
+    below
+}
+
+#[cfg(feature = "stack-negative")]
+#[embassy_executor::task]
+async fn stack_negative() {
+    watchdog::RUNNING0.store(task::TEST, Ordering::Relaxed);
+    Timer::after(Duration::from_secs(10)).await;
+    watchdog::RUNNING0.store(task::TEST, Ordering::Relaxed);
+    if !watchdog::HANG_ARMED.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    unsafe extern "C" {
+        static _stack_end: u32;
+    }
+    let end = core::ptr::addr_of!(_stack_end) as u32;
+    let probe = (end - 1024) as *const u32;
+    // SAFETY: a word of the statics just below the stack, read and never written here.
+    let before = unsafe { core::ptr::read_volatile(probe) };
+    defmt::info!(
+        "[INFO] stack-negative: _stack_end {=u32:#010x}, MSP {=u32:#010x}, MSPLIM {=u32:#010x}; diving to {=u32:#010x}",
+        end,
+        cortex_m::register::msp::read(),
+        cortex_m::register::msplim::read(),
+        end - 2048
+    );
+    let depth = stack_dive(end - 2048, 0);
+    // SAFETY: as above.
+    let after = unsafe { core::ptr::read_volatile(probe) };
+    defmt::error!(
+        "[FAIL] stack-negative: recursed {=u32} frames to 2 KiB below _stack_end and no fault; word at _stack_end-1024 {=u32:#010x} -> {=u32:#010x}",
+        depth,
+        before,
+        after
+    );
+}
+
 /// The two IMUs' setups from the stored settings (`IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`,
 /// `AHRS_ORIENTATION`), read once at boot after `settings::boot` (which refused and reset an invalid
 /// combination, so the read succeeds) and handed to core 1 by value. The board's orientation is read
@@ -1062,6 +1119,9 @@ fn imu_setups() -> (
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    // MSPLIM := `_stack_end` (memory.x): core 0's stack overflow faults instead of overwriting statics.
+    // Core 1's guard is set by `spawn_core1` (embassy-rp `core1_setup`).
+    defmt::unwrap!(embassy_rp::install_core0_stack_guard());
     let p = embassy_rp::init(Default::default());
     watchdog::RUNNING0.store(task::MAIN, Ordering::Relaxed);
     let mut wd = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
@@ -1224,6 +1284,8 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(watchdog::hang_flight_arm()));
     #[cfg(feature = "stall-core0")]
     spawner.spawn(defmt::unwrap!(stall()));
+    #[cfg(feature = "stack-negative")]
+    spawner.spawn(defmt::unwrap!(stack_negative()));
     #[cfg(feature = "save-loop")]
     spawner.spawn(defmt::unwrap!(settings::save_loop()));
     #[cfg(feature = "xip-park")]
