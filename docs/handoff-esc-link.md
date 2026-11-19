@@ -43,6 +43,7 @@ Driver crates: `~/Documents/MARV-V2-drivers/<crate>`, accepted work on `main`, p
 | DShot back-end `PioDshot` | DONE: accepted, reviewed, pushed (dshot-rs main b7c823a, 2026-11-12 night). With the four motors attached: three zero-throttle runs passed (`dshot_smoke-20261113-022722`, `-022838`, `-022952`) and the spin test `dshot_spin` ran all four at up to 5 % (`dshot_spin-20261113-030326`, PASS); dshot-rs main `3557eb1` |
 | READMEs / "Works with" / package metadata | Done and pushed for the 14 other crates |
 | crates.io | Six crates prepared (icm45686, lsm6dsk320x, lc76g, bmm350 as `bmm350-async`, bmp581 as `bmp581-async`, esc-passthrough); nothing published (the owner's e-mail was not verified); PARKED by the owner |
+| Firmware DShot telemetry (`MARV-V2-firmware` `src/esc.rs`: Stop frames at 1 kHz from every boot, command 13 bursts, ESC_STATUS / ESC_INFO on USB, ESC row 12; design `_plan/decision-esc-telemetry-20261118.md`) | BUILT 2026-11-18, not yet run on the board |
 | ESC serial telemetry, firmware passthrough hookup, firmware arming rules | NOT STARTED |
 | Motors | Wired since 2026-11-13 ("motors are wired and ready to test"), no propellers; positions and directions: `docs/pinout.md`, bench configuration |
 
@@ -79,8 +80,9 @@ runs with the motors and the first spin test at the 5 % cap) are DONE. Still ope
 - The board's current scale: the ESCs' own current reading (153 to 160 A at rest) is unusable as a reference; a
   reference other than the ESC is needed.
 - ESC serial telemetry (measure the ESC's real baud rate first; `UartRx` tolerates -4.6 % to +3.9 %).
-- The firmware's hookup: the passthrough tap on the port shared with MAVLink, arming rules (arm when every line
-  has answered) and error counting.
+- The firmware's hookup: the passthrough tap on the port shared with MAVLink and arming rules (arm when every line
+  has answered). The DShot stream with error counting is BUILT in the firmware (README, ESC telemetry), not yet run
+  on the board.
 - Zero-throttle extras (beep commands, extended telemetry, decode cost) and the bench-review follow-ups of the plan
   log (the self-test for a short pulse at our release, the 53 ns tolerance, the arming block's position, `shorts_lost`
   and `ring_over` asserted per rate only in check 3).
@@ -105,7 +107,8 @@ runs with the motors and the first spin test at the 5 % cap) are DONE. Still ope
 - Zero throttle only, except the capped spin test the owner allowed on 2026-11-13 (5 % cap, props off, `dshot_spin`, feature `motor-test`); anything beyond it needs his word again. Never write to an ESC without the owner's word (settings
   and flashing are the owner's, in the configurator). The PCB repo `~/Documents/kicad/MARV-V2` is read-only.
   Files under `_plan/ref/` are never executed. The board only through each crate's `tools/run.sh`.
-- Bench: the battery must be plugged in for the bench runs; the four motors are attached, no propellers; four AM32
+- Bench: battery in, propellers off (the owner's word, 2026-11-18); the firmware itself now sends Stop frames on
+  GPIO36-39 from every boot; the four motors are attached; four AM32
   2.20 ESCs with their original settings (ESC 1 was re-flashed with the same 2.20 on 2026-11-12, verified).
   `dshot_smoke` and `dshot_spin` end with the lines released, so the ESCs then sit in their bootloaders.
 - Passthrough for the configurator: in `esc-passthrough/`,

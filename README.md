@@ -4,14 +4,14 @@ Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
 Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
 `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: an ArduPilot-format `.BIN` log from boot; see SD card and Logging) and the radio receiver (RC, report only; see Radio), and IMU1 and IMU2 on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
+devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: an ArduPilot-format `.BIN` log from boot; see SD card and Logging) and the radio receiver (RC, report only; see Radio), and IMU1, IMU2 and the four ESCs' DShot stream (telemetry only; see ESC telemetry) on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
 It has no flight functionality.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the 79 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation and the motors' pole count (see Parameters),
+  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 79 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation and the motors' pole count (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -23,7 +23,9 @@ It has no flight functionality.
   (`src/imu2.rs`): the LSM6DSK320X on SPI1 (SCK GPIO10, MOSI 11, MISO 8, CS 9) with DMA channels 2 and 3 and
   its INT1 on GPIO7 (INT2, GPIO6, unused), all built inside core 1's entry closure so their interrupts land on
   core 1, each running the flight-core device loop `fw_flight::imu` in its own task (see Flight-core device
-  loop). The program's one `DMA_IRQ_0` binding (`DmaIrqs` in `src/main.rs`) lists the four channels. No log, no critical-section primitive of its own, and no
+  loop), and `esc` (`src/esc.rs`): DShot300 on PIO2 SM0, GPIO36-39, reply capture on DMA channel 5, also built
+  inside core 1's entry (see ESC telemetry). The program's one `DMA_IRQ_0` binding (`DmaIrqs` in `src/main.rs`)
+  lists the five channels (0-3 and 5). No log, no critical-section primitive of its own, and no
   timer in the sample loop there. Everything it runs, every constant and its vector table are in internal SRAM
   (see Flight core in SRAM).
 - RULE of the flight core (lead's ruling, 2026-11-15): the flight core verifies INCREMENTALLY (as ArduPilot's
@@ -40,10 +42,11 @@ It has no flight functionality.
   longest poll (the longest stretch it ran without yielding, since boot and over the last 10 s window) and
   its poll count are taken around every poll (`flight_latency::measured`), published through its status
   cell (`ImuAdapter::latency`) and logged in its `[STAT]` line: the flight core's latency figure.
-- Between the cores only atomics and `fw_core::xcore` cells (`Kick`, and each IMU's `Seqlock` and `Kick` in
-  `fw_flight::imu::ImuCells`), in internal SRAM. `DMA_IRQ_0` is disabled on core 0 before core 1 starts (all
+- Between the cores only atomics and `fw_core::xcore` cells (`Kick`, each IMU's `Seqlock` and `Kick` in
+  `fw_flight::imu::ImuCells`, and the ESC status `Seqlock`, `esc::ESC`), in internal SRAM. `DMA_IRQ_0` is disabled on core 0 before core 1 starts (all
   DMA belongs to the flight core); start-up checks: not enabled on core 0, enabled on core 1, still not
-  enabled on core 0 after core 1 started.
+  enabled on core 0 after core 1 started; `PIO2_IRQ_0` enabled on core 1 after the ESC driver was built there
+  (with `esc-off`: not enabled) and not enabled on core 0.
 
 Not in it yet: IMU2's
 high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit.
@@ -926,14 +929,15 @@ last error TIMEOUT; searching = STARTING until the first lock since boot, DEGRAD
 locked at least once since boot; `enabled` = the state mapping of `fw_core::sys_status`; `health` = the
 radio link is up. `samples` = stick reports + RADIO_STATUS reports, `last_sample_age_ms` from the
 newer of the two, `errors` = CRC + UART errors, `timeouts` = lock losses. The row is in both links'
-device rotation; it is not in the supervised registry (`device::DEVICES`).
+device rotation; it is not in the supervised registry (`device::DEVICES`). The ESC row (see ESC telemetry) is
+built the same way and is in both rotations too.
 
 What each link carries:
 
 | | USB (link 0) | Radio (link 1, only while the port is locked on MAVLink) |
 |---|---|---|
 | HEARTBEAT, SYS_STATUS | 1 Hz each | 1 Hz each |
-| MARV_DEVICE_STATUS | 7 rows, 4 per message batch every 500 ms | one row per second: a row whose state changed since it was last sent on the radio goes out of turn, at most every other message (the message after it is the in-turn one), else in turn |
+| MARV_DEVICE_STATUS | 9 rows (the seven registry rows, RC, ESC), 4 per message batch every 333 ms | one row per second: a row whose state changed since it was last sent on the radio goes out of turn, at most every other message (the message after it is the in-turn one), else in turn |
 | GPS_RAW_INT | 1 Hz | every 2 s |
 | HIGHRES_IMU (`id` 0: IMU1 with the magnetometer), SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | 1 Hz each, built by the same functions as on USB (`push_highres_imu`, `push_scaled_imu2`, `push_scaled_pressure` in `main.rs`), so the fields are the USB link's; the Sensors tab's messages |
 | RC_CHANNELS (65) | 5 Hz while stick reports are younger than 1 s: 16 channels in us, `chancount` 16, `rssi` = CRSF uplink LQ x 254 / 100, or RADIO_STATUS `rssi` in MAVLink mode, 255 without a fresh figure | none |
@@ -1038,7 +1042,8 @@ From the ground station: the flight controller's own USB port enumerates as a CD
 PID 0xcafe, product "MARV V2 firmware"; on Linux the second `/dev/ttyACM*` besides the debug probe's).
 The node writes nothing until the station opens the port (DTR held 100 ms, or its HEARTBEAT). Then for
 example `marv-link-test --connect serial:/dev/ttyACM1 --count 0 --duration 60` (MARV-GCS) counts one
-HEARTBEAT, one SYS_STATUS and eight `MARV_DEVICE_STATUS` (4 per batch every 500 ms, cycling the seven registry rows and the RC row) per second,
+HEARTBEAT, one SYS_STATUS and twelve `MARV_DEVICE_STATUS` (4 per batch every 333 ms, cycling the seven registry rows, the RC row and the ESC row) per second,
+10 ESC_STATUS and 1 ESC_INFO per second while the flight core's ESC data is younger than 1 s,
 25 HIGHRES_IMU, 25 SCALED_IMU2 and 25 SCALED_PRESSURE per second, one GPS_RAW_INT per second while the fix is younger than 3 s and 5 RC_CHANNELS and 5 MANUAL_CONTROL per second
 while stick reports are fresh (MANUAL_CONTROL: CRSF sticks only), all from system 1 component 1, and the STATUSTEXT
 "MARV V2 fw 0.1.0: flight core up, reset: power-on" (the last reset's cause: `timeout` or `forced` when the
@@ -1117,6 +1122,8 @@ What each cargo feature does under the watchdog:
 | `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
 | `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; with `NO_CATCH_HARDFAULT=1` the core locks up and the watchdog resets it: "TimedOut, record false", measured), without it `[FAIL] ... no fault` and the statics below are overwritten |
 | `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
+| `esc-off` | the ESC task is not built or spawned: nothing touches PIO2, DMA channel 5 or GPIO36-39 (the IMU baseline of the ESC board checks); the ESC row reads FAILED, stuck; not for a release |
+| `esc-no-edt` | every frame the ESC task sends is Stop: the EDT bursts the gate starts are replaced (the negative control of extended telemetry; `edt_bursts` still counts them); not for a release |
 | `xip-park` | the board check of the flight core in SRAM (`src/xip_park.rs`), once, 30 s after a start the watchdog did not cause: a 1 s window of XIP accesses with both cores running (over 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with its interrupts off and the XIP accesses counted meanwhile, core 1's, must be exactly 0 while each IMU gains at least 790 samples and no error; with `xip-park,ram-negative` at least 1000. One "core 0 stalled 1.0 s" text, no reset. Not together with `xip-stat` |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
@@ -1191,6 +1198,37 @@ cargo build --release         # the firmware for the board (thumbv8m.main-none-e
 `cargo host-clippy -p fw-core -p fw-flight --all-targets` is the matching host lint. The host alias
 assumes an x86_64 Linux host; on another host, pass your own `--target`.
 
+## ESC telemetry
+
+Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. Code: `src/esc.rs`, `fw_flight::esc`,
+`fw_core::esc`.
+
+**The firmware sends DShot Stop frames on GPIO36-39 from every boot, whether or not a battery is connected**
+(not with the feature `esc-off`).
+
+- Core 1's task `esc` drives the four ESCs with `dshot`'s `PioDshot` (PIO2 SM0, DMA channel 5, DShot300, bidirectional):
+  `start()` once at boot (lines released 3 s, a 25 ms break; its waits through `SpinDelay`), then one exchange
+  every 1 ms for ever (`fw_flight::esc::next_deadline`: a stall gives one late frame, never a burst). Driver line 0 is
+  GPIO36 = M4 ... line 3 is GPIO39 = M1.
+- Frames: Stop on every line, except command 13 (extended telemetry on) in bursts of 10 frames on one line once
+  that line has answered for 1 s with no extended reply in the last 1 s, then a 1 s hold-off (`Esc::frames`). No
+  throttle is ever built. Nothing stops on errors; there is no lapse rule.
+- After every exchange the task publishes its counters and latest values to the seqlock `esc::ESC`; core 0 does all
+  conversion. No timer, log or lock in the task.
+- USB only: ESC_STATUS (291) at 10 Hz (fastest 50 Hz) and ESC_INFO (290) at 1 Hz (fastest 10 Hz), neither sent while
+  the data is older than 1 s. Their fields: the station's `docs/link-contract.md` section 14 (MARV-GCS). The rpm uses
+  `MOT_POLES` (see Parameters), read on core 0 for every message.
+- The ESC row (`MARV_DEVICE_STATUS` device 12) is report only, like the RC row, recomputed for every message
+  (`fw_core::esc::verdict`): STARTING (start sequence running, or ended less than 5 s ago and not all four
+  answering), ABSENT (no ESC has answered this boot), OK (all four answering: a good reply within 100 ms), DEGRADED
+  (1 to 3, error TIMEOUT), FAILED (none after some good reply, TIMEOUT; or the data older than 1 s, STUCK). It sets
+  no SYS_STATUS bit.
+- Core 0 prints `[STAT] ESC:` every 10 s: the row, exchanges, starts, longest spacing and longest exchange, and per
+  motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current.
+- Not built: arming, any throttle or motor test, the stop on signal loss, the ESCs' serial telemetry on GPIO34,
+  the passthrough, the ESC row in the SD log, ESC messages on the radio.
+- Not yet run on the board: built, `tools/check-ram-code.py` PASS and the host tests only.
+
 ## Flight core in SRAM
 
 Design: `~/Documents/MARV-V2-drivers/_plan/decision-ram-code-20261115.md` (the owner: "run from PSRAM or RAM
@@ -1198,10 +1236,10 @@ not flash"; the PSRAM sits behind the same 16 kB XIP cache as the flash, so this
 2026-11-16 the flight core executes only from internal SRAM once `core1_main` has started, so it no
 longer shares the XIP cache with core 0, whose misses under card work slowed it (facts-sd-logging C2).
 
-- In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks, `fw_flight`'s imu and liveness
-  modules, both IMU drivers, embassy-rp's SPI, DMA, GPIO and multicore code, the executor's poll and wake path,
+- In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks and the ESC task, `fw_flight`'s imu,
+  liveness and esc modules, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
   `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions, the handlers `DMA_IRQ_0`,
-  `IO_IRQ_BANK0` and `SIO_IRQ_FIFO`, the critical-section and time functions), every constant (`.rodata`),
+  `IO_IRQ_BANK0`, `SIO_IRQ_FIFO` and `PIO2_IRQ_0`, the critical-section and time functions), every constant (`.rodata`),
   and core 1's own vector table. Left in flash: core 1's panic paths and the launch trampoline that runs
   before `core1_main`.
 - How: `memory.x` adds the output section `.ram_text` (`> RAM AT> FLASH`, inserted before `.text`), whose
@@ -1281,7 +1319,8 @@ Program in flash 505 436 B of 2040 KiB; static SRAM 221 220 B of 512 KiB.
 - `docs/handoff.md`: the overview for whoever picks the work up: what is done and proven, what is in progress
   (SD card logging), what is left, and the rules that are easy to break (2026-11-15).
 - `docs/handoff-esc-link.md`: the ESC link (DShot, AM32 passthrough, ESC telemetry input) and battery sensing: what the drivers
-  already do, the owner's decisions and what is still open for the firmware (not built here yet).
+  already do, the owner's decisions and what is still open for the firmware (DShot telemetry is built, see ESC telemetry;
+  passthrough, serial telemetry and arming are not).
 - `docs/pinout.md`: the board pin assignment.
 - `docs/devices.md`: the devices on the board and what was measured on them.
 - `docs/resources.md`: who owns which pin, PIO state machine, DMA channel and interrupt, and the rules that follow.

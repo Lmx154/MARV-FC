@@ -12,7 +12,10 @@ input GPIO21 through `IO_IRQ_BANK0`), the BMM350 magnetometer on core 0 (2026-11
 `DMA_IRQ_0` enabled on core 1, not on core 0), IMU2, the LSM6DSK320X, on core 1 (2026-11-15: SPI1 at 8 MHz mode 0
 with DMA channels 2 and 3 on `DMA_IRQ_0`, INT1 on GPIO7 through core 1's `IO_IRQ_BANK0`, INT2 GPIO6 unused,
 built inside core 1's entry closure next to IMU1; configured once at boot from `IMU2_ACC_FS`, `IMU2_GYR_FS`, `IMU2_ODR_HZ`, default 800 Hz, the high-g channel off) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
-see the table below); no other device, PIO block or DMA channel of this plan has run in it yet.
+see the table below), and the four ESCs' DShot stream on core 1 (2026-11-18, `src/esc.rs`: `dshot` `PioDshot` on PIO2 SM0, GPIO36-39,
+reply capture on DMA channel 5 on `DMA_IRQ_0`, `PIO2_IRQ_0` bound and enabled on core 1 only, all built inside core 1's entry; Stop
+frames from every boot and command 13 in EDT bursts, never a throttle; built and checked statically, not yet run on the board); no
+other device, PIO block or DMA channel of this plan has run in it yet.
 
 ## Fixed by the board (`docs/pinout.md`)
 
@@ -26,7 +29,7 @@ see the table below); no other device, PIO block or DMA channel of this plan has
 | ELRS receiver (pads T0/R0) | TX 14 (function 11), RX 17 | UART0 | `rc-port` |
 | microSD | DAT 28-31, CLK 32, CMD 33 | PIO | `pio-sdmmc` |
 | ESC telemetry in | 34 | PIO | `pio-uart` `UartRx` |
-| ESC signal (DShot, passthrough) | 36-39 (M4..M1) | PIO | `dshot`, `esc-passthrough` |
+| ESC signal (DShot, passthrough) | 36-39 (M4..M1) | PIO | `dshot` (BUILT, `src/esc.rs`, core 1: driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1), `esc-passthrough` (not in the firmware) |
 | Battery voltage, current | 40, 41, 42 (ADC0-2) | ADC | `adc-battery` |
 | Status LED | 43 | PIO | `ws2812c` |
 | PSRAM | CS on 0 | QMI CS1 | `qmi-psram` |
@@ -54,7 +57,7 @@ unless the HAL is given an explicit base.
 | PIO0 | microSD (`pio-sdmmc`) | SM0 | 21 | BUILT (`src/sd.rs`, core 0, 2026-11-15): the SD task builds the whole `Pio` (SM1-3 unused and dropped) and builds it again for every start, recovery and restart. Takes `&mut Common` + one SM + one DMA channel |
 | PIO0 | Status LED (`ws2812c`, PIO transport) | SM1 | 4 | CHOSEN. Takes `&mut Common` + one SM. 25 of 32 words used; SM2, SM3 free |
 | PIO1 | ESC telemetry (`pio-uart` `UartRx`) | SM0 | 13 | CHOSEN. Borrows `&mut Common`. 19 words and SM1-3 free |
-| PIO2 | DShot (`dshot` `PioDshot`) | SM0 | 15 | CHOSEN. The driver needs SM0 and takes the block's `Common` by value, so nothing else lives in PIO2 while it runs |
+| PIO2 | DShot (`dshot` `PioDshot`) | SM0 | 15 | BUILT (`src/esc.rs`, core 1, 2026-11-18): `esc::driver` builds the whole `Pio` inside `core1_main` (SM1-3 dropped) and `PioDshot::new` at DShot300 with `clk_sys` read on core 0; never released. Not built with the feature `esc-off`. The driver needs SM0 and takes the block's `Common` by value, so nothing else lives in PIO2 while it runs |
 | PIO2 | ESC passthrough (`pio-uart` `OneWire`) | SM0 | 27 | CHOSEN. EXCLUSIVE IN TIME with DShot (15 + 27 > 32): DShot is released, `OneWire` built for the session, then released and DShot rebuilt, as the passthrough demo does |
 
 ## DMA (16 channels; embassy-rp's on `DMA_IRQ_0`, the SD card's on `DMA_IRQ_1`)
@@ -62,14 +65,14 @@ unless the HAL is given an explicit base.
 | Channel | User | Notes |
 |---|---|---|
 | 0, 1 | SPI0 (ICM-45686) | Core 1, BUILT (`src/imu1.rs`, inside core 1's entry). The HAL's async SPI takes two channels (as every bench does; not checked in `spi.rs`) |
-| 2, 3 | SPI1 (LSM6DSK320X) | Core 1, BUILT (`src/imu2.rs`, inside core 1's entry). One `bind_interrupts!` for channels 0-3 (`DmaIrqs`, `src/main.rs`); the `f4-negative` control builds channel 6 on core 0 |
+| 2, 3 | SPI1 (LSM6DSK320X) | Core 1, BUILT (`src/imu2.rs`, inside core 1's entry). One `bind_interrupts!` for channels 0-3 and 5 (`DmaIrqs`, `src/main.rs`); the `f4-negative` control builds channel 6 on core 0 |
 | 4 | microSD | Core 0, BUILT (`src/sd.rs`, 2026-11-15): programmed by `pio-sdmmc` itself through the PAC (no embassy-rp `dma::Channel`), completing on `DMA_IRQ_1`, enabled only in core 0's NVIC (INTE1 = 1 << 4; checked at start-up with INTE0, INTE2, INTE3) |
-| 5 | DShot reply capture | Core 1. The driver requires one |
+| 5 | DShot reply capture | Core 1, BUILT (`src/esc.rs` `driver`, inside core 1's entry, 2026-11-18; an embassy-rp `dma::Channel` on `DMA_IRQ_0`). Not built with `esc-off` |
 | 6-15 | free | The ADC (battery) runs WITHOUT DMA (it is on core 0: see the rule below); the flash driver needs none |
 
 ## Interrupts to bind
 
-`DMA_IRQ_0` (core 1: channels 0-3, 5 with DShot), `DMA_IRQ_1` (core 0: channel 4, `pio_sdmmc::pio::DmaIrqHandler<SdWaker>`, priority P3, set by the driver), `PIO0_IRQ_0` (the SD bus's `Pio`), `PIO1_IRQ_0`, `PIO2_IRQ_0`, `I2C0_IRQ`, `I2C1_IRQ`, `UART0_IRQ` and
+`DMA_IRQ_0` (core 1: channels 0-3 and 5), `DMA_IRQ_1` (core 0: channel 4, `pio_sdmmc::pio::DmaIrqHandler<SdWaker>`, priority P3, set by the driver), `PIO0_IRQ_0` (the SD bus's `Pio`), `PIO1_IRQ_0`, `PIO2_IRQ_0` (BUILT: `esc::Irqs`, enabled by `Pio::new` on core 1; start-up check: enabled on core 1, not on core 0; bound in every build, never enabled with `esc-off`), `I2C0_IRQ`, `I2C1_IRQ`, `UART0_IRQ` and
 `UART1_IRQ` (buffered UARTs), `ADC_IRQ_FIFO`, `USBCTRL_IRQ`. Taken by the HAL itself: `TIMER0_IRQ_0` (the time
 driver, alarm 0), `IO_IRQ_BANK0` (all `Input::wait_for_*`, no binding needed; priority P3), and `DMA_IRQ_0`'s
 priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through the bank interrupt.
@@ -81,7 +84,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 | Core 0, the I/O core: thread-mode executor | `embassy_rp::init`, the time driver; usb_link (`usb-cdc`'s futures are not `Send`: built here), rc_link, baro, mag, gnss, batt, supervisor, actions, settings and flash_saver, beat0; later led, sd_logger | DECIDED (design, two-core amendment) |
 | Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only, priority 1 (BUILT: `src/watchdog.rs`) | DECIDED |
 | Core 0: `SWI_IRQ_0` | the receiver task `rc_link` alone, priority P3 (0xC0), below the monitor's `SWI_IRQ_1` (P1) (2026-11-15) | DECIDED |
-| Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2 (BUILT: `fw_flight::imu` over the LSM6DSK320X), fbeat (liveness, BUILT); later the control loop, DShot, arming. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
+| Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2 (BUILT: `fw_flight::imu` over the LSM6DSK320X), fbeat (liveness, BUILT), esc (BUILT 2026-11-18: one DShot exchange per 1 ms, paced with `SpinDelay`; not spawned with `esc-off`); later the control loop, arming. The esc task's wait is a clock poll that wakes itself, so core 1's executor no longer sleeps: a core-1 load figure must come from task timings, not idle time. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
 | Core 1 stack | a `static`, 16 KB default, set from stack painting; MSPLIM guard set by `spawn_core1` | DECIDED |
 | Hardware watchdog | owned and fed by core 0's monitor, 1600 ms period, `pause_on_debug(true)`, only while `BEAT0` and `PONG` both changed less than 200 ms ago; scratch registers 0 to 3 hold the reset record (layout version 2; 4 to 7 are the boot ROM's). BUILT | DECIDED |
 
@@ -152,6 +155,14 @@ is in `memory.x`, and `ImuOffsets::publish` is `#[inline(always)]` into the two 
 `ImuSetup.board`, i.e. into core 1's entry closure like the rest of the setup; core 0 keeps the same value in `calibration::Core0` (a field of the existing core-0 struct, never read by core 1). No new
 task, interrupt, DMA channel, cross-core cell or shared static (the two new `static`s are `ParamDef` tables, constant data read on core 0). `tools/check-ram-code.py` passes (roots 4, 130 functions, 68 048 B in SRAM, 209 data objects).
 
+ESC telemetry F2 (2026-11-18, `esc-telemetry`, normal build, `arm-none-eabi-size -A` and the linker symbols, against
+82ee5e1 built the same way): `.ram_text` 128 292 -> 146 148, `.text` 504 596 -> 548 352, `.data` 43 988 -> 43 984,
+`.bss` 109 996 -> 112 084, `.uninit` 8 192; code in SRAM 83 784 -> 100 760 B; static SRAM (to `__euninit`) 290 732 ->
+310 740 B; free above `_stack_end` 233 552 -> 213 544 B, 180 776 B above the 32 KiB floor. New: one task (core 1's
+`esc`), one static cell (`esc::ESC`, a `Seqlock<EscStatus>` of 696 B), the PIO2 block, DMA channel 5, `PIO2_IRQ_0`.
+Most of the `.text` growth is the core-0 readers (`esc::row`, `message`, `stat`, each inlining the seqlock copy).
+`tools/check-ram-code.py` passes (roots 5, 151 functions, 82 712 B in SRAM, 247 data objects).
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow
@@ -179,14 +190,15 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    only, completing on `DMA_IRQ_1` in core 0's NVIC, cleared through INTS1; core 0 never read-modify-writes a
    DMA register shared across channels (INTR, INTEn, INTFn, INTSn, CHAN_ABORT, MULTI_CHAN_TRIGGER): only SET/CLR
    alias writes and single-bit plain writes. Start-up checks: `DMA_IRQ_0` off on core 0 (F4), and after the SD
-   bus is built INTE0 = core 1's channels, INTE1 = 1 << 4, INTE2 = INTE3 = 0, `DMA_IRQ_1` on in core 0 and off
+   bus is built INTE0 = core 1's channels (0x2f: 0-3 and 5; 0x0f with `esc-off`), INTE1 = 1 << 4, INTE2 = INTE3 = 0, `DMA_IRQ_1` on in core 0 and off
    in core 1.
 7. A driver is constructed on the core that owns its interrupt (the HAL enables the NVIC line in the
    constructor, on the calling core). The timer interrupt is always on core 0; a flash write must come from
    core 0 and pauses core 1.
 8. The flight core schedules no timer at all, takes no critical-section primitive of its own and
    never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
-   buffer into it, atomic flags with a lock-free waker for requests). Its IMU tasks wait through `SpinDelay`
+   buffer into it, atomic flags with a lock-free waker for requests). The seqlocks out of core 1: each IMU's status
+   (`fw_flight::imu::ImuCells`) and the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task). Its IMU tasks wait through `SpinDelay`
    (`src/imu1.rs`): under 50 us a busy wait (the ICM-45686's 10 us waits in a verify step, so the sample loop
    never yields inside one), from 50 us on clock polls with a yield between them. HARD RULE (lead's ruling,
    2026-11-15): no timer queue on the flight core at all, no `embassy_time::{Timer, Ticker, Delay}` and no
@@ -217,9 +229,14 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    time MSPLIM = `_stack_end` on core 0 and the bottom of `CORE1_STACK` on core 1, so an overflow of either stack
    is a HardFault, not a silent write into the statics). R5: the copy runs before anything uses SRAM code
    (`__wrap___pre_init`, assembly, wrapped ahead of embassy-rp's `__pre_init`; a violation faults at once on
-   every boot). Maintenance: a new core-1 interrupt (for example `PIO2_IRQ_0` for DShot) becomes a checker
-   root and a pattern line in `memory.x`; a new flight crate (for example `*5dshot*`) gets a pattern line; a
-   pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
+   every boot). Maintenance: a new core-1 interrupt becomes a checker root and a pattern line in `memory.x`;
+   a new flight crate gets a pattern line. DShot (2026-11-18) added the root `PIO2_IRQ_0` and the lines
+   `.text.PIO2_IRQ_0`, `*5dshot*`, `*10embassy_rp3pio*`, `*8pio_core*` (named by the checker: `set_config` in
+   `PioDshot::new`, called from `core1_main`), `*9fw_flight3esc*` and three narrow `esc` lines
+   (`*16marv_v2_firmware3esc6driver*`, `*3esc4task*`, `*3esc11___task_task*`): the broad
+   `*16marv_v2_firmware3esc*` also moved the core-0 readers of `src/esc.rs` (about 21 KB) into SRAM.
+   `*10embassy_rp3pio*` also moves core 0's PIO0 code (the SD bus's, about 2.4 KB). Removing `*5dshot*`
+   makes the checker FAIL (13 functions). A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
    identical functions make the patterns inexact: three lines exist only for merged functions' sections). A
    binary flashed without `tools/run.sh` skips the checker.
 

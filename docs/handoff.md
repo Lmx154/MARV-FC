@@ -23,7 +23,7 @@ Read these before changing anything:
 - `_plan/facts-foundation.md`: what was measured and read (cross-core hazards, flash, timing).
 - `_plan/decision-sd-logging-20261115.md` and `_plan/facts-sd-logging.md`: the SD logging design and its facts.
 - `_plan/WARNING-oom-tab-kills-20261115.md`: why sessions were killed and the rules that prevent it.
-- `docs/handoff-esc-link.md`: the ESC work that is not in the firmware yet.
+- `docs/handoff-esc-link.md`: the ESC link work; in the firmware so far only the DShot telemetry stream (README, ESC telemetry).
 
 ## What the owner asked for
 
@@ -39,7 +39,7 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   Data crosses only through lock-free cells.
 - **Seven device rows:** IMU1, IMU2, BARO, MAG, GNSS, BATT (supervised: health states, recovery ladder,
   operator restart) and RC (report only: "the radio link is up").
-- **Parameters:** 78 (the last eight: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`) and `MAG_ORIENT` (`Live`); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
+- **Parameters:** 79 (the last nine: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`) and `MOT_POLES` (`Live`, the motors' poles for the ESC rpm; not yet used on the board); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
@@ -222,9 +222,11 @@ copies for the download checks.
     steps that followed are above.
 
 **Not built**
-- ESC in the firmware: the DShot driver and the passthrough work as driver crates with bench programs, but
-  the firmware has no ESC row, no passthrough through its USB port, no stop on signal loss; the board's
-  current scale and ESC serial telemetry are not done. See `docs/handoff-esc-link.md`.
+- ESC in the firmware: BUILT, not yet run on the board (2026-11-18, `src/esc.rs`): core 1 sends DShot300 Stop
+  frames at 1 kHz on GPIO36-39 from every boot (command 13 in EDT bursts, never a throttle), the ESC row (device 12,
+  report only), ESC_STATUS and ESC_INFO on USB; see the README, ESC telemetry. Not built: arming, throttle, motor
+  test, passthrough through the USB port, the board's current scale, ESC serial telemetry on GPIO34. See
+  `docs/handoff-esc-link.md`.
 - The estimator (next).
 - Status LED. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
   the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
@@ -285,9 +287,9 @@ copies for the download checks.
   `DMA_IRQ_1` through its own driver code. Core 0 never read-modify-writes a DMA register shared by channels.
 - **Flash:** the firmware writes only its settings region, through one guarded function; a save stalls both
   cores for about 45 ms. Keep the number of saves low (about 225 so far).
-- **Bench:** the board through `tools/run.sh` only, one session at a time; battery unplugged, USB power,
-  motors attached without propellers; nothing may drive GPIO36 to 39 or PIO2; never write settings to the
-  receiver, the ESCs or the GNSS receiver.
+- **Bench:** the board through `tools/run.sh` only, one session at a time; battery in, propellers off (the owner's
+  word, 2026-11-18), motors attached; the firmware drives GPIO36 to 39 (DShot Stop frames, PIO2) from every boot;
+  never write settings to the receiver, the ESCs or the GNSS receiver.
 - **This machine:** every test or build under a memory cap, every board run in its own detached scope
   (`_plan/WARNING-oom-tab-kills-20261115.md` has the commands). A runaway test killed whole sessions before
   this rule existed.

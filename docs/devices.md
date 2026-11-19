@@ -223,6 +223,15 @@ Pins: see `pinout.md`, status LED.
 - Not verified in the driver's runs: the colours as seen by a person (the bring-up run was watched: red, green,
   blue, white).
 
+## ESCs (four AM32 2.20 on the GOKU G55M 4-in-1, DShot on GPIO36-39)
+
+- Facts measured on the bench: the `dshot` crate's README (cadence, start sequence, arming silence, extended
+  telemetry). Motor positions and directions: `pinout.md`.
+- In the firmware (`src/esc.rs`, not yet run on the board): `PioDshot` on PIO2 SM0, DShot300 at 1 kHz from core 1,
+  driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1. Device row 12 (ESC), report only: no health machine, no
+  recovery (`fw_core::esc::verdict`).
+- The ESCs' current reading (153 to 160 A at rest) is not a current: the firmware never sends it.
+
 ## ADC channels
 
 Pins: see `pinout.md`, ADC.
