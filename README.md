@@ -71,7 +71,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(32 tests and 1 doc test, the flight step's included).
+(35 tests and 1 doc test, the flight step's included).
 
 The flight step (build step 3 of the GNC plan; design: `~/Documents/MARV-V2-drivers/_plan/decision-sim-seams-20261119.md`).
 `fw_flight::step::Flight::step` runs once per good IMU1 sample, on core 1, inside IMU1's task, right after the sample
@@ -82,8 +82,15 @@ controller reset while disarmed, stick shaper, validity check, controller, alloc
 slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Today every stage is a stand-in (nothing
 valid, the controller refuses, the gate never arms), so every step gives Stop; the board image names them in
 `src/flight.rs` (`BoardFlight`). Only IMU1's sample goes in (IMU2, the slow sensors and RC come with later steps).
+`Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
+`decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate will store the armed state for
+core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
+`fw_flight::step::encode_step` writes one step as the records NAV, SETP, DMD and MOT (`fw_core::dflog::FLIGHT_TYPES`,
+ids 139 to 142; not in the board's header, and the board logs none of them).
 After each step the task writes the step time and the command to the seqlock `flight::OUT`. Nothing reads it yet: the
-ESC task sends what it sent before and starts reading it in step 5. There is no status line for it. A core-0
+ESC task passes the initial `(0, Stop)` to `Esc::frames`, which applies `fw_flight::esc::hold` (Stop when the command is
+older than 10 ms) and, while the held command spins, sends its throttles on all four lines, no EDT burst, and ends a
+running motor test as `Replaced`; the ESC task starts reading `OUT` in a later packet. There is no status line for it. A core-0
 `[STAT] FLT:` line was tried on 2026-11-19 (it showed 8035 steps per 10 s, the IMU1 rate, `command Stop`) and removed:
 with the probe attached, that one extra log line raised the ESC task's longest spacing from 1.09 to 1.26 ms (six runs
 without it) to 1.58 ms inside the 10 s `[STAT]` burst and 1.36 ms on a tick of its own; without the line it is 1.20 ms.

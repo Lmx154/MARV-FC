@@ -196,6 +196,8 @@ pub struct Sticks {
 pub struct RcSample {
     /// The normalised sticks.
     pub sticks: Sticks,
+    /// Channel 5 in the arm position, same report.
+    pub arm: bool,
     /// Board time the report was read, us.
     pub t_us: u64,
 }

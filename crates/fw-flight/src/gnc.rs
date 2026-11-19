@@ -137,6 +137,8 @@ pub trait Estimator {
     fn origin(&self) -> Option<GeoPoint> {
         None
     }
+    /// The gate's armed state after the previous step; `Flight::step` calls it once, before `update`.
+    fn set_armed(&mut self, _armed: bool) {}
 }
 
 /// The flight mode the pilot selected. It tells the stick shaper which `Setpoint` to build. It is not a controller

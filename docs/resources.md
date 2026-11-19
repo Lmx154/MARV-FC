@@ -208,7 +208,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    buffer into it, atomic flags with a lock-free waker for requests). The seqlocks out of core 1: each IMU's status
    (`fw_flight::imu::ImuCells`), the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task) and the flight
    step's output (`flight::OUT`, 2026-11-19: step time, `MotorCommand`; writer taken once by IMU1's task; no reader
-   until the ESC task reads it in step 5). The triple buffers into it: the IMU offsets
+   until the ESC task reads it in step 5; `Esc::frames` already takes the flight command as an input, and the task passes
+   the initial `(0, Stop)` until then). The atomic flags `settings::HANDSHAKE` are handed to the flight step's gate,
+   which will store the armed state there (step 5). The triple buffers into it: the IMU offsets
    (`calibration::OFFSETS`) and the motor-test command (`esc::TEST`, a `TestCmd`; writer in core 0's `actions` state, reader
    taken before core 1 starts and moved into the esc task, which reads it at every exchange; 2026-11-18). Its IMU tasks wait through `SpinDelay`
    (`src/imu1.rs`): under 50 us a busy wait (the ICM-45686's 10 us waits in a verify step, so the sample loop

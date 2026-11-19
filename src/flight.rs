@@ -10,6 +10,7 @@ use fw_flight::gate::MotorCommand;
 use fw_flight::gnc::{NoAllocator, NoController, NoEstimator, Sensors};
 use fw_flight::imu::{ImuSample, SampleSink};
 use fw_flight::step::{Flight, FlightInputs};
+use fw_flight::tuning::Tuning;
 
 /// The flight code this image runs; edit this line to change it (seams decision, section 9).
 pub type BoardFlight = Flight<NoEstimator, NoController, NoAllocator>;
@@ -40,7 +41,13 @@ impl Stepper {
     /// `None` if the writer of [`OUT`] was taken already.
     pub fn new() -> Option<Self> {
         Some(Self {
-            flight: Flight::new(NoEstimator, NoController, NoAllocator),
+            flight: Flight::new(
+                NoEstimator,
+                NoController,
+                NoAllocator,
+                &Tuning::DEFAULT,
+                &crate::settings::HANDSHAKE,
+            ),
             out: OUT.take_writer()?,
         })
     }

@@ -209,6 +209,12 @@ pub struct EscStatus {
     pub test_ended: Option<TestEnding>,
     /// Throttle frames sent since boot.
     pub throttle_frames: u32,
+    /// This exchange sent the flight command's throttles.
+    pub flight_spin: bool,
+    /// Exchanges that sent the flight command's throttles since boot (saturating).
+    pub flight_frames: u32,
+    /// Exchanges whose flight command could not be read since boot (saturating; counted by the board's task).
+    pub flight_read_failures: u32,
 }
 
 impl EscStatus {
@@ -226,6 +232,9 @@ impl EscStatus {
         test_spin: None,
         test_ended: None,
         throttle_frames: 0,
+        flight_spin: false,
+        flight_frames: 0,
+        flight_read_failures: 0,
     };
 
     /// The newest event of the snapshot (an exchange or the end of a start), us.

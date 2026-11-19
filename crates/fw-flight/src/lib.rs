@@ -2,7 +2,7 @@
 //! Today: the liveness answer [`liveness`], the IMU device loop [`imu`] (IMU1 runs it), the ESC
 //! telemetry logic [`esc`] (pure), and [`tagged`], which names the task that ran last for the watchdog (`RUNNING1`).
 //! The flight step: [`step`] (`Flight`, called by IMU1's task per sample), [`gnc`] (the estimator, controller and
-//! allocator seams), [`gate`] (the gate and `MotorCommand`).
+//! allocator seams), [`gate`] (the gate and `MotorCommand`), [`tuning`] (the gains and limits).
 //! Rule: no dependency on `embassy-time`, `embassy-sync` or `defmt`.
 #![no_std]
 #![forbid(unsafe_code)]
@@ -31,6 +31,7 @@ pub mod gate;
 pub mod gnc;
 pub mod imu;
 pub mod step;
+pub mod tuning;
 
 /// The flight core's liveness answer (`fbeat`): waits on `kick`, then copies `ping` into `pong`,
 /// forever. Core 0 bumps `ping` and kicks; a `pong` that stops following `ping` means the flight

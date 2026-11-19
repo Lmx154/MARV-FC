@@ -112,7 +112,8 @@ pub async fn task(mut drv: Driver, mut test: TripleReader<'static, TestCmd>) -> 
     loop {
         let t0 = crate::now_us();
         let (cmd, _) = test.read();
-        let frames = esc.frames(t0, cmd);
+        // P6 reads flight::OUT here.
+        let frames = esc.frames(t0, cmd, (0, fw_flight::gate::MotorCommand::STOP));
         #[cfg(feature = "esc-no-edt")]
         let frames = frames.map(|_| dshot::LineFrame::STOP);
         let x = drv.exchange(frames).await;

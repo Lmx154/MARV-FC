@@ -135,6 +135,14 @@ pub const ID_RCIN: u8 = 136;
 pub const ID_DEV: u8 = 137;
 /// Type number of DSF.
 pub const ID_DSF: u8 = 138;
+/// Type number of NAV (flight step).
+pub const ID_NAV: u8 = 139;
+/// Type number of SETP (flight step).
+pub const ID_SETP: u8 = 140;
+/// Type number of DMD (flight step).
+pub const ID_DMD: u8 = 141;
+/// Type number of MOT (flight step).
+pub const ID_MOT: u8 = 142;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -178,12 +186,39 @@ pub const DEV: RecordDef = def(
 );
 /// DSF: the logger's own statistics.
 pub const DSF: RecordDef = def(ID_DSF, "DSF", "QIHIIII", "TimeUS,Dp,Blk,Bytes,FMn,FMx,FAv");
+/// NAV: the estimate of one flight step: attitude quaternion (w, x, y, z), body rates (rad/s), valid bits.
+pub const NAV: RecordDef = def(
+    ID_NAV,
+    "NAV",
+    "QfffffffB",
+    "TimeUS,Q1,Q2,Q3,Q4,GX,GY,GZ,Vld",
+);
+/// SETP: the setpoint of one flight step: kind, attitude quaternion, rates (rad/s), thrust (N).
+pub const SETP: RecordDef = def(
+    ID_SETP,
+    "SETP",
+    "QBffffffff",
+    "TimeUS,K,Q1,Q2,Q3,Q4,RX,RY,RZ,Thr",
+);
+/// DMD: the controller's demand of one flight step: accepted, thrust (N), torques (N.m), saturation bits.
+pub const DMD: RecordDef = def(ID_DMD, "DMD", "QBffffB", "TimeUS,Ok,Thr,TX,TY,TZ,Sat");
+/// MOT: armed, mode, the allocator's levels and the gate's command (0 = Stop), by DShot line.
+pub const MOT: RecordDef = def(
+    ID_MOT,
+    "MOT",
+    "QBBHHHHHHHH",
+    "TimeUS,Arm,Mode,A0,A1,A2,A3,C0,C1,C2,C3",
+);
 
 /// Every record type of the file, FMT first, in the order of the header.
 pub const TYPES: [RecordDef; 11] = [FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
 pub const HEADER_SEQUENCE_LEN: usize = TYPES.len() * FMT.length as usize;
+
+/// The flight-step types (decision-first-pair-wiring-20261119, A6). Not in [`TYPES`], so not in
+/// [`write_header`]: a writer that logs them writes their FMTs itself with [`fmt_record`].
+pub const FLIGHT_TYPES: [RecordDef; 4] = [NAV, SETP, DMD, MOT];
 
 /// Writes one record into the start of a buffer.
 struct Writer<'a> {
@@ -505,6 +540,90 @@ pub fn encode_dsf(out: &mut [u8], time_us: u64, d: &Dsf) -> usize {
     w.u32(d.free_min);
     w.u32(d.free_max);
     w.u32(d.free_avg);
+    w.pos
+}
+
+/// NAV: attitude quaternion (w, x, y, z), body rates in rad/s, valid bits. 40 bytes.
+pub fn encode_nav(
+    out: &mut [u8],
+    time_us: u64,
+    attitude: [f32; 4],
+    rates_rads: [f32; 3],
+    valid: u8,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &NAV) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for v in attitude.into_iter().chain(rates_rads) {
+        w.f32(v);
+    }
+    w.u8(valid);
+    w.pos
+}
+
+/// SETP: setpoint kind, attitude quaternion, rates in rad/s, thrust in N. 44 bytes.
+pub fn encode_setp(
+    out: &mut [u8],
+    time_us: u64,
+    kind: u8,
+    attitude: [f32; 4],
+    rates_rads: [f32; 3],
+    thrust_n: f32,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &SETP) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(kind);
+    for v in attitude.into_iter().chain(rates_rads) {
+        w.f32(v);
+    }
+    w.f32(thrust_n);
+    w.pos
+}
+
+/// DMD: demand accepted, thrust in N, torques in N.m, saturation bits. 29 bytes.
+pub fn encode_dmd(
+    out: &mut [u8],
+    time_us: u64,
+    ok: bool,
+    thrust_n: f32,
+    torque_nm: [f32; 3],
+    saturation: u8,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &DMD) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(u8::from(ok));
+    w.f32(thrust_n);
+    for v in torque_nm {
+        w.f32(v);
+    }
+    w.u8(saturation);
+    w.pos
+}
+
+/// MOT: armed, mode number, the allocator's levels and the gate's command levels (0 = Stop), by
+/// DShot line. 29 bytes.
+pub fn encode_mot(
+    out: &mut [u8],
+    time_us: u64,
+    armed: bool,
+    mode: u8,
+    levels: [u16; 4],
+    command: [u16; 4],
+) -> usize {
+    let Some(mut w) = Writer::start(out, &MOT) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(u8::from(armed));
+    w.u8(mode);
+    for v in levels.into_iter().chain(command) {
+        w.u16(v);
+    }
     w.pos
 }
 
