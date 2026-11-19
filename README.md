@@ -1257,7 +1257,7 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
     frame choice, wake and two clock reads (1 us resolution). The driver decision's 1500-cycle decode tripwire is
     10 us: decode alone was not isolated, it is bounded above by 11.4 us. Longest 255-1358 us, which includes other
     core-1 tasks' polls and, once, the save stall.
-  - Not measured: any throttle, anything but Stop frames and command 13, serial telemetry.
+  - Not measured: serial telemetry. Throttle: see Motor test below.
 - Known behaviour: when the battery is plugged in more than 5 s after boot, the ESC row can read FAILED/TIMEOUT for
   under a second during the arming tune.
 - Noticed (2026-11-18, not analysed): an RC UART framing/break burst after `xip-park`'s core-0 park (33 warnings,
@@ -1269,7 +1269,7 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
 Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (amendment A, "lean"). Code:
 `fw_core::admission` (`classify_motor_test`, `MotorTest`), `src/actions.rs` (`motor_test`), `src/esc.rs` (`TEST`,
 `report`), `fw_flight::esc` (`Esc::frames`, `capped`). The station's field table: `docs/link-contract.md` section 15
-(MARV-GCS). **Propellers off only. Not yet run on the board.**
+(MARV-GCS). **Propellers off only.** Run on the board on 2026-11-18 (the last item below).
 
 - The command: `MAV_CMD_DO_MOTOR_TEST` (209), `COMMAND_LONG`, on every link the same way (the firmware does not check the
   link; link contract section 9). param1 motor 1-4 (M1-M4, the ESC_STATUS order); param2 0 (percent); param3 throttle
@@ -1300,7 +1300,24 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (ame
   runs to its end (at most 3 s); nothing repeats or holds it. The ESC task must be running: if the driver was not
   built the row reads FAILED but a spin is still ACCEPTED and nothing turns.
 - Tests: `cargo host-test -p fw-core` (admission: `motor_test_*`), `-p fw-flight` (the frames and endings, M2-F1).
-- Not yet run on the board.
+- Measured on the board (2026-11-18, commit 7b3cdb6, flash log `20261118-204512`: 15 PASS, 0 FAIL; battery on, no
+  propellers; the owner clicking Spin and Stop in the station's Motors tab; figures read from the station's own
+  recordings `2026-11-19_02-48-25Z.tlog` and `2026-11-19_03-03-53Z.tlog`, ESC_STATUS at 10 Hz, so times resolve to 0.1 s):
+  - Identity: each of M1-M4 at 5 % for 2 s turned one motor, and rpm appeared only on that motor's ESC_STATUS element.
+    The owner named them: M1 rear left counter-clockwise, M2 front left clockwise, M3 rear right clockwise, M4 front
+    right counter-clockwise (the same as `docs/pinout.md`, 2026-11-13).
+  - rpm at 5 % (level 100), median over the last second: M1 1809, M2 1899, M3 1822, M4 1840 (the bench's
+    2026-11-13 median for M1 was 12 755 eRPM, 1822 rpm). At 1.65 % (level 33) M1 started and ran at 898 rpm.
+  - Duration: 17 spins, all ACCEPTED; a 2 s spin showed rpm for 2.0-2.1 s and a 3 s spin for 3.0 s, each ended by
+    itself.
+  - Stop: a stop 0.67 s into a 3 s spin; rpm was 0 in the next ESC_STATUS (0.70 s after the spin began).
+  - Replace: M2 commanded 0.35 s into M1's spin; M1 went to 0 and M2 ran its own 3 s.
+  - Link loss: the USB cable pulled 1.2 s into a 3 s spin and 0.4 s into a 2 s spin; the owner saw the motor stop by
+    itself both times; after reconnecting, rpm 0, all four ESCs online, no reset.
+  - All four ESCs stayed online (`info` 15 in every ESC_INFO) with 0 new reply errors over the 914 s recording.
+  - Not run on the board: a refused command (the station cannot send one outside the table; host-tested), a save
+    or calibration during a spin (host-tested), a spin with the battery unplugged, `xip-park` and the IMU rates
+    during a spin (the RAM-code checker passed at the flash), the `[INFO] motor test` lines (the probe was detached).
 
 ## Flight core in SRAM
 

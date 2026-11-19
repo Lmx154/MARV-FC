@@ -14,7 +14,7 @@ with DMA channels 2 and 3 on `DMA_IRQ_0`, INT1 on GPIO7 through core 1's `IO_IRQ
 built inside core 1's entry closure next to IMU1; configured once at boot from `IMU2_ACC_FS`, `IMU2_GYR_FS`, `IMU2_ODR_HZ`, default 800 Hz, the high-g channel off) and the hardware watchdog (2026-11-15: fed by the monitor on `SWI_IRQ_1`,
 see the table below), and the four ESCs' DShot stream on core 1 (2026-11-18, `src/esc.rs`: `dshot` `PioDshot` on PIO2 SM0, GPIO36-39,
 reply capture on DMA channel 5 on `DMA_IRQ_0`, `PIO2_IRQ_0` bound and enabled on core 1 only, all built inside core 1's entry; Stop
-frames from every boot and command 13 in EDT bursts, and the props-off motor test's capped throttle on one line (2026-11-18, built, not yet run on the board); the telemetry run on the board 2026-11-18, 4cfb1f0 and 0d25909, logs
+frames from every boot and command 13 in EDT bursts, and the props-off motor test's capped throttle on one line (2026-11-18, run on the board from the station, README, Motor test); the telemetry run on the board 2026-11-18, 4cfb1f0 and 0d25909, logs
 `20261118-191955` to `20261118-194637`, see the README, ESC telemetry); no
 other device, PIO block or DMA channel of this plan has run in it yet.
 

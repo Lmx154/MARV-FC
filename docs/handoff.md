@@ -45,7 +45,8 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   README, ESC telemetry, "Measured on the board") (`src/esc.rs`): core 1 sends DShot300 Stop frames at 1 kHz on
   GPIO36-39 from every boot (command 13 in EDT bursts), the ESC row, ESC_STATUS and ESC_INFO on
   USB. The station's Motors tab shows it. The props-off motor test is built (command 209, one motor at up to 5 % for up
-  to 3 s, core 1 ends the spin on its own clock; README, ESC telemetry, Motor test) and not yet run on the board.
+  to 3 s, core 1 ends the spin on its own clock; README, ESC telemetry, Motor test) and was run on the board from the
+  station's Motors tab on 2026-11-18 (all four motors, stop, replace, cable pull).
 - **Parameters:** 79 (the last nine: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`) and `MOT_POLES` (`Live`, the motors' poles for the ESC rpm); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
