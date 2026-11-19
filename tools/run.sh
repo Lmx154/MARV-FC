@@ -3,7 +3,11 @@
 # The firmware runs until the timeout ends it: exit status 124 is the normal end; the verdict is in
 # the [PASS]/[FAIL] lines. A crash gives another status. The full log is kept under logs/.
 #
-# Usage: [FEATURES=<cargo features>] tools/run.sh [timeout_seconds, default 120]
+# Usage: [FEATURES=<cargo features>] [NO_CATCH_HARDFAULT=1] tools/run.sh [timeout_seconds, default 120]
+#   NO_CATCH_HARDFAULT=1: probe-rs run gets --no-catch-hardfault, so a HardFault does not halt the run
+#   (the watchdog can reset the board, as without a probe); default off.
+#   ATTACH=1: `probe-rs attach` instead of `run`: no flash, no reset; reads the RTT log of the image
+#   already running (build with the same FEATURES, for its symbols); default off.
 #   FEATURES=no-fbeat tools/run.sh 30    # the negative control (see README)
 # Before flashing, tools/check-ram-code.py (python3, arm-none-eabi-binutils) checks that nothing the
 # flight core runs lies in flash (decision-ram-code-20261115, R1): it must pass, or with the feature
@@ -31,9 +35,11 @@ if [ "$check" -ne "$want" ]; then
     exit 3
 fi
 
+sub=run
+[ -n "${ATTACH:-}" ] && sub=attach
 # One probe, one user at a time, across every checkout on this machine.
 lock="${XDG_RUNTIME_DIR:-/tmp}/marv-v2-probe.lock"
-flock "$lock" timeout "$tmo" probe-rs run --chip RP235x "$elf" >>"$log" 2>&1
+flock "$lock" timeout "$tmo" probe-rs "$sub" --chip RP235x ${NO_CATCH_HARDFAULT:+--no-catch-hardfault} "$elf" >>"$log" 2>&1
 status=$?
 
 grep -E '\[(PASS|FAIL|SKIP|INFO|STAT)\]|RESULT|panicked|ERROR|Error' "$log" | tail -n 80

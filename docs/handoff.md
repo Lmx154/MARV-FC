@@ -263,9 +263,9 @@ copies for the download checks.
   `install_core0_stack_guard` was not called. Now `memory.x` defines `_stack_end = ALIGN(__euninit, 8)` (the
   true bottom of core 0's stack, in RAM), the 32 KiB ASSERT is checked on it, and `main` calls
   `embassy_rp::install_core0_stack_guard()` first (it writes MSPLIM). An overflow is a HardFault (escalated
-  UsageFault STKOF); there is no fault handler, so without a debugger the core should spin in cortex-m-rt's default
-  HardFault loop and the watchdog reset it (like `hang-irqoff`: "TimedOut, record false"; not observed: the
-  probe stops the run first); under `probe-rs run` the hard-fault vector catch stops the
+  UsageFault STKOF); there is no fault handler, so without the probe's catch the core locks up (the HardFault's stacking
+  is below MSPLIM) and the watchdog resets it; the next boot report reads "TimedOut, record false, WDG reset: no
+  record" (measured twice, `NO_CATCH_HARDFAULT=1` then `ATTACH=1`, see `tools/run.sh`); under `probe-rs run` the hard-fault vector catch stops the
   run ("Firmware exited unexpectedly: Exception"). Core 1 was already guarded: `spawn_core1` writes MSPLIM with
   the bottom of `CORE1_STACK`. Negative control: `FEATURES=stack-negative`.
 - `python3 -m venv` does not work on this desktop (no ensurepip); `uv` does. A nightly Rust toolchain was
