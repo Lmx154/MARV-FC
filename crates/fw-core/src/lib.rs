@@ -36,6 +36,7 @@ pub mod mbr;
 pub mod params;
 pub mod rc;
 pub mod record;
+pub mod relay;
 pub mod rotation;
 pub mod sample;
 pub mod scratch;

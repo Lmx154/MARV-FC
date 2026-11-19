@@ -51,6 +51,44 @@ pub fn stale_spin(t_us: u64, cmd: MotorCommand, now_us: u64) -> bool {
     cmd.throttles().is_some() && now_us.saturating_sub(t_us) > FLIGHT_GAP_DISARM_US
 }
 
+/// The fields of one ESC log record (`fw_core::dflog::encode_esc`), by DShot line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogFields {
+    /// Raw eRPM of the latest capture; 0 if the line has not reported one.
+    pub erpm: [u32; LINES],
+    /// Volts in centivolts (mV / 10, saturating at `i16::MAX`); 0 if not reported.
+    pub volts_cv: [i16; LINES],
+    /// Degrees Celsius; 0 if not reported.
+    pub temp_c: [u8; LINES],
+    /// Bit i (i < 4): line i captured an eRPM after `since_us`; bit 4: this exchange sent the flight throttles.
+    pub flags: u8,
+}
+
+/// The ESC record's fields from `status`; `since_us` is the time of the previous ESC record. Pure.
+pub fn log_fields(status: &EscStatus, since_us: u64) -> LogFields {
+    let mut f = LogFields {
+        erpm: [0; LINES],
+        volts_cv: [0; LINES],
+        temp_c: [0; LINES],
+        flags: if status.flight_spin { 1 << 4 } else { 0 },
+    };
+    for (i, line) in status.lines.iter().enumerate() {
+        if let Some((erpm, t)) = line.erpm {
+            f.erpm[i] = erpm;
+            if t > since_us {
+                f.flags |= 1 << i;
+            }
+        }
+        if let Some((mv, _)) = line.voltage_mv {
+            f.volts_cv[i] = i16::try_from(mv / 10).unwrap_or(i16::MAX);
+        }
+        if let Some((c, _)) = line.temperature_c {
+            f.temp_c[i] = c;
+        }
+    }
+    f
+}
+
 /// The deadline of the exchange after the one due at `deadline_us`, given `now_us` (the time the
 /// task looks at the clock): `deadline + 1000 us`; but when `now` is already more than one period
 /// past that, `now`, so a stall costs one late frame and never a burst of catch-up frames.
@@ -402,6 +440,39 @@ mod tests {
 
     /// The initial flight command (`flight::OUT` before the first step).
     const NO_FLIGHT: (u64, MotorCommand) = (0, MotorCommand::STOP);
+
+    #[test]
+    fn log_fields_fresh_bits_and_units() {
+        let mut st = EscStatus::INITIAL;
+        // Nothing reported: all 0, no bits.
+        let f = log_fields(&st, 0);
+        assert_eq!(
+            (f.erpm, f.volts_cv, f.temp_c, f.flags),
+            ([0; 4], [0; 4], [0; 4], 0)
+        );
+        st.lines[0].erpm = Some((12_345, 5_000)); // after since: fresh
+        st.lines[1].erpm = Some((777, 4_000)); // at since: not fresh
+        st.lines[2].erpm = Some((0, 3_000)); // a stopped motor reported 0, older
+        st.lines[3].erpm = None; // never reported
+        st.lines[0].voltage_mv = Some((16_840, 1));
+        st.lines[1].voltage_mv = Some((9, 1)); // 0.009 V rounds down to 0
+        st.lines[2].voltage_mv = Some((4_000_000, 1)); // saturates
+        st.lines[0].temperature_c = Some((42, 1));
+        st.lines[3].temperature_c = Some((255, 1));
+        let f = log_fields(&st, 4_000);
+        assert_eq!(f.erpm, [12_345, 777, 0, 0]);
+        assert_eq!(f.volts_cv, [1_684, 0, i16::MAX, 0]);
+        assert_eq!(f.temp_c, [42, 0, 0, 255]);
+        assert_eq!(f.flags, 0b0_0001);
+        // All four captured after `since`, and the exchange sent the flight throttles.
+        for line in &mut st.lines {
+            line.erpm = Some((1, 9_000));
+        }
+        st.flight_spin = true;
+        assert_eq!(log_fields(&st, 4_000).flags, 0b1_1111);
+        st.flight_spin = false;
+        assert_eq!(log_fields(&st, 9_000).flags, 0);
+    }
 
     /// One exchange at `t_ms` milliseconds; returns the frames sent.
     fn step(esc: &mut Esc, t_ms: u64, caps: [LineCapture; LINES]) -> [LineFrame; LINES] {
