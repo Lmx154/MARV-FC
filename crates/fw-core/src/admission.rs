@@ -13,12 +13,17 @@
 //! the vehicle for 30 s; it ends FAILED after [`MAG_CALIBRATION_MAX_MS`]); each only with every other
 //! parameter zero. The all-zero 241 cancels the running calibration.
 //!
+//! `MAV_CMD_DO_MOTOR_TEST` (209) is not a long action: [`MotorTest`] admits it (ACCEPTED at once, no
+//! IN_PROGRESS, nothing in the book) and numbers the [`TestCmd`] the firmware hands to the flight core.
+//!
 //! The ACKs of a long action: the answer to the command is IN_PROGRESS (0 %); later
 //! [`ActionBook::next_ack`] hands out IN_PROGRESS with the percentage at 2 Hz, then the one final ACK,
 //! both only for the link the command came from.
 
 use mavlink_device::marv::{MarvDevice, MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
+
+use crate::esc::{TEST_BURST_MAX_US, TEST_CAP, TestCmd, line_of_element};
 
 /// Maximum duration of a gyroscope or accelerometer calibration, in milliseconds.
 pub const CALIBRATION_MAX_MS: u64 = 15_000;
@@ -304,6 +309,13 @@ impl ActionBook {
             .map(|r| r.action)
     }
 
+    /// True when an action is in the books (running, or ended with its final ACK still owed): the
+    /// state in which [`ActionBook::admit`] answers TEMPORARILY_REJECTED.
+    pub fn busy(&mut self, now_ms: u64) -> bool {
+        self.expire(now_ms);
+        self.slot.is_some()
+    }
+
     /// End by itself, FAILED, an action past its maximum duration. Returns the action that ended now.
     fn expire(&mut self, now_ms: u64) -> Option<Action> {
         let run = self.slot.as_mut()?;
@@ -471,6 +483,215 @@ impl ActionBook {
             run.orphan = true;
         }
         self.reap();
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Motor test (`decision-motor-test-20261118`, amendment A, Q1).
+// ---------------------------------------------------------------------------------------------
+
+/// The highest throttle of a motor test, in percent (param3).
+pub const MOTOR_TEST_PERCENT_MAX: f32 = 5.0;
+/// The longest spin of a motor test, in seconds (param4).
+pub const MOTOR_TEST_SECONDS_MAX: f32 = 3.0;
+/// Throttle levels per percent: 2000 levels are 100 % (`dshot_spin` `step_level`,
+/// `dshot/hil/src/bin/dshot_spin.rs` 202-206, "each at least 1"; the owner's mapping: 5 % is level 100).
+const LEVELS_PER_PERCENT: f32 = 20.0;
+
+const _: () = assert!(
+    (MOTOR_TEST_PERCENT_MAX * LEVELS_PER_PERCENT + 0.5) as u16 <= TEST_CAP,
+    "the highest accepted throttle is above TEST_CAP"
+);
+const _: () = assert!(
+    (MOTOR_TEST_SECONDS_MAX * 1.0e6) as u64 <= TEST_BURST_MAX_US,
+    "the longest accepted spin is above TEST_BURST_MAX_US"
+);
+
+const MT_MOTOR: &str = "motor test: motor must be 1 to 4";
+const MT_TYPE: &str = "motor test: type must be 0 (percent)";
+const MT_THROTTLE: &str = "motor test: throttle must be 0 to 5 %";
+const MT_DURATION: &str = "motor test: duration must be 0 to 3 s";
+const MT_COUNT: &str = "motor test: count must be 0 or 1";
+const MT_ORDER: &str = "motor test: order must be 0 or 2";
+const MT_PARAM7: &str = "motor test: param7 must be 0";
+
+/// What a `MAV_CMD_DO_MOTOR_TEST` asks for, parameters checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MotorTestRequest {
+    /// Stop now (param3 = 0).
+    Stop,
+    /// Spin the motor `motor` (1..=4, the board label M1..M4) at throttle `level` (of 2000) for
+    /// `duration_us`.
+    Spin {
+        /// M1..M4.
+        motor: u8,
+        /// 1..=[`TEST_CAP`].
+        level: u16,
+        /// 1..=3 000 000 us.
+        duration_us: u64,
+    },
+}
+
+/// The motor-test table of the decision (Q1): param1 a whole number 1-4, param2 0, param3 0 (stop) or
+/// above 0 up to 5.0, param4 above 0 up to 3.0 when param3 > 0 (ignored for a stop), param5 0 or 1,
+/// param6 0 or 2, param7 0. Anything else, NaN included, is refused with a "motor test: ..." text.
+/// Returns the motor (1..=4) with the request.
+pub fn classify_motor_test(params: &[f32; 7]) -> Result<(u8, MotorTestRequest), &'static str> {
+    let [p1, p2, p3, p4, p5, p6, p7] = *params;
+    let motor = match int(p1) {
+        Some(n @ 1..=4) => n as u8,
+        _ => return Err(MT_MOTOR),
+    };
+    if p2 != 0.0 {
+        return Err(MT_TYPE);
+    }
+    if !(0.0..=MOTOR_TEST_PERCENT_MAX).contains(&p3) {
+        return Err(MT_THROTTLE);
+    }
+    let spin = p3 > 0.0;
+    if spin && !(p4 > 0.0 && p4 <= MOTOR_TEST_SECONDS_MAX) {
+        return Err(MT_DURATION);
+    }
+    if p5 != 0.0 && p5 != 1.0 {
+        return Err(MT_COUNT);
+    }
+    if p6 != 0.0 && p6 != 2.0 {
+        return Err(MT_ORDER);
+    }
+    if p7 != 0.0 {
+        return Err(MT_PARAM7);
+    }
+    if !spin {
+        return Ok((motor, MotorTestRequest::Stop));
+    }
+    // p3 is above 0 and at most 5.0 here: adding 0.5 and truncating is round(), and the level is
+    // at least 1.
+    let level = ((p3 * LEVELS_PER_PERCENT + 0.5) as u16).max(1);
+    let duration_us = (p4 * 1.0e6) as u64;
+    Ok((
+        motor,
+        MotorTestRequest::Spin {
+            motor,
+            level,
+            duration_us,
+        },
+    ))
+}
+
+/// The decision of [`MotorTest::admit`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MotorTestDecision {
+    /// The answer to the command: ACCEPTED at once, TEMPORARILY_REJECTED or DENIED.
+    pub outcome: CommandOutcome,
+    /// For DENIED: the STATUSTEXT, "motor test: <reason>".
+    pub text: Option<&'static str>,
+    /// For ACCEPTED: the whole command to write to the flight core's cell (a new `seq`).
+    pub cmd: Option<TestCmd>,
+    /// The motor (1..=4) of an accepted command.
+    pub motor: u8,
+    /// For an accepted spin: its level (of 2000), else 0.
+    pub level: u16,
+}
+
+/// Core 0's record of the motor test: the `seq` of the last command it gave the flight core, and until
+/// when the last accepted spin runs. Pure: no clock, no cell.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MotorTest {
+    seq: u32,
+    spin_until_us: Option<u64>,
+}
+
+impl MotorTest {
+    /// Nothing sent yet: the first command gets `seq` 1.
+    pub const fn new() -> Self {
+        Self {
+            seq: 0,
+            spin_until_us: None,
+        }
+    }
+
+    /// True while a spin accepted here is not over: its `until_us` is not reached and no stop was
+    /// accepted since. The firmware passes this (or `armed`) as `armed` to [`ActionBook::admit`], so
+    /// every other action is TEMPORARILY_REJECTED during a spin.
+    pub fn spin_active(&self, now_us: u64) -> bool {
+        self.spin_until_us.is_some_and(|until| now_us < until)
+    }
+
+    /// The next `seq`: counts from 1 and skips 0 on wrap (the flight core treats 0 as done, and
+    /// ignores a change of fields under the same `seq`).
+    fn next_seq(&mut self) -> u32 {
+        self.seq = match self.seq.wrapping_add(1) {
+            0 => 1,
+            n => n,
+        };
+        self.seq
+    }
+
+    /// Decide a `MAV_CMD_DO_MOTOR_TEST` with `params` at board time `now_us`. `book_busy`: another long
+    /// action is in the books ([`ActionBook::busy`]); `armed` the vehicle is armed.
+    ///
+    /// DENIED for a parameter outside [`classify_motor_test`]'s table. A stop is ACCEPTED in every state.
+    /// A spin is TEMPORARILY_REJECTED if `book_busy` or `armed`; otherwise ACCEPTED at once, and it
+    /// replaces a running spin (a spin running here does not refuse it). Every accepted command, spin or
+    /// stop, gets a new `seq` and a whole [`TestCmd`].
+    pub fn admit(
+        &mut self,
+        params: &[f32; 7],
+        book_busy: bool,
+        armed: bool,
+        now_us: u64,
+    ) -> MotorTestDecision {
+        let none = |result| MotorTestDecision {
+            outcome: CommandOutcome::new(result),
+            text: None,
+            cmd: None,
+            motor: 0,
+            level: 0,
+        };
+        let (motor, request) = match classify_motor_test(params) {
+            Ok(ok) => ok,
+            Err(text) => {
+                return MotorTestDecision {
+                    text: Some(text),
+                    ..none(MavResult::MAV_RESULT_DENIED)
+                };
+            }
+        };
+        let cmd = match request {
+            MotorTestRequest::Stop => {
+                self.spin_until_us = None;
+                TestCmd {
+                    seq: self.next_seq(),
+                    line: 0,
+                    level: 0,
+                    until_us: 0,
+                }
+            }
+            MotorTestRequest::Spin {
+                motor,
+                level,
+                duration_us,
+            } => {
+                if book_busy || armed {
+                    return none(MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+                }
+                let until_us = now_us.saturating_add(duration_us);
+                self.spin_until_us = Some(until_us);
+                TestCmd {
+                    seq: self.next_seq(),
+                    // `motor` is 1..=4, so the mapping has an answer; 0 is a line that is a stop's.
+                    line: line_of_element(usize::from(motor - 1)).map_or(0, |l| l as u8),
+                    level,
+                    until_us,
+                }
+            }
+        };
+        MotorTestDecision {
+            cmd: Some(cmd),
+            motor,
+            level: cmd.level,
+            ..none(MavResult::MAV_RESULT_ACCEPTED)
+        }
     }
 }
 
@@ -1188,5 +1409,351 @@ mod tests {
         assert!(
             e.is_some_and(|e| e.contains("ack after the final one") || e.contains("no admitted"))
         );
+    }
+
+    // ---- motor test (decision-motor-test-20261118, amendment A, T6) ----
+
+    /// A spin of motor `m` at `pct` percent for `secs` seconds, the rest of the table at its zeros.
+    fn spin(m: f32, pct: f32, secs: f32) -> [f32; 7] {
+        p(&[(0, m), (2, pct), (3, secs)])
+    }
+
+    fn stop(m: f32) -> [f32; 7] {
+        p(&[(0, m)])
+    }
+
+    #[test]
+    fn motor_test_accepts_every_row_of_the_table() {
+        let ok = |params: [f32; 7]| classify_motor_test(&params);
+        let sp = |motor, level, duration_us| MotorTestRequest::Spin {
+            motor,
+            level,
+            duration_us,
+        };
+        assert_eq!(ok(spin(1.0, 5.0, 3.0)), Ok((1, sp(1, 100, 3_000_000))));
+        assert_eq!(ok(spin(4.0, 0.05, 0.1)), Ok((4, sp(4, 1, 100_000))));
+        assert_eq!(ok(spin(2.0, 1.65, 2.0)), Ok((2, sp(2, 33, 2_000_000))));
+        // Count 0 or 1, order 0 or 2.
+        for (count, order) in [(0.0, 0.0), (1.0, 0.0), (0.0, 2.0), (1.0, 2.0)] {
+            let mut q = spin(3.0, 2.0, 1.0);
+            q[4] = count;
+            q[5] = order;
+            assert_eq!(ok(q), Ok((3, sp(3, 40, 1_000_000))), "{q:?}");
+        }
+        assert_eq!(ok(stop(1.0)), Ok((1, MotorTestRequest::Stop)));
+        assert_eq!(ok(stop(4.0)), Ok((4, MotorTestRequest::Stop)));
+        // The duration is ignored for a stop, even when it is nonsense.
+        let mut q = stop(2.0);
+        q[3] = f32::NAN;
+        assert_eq!(ok(q), Ok((2, MotorTestRequest::Stop)));
+        q[3] = 99.0;
+        assert_eq!(ok(q), Ok((2, MotorTestRequest::Stop)));
+        assert_eq!(
+            ok(p(&[(0, 1.0), (2, -0.0)])),
+            Ok((1, MotorTestRequest::Stop))
+        );
+    }
+
+    #[test]
+    fn motor_test_refuses_every_row_outside_the_table_with_its_text() {
+        let nan = f32::NAN;
+        let inf = f32::INFINITY;
+        let with = |i: usize, v: f32| {
+            let mut q = spin(1.0, 2.0, 1.0);
+            q[i] = v;
+            q
+        };
+        let rows: Vec<([f32; 7], &str)> = std::vec![
+            // param1
+            (with(0, 0.0), MT_MOTOR),
+            (with(0, 5.0), MT_MOTOR),
+            (with(0, -1.0), MT_MOTOR),
+            (with(0, 1.5), MT_MOTOR),
+            (with(0, nan), MT_MOTOR),
+            (with(0, inf), MT_MOTOR),
+            (stop(0.0), MT_MOTOR),
+            (stop(5.0), MT_MOTOR),
+            // param2
+            (with(1, 1.0), MT_TYPE),
+            (with(1, 2.0), MT_TYPE),
+            (with(1, nan), MT_TYPE),
+            // param3
+            (with(2, 5.01), MT_THROTTLE),
+            (with(2, 100.0), MT_THROTTLE),
+            (with(2, -0.1), MT_THROTTLE),
+            (with(2, nan), MT_THROTTLE),
+            (with(2, inf), MT_THROTTLE),
+            (with(2, f32::NEG_INFINITY), MT_THROTTLE),
+            // param4 (a spin)
+            (with(3, 0.0), MT_DURATION),
+            (with(3, -1.0), MT_DURATION),
+            (with(3, 3.01), MT_DURATION),
+            (with(3, nan), MT_DURATION),
+            (with(3, inf), MT_DURATION),
+            // param5
+            (with(4, 2.0), MT_COUNT),
+            (with(4, -1.0), MT_COUNT),
+            (with(4, 0.5), MT_COUNT),
+            (with(4, nan), MT_COUNT),
+            // param6
+            (with(5, 1.0), MT_ORDER),
+            (with(5, 3.0), MT_ORDER),
+            (with(5, nan), MT_ORDER),
+            // param7
+            (with(6, 1.0), MT_PARAM7),
+            (with(6, -1.0), MT_PARAM7),
+            (with(6, nan), MT_PARAM7),
+        ];
+        for (params, text) in rows {
+            assert_eq!(classify_motor_test(&params), Err(text), "{params:?}");
+            // The decision is DENIED with the text, nothing for the flight core, in any state.
+            for (busy, armed) in [(false, false), (true, false), (false, true), (true, true)] {
+                let mut mt = MotorTest::new();
+                let d = mt.admit(&params, busy, armed, 5);
+                assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED, "{params:?}");
+                assert_eq!(d.text, Some(text));
+                assert_eq!(d.cmd, None);
+                assert!(!mt.spin_active(6));
+            }
+        }
+        // Stop rows of the other parameters are checked too.
+        for i in [1, 4, 5, 6] {
+            let mut q = stop(1.0);
+            q[i] = 7.0;
+            assert!(classify_motor_test(&q).is_err(), "{q:?}");
+        }
+        for t in [
+            MT_MOTOR,
+            MT_TYPE,
+            MT_THROTTLE,
+            MT_DURATION,
+            MT_COUNT,
+            MT_ORDER,
+            MT_PARAM7,
+        ] {
+            assert!(t.starts_with("motor test: "));
+            assert!(t.len() <= 50, "{t}: STATUSTEXT holds 50 bytes");
+        }
+    }
+
+    #[test]
+    fn motor_test_level_is_round_of_twenty_per_percent_at_least_one() {
+        let level = |pct: f32| match classify_motor_test(&spin(1.0, pct, 1.0)) {
+            Ok((_, MotorTestRequest::Spin { level, .. })) => level,
+            other => panic!("{pct}: {other:?}"),
+        };
+        assert_eq!(level(5.0), TEST_CAP);
+        assert_eq!(level(0.01), 1);
+        assert_eq!(level(0.02), 1);
+        assert_eq!(level(0.03), 1);
+        assert_eq!(level(0.04), 1);
+        assert_eq!(level(0.07), 1);
+        assert_eq!(level(0.08), 2);
+        assert_eq!(level(1.0), 20);
+        assert_eq!(level(1.65), 33);
+        assert_eq!(level(3.3), 66);
+        assert_eq!(level(4.99), 100);
+        for k in 1..=5000u32 {
+            let pct = k as f32 / 1000.0;
+            let l = level(pct);
+            assert!((1..=TEST_CAP).contains(&l), "{pct}: {l}");
+        }
+    }
+
+    #[test]
+    fn motor_test_motors_map_to_lines_by_line_of_element() {
+        let mut mt = MotorTest::new();
+        for motor in 1..=4u8 {
+            let d = mt.admit(&spin(f32::from(motor), 5.0, 1.0), false, false, 1_000);
+            assert_eq!(d.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
+            let cmd = d.cmd.unwrap();
+            assert_eq!(
+                usize::from(cmd.line),
+                line_of_element(usize::from(motor) - 1).unwrap()
+            );
+            assert_eq!((d.motor, d.level, cmd.level), (motor, 100, 100));
+            assert_eq!(cmd.until_us, 1_000 + 1_000_000);
+        }
+        // M1 is line 3 and M4 line 0.
+        let m1 = mt.admit(&spin(1.0, 1.0, 1.0), false, false, 0).cmd.unwrap();
+        let m4 = mt.admit(&spin(4.0, 1.0, 1.0), false, false, 0).cmd.unwrap();
+        assert_eq!((m1.line, m4.line), (3, 0));
+    }
+
+    #[test]
+    fn motor_test_spin_is_temporarily_rejected_when_the_book_is_busy_or_armed() {
+        for (busy, armed) in [(true, false), (false, true), (true, true)] {
+            let mut mt = MotorTest::new();
+            let d = mt.admit(&spin(1.0, 5.0, 1.0), busy, armed, 10);
+            assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+            assert_eq!((d.cmd, d.text), (None, None));
+            assert!(!mt.spin_active(11), "a refused spin is not a spin");
+            // And it took no seq.
+            assert_eq!(mt.seq, 0);
+        }
+        // With the real book: a long action in it.
+        let mut b = ActionBook::new();
+        let mut mt = MotorTest::new();
+        assert!(!b.busy(0));
+        admit(&mut b, &req(CAL, p(&[(0, 1.0)]), GCS), false, false, 0);
+        assert!(b.busy(1));
+        let d = mt.admit(&spin(1.0, 5.0, 1.0), b.busy(1), false, 1_000);
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
+        // After the action's timeout and its final ACK the books are free.
+        assert!(b.busy(CALIBRATION_MAX_MS));
+        assert!(b.next_ack(0, CALIBRATION_MAX_MS).is_some());
+        assert!(!b.busy(CALIBRATION_MAX_MS));
+        let d = mt.admit(
+            &spin(1.0, 5.0, 1.0),
+            b.busy(CALIBRATION_MAX_MS),
+            false,
+            20_000_000,
+        );
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
+    }
+
+    #[test]
+    fn motor_test_stop_is_accepted_in_every_state() {
+        for (busy, armed, spinning) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, false),
+            (false, false, true),
+            (true, true, true),
+        ] {
+            let mut mt = MotorTest::new();
+            if spinning {
+                mt.admit(&spin(2.0, 5.0, 3.0), false, false, 0);
+                assert!(mt.spin_active(1));
+            }
+            let d = mt.admit(&stop(3.0), busy, armed, 1);
+            assert_eq!(d.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
+            assert_eq!(d.text, None);
+            let cmd = d.cmd.unwrap();
+            assert_eq!((cmd.level, cmd.until_us), (0, 0));
+            assert!(
+                !mt.spin_active(2),
+                "a stop ends the spin in core 0's record"
+            );
+        }
+    }
+
+    #[test]
+    fn motor_test_spin_during_a_spin_is_accepted_and_replaces_it() {
+        let mut mt = MotorTest::new();
+        let first = mt
+            .admit(&spin(1.0, 5.0, 3.0), false, false, 1_000)
+            .cmd
+            .unwrap();
+        assert!(mt.spin_active(2_000));
+        // The same bits again, and another motor, are new commands with new seqs.
+        let again = mt.admit(&spin(1.0, 5.0, 3.0), false, false, 2_000);
+        assert_eq!(again.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
+        let again = again.cmd.unwrap();
+        assert_ne!(again.seq, first.seq);
+        assert_eq!(again.until_us, 2_000 + 3_000_000);
+        let other = mt
+            .admit(&spin(3.0, 1.0, 0.5), false, false, 3_000)
+            .cmd
+            .unwrap();
+        assert_ne!(other.seq, again.seq);
+        assert_eq!((other.line, other.level), (1, 20));
+        // Core 0's record follows the latest spin.
+        assert!(mt.spin_active(3_000 + 499_999));
+        assert!(!mt.spin_active(3_000 + 500_000));
+    }
+
+    #[test]
+    fn motor_test_refuses_other_actions_during_a_spin_and_admits_them_after_until() {
+        let mut b = ActionBook::new();
+        let mut mt = MotorTest::new();
+        let now_us = 10_000_000;
+        let d = mt.admit(&spin(2.0, 5.0, 2.0), b.busy(now_us / 1000), false, now_us);
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
+        // The book holds nothing for a motor test.
+        assert!(!b.busy(now_us / 1000));
+        let save = req(STO, SAVE, GCS);
+        let at = |t_us: u64, b: &mut ActionBook, mt: &MotorTest| {
+            b.admit(&save, 0, mt.spin_active(t_us), false, t_us / 1000)
+                .outcome
+                .result
+        };
+        assert_eq!(
+            at(now_us + 1, &mut b, &mt),
+            MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+        );
+        assert_eq!(
+            at(now_us + 1_999_999, &mut b, &mt),
+            MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+        );
+        assert_eq!(
+            at(now_us + 2_000_000, &mut b, &mt),
+            MavResult::MAV_RESULT_IN_PROGRESS
+        );
+        // A stop frees the others at once.
+        let mut b = ActionBook::new();
+        let mut mt = MotorTest::new();
+        mt.admit(&spin(2.0, 5.0, 3.0), false, false, now_us);
+        assert_eq!(
+            at(now_us + 1, &mut b, &mt),
+            MavResult::MAV_RESULT_TEMPORARILY_REJECTED
+        );
+        mt.admit(&stop(2.0), false, false, now_us + 2);
+        assert_eq!(
+            at(now_us + 3, &mut b, &mt),
+            MavResult::MAV_RESULT_IN_PROGRESS
+        );
+        // And unsupported or denied commands keep their answers during a spin (classification first).
+        let mut b = ActionBook::new();
+        let mut mt = MotorTest::new();
+        mt.admit(&spin(2.0, 5.0, 3.0), false, false, now_us);
+        let d = b.admit(
+            &req(MavCmd::MAV_CMD_NAV_TAKEOFF, [0.0; 7], GCS),
+            0,
+            mt.spin_active(now_us + 1),
+            false,
+            now_us / 1000,
+        );
+        assert_eq!(d.outcome.result, MavResult::MAV_RESULT_UNSUPPORTED);
+    }
+
+    #[test]
+    fn motor_test_seq_counts_from_one_skips_zero_and_never_repeats_across_a_wrap() {
+        let mut mt = MotorTest::new();
+        let first = mt.admit(&spin(1.0, 1.0, 1.0), false, false, 0).cmd.unwrap();
+        assert_eq!(first.seq, 1);
+        assert_ne!(first.seq, TestCmd::INITIAL.seq);
+        // Spin and stop alternate, each with a new seq.
+        let mut last = first.seq;
+        for i in 0..10u32 {
+            let params = if i % 2 == 0 {
+                stop(1.0)
+            } else {
+                spin(1.0, 1.0, 1.0)
+            };
+            let cmd = mt.admit(&params, false, false, 0).cmd.unwrap();
+            assert_eq!(cmd.seq, last + 1);
+            last = cmd.seq;
+        }
+        // Wrap: 0 is skipped, and no seq within a window of the wrap repeats.
+        let mut mt = MotorTest::new();
+        mt.seq = u32::MAX - 3;
+        let mut seen = Vec::new();
+        for i in 0..8u32 {
+            let params = if i % 3 == 0 {
+                stop(2.0)
+            } else {
+                spin(2.0, 1.0, 1.0)
+            };
+            seen.push(mt.admit(&params, false, false, 0).cmd.unwrap().seq);
+        }
+        assert_eq!(
+            seen,
+            std::vec![u32::MAX - 2, u32::MAX - 1, u32::MAX, 1, 2, 3, 4, 5]
+        );
+        assert!(!seen.contains(&0));
+        // Two neighbours differ always (a change under the same seq would be honoured live).
+        assert!(seen.windows(2).all(|w| w[0] != w[1]));
     }
 }
