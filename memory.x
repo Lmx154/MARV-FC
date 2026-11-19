@@ -90,15 +90,17 @@ SECTIONS {
     .ram_text : ALIGN(8)
     {
         __sram_text = .;
-        *(.text.SIO_IRQ_FIFO .text.DMA_IRQ_0 .text.IO_IRQ_BANK0)
+        *(.text.SIO_IRQ_FIFO .text.DMA_IRQ_0 .text.IO_IRQ_BANK0 .text.PIO2_IRQ_0)
         *(.text._critical_section_1_0_acquire .text._critical_section_1_0_release .text._embassy_time_now)
         *(.text.__aeabi_mem* .text.*17compiler_builtins3mem*)
-        *(.text.*8icm45686* .text.*11lsm6dsk320x*)
-        *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness*)
+        *(.text.*8icm45686* .text.*11lsm6dsk320x* .text.*5dshot*)
+        *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness* .text.*9fw_flight3esc*)
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
+        /* esc: only its core-1 items (the driver's build, the task); its core-0 readers stay in flash. */
+        *(.text.*16marv_v2_firmware3esc6driver* .text.*16marv_v2_firmware3esc4task* .text.*16marv_v2_firmware3esc11___task_task*)
         *(.text.*16marv_v2_firmware10imu_inject* .text.*16marv_v2_firmware14flight_latency*)
         *(.text.*16marv_v2_firmware10core1_main* .text.*16marv_v2_firmware12___fbeat_task* .text.*16marv_v2_firmware6now_us*)
-        *(.text.*10embassy_rp3spi* .text.*10embassy_rp3dma* .text.*10embassy_rp4gpio*)
+        *(.text.*10embassy_rp3spi* .text.*10embassy_rp3dma* .text.*10embassy_rp4gpio* .text.*10embassy_rp3pio* .text.*8pio_core*)
         *(.text.*10embassy_rp9multicore* .text.*10embassy_rp*6RegExt*)
         *(.text.*16embassy_executor3raw5waker* .text.*16embassy_executor3raw*8Executor* .text.*16embassy_executor8platform6thread*)
         *(.text.*12atomic_waker* .text.*12embassy_time5delay9block_for* .text.*12embassy_time7instant*)
