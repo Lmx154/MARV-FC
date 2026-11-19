@@ -414,6 +414,11 @@ dependencies = [
 name = "dshot"
 version = "0.1.0"
 source = "git+https://github.com/Lmx154/dshot-rs.git?rev=3557eb111097400c91277c5a69ddefce22c3be44#3557eb111097400c91277c5a69ddefce22c3be44"
+dependencies = [
+ "defmt",
+ "embassy-rp",
+ "embedded-hal-async",
+]
 
 [[package]]
 name = "either"
@@ -1054,6 +1059,7 @@ dependencies = [
  "critical-section",
  "defmt",
  "defmt-rtt",
+ "dshot",
  "embassy-executor",
  "embassy-futures",
  "embassy-rp",

@@ -42,6 +42,9 @@ mod batt;
 mod busclear;
 mod calibration;
 mod device;
+// With `esc-off` the ESC task is not built: only the core-0 readers of `esc` are used.
+#[cfg_attr(feature = "esc-off", allow(dead_code))]
+mod esc;
 mod flight_latency;
 mod gnss;
 mod i2cbus;
@@ -85,7 +88,7 @@ use embassy_executor::{Executor, Spawner};
 use embassy_futures::select::{Either, select};
 use embassy_rp::interrupt::{self, InterruptExt};
 use embassy_rp::multicore::{Stack, spawn_core1};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, USB};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, DMA_CH3, DMA_CH5, USB};
 use embassy_rp::usb::{Driver, InterruptHandler};
 use embassy_rp::{bind_interrupts, dma};
 use embassy_sync::blocking_mutex::Mutex;
@@ -116,17 +119,18 @@ bind_interrupts!(struct Irqs {
 });
 
 // The program's one `DMA_IRQ_0` binding, the flight core's (F4): IMU1's channels 0 and 1, IMU2's 2
-// and 3; the negative control's channel 6 on core 0 is bound here too.
+// and 3, the ESC reply capture's 5; the negative control's channel 6 on core 0 is bound here too.
 #[cfg(not(feature = "f4-negative"))]
 bind_interrupts!(pub struct DmaIrqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>,
-        dma::InterruptHandler<DMA_CH2>, dma::InterruptHandler<DMA_CH3>;
+        dma::InterruptHandler<DMA_CH2>, dma::InterruptHandler<DMA_CH3>,
+        dma::InterruptHandler<DMA_CH5>;
 });
 #[cfg(feature = "f4-negative")]
 bind_interrupts!(pub struct DmaIrqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>,
         dma::InterruptHandler<DMA_CH2>, dma::InterruptHandler<DMA_CH3>,
-        dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>;
+        dma::InterruptHandler<DMA_CH5>, dma::InterruptHandler<embassy_rp::peripherals::DMA_CH6>;
 });
 
 type UsbDriver = Driver<'static, USB>;
@@ -153,6 +157,9 @@ static CORE1_DMA_IRQ0: AtomicU8 = AtomicU8::new(0);
 /// Core 1's `DMA_IRQ_1` (the SD card's line, core 0 only), read at the same point; stored before
 /// `CORE1_DMA_IRQ0`, so it is published once that is: 0 not read yet, 1 disabled, 2 enabled.
 pub static CORE1_DMA_IRQ1: AtomicU8 = AtomicU8::new(0);
+/// Core 1's `PIO2_IRQ_0` after it built the ESC driver, read at the same point and stored before
+/// `CORE1_DMA_IRQ0`: 0 not read yet, 1 disabled, 2 enabled, 3 the driver refused its parts.
+static CORE1_PIO2_IRQ0: AtomicU8 = AtomicU8::new(0);
 /// Core 1's VTOR as it read it back after pointing it at `CORE1_VECTOR_TABLE`; 0 until then.
 static CORE1_VTOR: AtomicU32 = AtomicU32::new(0);
 
@@ -204,8 +211,9 @@ const TEXTS_DEPTH: usize = if cfg!(feature = "latency-text") {
 } else {
     8
 };
-/// The registry rows and the RC row (report only, `rc`), in the order sent.
-pub const ROWS: usize = DEVICE_COUNT + 1;
+/// The registry rows, the RC row (report only, `rc`) and the ESC row (report only, `esc`), in the
+/// order sent.
+pub const ROWS: usize = DEVICE_COUNT + 2;
 
 const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
@@ -232,6 +240,12 @@ const RC_CHANNELS_INTERVAL_US: i32 = 200_000;
 /// (USB only).
 const MANUAL_CONTROL_ID: u32 = 69;
 const MANUAL_CONTROL_INTERVAL_US: i32 = 200_000;
+/// ESC_STATUS at 10 Hz (fastest 50 Hz) and ESC_INFO at 1 Hz (fastest 10 Hz) while the flight core's
+/// ESC data is not older than 1 s (USB only).
+const ESC_STATUS_ID: u32 = 291;
+const ESC_STATUS_INTERVAL_US: i32 = 100_000;
+const ESC_INFO_ID: u32 = 290;
+const ESC_INFO_INTERVAL_US: i32 = 1_000_000;
 /// The receiver's value is not sent once its latest sample is older than this (3 fix periods; the
 /// 1 s of the fast sensors would be one period of this one).
 const GPS_STALE_US: u64 = 3_000_000;
@@ -278,7 +292,11 @@ async fn fbeat() -> ! {
     .await
 }
 
-fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
+fn core1_main(
+    imu1_parts: imu1::Parts,
+    imu2_parts: imu2::Parts,
+    #[cfg(not(feature = "esc-off"))] esc_parts: esc::Parts,
+) -> ! {
     let table = CORE1_VECTOR_TABLE.0.get() as u32;
     // SAFETY: the executing core's own VTOR; the table is aligned to 512 bytes and was filled by core
     // 0 before this core started. No interrupt of this core is enabled by this firmware yet.
@@ -296,6 +314,17 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
     // Built here so that the DMA and GPIO interrupts are enabled on this core's NVIC.
     let imu1 = imu1::adapter(imu1_parts);
     let imu2 = imu2::adapter(imu2_parts);
+    #[cfg(not(feature = "esc-off"))]
+    let esc_driver = esc::driver(esc_parts);
+    #[cfg(not(feature = "esc-off"))]
+    let pio2_irq0 = if esc_driver.is_some() {
+        1 + u8::from(interrupt::PIO2_IRQ_0.is_enabled())
+    } else {
+        3
+    };
+    #[cfg(feature = "esc-off")]
+    let pio2_irq0 = 1 + u8::from(interrupt::PIO2_IRQ_0.is_enabled());
+    CORE1_PIO2_IRQ0.store(pio2_irq0, Ordering::Release);
     CORE1_DMA_IRQ1.store(
         1 + u8::from(interrupt::DMA_IRQ_1.is_enabled()),
         Ordering::Release,
@@ -312,6 +341,10 @@ fn core1_main(imu1_parts: imu1::Parts, imu2_parts: imu2::Parts) -> ! {
             spawner.spawn(token);
         }
         if let Ok(token) = imu2::task(imu2, imu2_period_us) {
+            spawner.spawn(token);
+        }
+        #[cfg(not(feature = "esc-off"))]
+        if let Some(Ok(token)) = esc_driver.map(esc::task) {
             spawner.spawn(token);
         }
     })
@@ -366,14 +399,19 @@ struct Board {
 
 fn rows() -> [DeviceRow; ROWS] {
     let devices = DEVICES.map(Device::row);
-    core::array::from_fn(|i| devices.get(i).copied().unwrap_or_else(rc::row))
+    core::array::from_fn(|i| match devices.get(i) {
+        Some(row) => *row,
+        None if i == DEVICE_COUNT => rc::row(),
+        None => esc::row(),
+    })
 }
 
-/// Row `i`'s MARV_DEVICE_STATUS (`i` = `DEVICE_COUNT` is the RC row).
+/// Row `i`'s MARV_DEVICE_STATUS (`i` = `DEVICE_COUNT` is the RC row, `DEVICE_COUNT + 1` the ESC row).
 pub fn device_message(i: usize, now_us: u64) -> Option<MARV_DEVICE_STATUS_DATA> {
     match DEVICES.get(i) {
         Some(dev) => Some(dev.message(now_us)),
-        None => (i == DEVICE_COUNT).then(|| rc::message(now_us)),
+        None if i == DEVICE_COUNT => Some(rc::message(now_us)),
+        None => (i == DEVICE_COUNT + 1).then(|| esc::message(now_us)),
     }
 }
 
@@ -582,6 +620,12 @@ impl Telemetry for Board {
         if message_id == MANUAL_CONTROL_ID {
             return rc::manual_control(now_us).is_some_and(|m| out.push(&m).is_ok());
         }
+        if message_id == ESC_STATUS_ID {
+            return esc::esc_status(now_us).is_some_and(|m| out.push(&m).is_ok());
+        }
+        if message_id == ESC_INFO_ID {
+            return esc::esc_info(now_us).is_some_and(|m| out.push(&m).is_ok());
+        }
         if message_id == logdl::LOG_DATA_ID {
             return self.logs.sample(out);
         }
@@ -772,6 +816,16 @@ async fn link_loop(
             message_id: MANUAL_CONTROL_ID,
             default_interval_us: MANUAL_CONTROL_INTERVAL_US,
             min_interval_us: 20_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: ESC_STATUS_ID,
+            default_interval_us: ESC_STATUS_INTERVAL_US,
+            min_interval_us: 20_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: ESC_INFO_ID,
+            default_interval_us: ESC_INFO_INTERVAL_US,
+            min_interval_us: 100_000,
         }),
         StreamSlot::new(Stream {
             message_id: logdl::LOG_DATA_ID,
@@ -967,6 +1021,7 @@ async fn supervise() -> ! {
             }
             devices.stat(now);
             rc::stat(now);
+            esc::stat(now);
             calibration::stat();
             watchdog::stat();
             #[cfg(feature = "xip-stat")]
@@ -1216,6 +1271,16 @@ async fn main(spawner: Spawner) {
         offsets: imu2_offsets,
         setup: imu2_setup,
     };
+    #[cfg(not(feature = "esc-off"))]
+    let esc_parts = esc::Parts {
+        pio: p.PIO2,
+        pin36: p.PIN_36,
+        pin37: p.PIN_37,
+        pin38: p.PIN_38,
+        pin39: p.PIN_39,
+        dma: p.DMA_CH5,
+        clk_sys_hz: embassy_rp::clocks::clk_sys_freq(),
+    };
     unsafe extern "C" {
         static __vector_table: u32;
         static __vector_table_end: u32;
@@ -1229,7 +1294,12 @@ async fn main(spawner: Spawner) {
         core::ptr::copy_nonoverlapping(vectors, CORE1_VECTOR_TABLE.0.get().cast::<u32>(), words);
     }
     spawn_core1(p.CORE1, CORE1_STACK.take(), move || {
-        core1_main(imu1_parts, imu2_parts)
+        core1_main(
+            imu1_parts,
+            imu2_parts,
+            #[cfg(not(feature = "esc-off"))]
+            esc_parts,
+        )
     });
 
     let mut config = UsbConfig::new(0xc0de, 0xcafe);
@@ -1355,6 +1425,25 @@ async fn startup_checks() {
         !dma0_on,
         "DMA_IRQ_0 still not enabled on core 0 after core 1 started, enabled",
         u32::from(dma0_on),
+    );
+    let pio2_1 = CORE1_PIO2_IRQ0.load(Ordering::Acquire);
+    #[cfg(not(feature = "esc-off"))]
+    check(
+        pio2_1 == 2,
+        "PIO2_IRQ_0 enabled on core 1 after the ESC driver was built there (0 not read, 1 off, 2 on, 3 driver refused its parts)",
+        u32::from(pio2_1),
+    );
+    #[cfg(feature = "esc-off")]
+    check(
+        pio2_1 == 1,
+        "esc-off: PIO2_IRQ_0 not enabled on core 1 (0 not read, 1 off, 2 on)",
+        u32::from(pio2_1),
+    );
+    let pio2_0 = interrupt::PIO2_IRQ_0.is_enabled();
+    check(
+        !pio2_0,
+        "PIO2_IRQ_0 not enabled on core 0, enabled",
+        u32::from(pio2_0),
     );
     #[cfg(not(any(feature = "wdg-scratch-probe", feature = "no-fbeat")))]
     {

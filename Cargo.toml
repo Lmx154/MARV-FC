@@ -24,6 +24,9 @@ bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac83258
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }
 lc76g = { git = "https://github.com/Lmx154/lc76g-rs.git", rev = "2ee54f927bd0ffb7c4f7a4978c84cc2af962f405", features = ["defmt"] }
 pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "424fd58b4beb7607e426c398494c836b4bfe1fb3", features = ["defmt", "embassy-rp-0-10", "block-device-driver-0-2"] }
+# The four ESCs (src/esc.rs): bidirectional DShot on PIO2 with `PioDshot`; the same commit as in
+# crates/fw-flight/Cargo.toml, so there is one copy of it.
+dshot = { git = "https://github.com/Lmx154/dshot-rs.git", rev = "3557eb111097400c91277c5a69ddefce22c3be44", features = ["defmt", "embassy-rp-0-10"] }
 
 # The firmware's own crates: the hardware-free logic and the flight-core tasks.
 fw-core = { path = "crates/fw-core" }
@@ -122,6 +125,12 @@ inject-imu2-verify = ["inject-imu2"]
 inject-imu2 = ["inject-imu"]
 # Internal: on when an IMU injection feature is on (src/imu_inject.rs, the wrapper both IMUs use).
 inject-imu = []
+# Board checks of the ESC task (decision-esc-telemetry Q5), not for a release: esc-off: the ESC task is not
+# built or spawned, nothing touches PIO2, DMA channel 5 or GPIO36-39 (the IMU baseline of B3; the ESC row
+# reads FAILED, stuck); esc-no-edt: every frame the task sends is Stop, the EDT bursts are replaced (the
+# negative control of B1: no extended telemetry).
+esc-off = []
+esc-no-edt = []
 # Invariant F1 on the board: one core-0 task spins 1.2 s without yielding, once, 20 s after start.
 stall-core0 = []
 # NEGATIVE CONTROL of F4: a DMA channel built on core 0 before the start-up check (no transfer;

@@ -33,8 +33,13 @@ use crate::{CORE1_DMA_IRQ1, check};
 /// The SD card's channel (resources.md DMA row 4).
 const CH: usize = 4;
 const BIT: u32 = 1 << CH;
-/// INTE0 as the flight core leaves it: IMU1's channels 0 and 1, IMU2's 2 and 3.
-const FLIGHT_CHANNELS: u32 = 0x0f;
+/// INTE0 as the flight core leaves it: IMU1's channels 0 and 1, IMU2's 2 and 3, the ESC capture's 5
+/// (not built with `esc-off`).
+const FLIGHT_CHANNELS: u32 = if cfg!(feature = "esc-off") {
+    0x0f
+} else {
+    0x2f
+};
 /// The probe starts at this uptime (just after the 20 s `[STAT]` lines).
 const START_MS: u64 = 20_500;
 const PIECE: usize = 4096;
@@ -135,7 +140,7 @@ fn register_checks(after: &str) -> u32 {
     let core1 = CORE1_DMA_IRQ1.load(Ordering::Acquire);
     checked(
         inte[0] == FLIGHT_CHANNELS,
-        "sd-probe: INTE0 = exactly the flight core's channels 0-3, INTE0",
+        "sd-probe: INTE0 = exactly the flight core's channels (0-3, and 5 unless esc-off), INTE0",
         inte[0],
     ) + checked(inte[1] == BIT, "sd-probe: INTE1 = 1 << 4, INTE1", inte[1])
         + checked(inte[2] == 0, "sd-probe: INTE2 = 0, INTE2", inte[2])
