@@ -131,8 +131,8 @@ inject-imu2 = ["inject-imu"]
 inject-imu = []
 # Board checks of the ESC task (decision-esc-telemetry Q5), not for a release: esc-off: the ESC task is not
 # built or spawned, nothing touches PIO2, DMA channel 5 or GPIO36-39 (the IMU baseline of B3; the ESC row
-# reads FAILED, stuck); esc-no-edt: every frame the task sends is Stop, the EDT bursts are replaced (the
-# negative control of B1: no extended telemetry).
+# reads FAILED, stuck); esc-no-edt: no EDT burst starts, every other frame is unchanged (the negative control
+# of B1: no extended telemetry).
 esc-off = []
 esc-no-edt = []
 # Invariant F1 on the board: one core-0 task spins 1.2 s without yielding, once, 20 s after start.

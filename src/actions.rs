@@ -1,7 +1,8 @@
 //! The firmware's commands: the one `fw_core::admission::ActionBook`, the action each admitted
 //! command starts, and how each action ends. Link id 0 is USB, 1 the radio (`crate::LINK_*`); the
-//! final ACK goes only to the origin link (the book's rule). `armed` and `hil` are false until
-//! the arming code and the HIL source exist.
+//! final ACK goes only to the origin link (the book's rule). `armed` is the flight core's handshake
+//! (`settings::HANDSHAKE`), flight throttles sent (`esc::ESC`) or a motor-test spin; `hil` is false
+//! until the HIL source exists.
 //!
 //! Built: restart of every registry row (IMU1, IMU2, BARO, MAG, GNSS, BATT, SD), the self-test of
 //! MAG, IMU1 and IMU2 (the driver's test, then the restart under the same request number; one
@@ -122,13 +123,15 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
     if req.command == MavCmd::MAV_CMD_DO_MOTOR_TEST {
         return motor_test(req, link, now_ms);
     }
-    // While a motor-test spin runs, every other action is refused as if armed.
+    // While armed, while flight throttles are sent or while a motor-test spin runs, every other action is refused.
+    let flying = crate::esc::flight_spin() || crate::settings::HANDSHAKE.armed();
     let decision = BOOK.lock(|b| {
-        let armed = MOTOR.lock(|m| {
-            m.borrow()
-                .as_ref()
-                .is_some_and(|m| m.state.spin_active(crate::now_us()))
-        });
+        let armed = flying
+            || MOTOR.lock(|m| {
+                m.borrow()
+                    .as_ref()
+                    .is_some_and(|m| m.state.spin_active(crate::now_us()))
+            });
         b.borrow_mut().admit(req, link, armed, false, now_ms)
     });
     defmt::info!(
@@ -158,12 +161,14 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
 /// once, no IN_PROGRESS, nothing in the book), the whole `TestCmd` of an accepted command written to
 /// the flight core's cell. The same on every link. UNSUPPORTED when there is no ESC task (`esc-off`).
 fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
+    // A spin is refused while armed or while flight throttles are sent; a running spin is replaced as before.
+    let flying = crate::esc::flight_spin() || crate::settings::HANDSHAKE.armed();
     let decision = BOOK.lock(|b| {
         MOTOR.lock(|m| {
             let mut m = m.borrow_mut();
             let m = m.as_mut()?;
             let busy = b.borrow_mut().busy(now_ms);
-            let d = m.state.admit(&req.params, busy, false, crate::now_us());
+            let d = m.state.admit(&req.params, busy, flying, crate::now_us());
             if let Some(cmd) = d.cmd {
                 m.cell.write(cmd);
             }

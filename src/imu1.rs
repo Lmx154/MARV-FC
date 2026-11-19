@@ -308,9 +308,13 @@ const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::Persistent;
 const INJECT: crate::imu_inject::Mode = crate::imu_inject::Mode::MissedEdge;
 
 #[embassy_executor::task]
-pub async fn task(adapter: Adapter, period_us: u32) -> ! {
+pub async fn task(
+    adapter: Adapter,
+    period_us: u32,
+    rc: Option<TripleReader<'static, fw_core::rc::RcSample>>,
+) -> ! {
     // The flight code is built here, inside the task, on core 1, and owned by it.
-    let task = crate::flight::Stepper::new().and_then(|stepper| {
+    let task = crate::flight::Stepper::new(rc).and_then(|stepper| {
         ImuTask::new(
             &CELLS,
             adapter,

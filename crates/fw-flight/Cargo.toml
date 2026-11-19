@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 publish = false
 license = "MIT"
-description = "MARV V2 flight-core tasks (core 1). No embassy-time, embassy-sync or defmt by rule. Today: the liveness answer and the IMU device loop."
+description = "MARV V2 flight-core tasks (core 1). No embassy-time, embassy-sync or defmt by rule. The liveness answer, the IMU device loop, the ESC logic and the flight step (estimator, controller, allocator, arming gate)."
 rust-version = "1.99"
 
 [dependencies]

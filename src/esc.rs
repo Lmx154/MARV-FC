@@ -1,8 +1,9 @@
 //! The four ESCs: bidirectional DShot300 at 1 kHz on PIO2 SM0, GPIO36-39 (driver line 0 = GPIO36 = M4
 //! ... line 3 = GPIO39 = M1), the reply capture on DMA channel 5 (`dshot` `PioDshot`). Design:
 //! `decision-esc-telemetry-20261118` Q1-Q3. Stop frames from every boot, and command 13 in the EDT
-//! bursts of `fw_flight::esc`; throttle only for the props-off motor test (command 209: one line, at
-//! most 5 %, 3 s, the command in the cell [`TEST`]; README, Motor test).
+//! bursts of `fw_flight::esc`; throttle on all four lines from the flight command (`crate::flight::OUT`,
+//! Stop when older than `fw_flight::esc::MOTOR_HOLD_MAX_US`), or, while that is Stop, on one line for the
+//! props-off motor test (command 209: at most 5 %, 3 s, the command in the cell [`TEST`]; README, Motor test).
 //!
 //! [`driver`] and [`task`] run on core 1: [`driver`] is called inside core 1's entry, so
 //! `PIO2_IRQ_0` and the DMA channel's `DMA_IRQ_0` are enabled there, and [`task`] runs on core 1's
@@ -103,6 +104,8 @@ pub async fn task(mut drv: Driver, mut test: TripleReader<'static, TestCmd>) -> 
         match core::future::pending::<core::convert::Infallible>().await {}
     };
     let mut esc = Esc::new();
+    #[cfg(feature = "esc-no-edt")]
+    esc.set_edt_bursts(false);
     esc.start_begin();
     cell.write(*esc.status());
     drv.start(&mut SpinDelay).await;
@@ -112,10 +115,15 @@ pub async fn task(mut drv: Driver, mut test: TripleReader<'static, TestCmd>) -> 
     loop {
         let t0 = crate::now_us();
         let (cmd, _) = test.read();
-        // P6 reads flight::OUT here.
-        let frames = esc.frames(t0, cmd, (0, fw_flight::gate::MotorCommand::STOP));
-        #[cfg(feature = "esc-no-edt")]
-        let frames = frames.map(|_| dshot::LineFrame::STOP);
+        // One attempt: the writer (IMU1's task) runs on this executor and never yields inside `write`.
+        let flight = match crate::flight::OUT.try_read(1) {
+            Some(o) => (o.t_us, o.motors),
+            None => {
+                esc.flight_read_failed();
+                (0, fw_flight::gate::MotorCommand::STOP)
+            }
+        };
+        let frames = esc.frames(t0, cmd, flight);
         let x = drv.exchange(frames).await;
         let t1 = crate::now_us();
         esc.record(
@@ -143,6 +151,20 @@ static ENDED_SEQ: AtomicU32 = AtomicU32::new(0);
 /// shows as stuck.
 fn snapshot() -> EscStatus {
     ESC.try_read(READ_ATTEMPTS).unwrap_or(EscStatus::INITIAL)
+}
+
+/// Flight throttles went out on the latest exchange (core 0: admission).
+pub fn flight_spin() -> bool {
+    snapshot().flight_spin
+}
+
+/// The ESC row's state and whether flight throttles went out, from one status copy (core 0: the LED).
+pub fn led_inputs() -> (fw_core::health::State, bool) {
+    let s = snapshot();
+    (
+        fw_core::esc::verdict(&s, crate::now_us()).state,
+        s.flight_spin,
+    )
 }
 
 /// Every supervisor tick (core 0): one `[INFO]` line for each new motor-test ending in the flight

@@ -289,6 +289,16 @@ pub fn range(pwm: u16, ch: &Channel) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
+/// The arm switch's on threshold, us: ArduPilot's `AUX_SWITCH_PWM_TRIGGER_HIGH`. Applied to the raw
+/// channel 5 microseconds; no calibration or reversal.
+pub const ARM_SWITCH_HIGH_US: u16 = 1800;
+
+/// Channel 5 (raw us) in the arm position: strictly above [`ARM_SWITCH_HIGH_US`]. 0 (a missing
+/// channel) is off.
+pub fn arm_switch(ch5_us: u16) -> bool {
+    ch5_us > ARM_SWITCH_HIGH_US
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +598,13 @@ mod tests {
         assert_eq!(scale(-0.0005), -1);
         assert_eq!(scale(1.0), 1000);
         assert_eq!(scale(-1.0), -1000);
+    }
+
+    #[test]
+    fn the_arm_switch_is_on_strictly_above_1800() {
+        assert!(!arm_switch(1800));
+        assert!(arm_switch(1801));
+        assert!(!arm_switch(0));
+        assert!(arm_switch(2000));
     }
 }

@@ -2,8 +2,8 @@
 //! between CRSF (420000 baud) and MAVLink (460800 baud) by itself. This module only REPORTS: the
 //! RC row (no health machine, no recovery), RC_CHANNELS and the mapped sticks (MANUAL_CONTROL) for
 //! USB, the `[STAT] RC:` line, the BATT value as CRSF telemetry, and the radio's MAVLink node (link
-//! 1, active only while the port is locked on MAVLink). Nothing here acts on the sticks, arms, or
-//! decides about link loss or authority.
+//! 1, active only while the port is locked on MAVLink). It also hands every CRSF stick report, mapped,
+//! to the flight core through [`FLIGHT_RC`]; arming and link loss are decided there (`fw_flight::gate`).
 //!
 //! UART0 as the bench (`rc-port/hil/src/bin/rc_link.rs`) set it up: `BufferedUart` (interrupt
 //! driven, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART
@@ -27,9 +27,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::health::Counters;
-use fw_core::rc::{PortMode, RcInput, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, verdict};
+use fw_core::rc::{
+    PortMode, RcInput, RcSample, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, verdict,
+};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
+use fw_core::xcore::{TripleBuffer, TripleWriter};
+use fw_settings::rc::{RcMap, arm_switch};
 use mavlink_device::dialect::{MANUAL_CONTROL_DATA, MavState, RC_CHANNELS_DATA};
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
 use mavlink_device::{
@@ -76,6 +80,21 @@ const RADIO_STREAMS: [(u32, i32); 6] = [
 const FRESH_US: u64 = 1_000_000;
 /// Pause before `run` is called again after it returned.
 const RESTART_MS: u64 = 100;
+/// The hook re-reads the stick map from the store at every this many CRSF stick reports (about 4/s).
+const MAP_EVERY: u32 = 64;
+
+/// Core 0 -> flight core: the latest CRSF stick report, mapped, with the arm switch and its time (one
+/// writer, the port's hooks; one reader, IMU1's [`crate::flight::Stepper`]).
+pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
+    sticks: fw_core::rc::Sticks {
+        roll: 0.0,
+        pitch: 0.0,
+        throttle: 0.0,
+        yaw: 0.0,
+    },
+    arm: false,
+    t_us: 0,
+});
 
 /// Bytes the UART took at the CRSF baud and at 460800 (the port writes only while locked, in the
 /// locked protocol), baud changes, and returns of `run`.
@@ -267,10 +286,20 @@ pub fn manual_control(now_us: u64) -> Option<MANUAL_CONTROL_DATA> {
 struct RcHooks {
     /// The GNSS sample (its `t_us`) last sent as a GPS frame.
     last_gps_us: Option<u64>,
+    /// The writer of [`FLIGHT_RC`] (`None` if it was taken already: nothing is written).
+    flight: Option<TripleWriter<'static, RcSample>>,
+    /// The stick map last read from the store; `None` until the store gave one (no sample then).
+    map: Option<RcMap>,
+    /// CRSF stick reports seen.
+    crsf_reports: u32,
 }
 
 impl Hooks for RcHooks {
     fn report(&mut self, report: Report) {
+        let crsf = match &report {
+            Report::Sticks(r) if matches!(r.source, Source::Crsf) => Some((r.channels_us, r.at_us)),
+            _ => None,
+        };
         SHARED.lock(|s| {
             let mut s = s.borrow_mut();
             match report {
@@ -283,6 +312,30 @@ impl Hooks for RcHooks {
                 _ => {}
             }
         });
+        let Some((ch, t_us)) = crsf else {
+            return;
+        };
+        if self.crsf_reports.is_multiple_of(MAP_EVERY) {
+            // One store access (not nested in `SHARED`) copies the 44 RC values; the map is built outside it.
+            self.map = crate::store::with(|p| {
+                core::array::from_fn(|i| {
+                    u16::try_from(fw_settings::rc::RC_OFFSET + i)
+                        .ok()
+                        .and_then(|n| ParamStore::get(p, n))
+                })
+            })
+            .map(|values: [Option<ParamValue>; fw_settings::rc::COUNT]| {
+                RcMap::from_values(&values)
+            });
+        }
+        self.crsf_reports = self.crsf_reports.wrapping_add(1);
+        if let (Some(map), Some(w)) = (&self.map, &mut self.flight) {
+            w.write(RcSample {
+                sticks: map.sticks(&ch),
+                arm: arm_switch(ch[4]),
+                t_us,
+            });
+        }
     }
 
     /// The GPS frame from the GNSS row's latest sample when it is newer than the one last sent as
@@ -558,7 +611,12 @@ async fn rc_link(
         last_out_of_turn: false,
         sent_state: [None; crate::ROWS],
     };
-    let mut hooks = RcHooks { last_gps_us: None };
+    let mut hooks = RcHooks {
+        last_gps_us: None,
+        flight: FLIGHT_RC.take_writer(),
+        map: None,
+        crsf_reports: 0,
+    };
     loop {
         let end = port
             .run(

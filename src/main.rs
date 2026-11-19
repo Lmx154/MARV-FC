@@ -302,6 +302,7 @@ fn core1_main(
         'static,
         fw_core::esc::TestCmd,
     >,
+    flight_rc: Option<fw_core::xcore::TripleReader<'static, fw_core::rc::RcSample>>,
 ) -> ! {
     let table = CORE1_VECTOR_TABLE.0.get() as u32;
     // SAFETY: the executing core's own VTOR; the table is aligned to 512 bytes and was filled by core
@@ -343,7 +344,7 @@ fn core1_main(
         if let Ok(token) = fbeat() {
             spawner.spawn(token);
         }
-        if let Ok(token) = imu1::task(imu1, imu1_period_us) {
+        if let Ok(token) = imu1::task(imu1, imu1_period_us, flight_rc) {
             spawner.spawn(token);
         }
         if let Ok(token) = imu2::task(imu2, imu2_period_us) {
@@ -1293,6 +1294,8 @@ async fn main(spawner: Spawner) {
     let esc_test = esc::test_reader();
     #[cfg(not(feature = "esc-off"))]
     actions::init_motor_test();
+    // The sticks cell (as the motor-test cell): the reader goes to core 1, the RC port's hooks take the writer.
+    let flight_rc = rc::FLIGHT_RC.take_reader();
     unsafe extern "C" {
         static __vector_table: u32;
         static __vector_table_end: u32;
@@ -1313,6 +1316,7 @@ async fn main(spawner: Spawner) {
             esc_parts,
             #[cfg(not(feature = "esc-off"))]
             esc_test,
+            flight_rc,
         )
     });
 

@@ -85,17 +85,17 @@ the real flight code (`decision-first-pair-20261119.md`): `fw_flight::mahony::Ma
 RC-loss rules (section 5: an off-to-on switch cycle on fresh reports with throttle low, attitude valid, lean within
 `ANGLE_MAX`, levels present and `HANDSHAKE.try_arm()` granted; Stop and disarm when the newest report is older than
 `RC_FS_TIMEOUT`, on switch off, or on a refusal while armed). The board image names them in `src/flight.rs`
-(`BoardFlight`). It still cannot spin a motor: the board passes no stick report (`rc: None`), so the gate never arms,
-and the ESC task does not read the command. Only IMU1's sample goes in (IMU2, the slow sensors and RC come with later steps).
+(`BoardFlight`). Since P6 the image spins the motors when armed (see Flying, props off, below). Only IMU1's sample and the
+newest CRSF stick report go in (IMU2 and the slow sensors come with later steps).
 `Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
 `decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
 core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
 `fw_flight::step::encode_step` writes one step as the records NAV, SETP, DMD and MOT (`fw_core::dflog::FLIGHT_TYPES`,
 ids 139 to 142; not in the board's header, and the board logs none of them).
-After each step the task writes the step time and the command to the seqlock `flight::OUT`. Nothing reads it yet: the
-ESC task passes the initial `(0, Stop)` to `Esc::frames`, which applies `fw_flight::esc::hold` (Stop when the command is
-older than 10 ms) and, while the held command spins, sends its throttles on all four lines, no EDT burst, and ends a
-running motor test as `Replaced`; the ESC task starts reading `OUT` in a later packet. There is no status line for it. A core-0
+After each step the task writes the step time and the command to the seqlock `flight::OUT`. The ESC task reads it at
+every exchange (`try_read(1)`; a failed read sends Stop and counts `flight_read_failures`) and passes it to `Esc::frames`,
+which applies `fw_flight::esc::hold` (Stop when the command is older than 10 ms) and, while the held command spins, sends
+its throttles on all four lines, no EDT burst, and ends a running motor test as `Replaced`. There is no status line for it. A core-0
 `[STAT] FLT:` line was tried on 2026-11-19 (it showed 8035 steps per 10 s, the IMU1 rate, `command Stop`) and removed:
 with the probe attached, that one extra log line raised the ESC task's longest spacing from 1.09 to 1.26 ms (six runs
 without it) to 1.58 ms inside the 10 s `[STAT]` burst and 1.36 ms on a tick of its own; without the line it is 1.20 ms.
@@ -792,8 +792,9 @@ Features for the checks (off by default):
   discarded windows, guard refusals, the last value saved). Flash wear: 100 erases per run. Runs once per
   power-up or flash: not after a reset the watchdog caused (so a fault can never make it loop). Not yet run
   under the watchdog (see Watchdog).
-- `FEATURES=fake-armed tools/run.sh 60`: the handshake's armed flag is set at boot; `param save` ends
-  FAILED "save failed: armed" and writes nothing.
+- `FEATURES=fake-armed tools/run.sh 60`: the handshake's armed flag is set at boot; `param save` is
+  TEMPORARILY_REJECTED (the admission reads the same flag as armed) and writes nothing. Before the flight
+  wiring (step 5) it reached the save and ended FAILED "save failed: armed".
 - `FEATURES=corrupt-newest tools/run.sh 60`: at boot, before the settings are read, one byte of the newest
   valid record (the first entry's value byte, else the CRC's, else the magic's) is programmed to 0x00
   through the guard; the boot then chooses the other sector (invariant I3.2) and the next save goes to the
@@ -1005,8 +1006,13 @@ the boot report and the settings classification in the 2 sticky slots (taken fir
 link took them; the worst case of all boot texts is about 14, so the skip and per-device lines are
 ordinary texts); a link that is down holds back nobody; the 300 ms "text before ACK" hold is per link.
 
-Not built: any use of the sticks (they are only reported), arming, failsafe, a rule about which link has authority or what a
-mode change means.
+The flight core gets the sticks: the port's `report` hook maps every CRSF stick report with its own copy of the RC
+parameters (read from the store at the first report and then every 64th, about 4 times a second; no sample before the
+store gave one) and writes `RcSample { sticks, arm, t_us }` to the triple buffer `rc::FLIGHT_RC`; `arm` is the raw
+channel 5 above 1800 us (`fw_settings::rc::arm_switch`, ArduPilot's switch-high threshold, no calibration or reversal).
+A MAVLink RC_CHANNELS_OVERRIDE report is never written, so the radio's MAVLink model cannot arm or fly. Arming and RC
+loss are decided on core 1 (see Flying, props off). Not built: a rule about which link has authority or what a mode
+change means.
 
 Seen on 2026-11-15, transmitter on in its MAVLink model, ground station on the transmitter backpack's
 WiFi (UDP 14550): the port locked on MAVLink at start and held 300 s (100 stick reports and 90
@@ -1200,7 +1206,7 @@ What each cargo feature does under the watchdog:
 | `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; with `NO_CATCH_HARDFAULT=1` the core locks up and the watchdog resets it: "TimedOut, record false", measured), without it `[FAIL] ... no fault` and the statics below are overwritten |
 | `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
 | `esc-off` | the ESC task is not built or spawned: nothing touches PIO2, DMA channel 5 or GPIO36-39 (the IMU baseline of the ESC board checks); the ESC row reads FAILED, stuck; not for a release |
-| `esc-no-edt` | every frame the ESC task sends is Stop: the EDT bursts the gate starts are replaced (the negative control of extended telemetry; `edt_bursts` still counts them); not for a release |
+| `esc-no-edt` | no EDT burst starts (`edt_bursts` stays 0); Stop, the motor test and flight throttles go out as without it (the negative control of extended telemetry); not for a release |
 | `xip-park` | the board check of the flight core in SRAM (`src/xip_park.rs`), once, 30 s after a start the watchdog did not cause: a 1 s window of XIP accesses with both cores running (over 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with its interrupts off and the XIP accesses counted meanwhile, core 1's, must be exactly 0 while each IMU gains at least 790 samples and no error; with `xip-park,ram-negative` at least 1000. One "core 0 stalled 1.0 s" text, no reset. Not together with `xip-stat` |
 
 Check features (each acts once, 20 s after a start the watchdog did not cause, so not again after the reset
@@ -1303,8 +1309,9 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
 - Core 0 prints `[STAT] ESC:` every 10 s: the row, exchanges, starts, longest spacing, longest exchange and shortest exchange (0 before the first), and per
   motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current, and at
   the end of the line `throttle frames N` (the throttle frames the flight core has sent since boot).
-- Not built: arming, any throttle but the motor test's, the stop on signal loss, the ESCs' serial telemetry on GPIO34,
-  the passthrough, the ESC row in the SD log, ESC messages on the radio.
+- Since P6 the frames carry the flight command's throttles on all four lines while it spins (see Flying, props off,
+  below); `EscStatus` counts them (`flight_spin`, `flight_frames`, `flight_read_failures`; not in the `[STAT]` line).
+- Not built: the ESCs' serial telemetry on GPIO34, the passthrough, the ESC row in the SD log, ESC messages on the radio.
 - Measured on the board (2026-11-18, battery connected, motors fitted, no propellers, probe-rs attached). F3a at
   4cfb1f0: logs `20261118-191955` (default), `20261118-192214` (`esc-off`), `20261118-192403` (default). F3b at
   0d25909: `20261118-193433` (default, one settings save), `20261118-193820` (`esc-no-edt`), `20261118-194106`
@@ -1341,6 +1348,21 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
   logs `20261118-194106` / `20261118-194357`; 1 overrun on 2026-11-16); one RC UART overrun at a settings save
   (`20261118-193433`).
 
+### Flying, props off
+
+**This firmware spins all four motors when the pilot arms it on the radio. Keep the propellers off unless the owner
+says otherwise.** Not yet checked on the board (`docs/handoff.md`).
+
+- Arms: channel 5 goes from off to above 1800 us on a fresh CRSF report, with throttle low, the attitude valid, lean
+  within 30 deg and no settings save running (`HANDSHAKE.try_arm()`); the motors then run at idle at zero throttle and
+  the status LED is purple.
+- Disarms (Stop at once): the switch off; no new CRSF stick report for 1.0 s (`RC_FS_TIMEOUT`; the switch must then be
+  cycled to re-arm); a refusal by the controller while armed. The ESC task also sends Stop when the newest flight command
+  is older than 10 ms (`MOTOR_HOLD_MAX_US`), and the motors resume with the next step if the gate is still armed.
+- While armed or while flight throttles go out, core 0 refuses every action (saves, calibrations, restarts) and a
+  motor-test spin (TEMPORARILY_REJECTED); a motor-test stop is still accepted. The motor test runs only while disarmed.
+- Gains and limits are constants in `fw_flight::tuning` (`Tuning::DEFAULT`) for now; no parameter changes them.
+
 ### Motor test
 
 Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (amendment A, "lean"). Code:
@@ -1354,7 +1376,7 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (ame
   param7 0. Anything else, NaN included, is DENIED with a STATUSTEXT `motor test: <reason>`. The level sent to the ESC
   is round(param3 x 20) of 2000, at least 1 (the bench's mapping, `dshot_spin` `step_level`): 5 % is level 100.
 - The answers: a stop is ACCEPTED in every state. A spin is ACCEPTED at once (no IN_PROGRESS) unless another long
-  action is in the books or the vehicle is armed (always false today): TEMPORARILY_REJECTED. A spin while one runs
+  action is in the books, the vehicle is armed or flight throttles go out: TEMPORARILY_REJECTED. A spin while one runs
   replaces it. While a spin runs, every other command that starts an action is TEMPORARILY_REJECTED (core 0 passes
   "armed, or a spin is active" to the book; its own record: the last accepted spin's `until_us` not reached and no stop
   accepted since). There are no pre-checks of the ESCs or the battery and no automatic stops on telemetry. With the

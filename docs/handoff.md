@@ -1,6 +1,6 @@
 # MARV V2 firmware: hand-off
 
-State on 2026-11-18; written first on 2026-11-15 and brought up to date since. Written for whoever picks the work up next, human or agent. It says what
+State on 2026-11-19; written first on 2026-11-15 and brought up to date since. Written for whoever picks the work up next, human or agent. It says what
 is built and proven, what is in progress, and what is left. It is an overview: the details and the evidence
 are in the documents it points to.
 
@@ -231,12 +231,19 @@ copies for the download checks.
     steps that followed are above.
 
 **Not built**
-- ESC, beyond the telemetry and the props-off motor test above: arming, any other throttle, passthrough through the USB port, the board's
-  current scale, ESC serial telemetry on GPIO34. See `docs/handoff-esc-link.md`.
-- The board wiring of the flight code (next, step 5 P6). Since P4b (2026-11-19) `Flight::step` runs Mahony, the stick
-  shaper, the cascaded PID, the card's allocator and the gate's arming and RC-loss rules in IMU1's task on core 1 (all
-  in SRAM, checker PASS); host-tested only, not run on the board. It cannot spin a motor yet: the board passes
-  `rc: None` and the ESC task does not read `flight::OUT` (README, Flight-core device loop).
+- ESC, beyond the telemetry, the props-off motor test and the flight throttles: passthrough through the USB port, the
+  board's current scale, ESC serial telemetry on GPIO34. See `docs/handoff-esc-link.md`.
+- The board wiring of the flight code (step 5 P6, 2026-11-19, built, NOT yet run on the board). **The image now spins all
+  four motors when armed on channel 5: propellers off.** CRSF stick reports go from the RC hook on core 0 through
+  `rc::FLIGHT_RC` into `Flight::step` on core 1; the ESC task sends `flight::OUT` (Stop when older than 10 ms); core 0
+  refuses actions and motor tests while armed (`HANDSHAKE`) or while flight throttles go out (`EscStatus::flight_spin`),
+  and the LED shows purple for either (README, Flying, props off). Gains are `Tuning::DEFAULT` constants. Checker PASS;
+  host tests pass. Still to check on the board, props off, before anything else: the switch arms only after off-to-on
+  with throttle low, LED purple, four ESCs at idle; throttle raises all four; switch off stops at once; a settings save,
+  a calibration and a motor test are refused while armed; transmitter off stops the motors within about 1 s and needs a
+  switch cycle to re-arm; with `inject-imu1-persistent` the motors stop (stale command); IMU1/IMU2 rates, IMU1 longest
+  run and largest gap, ESC exchange count and longest spacing against the baselines (README, ESC telemetry: IMU1 803.43-803.45/s,
+  1411-1487 us, 711-737 us; 10 000 ±1 exchanges per 10 s, longest spacing 1.1-1.3 ms); `xip-park` 0 accesses.
 - The PSRAM. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
   the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
 - Full-rate IMU data from the flight core to core 0 (a ring is reserved in the design; needed for a control

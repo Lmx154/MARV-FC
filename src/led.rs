@@ -1,7 +1,7 @@
 //! The status LED (D20, one WS2812C on GPIO43): a core-0 task on PIO1 state machine 1 that shows the
 //! boot roll call, the running display and the one-off flashes of `fw_core::led`
 //! (`decision-status-led-20261118`). Every 20 ms it gathers what the display reads (the device rows,
-//! the motor spin, the calibration flag, the open log, the GNSS fix, `LED_BRIGHT`), asks
+//! the motor spin (a motor test or flight throttles), the calibration flag, the open log, the GNSS fix, `LED_BRIGHT`), asks
 //! `fw_core::led` and writes the LED only when the colour or the brightness changed.
 //!
 //! Nothing depends on the LED: if the transport cannot be built the task logs once and ends. There is
@@ -72,6 +72,7 @@ fn log_open() -> bool {
 /// Everything the display reads, now, with the level last read from the store.
 fn inputs(now_us: u64, level: i32) -> Inputs {
     let sd = find(MarvDevice::MARV_DEVICE_SD).map_or(State::Absent, |d| d.row().state);
+    let (esc_state, flight_spin) = crate::esc::led_inputs();
     let rows: [State; ROWS] = [
         IMU1.row().state,
         IMU2.row().state,
@@ -81,7 +82,7 @@ fn inputs(now_us: u64, level: i32) -> Inputs {
         BATT.row().state,
         crate::rc::row().state,
         sd,
-        crate::esc::row().state,
+        esc_state,
     ];
     let gnss_fix = GNSS.latest.try_get().is_some_and(|s| {
         now_us.saturating_sub(s.t_us) < GNSS_FRESH_US
@@ -89,7 +90,7 @@ fn inputs(now_us: u64, level: i32) -> Inputs {
     });
     Inputs {
         rows,
-        motor_spin: crate::actions::motor_spin(),
+        motor_spin: crate::actions::motor_spin() || flight_spin,
         calibrating: crate::calibration::calibrating(),
         log_open: log_open(),
         gnss_fix,
