@@ -71,7 +71,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(35 tests and 1 doc test, the flight step's included).
+(41 tests and 1 doc test, the flight step's included).
 
 The flight step (build step 3 of the GNC plan; design: `~/Documents/MARV-V2-drivers/_plan/decision-sim-seams-20261119.md`).
 `fw_flight::step::Flight::step` runs once per good IMU1 sample, on core 1, inside IMU1's task, right after the sample
@@ -79,11 +79,16 @@ is published: `ImuTask` hands each new sample to its `SampleSink` (IMU1's is `fl
 `Flight`; IMU2's is `()`, which does nothing). The stages run in the order of the decision's rule R1 (estimator,
 controller reset while disarmed, stick shaper, validity check, controller, allocator, gate); the seams are in
 `fw_flight::gnc`, the gate and `MotorCommand` (only the gate can make a spinning one) in `fw_flight::gate`, the
-slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Today every stage is a stand-in (nothing
-valid, the controller refuses, the gate never arms), so every step gives Stop; the board image names them in
-`src/flight.rs` (`BoardFlight`). Only IMU1's sample goes in (IMU2, the slow sensors and RC come with later steps).
+slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Since step 5 (P4b, 2026-11-19) the step runs
+the real flight code (`decision-first-pair-20261119.md`): `fw_flight::mahony::Mahony`, the Angle-mode stick shaper
+(private, in `step.rs`), `fw_flight::pid::CascadedPid`, `fw_flight::alloc::CardAllocator` and the gate's arming and
+RC-loss rules (section 5: an off-to-on switch cycle on fresh reports with throttle low, attitude valid, lean within
+`ANGLE_MAX`, levels present and `HANDSHAKE.try_arm()` granted; Stop and disarm when the newest report is older than
+`RC_FS_TIMEOUT`, on switch off, or on a refusal while armed). The board image names them in `src/flight.rs`
+(`BoardFlight`). It still cannot spin a motor: the board passes no stick report (`rc: None`), so the gate never arms,
+and the ESC task does not read the command. Only IMU1's sample goes in (IMU2, the slow sensors and RC come with later steps).
 `Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
-`decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate will store the armed state for
+`decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
 core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
 `fw_flight::step::encode_step` writes one step as the records NAV, SETP, DMD and MOT (`fw_core::dflog::FLIGHT_TYPES`,
 ids 139 to 142; not in the board's header, and the board logs none of them).
@@ -1359,8 +1364,8 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (ame
   `TestCmd { seq, line, level, until_us }` to the cell `esc::TEST`, a `TripleBuffer<TestCmd>` (writer in `actions`,
   reader taken before core 1 starts and moved into the ESC task, which reads it wait-free at every exchange). Core 1
   ends the spin on its own clock: at `until_us`, at 3 s from the spin's first throttle frame, on a stop, on a command with a
-  new `seq` (replaced), or if its own guard finds the level above the 5 % cap (`capped()` is the only constructor
-  of a `Throttle`). A hung core 0 cannot extend a spin. During a spin the tested line gets the throttle and the other
+  new `seq` (replaced), or if its own guard finds the level above the 5 % cap (`capped()` is the motor test's only constructor
+  of a `Throttle`; the flight command's is the gate's). A hung core 0 cannot extend a spin. During a spin the tested line gets the throttle and the other
   three Stop; no command 13 is sent, and a running EDT burst is cut.
 - The report (core 0, every 10 ms tick): when the status shows a new ending (its `seq` changed), one line
   `[INFO] motor test M<n>: level L, ended by <cause> after <ms> ms` (cause: expiry, 3 s limit, stop, replaced, cap; ms
@@ -1399,7 +1404,8 @@ not flash"; the PSRAM sits behind the same 16 kB XIP cache as the flash, so this
 longer shares the XIP cache with core 0, whose misses under card work slowed it (facts-sd-logging C2).
 
 - In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks and the ESC task, `fw_flight`'s imu,
-  liveness, esc, step, gnc and gate modules and the binary's `flight::Stepper`, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
+  liveness, esc, step, gnc, gate, mahony, pid, alloc and quat modules, `fw_core::handshake`, `libm` and the soft
+  double-precision routines its `sinf`/`cosf` use, the binary's `flight::Stepper`, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
   `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions and the 64-bit division, the handlers `DMA_IRQ_0`,
   `IO_IRQ_BANK0`, `SIO_IRQ_FIFO` and `PIO2_IRQ_0`, the critical-section and time functions), every constant (`.rodata`),
   and core 1's own vector table. Left in flash: core 1's panic paths and the launch trampoline that runs

@@ -7,11 +7,14 @@ use crate::gnc::{
     Allocation, Allocator, Controller, Estimator, Mode, NavState, Refused, Saturation, Sensors,
     Setpoint, ThrustTorque, Valid,
 };
+use crate::quat;
 use crate::tuning::Tuning;
+use fw_core::calib::GRAVITY_MSS;
 use fw_core::dflog::{self, FLIGHT_TYPES};
 use fw_core::esc::LINES;
 use fw_core::handshake::Handshake;
 use fw_core::rc::{RcSample, Sticks};
+use marv_card::{K_F, MASS, MAX_ROTOR_SPEED};
 
 /// One step's inputs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -43,15 +46,59 @@ pub struct StepOut {
     pub allocation: Option<Allocation>,
 }
 
-/// Turns (mode, held sticks, nav) into a `Setpoint`. Step-3 stand-in, replaced in step 5 (stick scaling): a zero
-/// `Setpoint::Rates`.
-struct StickShaper;
+/// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle mode (decision-first-pair-20261119, section 4).
+struct StickShaper {
+    /// The newest sticks; before the first report, throttle 0 and centred (4e).
+    sticks: Sticks,
+    angle_max_rad: f32,
+    pilot_y_rate_rads: f32,
+}
 
 impl StickShaper {
-    fn setpoint(&self, _mode: Mode, _sticks: Option<&Sticks>, _nav: &NavState) -> Setpoint {
-        Setpoint::Rates {
-            rates_rads: [0.0; 3],
-            thrust_n: 0.0,
+    fn setpoint(&self, mode: Mode, nav: &NavState) -> Setpoint {
+        // Angle for every mode: Acro, Altitude and Position are declared only; the mode source comes in step 7.
+        match mode {
+            Mode::Acro | Mode::Angle | Mode::Altitude | Mode::Position => self.angle(nav),
+        }
+    }
+
+    /// q_sp = twist(q) (x) q_tilt, the heading rate from yaw, the collective from throttle (4a, 4b).
+    fn angle(&self, nav: &NavState) -> Setpoint {
+        let Sticks {
+            roll,
+            pitch,
+            throttle,
+            yaw,
+        } = self.sticks;
+        // Tilt vector v = ANGLE_MAX [roll, -pitch, 0], limited to |v| <= ANGLE_MAX, as a rotation about v.
+        let (vx, vy) = (self.angle_max_rad * roll, -self.angle_max_rad * pitch);
+        let n = libm::sqrtf(vx * vx + vy * vy);
+        let half = n.min(self.angle_max_rad) / 2.0;
+        let tilt = if n > 0.0 {
+            let s = libm::sinf(half) / n;
+            [libm::cosf(half), s * vx, s * vy, 0.0]
+        } else {
+            [1.0, 0.0, 0.0, 0.0]
+        };
+        // Today's heading: the estimate's twist about down (identity while tilt is not valid, rule R5).
+        let [w, _, _, z] = nav.attitude;
+        let heading = if nav.valid.tilt {
+            quat::normalise([w, 0.0, 0.0, z])
+        } else {
+            [1.0, 0.0, 0.0, 0.0]
+        };
+        // Collective, piecewise linear: 0 -> 0, 0.5 -> hover m g, 1 -> 4 T_hi (four rotors at full speed).
+        let hover = MASS * GRAVITY_MSS;
+        let full = 4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED;
+        let thrust_n = if throttle <= 0.5 {
+            2.0 * throttle * hover
+        } else {
+            hover + (2.0 * throttle - 1.0) * (full - hover)
+        };
+        Setpoint::Attitude {
+            attitude: quat::mul(heading, tilt),
+            heading_rate_rads: yaw * self.pilot_y_rate_rads,
+            thrust_n,
         }
     }
 }
@@ -65,12 +112,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     shaper: StickShaper,
     mode: Mode,
     limited: Saturation,
-    sticks: Option<Sticks>,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// `tuning`: the gains and limits; `handshake`: where the gate stores the armed state for core 0.
-    /// Step 3: the mode is `Mode::Angle`, replaced in step 5.
+    /// The mode is `Mode::Angle` until step 7 brings a mode source.
     pub fn new(
         estimator: E,
         controller: C,
@@ -83,7 +129,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             controller,
             allocator,
             gate: Gate::new(tuning, handshake),
-            shaper: StickShaper,
+            shaper: StickShaper {
+                sticks: Sticks {
+                    roll: 0.0,
+                    pitch: 0.0,
+                    throttle: 0.0,
+                    yaw: 0.0,
+                },
+                angle_max_rad: tuning.angle_max_rad,
+                pilot_y_rate_rads: tuning.pilot_y_rate_rads,
+            },
             mode: Mode::Angle,
             limited: Saturation {
                 roll: false,
@@ -92,7 +147,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 thrust_low: false,
                 thrust_high: false,
             },
-            sticks: None,
         }
     }
 
@@ -100,7 +154,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     pub fn step(&mut self, inputs: &FlightInputs) -> StepOut {
         let t_us = inputs.sensors.imu1.t_us;
         if let Some(rc) = inputs.rc {
-            self.sticks = Some(rc.sticks);
+            self.shaper.sticks = rc.sticks;
         }
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
@@ -108,7 +162,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if !self.gate.armed() {
             self.controller.reset();
         }
-        let setpoint = self.shaper.setpoint(self.mode, self.sticks.as_ref(), &nav);
+        let setpoint = self.shaper.setpoint(self.mode, &nav);
         let demand = if nav.valid.covers(&setpoint.requires()) {
             self.controller.update(&nav, &setpoint, &self.limited)
         } else {
@@ -232,8 +286,11 @@ pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gnc::{MotorLevels, NoAllocator, NoController, NoEstimator};
+    use crate::alloc::CardAllocator;
+    use crate::gnc::MotorLevels;
     use crate::imu::{ImuReading, ImuSample};
+    use crate::mahony::Mahony;
+    use crate::pid::CascadedPid;
     use core::cell::Cell;
 
     static HANDSHAKE: Handshake = Handshake::new();
@@ -257,12 +314,13 @@ mod tests {
     }
 
     #[test]
-    fn stand_ins_give_stop() {
+    fn board_types_give_stop_without_rc() {
+        let tuning = Tuning::DEFAULT;
         let mut flight = Flight::new(
-            NoEstimator,
-            NoController,
-            NoAllocator,
-            &Tuning::DEFAULT,
+            Mahony::new(&tuning),
+            CascadedPid::new(&tuning),
+            CardAllocator::new(),
+            &tuning,
             &HANDSHAKE,
         );
         let out = flight.step(&inputs(1234));
@@ -293,9 +351,15 @@ mod tests {
     impl Estimator for Rec<'_> {
         fn update(&mut self, sensors: &Sensors) -> NavState {
             self.note(1);
-            let mut nav = NoEstimator.update(sensors);
-            nav.valid = self.valid;
-            nav
+            NavState {
+                t_us: sensors.imu1.t_us,
+                attitude: [1.0, 0.0, 0.0, 0.0],
+                rates_rads: [0.0; 3],
+                velocity_ms: [0.0; 3],
+                position_m: [0.0; 3],
+                valid: self.valid,
+                sigma: None,
+            }
         }
     }
 
@@ -325,26 +389,31 @@ mod tests {
     impl Allocator for Rec<'_> {
         fn allocate(&mut self, _: &ThrustTorque) -> Allocation {
             self.note(6);
-            let mut a = NoAllocator.allocate(&ThrustTorque {
-                thrust_n: 0.0,
-                torque_nm: [0.0; 3],
-            });
-            a.levels = MotorLevels { level: [100; 4] };
-            a
+            Allocation {
+                levels: MotorLevels { level: [100; 4] },
+                saturation: Saturation {
+                    roll: false,
+                    pitch: false,
+                    yaw: false,
+                    thrust_low: false,
+                    thrust_high: false,
+                },
+            }
         }
     }
 
     #[test]
     fn stages_run_in_r1_order() {
-        let rates = Valid {
+        let attitude = Valid {
+            tilt: true,
             rates: true,
             ..Valid::NONE
         };
         // (valid, controller accepts, calls, allocation made)
         let cases = [
             (Valid::NONE, true, 12, false), // covers fails: no controller, no allocator
-            (rates, false, 125, false),     // the controller refuses: no allocator
-            (rates, true, 1256, true),      // the full order
+            (attitude, false, 125, false),  // the controller refuses: no allocator
+            (attitude, true, 1256, true),   // the full order
         ];
         for (valid, accept, calls, allocated) in cases {
             let log = Cell::new(0);
@@ -358,7 +427,7 @@ mod tests {
             assert_eq!(log.get(), calls);
             assert_eq!(out.allocation.is_some(), allocated);
             assert_eq!(out.demand.is_ok(), allocated);
-            // The gate comes last and is not armed in step 3: Stop whatever the allocator said.
+            // The gate comes last and has no stick report: Stop whatever the allocator said.
             assert_eq!(out.motors, MotorCommand::STOP);
         }
     }

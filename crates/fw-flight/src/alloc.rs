@@ -34,6 +34,18 @@ impl CardAllocator {
         let c = demand.thrust_n.max(4.0 * lo).min(4.0 * hi);
         let thrust_low = c > demand.thrust_n;
         let mut thrust_high = c < demand.thrust_n;
+        // At the floor the shares a and e are 0 by rule (no authority at idle, no airmode; decision 1d): all four
+        // rotors at T_lo, so exactly IDLE_LEVEL, whatever the torques and the card's symmetry.
+        if thrust_low {
+            let all = Saturation {
+                roll: true,
+                pitch: true,
+                yaw: true,
+                thrust_low,
+                thrust_high,
+            };
+            return ([lo; 4], all);
+        }
 
         // 2. Roll and pitch: the largest share a that keeps every rotor above T_lo and fits the span T_hi - T_lo,
         //    then lower the collective by d (<= 0) so the top rotor is at most T_hi.
@@ -171,6 +183,10 @@ mod tests {
             thrust_low: true,
             thrust_high: false,
         };
+        assert_eq!(out.saturation, want);
+        // A large torque demand at zero throttle: still idle on all four (decision 1d).
+        let out = CardAllocator::new().allocate(&demand(0.0, [5.0, -5.0, 5.0]));
+        assert_eq!(out.levels.level, [IDLE_LEVEL; 4]);
         assert_eq!(out.saturation, want);
     }
 

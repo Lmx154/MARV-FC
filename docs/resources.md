@@ -171,6 +171,13 @@ Status LED (2026-11-18, `status-led`, normal build, `arm-none-eabi-size -A`, aga
 growth is `led::inputs` (the rows' reads inlined). `tools/check-ram-code.py` passes with the same 5 roots (155
 functions, 84 906 B in SRAM, 248 data objects; 151, 83 700 B and 248 before).
 
+Flight code in the step (2026-11-19, `first-pair` P4b, release build, `arm-none-eabi-size -A` and the linker symbols,
+against ee647fb built the same way): `.ram_text` 154 516 -> 176 528 (+22 012: code +21 300, constants +712), `.text`
+702 260 -> 702 168, `.data` 44 868, `.bss` 112 852 -> 114 604 (+1 752, the flight state in IMU1's task), `.uninit`
+8 192; static SRAM to `__euninit` +23 768 B (0x2004e4d4 -> 0x200541ac); free above `_stack_end` 179 792 B. The
+card's `MIX` is folded into `CardAllocator::allocate`'s literal pool (in SRAM). `tools/check-ram-code.py` passes
+(roots 5, 185 functions, 107 010 B, 255 data objects; 155, 85 776 B and 250 before).
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow
@@ -254,7 +261,13 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    makes the checker FAIL (13 functions). The flight step (2026-11-19) added
    `*9fw_flight4step*`, `*9fw_flight3gnc*`, `*9fw_flight4gate*` and `*16marv_v2_firmware6flight*7Stepper*`. With today's stand-ins the whole step is inlined into IMU1's
    `ImuTask::once`, so the checker passes without them; with `Flight::step` forced out of line, removing them makes
-   it FAIL (1 function, `Flight::step`). A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
+   it FAIL (1 function, `Flight::step`). The flight code (step 5, P4b, 2026-11-19) added `*9fw_flight5alloc*`,
+   `*9fw_flight6mahony*`, `*9fw_flight3pid*`, `*9fw_flight4quat*`, `*9fw_flight6tuning*`, `*7fw_core9handshake*`,
+   `*4libm4math*`, and `.text.__aeabi_d*`, `__aeabi_f2d`, `__aeabi_i2d`, `__aeabi_ul2f` and
+   `*17compiler_builtins5float*` (the soft double-precision code `libm`'s `sinf`/`cosf` use, and Mahony's u64-to-f32);
+   `Flight::step` is now out of line in SRAM. Removing the `handshake`/`libm` line makes the checker FAIL (21
+   functions: `sinf`, `cosf`, `sqrtf`, `roundf`, `Handshake::try_arm`, `disarm` and their callees). The card's
+   constants need no line: every `.rodata` is in SRAM already. A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
    identical functions make the patterns inexact: three lines exist only for merged functions' sections). A
    binary flashed without `tools/run.sh` skips the checker.
 

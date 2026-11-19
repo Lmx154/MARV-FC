@@ -323,7 +323,7 @@ impl Esc {
     }
 }
 
-/// G3 (DS:175-185): the one place a throttle is built. A level above [`TEST_CAP`] (or outside
+/// G3 (DS:175-185): the motor test's only throttle constructor (the flight command's is the gate's). A level above [`TEST_CAP`] (or outside
 /// 1..=2000) is refused.
 fn capped(level: u16) -> Option<Throttle> {
     if !within_cap(level) {

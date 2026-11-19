@@ -1,6 +1,5 @@
 //! The three seams of the flight code and their types: [`Estimator`], [`Controller`], [`Allocator`]
 //! (decision-sim-seams-20261119, sections 3 to 5). Frames, units and signs: decision-sim-conventions-20261119.
-//! At the end, the step-3 stand-ins, replaced in step 5.
 
 use crate::imu::ImuSample;
 use fw_core::esc::LINES;
@@ -304,60 +303,6 @@ pub struct Allocation {
 pub trait Allocator {
     /// Owns saturation priority and the thrust-to-level map.
     fn allocate(&mut self, demand: &ThrustTorque) -> Allocation;
-}
-
-/// Step-3 stand-in, replaced in step 5: nothing is valid, no sigma, at `sensors.imu1.t_us`.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoEstimator;
-
-impl Estimator for NoEstimator {
-    fn update(&mut self, sensors: &Sensors) -> NavState {
-        NavState {
-            t_us: sensors.imu1.t_us,
-            attitude: [1.0, 0.0, 0.0, 0.0],
-            rates_rads: [0.0; 3],
-            velocity_ms: [0.0; 3],
-            position_m: [0.0; 3],
-            valid: Valid::NONE,
-            sigma: None,
-        }
-    }
-}
-
-/// Step-3 stand-in, replaced in step 5: refuses every setpoint.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoController;
-
-impl Controller for NoController {
-    fn update(
-        &mut self,
-        _: &NavState,
-        _: &Setpoint,
-        _: &Saturation,
-    ) -> Result<ThrustTorque, Refused> {
-        Err(Refused)
-    }
-
-    fn reset(&mut self) {}
-}
-
-/// Step-3 stand-in, replaced in step 5 (`CardAllocator`): never reached, since [`NoController`] refuses.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct NoAllocator;
-
-impl Allocator for NoAllocator {
-    fn allocate(&mut self, _: &ThrustTorque) -> Allocation {
-        Allocation {
-            levels: MotorLevels { level: [0; LINES] },
-            saturation: Saturation {
-                roll: false,
-                pitch: false,
-                yaw: false,
-                thrust_low: false,
-                thrust_high: false,
-            },
-        }
-    }
 }
 
 #[cfg(test)]

@@ -1,19 +1,23 @@
 //! The flight step on the board (decision-sim-seams-20261119, section 8; build step 3). Core 1 only: IMU1's
 //! task owns a [`Stepper`] and runs `fw_flight::step::Flight::step` once per good IMU1 sample, right
 //! after publishing it, then publishes the result through [`OUT`]. Nothing on core 0 touches this module.
-//! Step 3: the stand-ins give Stop on every step and the ESC task does not read [`OUT`] yet (step 5).
+//! Step 5: the step runs Mahony, the cascaded PID and the card's allocator, but with no stick report (`rc: None`) the
+//! gate never arms, and the ESC task does not read [`OUT`] yet.
 //! No status line: a `[STAT] FLT:` line from core 0 was tried on 2026-11-19 and removed, because that one
 //! extra log line lengthened the flight core's longest wait behind the log (README, Flight-core device loop).
 
 use fw_core::xcore::{Seqlock, SeqlockWriter};
+use fw_flight::alloc::CardAllocator;
 use fw_flight::gate::MotorCommand;
-use fw_flight::gnc::{NoAllocator, NoController, NoEstimator, Sensors};
+use fw_flight::gnc::Sensors;
 use fw_flight::imu::{ImuSample, SampleSink};
+use fw_flight::mahony::Mahony;
+use fw_flight::pid::CascadedPid;
 use fw_flight::step::{Flight, FlightInputs};
 use fw_flight::tuning::Tuning;
 
 /// The flight code this image runs; edit this line to change it (seams decision, section 9).
-pub type BoardFlight = Flight<NoEstimator, NoController, NoAllocator>;
+pub type BoardFlight = Flight<Mahony, CascadedPid, CardAllocator>;
 
 /// What the flight step publishes after every step.
 #[derive(Clone, Copy)]
@@ -42,9 +46,9 @@ impl Stepper {
     pub fn new() -> Option<Self> {
         Some(Self {
             flight: Flight::new(
-                NoEstimator,
-                NoController,
-                NoAllocator,
+                Mahony::new(&Tuning::DEFAULT),
+                CascadedPid::new(&Tuning::DEFAULT),
+                CardAllocator::new(),
                 &Tuning::DEFAULT,
                 &crate::settings::HANDSHAKE,
             ),

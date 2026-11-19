@@ -3,8 +3,7 @@
 //! telemetry logic [`esc`] (pure), and [`tagged`], which names the task that ran last for the watchdog (`RUNNING1`).
 //! The flight step: [`step`] (`Flight`, called by IMU1's task per sample), [`gnc`] (the estimator, controller and
 //! allocator seams), [`gate`] (the gate and `MotorCommand`), [`tuning`] (the gains and limits).
-//! The first pair's parts, not yet wired into the step: [`alloc`] (`CardAllocator`), [`mahony`] (`Mahony`),
-//! [`pid`] (`CascadedPid`).
+//! What the step runs: [`mahony`] (`Mahony`), [`pid`] (`CascadedPid`), [`alloc`] (`CardAllocator`).
 //! Rule: no dependency on `embassy-time`, `embassy-sync` or `defmt`.
 #![no_std]
 #![forbid(unsafe_code)]
