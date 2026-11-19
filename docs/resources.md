@@ -32,7 +32,7 @@ other device, PIO block or DMA channel of this plan has run in it yet.
 | ESC telemetry in | 34 | PIO | `pio-uart` `UartRx` |
 | ESC signal (DShot, passthrough) | 36-39 (M4..M1) | PIO | `dshot` (BUILT, `src/esc.rs`, core 1: driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1), `esc-passthrough` (not in the firmware) |
 | Battery voltage, current | 40, 41, 42 (ADC0-2) | ADC | `adc-battery` |
-| Status LED | 43 | PIO | `ws2812c` |
+| Status LED | 43 | PIO | `ws2812c` (BUILT, `src/led.rs`, core 0: PIO1 SM1) |
 | PSRAM | CS on 0 | QMI CS1 | `qmi-psram` |
 | USB | | USB | `usb-cdc`, `mavlink-device` |
 | Servo pads | 2-5 | PWM slices 1 and 2 | (none yet; 4 and 5 are used as inputs on the bench) |
@@ -56,8 +56,8 @@ unless the HAL is given an explicit base.
 | Block | User | State machine | Words | Notes |
 |---|---|---|---|---|
 | PIO0 | microSD (`pio-sdmmc`) | SM0 | 21 | BUILT (`src/sd.rs`, core 0, 2026-11-15): the SD task builds the whole `Pio` (SM1-3 unused and dropped) and builds it again for every start, recovery and restart. Takes `&mut Common` + one SM + one DMA channel |
-| PIO0 | Status LED (`ws2812c`, PIO transport) | SM1 | 4 | CHOSEN. Takes `&mut Common` + one SM. 25 of 32 words used; SM2, SM3 free |
-| PIO1 | ESC telemetry (`pio-uart` `UartRx`) | SM0 | 13 | CHOSEN. Borrows `&mut Common`. 19 words and SM1-3 free |
+| PIO1 | Status LED (`ws2812c`, PIO transport) | SM1 | 4 | BUILT (`src/led.rs`, core 0, 2026-11-18; not yet run on the board): the LED task builds `Pio::new(PIO1)` and `PioTransport::new` on SM1 and GPIO43. Not PIO0: the SD task builds `Pio::new(PIO0)` again at every SD session (`src/sd.rs`), which resets the block's bookkeeping under any other user |
+| PIO1 | ESC telemetry (`pio-uart` `UartRx`) | SM0 | 13 | CHOSEN, not built. Borrows `&mut Common`. 13 words, with the LED's 4: 17 of 32, SM2 and SM3 free. When it is built, the `UartRx` and the LED must come from the SAME `Pio::new(PIO1)` call (one `Common`, SM0 and SM1): a second `Pio::new` on this block would reset the state the first one set |
 | PIO2 | DShot (`dshot` `PioDshot`) | SM0 | 15 | BUILT (`src/esc.rs`, core 1, 2026-11-18): `esc::driver` builds the whole `Pio` inside `core1_main` (SM1-3 dropped) and `PioDshot::new` at DShot300 with `clk_sys` read on core 0; never released. Not built with the feature `esc-off`. The driver needs SM0 and takes the block's `Common` by value, so nothing else lives in PIO2 while it runs |
 | PIO2 | ESC passthrough (`pio-uart` `OneWire`) | SM0 | 27 | CHOSEN. EXCLUSIVE IN TIME with DShot (15 + 27 > 32): DShot is released, `OneWire` built for the session, then released and DShot rebuilt, as the passthrough demo does |
 
@@ -73,7 +73,7 @@ unless the HAL is given an explicit base.
 
 ## Interrupts to bind
 
-`DMA_IRQ_0` (core 1: channels 0-3 and 5), `DMA_IRQ_1` (core 0: channel 4, `pio_sdmmc::pio::DmaIrqHandler<SdWaker>`, priority P3, set by the driver), `PIO0_IRQ_0` (the SD bus's `Pio`), `PIO1_IRQ_0`, `PIO2_IRQ_0` (BUILT: `esc::Irqs`, enabled by `Pio::new` on core 1; start-up check: enabled on core 1, not on core 0; bound in every build, never enabled with `esc-off`), `I2C0_IRQ`, `I2C1_IRQ`, `UART0_IRQ` and
+`DMA_IRQ_0` (core 1: channels 0-3 and 5), `DMA_IRQ_1` (core 0: channel 4, `pio_sdmmc::pio::DmaIrqHandler<SdWaker>`, priority P3, set by the driver), `PIO0_IRQ_0` (the SD bus's `Pio`), `PIO1_IRQ_0` (BUILT: `led::Irqs`, enabled by `Pio::new` on core 0, the status LED; not yet run on the board), `PIO2_IRQ_0` (BUILT: `esc::Irqs`, enabled by `Pio::new` on core 1; start-up check: enabled on core 1, not on core 0; bound in every build, never enabled with `esc-off`), `I2C0_IRQ`, `I2C1_IRQ`, `UART0_IRQ` and
 `UART1_IRQ` (buffered UARTs), `ADC_IRQ_FIFO`, `USBCTRL_IRQ`. Taken by the HAL itself: `TIMER0_IRQ_0` (the time
 driver, alarm 0), `IO_IRQ_BANK0` (all `Input::wait_for_*`, no binding needed; priority P3), and `DMA_IRQ_0`'s
 priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through the bank interrupt.
@@ -82,7 +82,7 @@ priority (P3). Data-ready and PPS inputs (GPIO15, 7, 6, 21, 4, 5) all go through
 
 | Item | Assignment | Status |
 |---|---|---|
-| Core 0, the I/O core: thread-mode executor | `embassy_rp::init`, the time driver; usb_link (`usb-cdc`'s futures are not `Send`: built here), rc_link, baro, mag, gnss, batt, supervisor, actions, settings and flash_saver, beat0; later led, sd_logger | DECIDED (design, two-core amendment) |
+| Core 0, the I/O core: thread-mode executor | `embassy_rp::init`, the time driver; usb_link (`usb-cdc`'s futures are not `Send`: built here), rc_link, baro, mag, gnss, batt, supervisor, actions, settings and flash_saver, beat0, led (BUILT 2026-11-18: `src/led.rs`, a 20 ms `Ticker`, PIO1 SM1, GPIO43; not yet run on the board); later sd_logger | DECIDED (design, two-core amendment) |
 | Core 0: `SWI_IRQ_1` interrupt executor | the watchdog's monitor only, priority 1 (BUILT: `src/watchdog.rs`) | DECIDED |
 | Core 0: `SWI_IRQ_0` | the receiver task `rc_link` alone, priority P3 (0xC0), below the monitor's `SWI_IRQ_1` (P1) (2026-11-15) | DECIDED |
 | Core 1, the FLIGHT core: thread-mode executor | imu1 (BUILT: `fw_flight::imu` over the ICM-45686), imu2 (BUILT: `fw_flight::imu` over the LSM6DSK320X), fbeat (liveness, BUILT), esc (BUILT 2026-11-18: one DShot exchange per 1 ms, paced with `SpinDelay`; not spawned with `esc-off`); later the control loop, arming. The esc task's wait is a clock poll that wakes itself, so core 1's executor no longer sleeps: a core-1 load figure must come from task timings, not idle time. Every flight peripheral is built inside core 1's entry closure so its interrupt lands there. No interrupt executor on core 1 (it could not be woken from core 0) | DECIDED |
@@ -163,6 +163,13 @@ ESC telemetry F2 (2026-11-18, `esc-telemetry`, normal build, `arm-none-eabi-size
 `esc`), one static cell (`esc::ESC`, a `Seqlock<EscStatus>` of 696 B), the PIO2 block, DMA channel 5, `PIO2_IRQ_0`.
 Most of the `.text` growth is the core-0 readers (`esc::row`, `message`, `stat`, each inlining the seqlock copy).
 `tools/check-ram-code.py` passes (roots 5, 151 functions, 82 712 B in SRAM, 247 data objects).
+
+Status LED (2026-11-18, `status-led`, normal build, `arm-none-eabi-size -A`, against 338709b built the same way):
+`.ram_text` 150 076 -> 153 636, `.text` 667 132 -> 700 276, `.data` 44 852 -> 44 860, `.bss` 111 396 -> 112 136,
+`.uninit` 8 192. New: one core-0 task (`led`, watchdog id 19), `PIO1_IRQ_0` bound on core 0, PIO1 SM1, GPIO43, one
+`AtomicU8` (`led::EVENT`), one `ParamDef` table; no cross-core cell, nothing on core 1. About 20 KB of the `.text`
+growth is `led::inputs` (the rows' reads inlined). `tools/check-ram-code.py` passes with the same 5 roots (155
+functions, 84 906 B in SRAM, 248 data objects; 151, 83 700 B and 248 before).
 
 SRAM8 and SRAM9 (4 KB each) are unused.
 

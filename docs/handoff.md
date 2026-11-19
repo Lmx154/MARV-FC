@@ -47,8 +47,9 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
   USB. The station's Motors tab shows it. The props-off motor test is built (command 209, one motor at up to 5 % for up
   to 3 s, core 1 ends the spin on its own clock; README, ESC telemetry, Motor test) and was run on the board from the
   station's Motors tab on 2026-11-18 (all four motors, stop, replace, cable pull).
-- **Parameters:** 79 (the last nine: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`) and `MOT_POLES` (`Live`, the motors' poles for the ESC rpm); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
+- **Parameters:** 80 (the last ten: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`), `MOT_POLES` (`Live`, the motors' poles for the ESC rpm) and `LED_BRIGHT` (`Live`, the status LED's level 0 to 3, default 1); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
+- **Status LED:** built and host-tested, NOT yet run on the board (`src/led.rs`, PIO1 SM1, GPIO43): white at boot, a nine-blink roll call at 6 s (IMU1, IMU2, BARO, MAG, GNSS, BATT, RC, SD, ESC: green OK, red FAILED, yellow other), then a one-second pulse whose colour is the state (red double blink: a vital sensor FAILED; purple: motor spin; blue/white: calibrating; yellow: degraded or no log; green: GNSS 3D fix; blue: otherwise); three green or red flashes when a save or calibration ends. README, Status LED, has the table.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
 - **Watchdog:** resets when either core stops answering, keeps a record of why, reports it at the next boot.
@@ -233,7 +234,7 @@ copies for the download checks.
 - ESC, beyond the telemetry and the props-off motor test above: arming, any other throttle, passthrough through the USB port, the board's
   current scale, ESC serial telemetry on GPIO34. See `docs/handoff-esc-link.md`.
 - The estimator (next).
-- Status LED. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
+- The PSRAM. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
   the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
 - Full-rate IMU data from the flight core to core 0 (a ring is reserved in the design; needed for a control
   loop and for full-rate logging).

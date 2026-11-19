@@ -11,12 +11,12 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 79 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation and the motors' pole count (see Parameters),
+  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 80 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
   action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag`, `gnss` and `batt`, the four core-0 device tasks (see
-  Device layer), and `sd`, the SD card's device task with its own loop (see SD card). `rc_link`, the radio's task (UART0, report only; see Radio).
+  Device layer), and `sd`, the SD card's device task with its own loop (see SD card). `rc_link`, the radio's task (UART0, report only; see Radio). `led`, the status LED's task (PIO1, GPIO43; see Status LED).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, IMU1
   (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, and IMU2
@@ -371,7 +371,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (79 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1: `AHRS_ORIENTATION`, `MAG_ORIENT` and `MOT_POLES` are appended last, indices 76, 77 and 78). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (80 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1 + 1: `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES` and `LED_BRIGHT` are appended last, indices 76, 77, 78 and 79). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -446,6 +446,8 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 `AHRS_ORIENTATION` (`crates/fw-settings/src/imu.rs`, `BOARD`, index 76), `I32`, device 0 (the system; a refused IMU setup never resets it), default 0, range 0 to 15, `Reboot` class: the rotation from the board's frame to the vehicle's, ArduPilot's name and numbers (see `MAG_ORIENT`). Both IMU adapters apply it after the offsets. It is read once at boot and handed to core 1 by value (no cell), and the calibrations on core 0 use the same boot value, so a write applies after save and reboot. Each IMU also has a fixed chip-to-board rotation in code, `fw_settings::imu::IMU1_MOUNT` and `IMU2_MOUNT`, both `ROLL_180` (8): the IMUs' axes are +X forward, +Y left, +Z up, the body's FRD.
 
 `MOT_POLES` (`crates/fw-settings/src/esc.rs`, index 78), `I32`, device ESC (12), default 14, range 2 to 64, `Live`: the magnets (poles, not pole pairs) of each motor, for the rpm of ESC_STATUS (eRPM / (`MOT_POLES` / 2), rounded down). Core 0 reads it for every message, so it never reaches the flight core. Design: `_plan/decision-esc-telemetry-20261118.md`.
+
+`LED_BRIGHT` (`crates/fw-settings/src/led.rs`, index 79), `I32`, device 0 (the system: there is no LED device row), default 1, range 0 to 3, `Live`: the status LED's brightness, 0 off, 1 dim (20 of 255), 2 medium (80), 3 bright (255). The LED task reads it every 20 ms, so a write shows at once; it is saved only on the user's Save, like every parameter. See Status LED.
 
 ### SD parameter
 
@@ -587,7 +589,7 @@ written.
   time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
   status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 79 parameters when a log opens and after
+  text ring's third cursor: the boot texts first), PARM for all 80 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second).
@@ -989,6 +991,47 @@ the station ("this link is operate-only", status 4, no write on the board); `par
 before its ACK. CRSF mode has run since (2026-11-16: RC_CHANNELS and MANUAL_CONTROL on USB, RCIN in the
 SD log). Not yet run: the transmitter switched off in either mode, a command over the radio.
 
+## Status LED
+
+Not yet run on the board: built and host-tested only (the display logic, `fw_core::led`, has host tests; the task has been
+built, not flashed). Design: `_plan/decision-status-led-20261118.md`.
+
+The board's one status LED (D20, a WS2812C on GPIO43) shows the vehicle's state, decided by the firmware (nothing in the
+station). `src/led.rs` is a core-0 task (watchdog id LED = 19) on PIO1 state machine 1 with `PIO1_IRQ_0`, using the
+`ws2812c` driver; every 20 ms it reads the device rows, the motor test, the calibration flag, the open log, the GNSS
+sample and `LED_BRIGHT`, asks the pure `fw_core::led` what to show, and writes the LED only when the colour or the
+brightness changed. If the PIO timing cannot be built the task logs one line and ends: nothing else depends on the LED.
+It has no device row and no cross-core cell.
+
+**Boot.** From the start: steady white. At 6.0 s after boot (the ESCs are stable from about 5.4 s) a roll call of nine
+blinks, 200 ms on and 150 ms off, always in this order: IMU1, IMU2, BARO, MAG, GNSS, BATT, RC, SD, ESC. Each blink is
+green when that device's row is OK, red when it is FAILED and yellow for anything else (ABSENT, STARTING, DEGRADED,
+RECOVERING), read at the moment of the blink (with the radio off the RC blink is yellow). Then the running display.
+
+**Running.** One soft pulse per second (the brightness rises and falls smoothly between 15 % and 100 % of the level);
+the colour is the state, and the highest row that applies wins:
+
+1. Red, double blink (two 100 ms blinks, then dark to the end of the second): IMU1, IMU2, BARO, MAG or BATT is FAILED.
+2. Purple, solid: a motor is being commanded (the motor test's spin is active; later: armed).
+3. Blue and white alternating at 5 Hz: a calibration is running.
+4. Yellow pulse: any row is DEGRADED or RECOVERING; GNSS, RC, SD or ESC is FAILED; or no log is open on the SD card.
+   RC or ESC merely ABSENT or STARTING (radio off, no battery) is not yellow.
+5. Green pulse: the latest GNSS sample is younger than 3 s and has a 3D fix or better.
+6. Blue pulse: otherwise.
+
+**Flashes.** Three quick flashes (100 ms on, 100 ms off) drawn over the running display, then back to it: green when a
+settings save (command 245, param1 = 1) or a calibration (gyro, accelerometer, compass) ends ACCEPTED, red when one of
+those ends FAILED (a calibration that runs out of time counts as FAILED). A cancelled calibration shows nothing. During
+the boot (the white and the roll call) an event waits until the roll call has finished; at most one event waits, and a
+newer one replaces an older one.
+
+**Not shown, on purpose:** sensor reads, telemetry, radio or USB traffic, parameter writes, low battery (the firmware has no
+low-battery threshold), the watchdog's reset cause.
+
+**Brightness:** the parameter `LED_BRIGHT` (see Parameters), 0 off, 1 dim (the default), 2 medium, 3 bright. With the
+feature `esc-off` the ESC row reads FAILED, so the running display is a yellow pulse. A build of `sd-fat-probe` has no SD
+row (the SD blink is yellow) and no log.
+
 ## Device drivers
 
 The device drivers are not part of this repository. Each one lives in its own GitHub repository and
@@ -1009,8 +1052,9 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | usb-cdc | <https://github.com/Lmx154/usb-cdc> | bytes over the board's USB port (CDC-ACM), the link to the ground station |
 | mavlink-device | <https://github.com/Lmx154/mavlink-device> | the board's MAVLink layer on any byte stream (with the `marv` dialect) |
 | rc-port | <https://github.com/Lmx154/rc-port> | the ELRS receiver's UART: CRSF and MAVLink, with its `crsf-codec` |
+| ws2812c | <https://github.com/Lmx154/ws2812c-rs> | the WS2812C status LED on GPIO43, PIO transport (feature `embassy-rp`; pinned at faf1eb5) |
 
-The `qmi-psram` (PSRAM) and `ws2812c` (status LED) drivers exist in their own repositories but are not dependencies of the firmware: it uses neither the PSRAM nor the LED yet.
+The `qmi-psram` (PSRAM) driver exists in its own repository but is not a dependency of the firmware: it does not use the PSRAM yet. The `ws2812c` driver (status LED) is a dependency: see Status LED.
 
 For what each driver offers and how to use it, read the README in its own repository. What was proven
 on the board, what the firmware has to respect, and what is still open: the Measured section of each driver's README.
@@ -1078,7 +1122,7 @@ board.
   that fails (its health goes to Failed, the executor runs on), a flash save (about 45 ms), a stall shorter
   than about 1.6 s.
 - Task ids (one table, `fw_core::watchdog::task`, used by the record and the boot report): core 0 MAIN, USB,
-  LINK, SUPERVISOR, BEAT, ACTION (a command's action inside the link task, so a settings save or reload runs under it), BARO, TEST (a check
+  LINK, SUPERVISOR, BEAT, ACTION (a command's action inside the link task, so a settings save or reload runs under it), BARO, LED (19), TEST (a check
   feature's task); flight core FBEAT, IMU1, IMU2. Each task stores its id when it resumes (`fw_flight::tagged`, a
   plain atomic store on every poll).
 - The boot report, read once at start (then the record's magic is cleared), one `[INFO] boot report` log line
@@ -1151,7 +1195,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (254 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (291 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
@@ -1177,7 +1221,7 @@ the host (254 tests, and 4 doc tests); the binary uses every module listed below
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, `mag`, `batt`, `imu` and `rc`, the last with the RC stick normaliser, no validator; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (47 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (48 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store
