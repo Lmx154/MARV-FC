@@ -30,6 +30,7 @@ pub mod esc;
 pub mod handshake;
 pub mod health;
 pub mod i2c;
+pub mod led;
 pub mod logfile;
 pub mod mbr;
 pub mod params;

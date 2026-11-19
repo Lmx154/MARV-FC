@@ -25,6 +25,7 @@ pub mod baro;
 pub mod batt;
 pub mod esc;
 pub mod imu;
+pub mod led;
 pub mod mag;
 pub mod rc;
 pub mod sd;
@@ -42,10 +43,11 @@ pub const COUNT: usize = baro::COUNT
     + imu::SETTINGS_COUNT
     + imu::BOARD_COUNT
     + mag::ORIENT_COUNT
-    + esc::COUNT;
+    + esc::COUNT
+    + led::COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
-/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT` and `MOT_POLES` (appended, so the
+/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES` and `LED_BRIGHT` (appended, so the
 /// first 70 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
@@ -131,6 +133,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < led::COUNT {
+        out[n] = led::TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -146,7 +154,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 79);
+        assert_eq!(COUNT, 80);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -157,7 +165,8 @@ mod tests {
             .chain(imu::SETTINGS.iter())
             .chain(imu::BOARD.iter())
             .chain(mag::ORIENT_TABLE.iter())
-            .chain(esc::TABLE.iter());
+            .chain(esc::TABLE.iter())
+            .chain(led::TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
@@ -253,6 +262,7 @@ mod tests {
             "AHRS_ORIENTATION",
             "MAG_ORIENT",
             "MOT_POLES",
+            "LED_BRIGHT",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
@@ -264,7 +274,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 79);
+        assert_eq!(COUNT, 80);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [
@@ -350,6 +360,29 @@ mod tests {
         for bad in [1, 65] {
             assert_eq!(
                 p.set(78, ParamValue::I32(bad)),
+                Err(mavlink_device::ParamError::OutOfRange)
+            );
+        }
+    }
+
+    /// `LED_BRIGHT` is the 80th parameter (index 79): I32, default 1, 0 to 3, `Live`, device 0.
+    #[test]
+    fn led_bright_is_appended_at_index_79() {
+        use mavlink_device::ParamValue;
+        let def = &TABLE[79];
+        assert_eq!(def.name, "LED_BRIGHT");
+        assert_eq!(def.device, 0);
+        assert_eq!(def.default, ParamValue::I32(1));
+        assert_eq!((def.min, def.max), (ParamValue::I32(0), ParamValue::I32(3)));
+        assert_eq!(def.apply, Apply::Live);
+        assert!(!def.calibration && !def.read_only);
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        for ok in [0, 1, 3] {
+            assert_eq!(p.set(79, ParamValue::I32(ok)), Ok(ParamValue::I32(ok)));
+        }
+        for bad in [-1, 4] {
+            assert_eq!(
+                p.set(79, ParamValue::I32(bad)),
                 Err(mavlink_device::ParamError::OutOfRange)
             );
         }
