@@ -7,15 +7,22 @@
 //! When a log opens the collector first commits [`PAD`] filler bytes, which the SD task consumes
 //! without writing them (they put the ring's read index and the file offset in step modulo 4096,
 //! so that whole pieces are written in place), then a PARM for every parameter and a DEV for
-//! every row. Then, per Q5: IMU1 and IMU2 at 25 Hz from their seqlocks (every 4th tick, only a new
-//! `seq`, `TimeUS` the sample's own time), BARO, MAG, BAT and GPS at every new sample, RCIN at
-//! 10 Hz while stick reports are fresh, DEV for every row at 1 Hz and at every state change, MSG
-//! for every text (the text ring's third cursor, so the boot texts come first), PARM after every
-//! change of a parameter's value, whatever made it (a set, a calibration result, a reset, a
+//! every row. Then, per Q5: IMU2 at 25 Hz from its seqlock (every 4th tick, only a new `seq`,
+//! `TimeUS` the sample's own time; IMU1 comes from the flight core, below), BARO, MAG, BAT and
+//! GPS at every new sample, RCIN at 10 Hz while stick reports are fresh, DEV for every row at
+//! 1 Hz and at every state change, MSG for every text (the text ring's third cursor, so the boot
+//! texts come first), PARM after every change of a parameter's value, whatever made it (a set,
+//! a calibration result, a reset, a
 //! reload: every tick the store is compared with the values last logged), and DSF once per second from the figures the SD task hands over
 //! in [`DSF_FIGURES`] (it owns the ring's statistics); Dp is counted here. A record that does not
 //! fit is dropped and counted by the ring. The collector never awaits the card and takes no lock
 //! that the SD task holds across a card call (Q4-I4): its only locks are short critical sections.
+//!
+//! The flight records (decision-flight-logging-20261119, section 3): the collector is the one
+//! consumer of `flight::LOG`, which IMU1's `Stepper` fills on core 1. Every tick, open log or not,
+//! `fw_core::relay::relay` moves its records into [`RING`] (into nothing while no log is open), so
+//! the flight ring is always drained and a full [`RING`] never backs up into core 1; with DSF, FDS
+//! (the flight ring's drops since the log opened and its smallest free space).
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -26,9 +33,10 @@ use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker};
 use fw_core::dflog::{self, Dev, Dsf, Gps};
 use fw_core::health::State;
+use fw_core::relay::relay;
 use fw_core::sys_status::{StatusInput, device_status};
 use fw_core::watchdog::task;
-use fw_core::xcore::{LogProducer, LogRing};
+use fw_core::xcore::{LogConsumer, LogProducer, LogRing};
 use fw_flight::tagged;
 use mavlink_device::marv::MARV_DEVICE_STATUS_DATA;
 use mavlink_device::{ParamStore, ParamValue};
@@ -36,8 +44,8 @@ use mavlink_device::{ParamStore, ParamValue};
 use crate::device::{BARO, BATT, DEVICE_COUNT, DEVICES, Device, GNSS, MAG, Reading, Sample};
 use crate::{LINK_LOG, ROWS};
 
-/// The ring's size (Q4: 32 KiB, in `.bss`).
-pub const RING_BYTES: usize = 32 * 1024;
+/// The ring's size (decision-flight-logging-20261119, section 2: 64 KiB).
+pub const RING_BYTES: usize = 64 * 1024;
 /// The writer's piece: the SD task writes whole pieces of this size in place.
 pub const PIECE: usize = 4096;
 /// The log ring: the collector's records, the SD task's bytes.
@@ -54,6 +62,7 @@ pub static DSF_FIGURES: Mutex<CriticalSectionRawMutex, Cell<Option<Dsf>>> =
     Mutex::new(Cell::new(None));
 
 type Producer = LogProducer<'static, RING_BYTES>;
+type FlightConsumer = LogConsumer<'static, { crate::flight::LOG_BYTES }>;
 
 const TICK: Duration = Duration::from_millis(10);
 /// IMU records every 4th tick (25 Hz).
@@ -72,13 +81,18 @@ async fn collect() -> ! {
     let Some(mut producer) = RING.take_producer() else {
         defmt::panic!("[FAIL] log ring: producer taken twice");
     };
+    let Some(flight) = crate::flight::LOG.take_consumer() else {
+        defmt::panic!("[FAIL] flight log ring: consumer taken twice");
+    };
     let mut ticker = Ticker::every(TICK);
     let mut c = Collector {
         tick: 0,
         open: 0,
         dropped_at_open: 0,
-        imu_due: [false; 2],
-        imu_seq: [None; 2],
+        flight,
+        flight_dropped_at_open: 0,
+        imu_due: false,
+        imu_seq: None,
         seq: [None; 4],
         rows: [None; ROWS],
         params: [None; fw_settings::COUNT],
@@ -95,9 +109,13 @@ struct Collector {
     open: u32,
     /// The ring's drop count when that log opened.
     dropped_at_open: u32,
-    /// IMU1, IMU2: a record is due (set every 4th tick, cleared by a read of the seqlock).
-    imu_due: [bool; 2],
-    imu_seq: [Option<u32>; 2],
+    /// The consumer of `flight::LOG`.
+    flight: FlightConsumer,
+    /// The flight ring's drop count when that log opened.
+    flight_dropped_at_open: u32,
+    /// IMU2: a record is due (set every 4th tick, cleared by a read of the seqlock).
+    imu_due: bool,
+    imu_seq: Option<u32>,
     /// The last `seq` logged of BARO, MAG, GNSS, BATT.
     seq: [Option<u32>; 4],
     /// Per row the state (and stuck flag) of its last DEV record.
@@ -111,7 +129,7 @@ impl Collector {
         let tick = self.tick;
         self.tick = tick.wrapping_add(1);
         if tick.is_multiple_of(IMU_EVERY) {
-            self.imu_due = [true; 2];
+            self.imu_due = true;
         }
         let open = OPEN.load(Ordering::Acquire);
         if open != self.open {
@@ -120,6 +138,8 @@ impl Collector {
                 self.start(p);
             }
         }
+        // Every tick: the flight ring is drained whether a log is open or not.
+        relay(&mut self.flight, (self.open != 0).then_some(&mut *p));
         if self.open == 0 {
             return;
         }
@@ -160,14 +180,22 @@ impl Collector {
             p.push_with(dflog::DSF.length.into(), |b| {
                 dflog::encode_dsf(b, now, &dsf)
             });
+            let dropped = self
+                .flight
+                .dropped()
+                .saturating_sub(self.flight_dropped_at_open);
+            let free_min = self.flight.take_stats().free_min;
+            p.push_with(dflog::FDS.length.into(), |b| {
+                dflog::encode_fds(b, now, dropped, free_min)
+            });
         }
         if RING.readable() >= PIECE {
             DATA.signal(());
         }
     }
 
-    /// A log opened: the filler; a PARM for every parameter, every row's DEV and both IMUs follow
-    /// in this tick.
+    /// A log opened: the filler; a PARM for every parameter, every row's DEV and IMU2 follow in
+    /// this tick.
     fn start(&mut self, p: &mut Producer) {
         let pad = PAD.load(Ordering::Relaxed) as usize;
         if pad > 0 {
@@ -177,8 +205,11 @@ impl Collector {
             }
         }
         self.dropped_at_open = p.dropped();
+        self.flight_dropped_at_open = self.flight.dropped();
+        // FDS's first FMn covers this log only.
+        self.flight.take_stats();
         self.rows = [None; ROWS];
-        self.imu_due = [true; 2];
+        self.imu_due = true;
         self.params = [None; fw_settings::COUNT];
         DSF_FIGURES.lock(|c| c.set(None));
     }
@@ -200,40 +231,26 @@ impl Collector {
         }
     }
 
+    /// IMU2 (instance 1); instance 0 is IMU1's, from the flight core.
     fn imus(&mut self, p: &mut Producer) {
-        let cells = [&crate::imu1::CELLS, &crate::imu2::CELLS];
-        for (inst, ((cells, due), last)) in cells
-            .into_iter()
-            .zip(self.imu_due.iter_mut())
-            .zip(self.imu_seq.iter_mut())
-            .enumerate()
-        {
-            if !*due {
-                continue;
-            }
-            let Some(status) = cells.read() else {
-                continue;
-            };
-            *due = false;
-            let Some(s) = status.latest else {
-                continue;
-            };
-            if *last == Some(s.seq) {
-                continue;
-            }
-            *last = Some(s.seq);
-            let r = s.reading;
-            p.push_with(dflog::IMU.length.into(), |b| {
-                dflog::encode_imu(
-                    b,
-                    s.t_us,
-                    inst as u8,
-                    r.gyro_rads,
-                    r.accel_ms2,
-                    r.temperature_c,
-                )
-            });
+        if !self.imu_due {
+            return;
         }
+        let Some(status) = crate::imu2::CELLS.read() else {
+            return;
+        };
+        self.imu_due = false;
+        let Some(s) = status.latest else {
+            return;
+        };
+        if self.imu_seq == Some(s.seq) {
+            return;
+        }
+        self.imu_seq = Some(s.seq);
+        let r = s.reading;
+        p.push_with(dflog::IMU.length.into(), |b| {
+            dflog::encode_imu(b, s.t_us, 1, r.gyro_rads, r.accel_ms2, r.temperature_c)
+        });
     }
 
     fn sensors(&mut self, p: &mut Producer) {

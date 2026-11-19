@@ -92,7 +92,7 @@ PROPOSED, not approved (`decision-flight-ground-20261119.md`, section 1): while 
 `decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
 core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
 `fw_flight::step::encode_step` writes one step as the records NAV, SETP, DMD and MOT (`fw_core::dflog::FLIGHT_TYPES`,
-ids 139 to 142; not in the board's header, and the board logs none of them).
+ids 139 to 142; the board logs them, see Logging).
 After each step the task writes the step time and the command to the seqlock `flight::OUT`. The ESC task reads it at
 every exchange (`try_read(1)`; a failed read sends Stop and counts `flight_read_failures`) and passes it to `Esc::frames`,
 which applies `fw_flight::esc::hold` (Stop when the command is older than 10 ms) and, while the held command spins, sends
@@ -613,17 +613,30 @@ written.
   45 282 IMU records per instance = 25.0 per second each, wall-clock time from the GPS records correct), the
   8.5-hour log 5 (161 MB, no bad bytes, DSF 30 804, GPS 30 885) and log 13 (the one cut by the card pull below:
   reads clean). UAV Log Viewer and Mission Planner were not tried.
-- What and how often (Q5; about 5.2 kB/s without the radio, 5.6 kB/s with fresh stick reports): IMU for each
-  IMU at 25 Hz (from its seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own
-  time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
+- What and how often (Q5 and decision-flight-logging-20261119 section 1; about 166 kB/s armed, 34 kB/s
+  disarmed, of which core 0's own records are about 4.6 kB/s with fresh stick reports): from the flight core
+  (IMU1's `flight::Stepper`, after the motor command is published) IMU instance 0 (IMU1, this step's sample) with
+  NAV, SETP, DMD and MOT at every flight step while armed (803.6 Hz, 182 B per step) and every 8th step while
+  disarmed (100.4 Hz), ESC (eRPM, volts, degC by DShot line, the fresh bits; `TimeUS` the exchange's) every 4th
+  step armed (200.9 Hz) and every 8th disarmed, RCS (sticks and arm switch, the report's own time) for each stick
+  report the step takes in (up to about 250 Hz); from the collector IMU instance 1 (IMU2) at 25 Hz (from its
+  seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
   status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
   text ring's third cursor: the boot texts first), PARM for all 80 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
-  ring's free bytes over the second).
-- Path: `log_collect` (core 0, watchdog id LOG) is the one producer of a 32 KiB `LogRing`; it pushes only while
+  ring's free bytes over the second), and with it FDS (Dp flight-ring records dropped in this log, FMn the flight
+  ring's smallest free space since the last FDS). Flight records reach the file up to about 10 ms after core-0
+  records of the same time, so `TimeUS` is not in order across types (nor within IMU, whose two instances come from
+  the two cores).
+- Path: `log_collect` (core 0, watchdog id LOG) is the one producer of a 64 KiB `LogRing`; it pushes only while
   a log is open (`logger::OPEN`) and never awaits the card. A record that does not fit is dropped and counted.
+  The flight core's records go first into a 16 KiB `LogRing` (`flight::LOG`: producer IMU1's `Stepper` on core 1,
+  consumer the collector on core 0); every 10 ms tick, log open or not, the collector moves its whole records into
+  the main ring (`fw_core::relay::relay`; with no log open they are consumed and discarded). Core 1 never waits: a
+  record that does not fit the flight ring is dropped and counted (FDS Dp); one that does not fit the main ring is
+  dropped there and counted (DSF Dp) and still consumed, so a stalled card never backs up into core 1.
   The SD task is the one consumer: whole 4 KiB pieces are written in place from the ring (the file offset and
   the ring's read index are kept equal modulo 4096 by a filler the collector commits and the SD task discards
   when a log opens), after 1 s without a write the bytes that wait, then a piece up to the next 4 KiB boundary;
@@ -635,8 +648,8 @@ written.
 - When: from boot, one log per boot and a new number after every recovery or RESTART (`device restart SD`
   writes what waits in the ring, flushes, closes, un-mounts, mounts and opens the next number). Off with
   `LOG_BACKEND_TYPE` = 0 (nothing collected, the card untouched).
-- Stalls and failures: the ring absorbs about 6 s of a stalled card; beyond that records are dropped (counted in
-  `overflows` and Dp). A failed write is retried once at once; a second failure is one error event and the piece
+- Stalls and failures: the main ring absorbs about 0.4 s of a stalled card while armed (about 1.9 s disarmed);
+  beyond that records are dropped (counted in `overflows` and DSF Dp). A failed write is retried once at once; a second failure is one error event and the piece
   is discarded (the file then has a gap); three such events make the row Recovering, and the recovery opens the
   next log. FAT is not power-safe: a power cut or reset loses what was not yet flushed (about 1 to 2 s).
 - Clean-up, BEFORE the log is opened and never while a log is written (as ArduPilot's `Prep_MinSpace`, which
@@ -917,8 +930,8 @@ Six rows Ok, 0 errors, watchdog stalls begun 0, no reset throughout.
 ## Commands
 
 `Telemetry::command` and `Telemetry::acks` on the USB link, over ONE `fw_core::admission::ActionBook`
-(`src/actions.rs`; link id 0 = USB; `armed` and `hil` are false until the arming code and the HIL source
-exist; `ActionBook::tick` runs in the supervisor). The answer to an admitted command is IN_PROGRESS 0 %;
+(`src/actions.rs`; link id 0 = USB; `armed` is the flight core's handshake, flight throttles sent or a motor-test
+spin, and `hil` is false until the HIL source exists; `ActionBook::tick` runs in the supervisor). The answer to an admitted command is IN_PROGRESS 0 %;
 the final ACK follows through `acks` (about 100 ms later, the node asks at least every 100 ms). Denied
 commands put the book's text out as a STATUSTEXT. Every decision logs
 `[INFO] command <number> from <sys>/<comp>: <result>`, every action `action <name> starts` and
@@ -1053,7 +1066,7 @@ RECOVERING), read at the moment of the blink (with the radio off the RC blink is
 the colour is the state, and the highest row that applies wins:
 
 1. Red, double blink (two 100 ms blinks, then dark to the end of the second): IMU1, IMU2, BARO, MAG or BATT is FAILED.
-2. Purple, solid: a motor is being commanded (the motor test's spin is active; later: armed).
+2. Purple, solid: a motor is being commanded (the motor test's spin is active, or the ESC task is sending the flight step's throttles, which happens only while armed).
 3. Blue and white alternating at 5 Hz: a calibration is running.
 4. Yellow pulse: any row is DEGRADED or RECOVERING; GNSS, RC, SD or ESC is FAILED; or no log is open on the SD card.
    RC or ESC merely ABSENT or STARTING (radio off, no battery) is not yellow.
@@ -1242,7 +1255,7 @@ the host (291 tests, and 4 doc tests); the binary uses every module listed below
 | Module | What it is |
 |---|---|
 | `xcore` | Lock-free cells between the two cores: `Seqlock` (flight core to core 0, one writer that never waits), `TripleBuffer` (core 0 to the flight core, wait-free both ways), `Kick` (request bits plus a lock-free wake), `LogRing` (the SD logger's single-producer single-consumer byte ring for whole records: a record goes in whole or not at all, drops counted, wait-free both ways, usable from either core). The only module with `unsafe`. Tested with two host threads over 10^7 writes (`LogRing`: 10^6 random operations against a model, and 4 x 10^5 records between two threads); statics using them must live in the internal SRAM, and core 1 must be started with embassy-rp's `spawn_core1` (it sets the bit that makes atomics work across the cores) |
-| `dflog` | The log format, pure: ArduPilot DataFlash `.BIN` records, one table of the 11 types (FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF) from which both the FMT records and the encoders' lengths come, the 979-byte header, GPS week and ms from UTC (integer); `dflog::walk::Walker`, an incremental reader of our own files (per-type counts and first/last `TimeUS`, bad bytes, a truncated tail, the FMT check) |
+| `dflog` | The log format, pure: ArduPilot DataFlash `.BIN` records, one table of the 18 types (FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS) from which both the FMT records and the encoders' lengths come, the 1602-byte header, GPS week and ms from UTC (integer); `dflog::walk::Walker`, an incremental reader of our own files (per-type counts and first/last `TimeUS`, bad bytes, a truncated tail, the FMT check) |
 | `mbr` | Block 0 of the SD card: MBR partition 1 of type 0x0B or 0x0C inside the card, or why not (no 0x55AA, protective GPT, exFAT/NTFS, out of range) |
 | `logfile` | The SD log files' rules, pure: log numbers 1 to 500 then 1 again, the 8.3 name `NNNNNNNN.BIN` and its parse, `LASTLOG.TXT` (format, parse, the last-number rule), and the clean-up planner (one deletion per call, the oldest log in ring order, from the sum of the log sizes and the volume size; "card full" under 8 MiB) |
 | `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's; arming also needs core 0's permit, a third flag cleared at every command admission before it reads the armed flag |
@@ -1442,7 +1455,7 @@ longer shares the XIP cache with core 0, whose misses under card work slowed it 
 
 - In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks and the ESC task, `fw_flight`'s imu,
   liveness, esc, step, gnc, gate, mahony, pid, alloc and quat modules, `fw_core::handshake`, `libm` and the soft
-  double-precision routines its `sinf`/`cosf` use, the binary's `flight::Stepper`, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
+  double-precision routines its `sinf`/`cosf` use, the binary's `flight::Stepper` and the seven `fw_core::dflog` encoders it calls, both IMU drivers, the `dshot` crate, embassy-rp's SPI, DMA, GPIO, PIO (with `pio_core`) and multicore code, the executor's poll and wake path,
   `AtomicWaker`, `fw_core`'s health and xcore modules, the memory functions and the 64-bit division, the handlers `DMA_IRQ_0`,
   `IO_IRQ_BANK0`, `SIO_IRQ_FIFO` and `PIO2_IRQ_0`, the critical-section and time functions), every constant (`.rodata`),
   and core 1's own vector table. Left in flash: core 1's panic paths and the launch trampoline that runs

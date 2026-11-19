@@ -105,6 +105,10 @@ SECTIONS {
         *(.text.*7fw_core9handshake* .text.*4libm4math*)
         *(.text.__aeabi_d* .text.__aeabi_f2d .text.__aeabi_i2d .text.__aeabi_ul2f .text.*17compiler_builtins5float*)
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
+        /* The flight log (decision-flight-logging-20261119): the dflog encoders the Stepper calls; core 0's stay in flash. */
+        *(.text.*7fw_core5dflog10encode_imu* .text.*7fw_core5dflog10encode_nav* .text.*7fw_core5dflog11encode_setp*)
+        *(.text.*7fw_core5dflog10encode_dmd* .text.*7fw_core5dflog10encode_mot* .text.*7fw_core5dflog10encode_esc*)
+        *(.text.*7fw_core5dflog10encode_rcs*)
         /* esc: only its core-1 items (the driver's build, the task); its core-0 readers stay in flash. */
         *(.text.*16marv_v2_firmware3esc6driver* .text.*16marv_v2_firmware3esc4task* .text.*16marv_v2_firmware3esc11___task_task*)
         *(.text.*16marv_v2_firmware10imu_inject* .text.*16marv_v2_firmware14flight_latency*)

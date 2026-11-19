@@ -65,7 +65,7 @@ fn main() {
     }
 
     let (week, ms0) = gps_week_ms(2026, 11, 15, 12, 0, 0, 0);
-    let mut counts = [0u32; 11];
+    let mut counts = [0u32; 18];
     let data_start = file.len();
     for ms in 0..10_000u64 {
         let t = 3_000_000 + ms * 1_000;
@@ -166,5 +166,7 @@ fn main() {
     println!("header sequence {header_len} bytes; with 25 PARM (start burst) {start_burst} bytes");
     println!("with the 3 MSG {data_start} bytes");
     println!("10 s of data {data} bytes = {} bytes/s", data / 10);
-    println!("records per type [FMT,PARM,MSG,IMU,BARO,MAG,GPS,BAT,RCIN,DEV,DSF] = {counts:?}");
+    println!(
+        "records per type [FMT,PARM,MSG,IMU,BARO,MAG,GPS,BAT,RCIN,DEV,DSF,NAV,SETP,DMD,MOT,ESC,RCS,FDS] = {counts:?}"
+    );
 }

@@ -178,6 +178,16 @@ against ee647fb built the same way): `.ram_text` 154 516 -> 176 528 (+22 012: co
 card's `MIX` is folded into `CardAllocator::allocate`'s literal pool (in SRAM). `tools/check-ram-code.py` passes
 (roots 5, 185 functions, 107 010 B, 255 data objects; 155, 85 776 B and 250 before).
 
+Flight logging (2026-11-19, `flight-candidate`, decision-flight-logging-20261119 packet 5, release build,
+`arm-none-eabi-size -A` and the linker symbols, against 5cf573d built the same way): `.ram_text` 177 628 -> 184 620
+(+6 992: code +5 664, constants +1 328), `.text` 727 296 -> 731 456, `.data` 44 972 -> 94 188 (+49 216: the main
+ring `logger::RING` 32 824 -> 65 592 B at 0x2002e2c8, and the new flight ring `flight::LOG` 16 440 B at 0x2003ece8,
+both in `.data` for the reason given at SD3), `.bss` 115 644 -> 116 124, `.uninit` 8 192; static SRAM to
+`__euninit` +56 800 B (0x200549bc -> 0x2006279c); free above `_stack_end` 177 728 -> 120 928 B, 88 160 B above
+the 32 KiB floor (the decision's 97 872 B started from the P4b figure and left out the code). New: one cross-core
+cell (`flight::LOG`, rule 8); no task, interrupt or DMA channel. `tools/check-ram-code.py` passes (roots 5, 195
+functions, 111 578 B, 256 data objects; 183, 106 536 B and 255 before).
+
 SRAM8 and SRAM9 (4 KB each) are unused.
 
 ## Rules that follow
@@ -211,8 +221,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    constructor, on the calling core). The timer interrupt is always on core 0; a flash write must come from
    core 0 and pauses core 1.
 8. The flight core schedules no timer at all, takes no critical-section primitive of its own and
-   never logs; data crosses the cores only through lock-free cells (seqlock out of the flight core, triple
-   buffer into it, atomic flags with a lock-free waker for requests). The seqlocks out of core 1: each IMU's status
+   never logs a text line (no defmt); data crosses the cores only through lock-free cells (seqlock out of the flight
+   core, triple buffer into it, atomic flags with a lock-free waker for requests, and one `LogRing` out of it for
+   its log records). The seqlocks out of core 1: each IMU's status
    (`fw_flight::imu::ImuCells`), the ESC status (`esc::ESC`, 2026-11-18, writer taken once by the esc task) and the flight
    step's output (`flight::OUT`, 2026-11-19: step time, `MotorCommand`; writer taken once by IMU1's task; core-1
    internal: its one reader is the esc task, `try_read(1)` at every exchange, step 5 P6; nothing on core 0 reads it).
@@ -222,7 +233,12 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    `actions` state, reader taken before core 1 starts and moved into the esc task, which reads it at every exchange;
    2026-11-18) and the sticks (`rc::FLIGHT_RC`, an `RcSample`, step 5 P6; writer taken by the RC port's hooks on core 0,
    written once per CRSF stick report; reader taken before core 1 starts and moved into IMU1's task and its `Stepper`,
-   which reads it once per step; the stick mapping runs on core 0). Its IMU tasks wait through `SpinDelay`
+   which reads it once per step; the stick mapping runs on core 0). The `LogRing` out of it (`flight::LOG`, 16 KiB,
+   decision-flight-logging-20261119, 2026-11-19): producer taken once by IMU1's `Stepper`, which pushes the step's
+   records after it has written `flight::OUT` (wait-free, atomic loads and stores only: `head`, `tail` and `stat_req`
+   loaded, the statistics seqlock written, then `head` stored, or for a record that does not fit `dropped` loaded
+   and stored); consumer taken once by core 0's collector
+   (`logger`), which relays every record into the main log ring every 10 ms tick, log open or not. The flight core's IMU tasks wait through `SpinDelay`
    (`src/imu1.rs`): under 50 us a busy wait (the ICM-45686's 10 us waits in a verify step, so the sample loop
    never yields inside one), from 50 us on clock polls with a yield between them. HARD RULE (lead's ruling,
    2026-11-15): no timer queue on the flight core at all, no `embassy_time::{Timer, Ticker, Delay}` and no
@@ -268,6 +284,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    `*9fw_flight6mahony*`, `*9fw_flight3pid*`, `*9fw_flight4quat*`, `*9fw_flight6tuning*`, `*7fw_core9handshake*`,
    `*4libm4math*`, and `.text.__aeabi_d*`, `__aeabi_f2d`, `__aeabi_i2d`, `__aeabi_ul2f` and
    `*17compiler_builtins5float*` (the soft double-precision code `libm`'s `sinf`/`cosf` use, and Mahony's u64-to-f32);
+   the flight log (2026-11-19) added one line per `fw_core::dflog` encoder the `Stepper` calls (`encode_imu`, `nav`,
+   `setp`, `dmd`, `mot`, `esc`, `rcs`; not the whole module, whose other encoders are core 0's): without them the
+   checker FAILS (7 functions);
    `Flight::step` is now out of line in SRAM. Removing the `handshake`/`libm` line makes the checker FAIL (21
    functions: `sinf`, `cosf`, `sqrtf`, `roundf`, `Handshake::try_arm`, `disarm` and their callees). The card's
    constants need no line: every `.rodata` is in SRAM already. A pattern change is accepted only with a passing checker (v0 back-references and rustc's merging of
