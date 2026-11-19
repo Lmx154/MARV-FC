@@ -207,6 +207,32 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     }
 }
 
+/// What the log writes at one flight step (decision-flight-logging-20261119, section 1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LogDue {
+    /// Write the step block (IMU1 sample, NAV, SETP, DMD, MOT) this step.
+    pub block: bool,
+    /// Write an ESC record this step.
+    pub esc: bool,
+}
+
+/// The decimation rule. `step` counts flight steps (the caller adds 1 after each). Armed: a block
+/// every step and an ESC record every 4th; disarmed: both every 8th step.
+pub fn log_due(step: u32, armed: bool) -> LogDue {
+    if armed {
+        LogDue {
+            block: true,
+            esc: step % 4 == 0,
+        }
+    } else {
+        let every_8th = step % 8 == 0;
+        LogDue {
+            block: every_8th,
+            esc: every_8th,
+        }
+    }
+}
+
 /// Writes the four flight records of one step (NAV, SETP, DMD, MOT; decision-first-pair-wiring-20261119,
 /// A6) at the start of `buf`. Returns the bytes written, or 0 (nothing written) if `buf` is too small.
 pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
@@ -616,5 +642,46 @@ mod tests {
         let levels: std::vec::Vec<u16> = (0..8).map(|i| h(126 + 2 * i)).collect();
         assert_eq!(levels, [120, 130, 140, 150, 111, 222, 333, 444]);
         assert!(buf[142..].iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn log_due_decimation_over_64_steps() {
+        let count = |armed| {
+            (0..64u32)
+                .map(|n| log_due(n, armed))
+                .fold((0, 0), |(b, e), d| {
+                    (b + u32::from(d.block), e + u32::from(d.esc))
+                })
+        };
+        assert_eq!(count(true), (64, 16));
+        assert_eq!(count(false), (8, 8));
+        assert_eq!(
+            log_due(0, false),
+            LogDue {
+                block: true,
+                esc: true
+            }
+        );
+        assert_eq!(
+            log_due(1, false),
+            LogDue {
+                block: false,
+                esc: false
+            }
+        );
+        assert_eq!(
+            log_due(4, true),
+            LogDue {
+                block: true,
+                esc: true
+            }
+        );
+        assert_eq!(
+            log_due(5, true),
+            LogDue {
+                block: true,
+                esc: false
+            }
+        );
     }
 }
