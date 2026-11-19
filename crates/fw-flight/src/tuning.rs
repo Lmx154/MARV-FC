@@ -25,6 +25,9 @@ pub struct Tuning {
     pub angle_max_rad: f32,
     /// Yaw rate at full stick, rad/s. PX4's 150 deg/s (section 13, PILOT_Y_RATE).
     pub pilot_y_rate_rads: f32,
+    /// Collective at full throttle stick, as a multiple of the weight m g. 2.0 makes the stick one straight line
+    /// (first-pair rulings, Amendment C; the owner, 2026-11-19).
+    pub pilot_thrust_max_g: f32,
     /// Age of the newest stick report that counts as RC loss, us. ArduPilot's 1.0 s (section 13, RC_FS_TIMEOUT).
     pub rc_fs_timeout_us: u64,
     /// Highest throttle stick (0..1) that may arm. Betaflight's 1050 us = 0.05 (section 13, ARM_THR_MAX).
@@ -44,6 +47,7 @@ impl Tuning {
         ins_gyro_lpf_hz: 60.0,
         angle_max_rad: 30.0_f32.to_radians(),
         pilot_y_rate_rads: 150.0_f32.to_radians(),
+        pilot_thrust_max_g: 2.0,
         rc_fs_timeout_us: 1_000_000,
         arm_thr_max: 0.05,
     };

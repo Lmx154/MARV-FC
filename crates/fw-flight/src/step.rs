@@ -52,6 +52,7 @@ struct StickShaper {
     sticks: Sticks,
     angle_max_rad: f32,
     pilot_y_rate_rads: f32,
+    pilot_thrust_max_g: f32,
 }
 
 impl StickShaper {
@@ -87,9 +88,11 @@ impl StickShaper {
         } else {
             [1.0, 0.0, 0.0, 0.0]
         };
-        // Collective, piecewise linear: 0 -> 0, 0.5 -> hover m g, 1 -> 4 T_hi (four rotors at full speed).
+        // Collective, piecewise linear: 0 -> 0, 0.5 -> hover m g, 1 -> min(pilot_thrust_max_g m g, 4 T_hi)
+        // (Amendment C: 2.0 m g by default, one straight line; 4 T_hi is four rotors at full speed).
         let hover = MASS * GRAVITY_MSS;
-        let full = 4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED;
+        let full =
+            (self.pilot_thrust_max_g * hover).min(4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED);
         let thrust_n = if throttle <= 0.5 {
             2.0 * throttle * hover
         } else {
@@ -138,6 +141,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 },
                 angle_max_rad: tuning.angle_max_rad,
                 pilot_y_rate_rads: tuning.pilot_y_rate_rads,
+                pilot_thrust_max_g: tuning.pilot_thrust_max_g,
             },
             mode: Mode::Angle,
             limited: Saturation {
@@ -327,6 +331,48 @@ mod tests {
             },
             rc: None,
         }
+    }
+
+    /// Amendment C: the stick-to-collective map, 0 -> 0, 0.5 -> m g, 1 -> min(cap m g, 4 K_F w_max^2).
+    #[test]
+    fn collective_follows_the_capped_map() {
+        let hover = MASS * GRAVITY_MSS;
+        let physical = 4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED;
+        let nav = NavState {
+            t_us: 0,
+            attitude: [1.0, 0.0, 0.0, 0.0],
+            rates_rads: [0.0; 3],
+            velocity_ms: [0.0; 3],
+            position_m: [0.0; 3],
+            valid: Valid {
+                tilt: true,
+                ..Valid::NONE
+            },
+            sigma: None,
+        };
+        let thrust = |cap: f32, throttle: f32| {
+            let mut tuning = Tuning::DEFAULT;
+            tuning.pilot_thrust_max_g = cap;
+            let mut flight = Flight::new(
+                Mahony::new(&tuning),
+                CascadedPid::new(&tuning),
+                CardAllocator::new(),
+                &tuning,
+                &HANDSHAKE,
+            );
+            flight.shaper.sticks.throttle = throttle;
+            match flight.shaper.angle(&nav) {
+                Setpoint::Attitude { thrust_n, .. } => thrust_n,
+                _ => panic!("not an attitude setpoint"),
+            }
+        };
+        let near = |a: f32, b: f32| assert!((a - b).abs() <= 1e-4 * b.max(1.0), "{a} vs {b}");
+        near(thrust(2.0, 0.0), 0.0);
+        near(thrust(2.0, 0.25), 0.5 * hover);
+        near(thrust(2.0, 0.5), hover);
+        near(thrust(2.0, 0.75), 1.5 * hover);
+        near(thrust(2.0, 1.0), 2.0 * hover);
+        near(thrust(100.0, 1.0), physical);
     }
 
     #[test]

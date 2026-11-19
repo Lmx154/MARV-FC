@@ -81,7 +81,7 @@ controller reset while disarmed, stick shaper, validity check, controller, alloc
 `fw_flight::gnc`, the gate and `MotorCommand` (only the gate can make a spinning one) in `fw_flight::gate`, the
 slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Since step 5 (P4b, 2026-11-19) the step runs
 the real flight code (`decision-first-pair-20261119.md`): `fw_flight::mahony::Mahony`, the Angle-mode stick shaper
-(private, in `step.rs`), `fw_flight::pid::CascadedPid`, `fw_flight::alloc::CardAllocator` and the gate's arming and
+(private, in `step.rs`; collective 0 -> 0, 0.5 -> m g, 1 -> 2 m g, one straight line: `pilot_thrust_max_g`, Amendment C), `fw_flight::pid::CascadedPid`, `fw_flight::alloc::CardAllocator` and the gate's arming and
 RC-loss rules (section 5: an off-to-on switch cycle on fresh reports with throttle low, attitude valid, lean within
 `ANGLE_MAX`, levels present and `HANDSHAKE.try_arm()` granted; Stop and disarm when the newest report is older than
 `RC_FS_TIMEOUT`, on switch off, or on a refusal while armed). The board image names them in `src/flight.rs`
