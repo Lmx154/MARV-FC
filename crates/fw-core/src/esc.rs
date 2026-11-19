@@ -110,6 +110,8 @@ pub struct EscStatus {
     pub max_spacing_us: u32,
     /// Longest `exchange()` duration since boot, us.
     pub max_exchange_us: u32,
+    /// Shortest `exchange()` duration since boot, us; `u32::MAX` before the first exchange.
+    pub min_exchange_us: u32,
     /// Per driver line.
     pub lines: [EscLine; LINES],
 }
@@ -124,6 +126,7 @@ impl EscStatus {
         start_ended_us: None,
         max_spacing_us: 0,
         max_exchange_us: 0,
+        min_exchange_us: u32::MAX,
         lines: [EscLine::INITIAL; LINES],
     };
 

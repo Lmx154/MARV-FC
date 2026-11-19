@@ -182,13 +182,18 @@ pub fn stat(now: Instant) {
     };
     let (m1, m2, m3, m4) = (m(0), m(1), m(2), m(3));
     defmt::info!(
-        "[STAT] ESC: state {=str} error {=str}, {=u32} exchanges, {=u32} starts, longest spacing {=u32} us, longest exchange {=u32} us; good/bad/dropouts/EDT bursts, V mV, T degC, I mA: M1 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}; M2 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}; M3 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}; M4 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}",
+        "[STAT] ESC: state {=str} error {=str}, {=u32} exchanges, {=u32} starts, longest spacing {=u32} us, longest exchange {=u32} us, shortest exchange {=u32} us; good/bad/dropouts/EDT bursts, V mV, T degC, I mA: M1 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}; M2 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}; M3 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}; M4 {=u32}/{=u32}/{=u32}/{=u32}, {=i64}, {=i64}, {=i64}",
         crate::device::state_name(v.state),
         crate::device::error_name(v.last_error),
         s.exchanges,
         s.starts,
         s.max_spacing_us,
         s.max_exchange_us,
+        if s.min_exchange_us == u32::MAX {
+            0
+        } else {
+            s.min_exchange_us
+        },
         m1.0,
         m1.1,
         m1.2,

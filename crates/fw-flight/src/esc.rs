@@ -128,6 +128,7 @@ impl Esc {
                 .max(u32::try_from(spacing).unwrap_or(u32::MAX));
         }
         s.max_exchange_us = s.max_exchange_us.max(duration_us);
+        s.min_exchange_us = s.min_exchange_us.min(duration_us);
         s.exchanges = s.exchanges.wrapping_add(1);
         s.last_exchange_us = now_us;
         for (line, capture) in s.lines.iter_mut().zip(captures) {
@@ -360,5 +361,13 @@ mod tests {
             (s.exchanges, s.last_exchange_us, s.max_exchange_us),
             (1, 5000, 145)
         );
+        let none = [LineCapture::Foreign; LINES];
+        for (t_ms, us) in [(6, 900), (7, 146)] {
+            let now = t_ms * 1000;
+            esc.frames(now);
+            esc.record(now, us, &none);
+        }
+        let s = esc.status();
+        assert_eq!((s.min_exchange_us, s.max_exchange_us), (145, 900));
     }
 }

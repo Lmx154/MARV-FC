@@ -1223,7 +1223,7 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
   answering), ABSENT (no ESC has answered this boot), OK (all four answering: a good reply within 100 ms), DEGRADED
   (1 to 3, error TIMEOUT), FAILED (none after some good reply, TIMEOUT; or the data older than 1 s, STUCK). It sets
   no SYS_STATUS bit.
-- Core 0 prints `[STAT] ESC:` every 10 s: the row, exchanges, starts, longest spacing and longest exchange, and per
+- Core 0 prints `[STAT] ESC:` every 10 s: the row, exchanges, starts, longest spacing, longest exchange and shortest exchange (0 before the first), and per
   motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current.
 - Not built: arming, any throttle or motor test, the stop on signal loss, the ESCs' serial telemetry on GPIO34,
   the passthrough, the ESC row in the SD log, ESC messages on the radio.
