@@ -35,11 +35,17 @@ and Betaflight, nothing stricter, except where the two-core design has no preced
 
 ## Done and proven on the board
 
-- **Two cores.** Core 1 is the flight core: both IMUs (configured once at boot from `IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`; default 16 g, 2000 dps, 800 Hz), nothing else. Core 0 does everything else.
+- **Two cores.** Core 1 is the flight core: both IMUs (configured once at boot from `IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`; default 16 g, 2000 dps, 800 Hz) and the ESC task (DShot300 at 1 kHz), nothing else. Core 0 does everything else.
   Data crosses only through lock-free cells.
 - **Seven device rows:** IMU1, IMU2, BARO, MAG, GNSS, BATT (supervised: health states, recovery ladder,
-  operator restart) and RC (report only: "the radio link is up").
-- **Parameters:** 79 (the last nine: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`) and `MOT_POLES` (`Live`, the motors' poles for the ESC rpm; not yet used on the board); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
+  operator restart) and RC (report only: "the radio link is up"). Also SD (supervised) and ESC (device 12, report
+  only: how many of the four ESCs answer).
+- **ESC telemetry:** run on the board with the battery (2026-11-18, 4cfb1f0 and 0d25909, logs `20261118-191955` to
+  `20261118-194637`: all four online, EDT voltage and temperature, rpm 0, 1000 exchanges/s, IMU rates unchanged;
+  README, ESC telemetry, "Measured on the board") (`src/esc.rs`): core 1 sends DShot300 Stop frames at 1 kHz on
+  GPIO36-39 from every boot (command 13 in EDT bursts, never a throttle), the ESC row, ESC_STATUS and ESC_INFO on
+  USB. The station's Motors tab shows it.
+- **Parameters:** 79 (the last nine: the IMUs' six chip settings, `Reboot` class: they apply after save and reboot; then `AHRS_ORIENTATION` (`Reboot`), `MAG_ORIENT` (`Live`) and `MOT_POLES` (`Live`, the motors' poles for the ESC rpm); range-checked when written, the chip's value set checked at boot), with ranges and per-device validation. A write takes effect in RAM; flash is written
   only on the user's Save. Reload, reset, load at boot. Survives re-flash and a real power cycle.
 - **Actions:** device restart; self-test of MAG, IMU1, IMU2; gyro, level-accelerometer and compass
   calibration (results applied, never saved by themselves); storage save/reload/reset; reboot.
@@ -222,13 +228,8 @@ copies for the download checks.
     steps that followed are above.
 
 **Not built**
-- ESC in the firmware: BUILT and run on the board with the battery (2026-11-18, 4cfb1f0 and 0d25909, logs
-  `20261118-191955` to `20261118-194637`: all four online, EDT voltage and temperature, rpm 0, 1000 exchanges/s,
-  IMU rates unchanged; README, ESC telemetry, "Measured on the board") (`src/esc.rs`): core 1 sends DShot300 Stop
-  frames at 1 kHz on GPIO36-39 from every boot (command 13 in EDT bursts, never a throttle), the ESC row (device 12,
-  report only), ESC_STATUS and ESC_INFO on USB; see the README, ESC telemetry. Not built: arming, throttle, motor
-  test, passthrough through the USB port, the board's current scale, ESC serial telemetry on GPIO34. See
-  `docs/handoff-esc-link.md`.
+- ESC, beyond the telemetry above: arming, throttle, motor test, passthrough through the USB port, the board's
+  current scale, ESC serial telemetry on GPIO34. See `docs/handoff-esc-link.md`.
 - The estimator (next).
 - Status LED. The 16 MiB PSRAM is fitted (hand-fitted in U24) and its driver was measured on the board, but
   the firmware does not use it yet. It can hold data (not code: it shares the flash cache).
