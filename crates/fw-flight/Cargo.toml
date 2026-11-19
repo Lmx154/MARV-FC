@@ -12,3 +12,6 @@ fw-core = { path = "../fw-core" }
 # The `DelayNs` trait the IMU loop receives for its start and recovery waits (the trait the
 # icm45686 driver takes; already in the lock through it).
 embedded-hal-async = "1.0"
+# The DShot codec types (`LineCapture`, `Command`, `LineFrame`): plain Rust, no HAL here; the
+# `embassy-rp-0-10` back-end is the binary's business (decision-esc-telemetry Q6, F2).
+dshot = { git = "https://github.com/Lmx154/dshot-rs.git", rev = "3557eb111097400c91277c5a69ddefce22c3be44" }

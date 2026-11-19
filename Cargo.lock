@@ -411,6 +411,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "dshot"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/dshot-rs.git?rev=3557eb111097400c91277c5a69ddefce22c3be44#3557eb111097400c91277c5a69ddefce22c3be44"
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -803,6 +808,7 @@ dependencies = [
 name = "fw-flight"
 version = "0.1.0"
 dependencies = [
+ "dshot",
  "embedded-hal-async",
  "fw-core",
 ]

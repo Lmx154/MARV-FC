@@ -26,6 +26,7 @@ extern crate std;
 pub mod admission;
 pub mod calib;
 pub mod dflog;
+pub mod esc;
 pub mod handshake;
 pub mod health;
 pub mod i2c;
