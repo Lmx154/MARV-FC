@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, the parameter protocol over the 78 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping and the sensor orientation (see Parameters),
+  second, the parameter protocol over the 79 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation and the motors' pole count (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -368,7 +368,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (78 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1: `AHRS_ORIENTATION` and `MAG_ORIENT` are appended last, indices 76 and 77). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (79 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1: `AHRS_ORIENTATION`, `MAG_ORIENT` and `MOT_POLES` are appended last, indices 76, 77 and 78). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -441,6 +441,8 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 ### IMU orientation parameter
 
 `AHRS_ORIENTATION` (`crates/fw-settings/src/imu.rs`, `BOARD`, index 76), `I32`, device 0 (the system; a refused IMU setup never resets it), default 0, range 0 to 15, `Reboot` class: the rotation from the board's frame to the vehicle's, ArduPilot's name and numbers (see `MAG_ORIENT`). Both IMU adapters apply it after the offsets. It is read once at boot and handed to core 1 by value (no cell), and the calibrations on core 0 use the same boot value, so a write applies after save and reboot. Each IMU also has a fixed chip-to-board rotation in code, `fw_settings::imu::IMU1_MOUNT` and `IMU2_MOUNT`, both `ROLL_180` (8): the IMUs' axes are +X forward, +Y left, +Z up, the body's FRD.
+
+`MOT_POLES` (`crates/fw-settings/src/esc.rs`, index 78), `I32`, device ESC (12), default 14, range 2 to 64, `Live`: the magnets (poles, not pole pairs) of each motor, for the rpm of ESC_STATUS (eRPM / (`MOT_POLES` / 2), rounded down). Core 0 reads it for every message, so it never reaches the flight core. Design: `_plan/decision-esc-telemetry-20261118.md`.
 
 ### SD parameter
 
@@ -582,7 +584,7 @@ written.
   time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (1 Hz:
   status, GPS week and ms from UTC, 0/0 before a time is known), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 78 parameters when a log opens and after
+  text ring's third cursor: the boot texts first), PARM for all 79 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second).
@@ -1168,7 +1170,7 @@ the host (254 tests, and 4 doc tests); the binary uses every module listed below
 `fw-settings` holds the device-specific pure logic: per device, the parameter table and the pure
 `settings_to_config` with its validator (today `baro`, `mag`, `batt`, `imu` and `rc`, the last with the RC stick normaliser, no validator; `baro` is over the `bmp581` driver's `Config`, without the
 driver's `defmt` feature). Device-specific pure logic goes here, generic logic stays in `fw-core`. Tested on
-the host with `cargo host-test -p fw-settings` (46 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
+the host with `cargo host-test -p fw-settings` (47 tests, the first six of the first 23: defaults equal `Config::new()` and P = 19 978 us,
 every refusal text, every offered rate within 1 % of its name and all distinct, the table accepted by
 `Params::new` with every default passing the validator, every offered value of every parameter accepted or
 refused only by the rate-against-oversampling rule with the refused sets listed, and the real store

@@ -23,6 +23,7 @@ extern crate std;
 
 pub mod baro;
 pub mod batt;
+pub mod esc;
 pub mod imu;
 pub mod mag;
 pub mod rc;
@@ -40,11 +41,12 @@ pub const COUNT: usize = baro::COUNT
     + rc::COUNT
     + imu::SETTINGS_COUNT
     + imu::BOARD_COUNT
-    + mag::ORIENT_COUNT;
+    + mag::ORIENT_COUNT
+    + esc::COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
-/// then the IMUs' chip settings, `AHRS_ORIENTATION` and `MAG_ORIENT` (appended, so the first 70
-/// indices did not change).
+/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT` and `MOT_POLES` (appended, so the
+/// first 70 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
@@ -123,6 +125,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < esc::COUNT {
+        out[n] = esc::TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -138,7 +146,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 78);
+        assert_eq!(COUNT, 79);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -148,7 +156,8 @@ mod tests {
             .chain(rc::TABLE.iter())
             .chain(imu::SETTINGS.iter())
             .chain(imu::BOARD.iter())
-            .chain(mag::ORIENT_TABLE.iter());
+            .chain(mag::ORIENT_TABLE.iter())
+            .chain(esc::TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
@@ -243,6 +252,7 @@ mod tests {
             "IMU2_ODR_HZ",
             "AHRS_ORIENTATION",
             "MAG_ORIENT",
+            "MOT_POLES",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
@@ -254,7 +264,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 78);
+        assert_eq!(COUNT, 79);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [
@@ -317,6 +327,29 @@ mod tests {
             mag::orientation(None),
             fw_core::rotation::Rotation::Roll180Yaw90
         );
+    }
+
+    /// `MOT_POLES` is the 79th parameter (index 78): I32, default 14, 2 to 64, `Live`, device ESC (12).
+    #[test]
+    fn mot_poles_is_appended_at_index_78() {
+        use mavlink_device::ParamValue;
+        let def = &TABLE[78];
+        assert_eq!(def.name, "MOT_POLES");
+        assert_eq!(def.device, 12);
+        assert_eq!(def.default, ParamValue::I32(14));
+        assert_eq!((def.min, def.max), (ParamValue::I32(2), ParamValue::I32(64)));
+        assert_eq!(def.apply, Apply::Live);
+        assert!(!def.calibration && !def.read_only);
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        for ok in [2, 14, 64] {
+            assert_eq!(p.set(78, ParamValue::I32(ok)), Ok(ParamValue::I32(ok)));
+        }
+        for bad in [1, 65] {
+            assert_eq!(
+                p.set(78, ParamValue::I32(bad)),
+                Err(mavlink_device::ParamError::OutOfRange)
+            );
+        }
     }
 
     /// A refused IMU setup puts `AHRS_ORIENTATION` back to nothing: it is device 0, never reset;
