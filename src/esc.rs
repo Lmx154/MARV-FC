@@ -89,7 +89,7 @@ pub async fn task(mut drv: Driver) -> ! {
     let mut deadline = crate::now_us();
     loop {
         let t0 = crate::now_us();
-        let frames = esc.frames(t0);
+        let frames = esc.frames(t0, fw_flight::esc::TestCmd::INITIAL);
         #[cfg(feature = "esc-no-edt")]
         let frames = frames.map(|_| dshot::LineFrame::STOP);
         let x = drv.exchange(frames).await;
