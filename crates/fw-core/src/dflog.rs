@@ -143,6 +143,12 @@ pub const ID_SETP: u8 = 140;
 pub const ID_DMD: u8 = 141;
 /// Type number of MOT (flight step).
 pub const ID_MOT: u8 = 142;
+/// Type number of ESC (ESC telemetry, by DShot line).
+pub const ID_ESC: u8 = 143;
+/// Type number of RCS (one stick report the flight step consumed).
+pub const ID_RCS: u8 = 144;
+/// Type number of FDS (the flight ring's statistics).
+pub const ID_FDS: u8 = 145;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -209,15 +215,30 @@ pub const MOT: RecordDef = def(
     "QBBHHHHHHHH",
     "TimeUS,Arm,Mode,A0,A1,A2,A3,C0,C1,C2,C3",
 );
+/// ESC: raw eRPM, volts (centivolts) and temperature (degC) by DShot line, and flag bits (bit i:
+/// line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight
+/// throttles).
+pub const ESC: RecordDef = def(
+    ID_ESC,
+    "ESC",
+    "QIIIIccccBBBBB",
+    "TimeUS,E0,E1,E2,E3,V0,V1,V2,V3,T0,T1,T2,T3,Fl",
+);
+/// RCS: one stick report (roll, pitch, throttle, yaw) and the arm switch; `TimeUS` is the report's own time.
+pub const RCS: RecordDef = def(ID_RCS, "RCS", "QffffB", "TimeUS,R,P,T,Y,Arm");
+/// FDS: the flight ring's statistics: records dropped since the log opened, smallest free space.
+pub const FDS: RecordDef = def(ID_FDS, "FDS", "QII", "TimeUS,Dp,FMn");
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 11] = [FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF];
+pub const TYPES: [RecordDef; 18] = [
+    FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
+];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
 pub const HEADER_SEQUENCE_LEN: usize = TYPES.len() * FMT.length as usize;
 
-/// The flight-step types (decision-first-pair-wiring-20261119, A6). Not in [`TYPES`], so not in
-/// [`write_header`]: a writer that logs them writes their FMTs itself with [`fmt_record`].
+/// The flight-step types (decision-first-pair-wiring-20261119, A6), the ones `encode_step` writes.
+/// They are in [`TYPES`], so [`write_header`] writes their FMTs.
 pub const FLIGHT_TYPES: [RecordDef; 4] = [NAV, SETP, DMD, MOT];
 
 /// Writes one record into the start of a buffer.
@@ -627,6 +648,59 @@ pub fn encode_mot(
     w.pos
 }
 
+/// ESC: raw eRPM, volts in centivolts, temperature in degC, by DShot line, and the flag bits (bit i:
+/// line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight
+/// throttles). 40 bytes.
+pub fn encode_esc(
+    out: &mut [u8],
+    time_us: u64,
+    erpm: [u32; 4],
+    volts_cv: [i16; 4],
+    temp_c: [u8; 4],
+    flags: u8,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &ESC) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for v in erpm {
+        w.u32(v);
+    }
+    for v in volts_cv {
+        w.i16(v);
+    }
+    for v in temp_c {
+        w.u8(v);
+    }
+    w.u8(flags);
+    w.pos
+}
+
+/// RCS: one stick report, roll, pitch, throttle, yaw, and the arm switch. `time_us` is the
+/// report's own time. 28 bytes.
+pub fn encode_rcs(out: &mut [u8], time_us: u64, sticks: [f32; 4], armed: bool) -> usize {
+    let Some(mut w) = Writer::start(out, &RCS) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for v in sticks {
+        w.f32(v);
+    }
+    w.u8(u8::from(armed));
+    w.pos
+}
+
+/// FDS: flight-ring records dropped since the log opened, and the ring's smallest free space. 19 bytes.
+pub fn encode_fds(out: &mut [u8], time_us: u64, dropped: u32, free_min: u32) -> usize {
+    let Some(mut w) = Writer::start(out, &FDS) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u32(dropped);
+    w.u32(free_min);
+    w.pos
+}
+
 /// Days from 1970-01-01 to `y-m-d` (proleptic Gregorian, `m` 1 to 12, `d` 1 to 31), after
 /// Howard Hinnant's `days_from_civil`.
 const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -725,6 +799,20 @@ mod tests {
         out.push((ID_DEV, b[..n].to_vec()));
         let n = encode_dsf(&mut b, 1, &Dsf::default());
         out.push((ID_DSF, b[..n].to_vec()));
+        let n = encode_nav(&mut b, 1, [1.0; 4], [2.0; 3], 3);
+        out.push((ID_NAV, b[..n].to_vec()));
+        let n = encode_setp(&mut b, 1, 1, [1.0; 4], [2.0; 3], 3.0);
+        out.push((ID_SETP, b[..n].to_vec()));
+        let n = encode_dmd(&mut b, 1, true, 1.0, [2.0; 3], 3);
+        out.push((ID_DMD, b[..n].to_vec()));
+        let n = encode_mot(&mut b, 1, true, 1, [1; 4], [2; 4]);
+        out.push((ID_MOT, b[..n].to_vec()));
+        let n = encode_esc(&mut b, 1, [1; 4], [2; 4], [3; 4], 5);
+        out.push((ID_ESC, b[..n].to_vec()));
+        let n = encode_rcs(&mut b, 1, [1.0; 4], true);
+        out.push((ID_RCS, b[..n].to_vec()));
+        let n = encode_fds(&mut b, 1, 1, 2);
+        out.push((ID_FDS, b[..n].to_vec()));
         out
     }
 
@@ -795,11 +883,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_11_fmt_records() {
-        assert_eq!(HEADER_SEQUENCE_LEN, 979);
-        let mut buf = [0u8; 1000];
-        assert_eq!(write_header(&mut buf), 979);
-        assert_eq!(write_header(&mut [0u8; 978]), 0);
+    fn header_sequence_is_18_fmt_records() {
+        assert_eq!(TYPES.len(), 18);
+        assert_eq!(HEADER_SEQUENCE_LEN, 1602);
+        let mut buf = [0u8; 1700];
+        assert_eq!(write_header(&mut buf), 1602);
+        assert_eq!(write_header(&mut [0u8; 1601]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -829,7 +918,14 @@ mod tests {
                 ("BAT", 20),
                 ("RCIN", 39),
                 ("DEV", 32),
-                ("DSF", 33)
+                ("DSF", 33),
+                ("NAV", 40),
+                ("SETP", 44),
+                ("DMD", 29),
+                ("MOT", 29),
+                ("ESC", 40),
+                ("RCS", 28),
+                ("FDS", 19)
             ]
         );
     }
@@ -1034,6 +1130,24 @@ mod tests {
                 0, 5, 0, 0, 0, 6, 0, 0, 0
             ]
         );
+    }
+
+    #[test]
+    fn new_encoders_write_their_table_length_and_nothing_into_a_short_buffer() {
+        let mut b = [0u8; 64];
+        assert_eq!(encode_esc(&mut b, 1, [1; 4], [2; 4], [3; 4], 5), 40);
+        assert_eq!(encode_rcs(&mut b, 1, [1.0; 4], true), 28);
+        assert_eq!(encode_fds(&mut b, 1, 1, 2), 19);
+        let mut e = [0x55u8; 39];
+        assert_eq!(encode_esc(&mut e, 1, [1; 4], [2; 4], [3; 4], 5), 0);
+        assert_eq!(e, [0x55; 39]);
+        let mut r = [0x55u8; 27];
+        assert_eq!(encode_rcs(&mut r, 1, [1.0; 4], true), 0);
+        assert_eq!(r, [0x55; 27]);
+        let mut f = [0x55u8; 18];
+        assert_eq!(encode_fds(&mut f, 1, 1, 2), 0);
+        assert_eq!(f, [0x55; 18]);
+        assert_eq!(encode_esc(&mut [], 1, [0; 4], [0; 4], [0; 4], 0), 0);
     }
 
     #[test]
