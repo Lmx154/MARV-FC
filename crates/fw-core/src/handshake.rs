@@ -13,21 +13,42 @@
 //! in the same race (each sees the other's flag before it is withdrawn); neither retries here.
 //! [`Handshake::armed`] can read `true` for the short time between `announce_arm` and a
 //! `confirm_arm` that backs out.
+//!
+//! The pre-arm permit (decision-prearm-20261119, section 3, with the lead's amendment on the tick):
+//! a third flag, `PERMIT`, initially false, stored only by core 0; arming also needs it set. Arming
+//! and a core-0 action (a calibration, an action in the book, a motor-test spin) never overlap:
+//! - Admission against the gate (different cores): the same Dekker pair. Admission stores
+//!   `PERMIT` false, then loads `ARMED`; the gate stores `ARMED`, then loads `PERMIT`. `SeqCst`
+//!   orders the four accesses, so either the gate backs out or core 0 sees armed and refuses.
+//! - Admission against the supervisor tick that sets `PERMIT` (both on core 0): admission is
+//!   synchronous (no await from its store of `PERMIT` false to the action's state being set) and
+//!   runs either cooperatively in thread mode (USB) or on the radio's `SWI_IRQ_0` executor, which
+//!   the thread-mode tick cannot preempt; so admission is atomic relative to the tick. The tick
+//!   reads the action's state and stores `PERMIT` inside one critical section, so a radio admission
+//!   cannot run between the read and the store; so the tick is atomic relative to admission. A tick
+//!   before an admission is overwritten by its false; a tick after it sees the action and stores
+//!   false.
+//!
+//! The flight core loads `PERMIT` only in [`Handshake::confirm_arm`], so clearing it while armed
+//! changes nothing.
 
 use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
-/// The two flags of the arm/save handshake; one `static` instance is shared by both cores.
+/// The flags of the arm/save handshake and the pre-arm permit; one `static` instance is shared by
+/// both cores.
 pub struct Handshake {
     armed: AtomicBool,
     save_intent: AtomicBool,
+    permit: AtomicBool,
 }
 
 impl Handshake {
-    /// Disarmed, no save intent.
+    /// Disarmed, no save intent, no permit.
     pub const fn new() -> Self {
         Self {
             armed: AtomicBool::new(false),
             save_intent: AtomicBool::new(false),
+            permit: AtomicBool::new(false),
         }
     }
 
@@ -63,10 +84,10 @@ impl Handshake {
         self.armed.store(true, SeqCst);
     }
 
-    /// Flight core, arm step 2: loads `SAVE_INTENT`; `true` = armed; `false` = a save is in
-    /// progress, `ARMED` withdrawn.
+    /// Flight core, arm step 2: loads `SAVE_INTENT` and `PERMIT`; `true` = armed; `false` = a save
+    /// is in progress or core 0 does not permit arming, `ARMED` withdrawn.
     pub fn confirm_arm(&self) -> bool {
-        if self.save_intent.load(SeqCst) {
+        if self.save_intent.load(SeqCst) || !self.permit.load(SeqCst) {
             self.armed.store(false, SeqCst);
             false
         } else {
@@ -89,6 +110,17 @@ impl Handshake {
     pub fn armed(&self) -> bool {
         self.armed.load(SeqCst)
     }
+
+    /// Core 0: stores `PERMIT` (the supervisor tick, from the pre-arm reasons; `false` at every
+    /// command admission before it loads `ARMED`).
+    pub fn set_permit(&self, permit: bool) {
+        self.permit.store(permit, SeqCst);
+    }
+
+    /// Whether `PERMIT` is set.
+    pub fn permitted(&self) -> bool {
+        self.permit.load(SeqCst)
+    }
 }
 
 impl Default for Handshake {
@@ -110,8 +142,18 @@ mod tests {
         ArmDecide,
         SaveStore,
         SaveDecide,
+        /// Admission: `set_permit(false)`.
+        PermitClear,
+        /// Admission: loads `ARMED`; not armed: the action starts (its state is set).
+        AdmitDecide,
+        /// The tick: reads the action's state.
+        TickRead,
+        /// The tick: stores the permit from what it read.
+        TickStore,
     }
-    use Step::{ArmDecide, ArmStore, SaveDecide, SaveStore};
+    use Step::{
+        AdmitDecide, ArmDecide, ArmStore, PermitClear, SaveDecide, SaveStore, TickRead, TickStore,
+    };
 
     /// The six orders of two two-step sequences.
     const ORDERS: [[Step; 4]; 6] = [
@@ -123,11 +165,63 @@ mod tests {
         [SaveStore, SaveDecide, ArmStore, ArmDecide],
     ];
 
+    /// The pre-arm model's atoms. An atom runs without the other core-0 actor (admission or the
+    /// tick) between its steps; the gate's atoms run on core 1 and interleave with everything.
+    const GATE: [&[Step]; 2] = [&[ArmStore], &[ArmDecide]];
+    const ADMIT: [&[Step]; 2] = [&[PermitClear], &[AdmitDecide]];
+    /// The tick: one atom (its critical section reads the action's state and stores the permit).
+    const TICK: &[&[Step]] = &[&[TickRead, TickStore]];
+
+    /// Every merge of the gate's, admission's and the tick's atoms in which no tick atom lies
+    /// between admission's two (admission is atomic relative to the tick).
+    fn merges(tick: &[&'static [Step]]) -> Vec<Vec<Step>> {
+        fn go(left: [usize; 3], actors: &mut Vec<usize>, all: &mut Vec<Vec<usize>>) {
+            if left == [0; 3] {
+                all.push(actors.clone());
+            }
+            for actor in 0..3 {
+                if left[actor] > 0 {
+                    let mut l = left;
+                    l[actor] -= 1;
+                    actors.push(actor);
+                    go(l, actors, all);
+                    actors.pop();
+                }
+            }
+        }
+        let mut all = Vec::new();
+        go(
+            [GATE.len(), ADMIT.len(), tick.len()],
+            &mut Vec::new(),
+            &mut all,
+        );
+        all.into_iter()
+            .filter_map(|actors| {
+                let mut next = [0usize; 3];
+                let mut steps = Vec::new();
+                for actor in actors {
+                    if actor == 2 && next[1] == 1 {
+                        return None;
+                    }
+                    let atom = match actor {
+                        0 => GATE[next[0]],
+                        1 => ADMIT[next[1]],
+                        _ => tick[next[2]],
+                    };
+                    next[actor] += 1;
+                    steps.extend_from_slice(atom);
+                }
+                Some(steps)
+            })
+            .collect()
+    }
+
     #[test]
     fn all_six_interleavings_never_both_win() {
         let mut outcomes = Vec::new();
         for order in ORDERS {
             let hs = Handshake::new();
+            hs.set_permit(true);
             let (mut armed, mut saving) = (false, false);
             for step in order {
                 match step {
@@ -135,6 +229,7 @@ mod tests {
                     ArmDecide => armed = hs.confirm_arm(),
                     SaveStore => hs.announce_save(),
                     SaveDecide => saving = hs.confirm_save(),
+                    PermitClear | AdmitDecide | TickRead | TickStore => unreachable!(),
                 }
             }
             assert!(!(armed && saving), "{order:?}");
@@ -143,6 +238,34 @@ mod tests {
             outcomes.push((armed, saving));
         }
         std::println!("handshake interleavings (armed, saving): {outcomes:?}");
+
+        // I4 (decision-prearm-20261119): arming and a core-0 action never overlap, over every order
+        // of the gate, admission and the tick; the permit starts set (an earlier tick found nothing).
+        let orders = merges(TICK);
+        let mut outcomes = Vec::new();
+        for order in &orders {
+            let hs = Handshake::new();
+            hs.set_permit(true);
+            let (mut armed, mut action, mut seen) = (false, false, false);
+            for step in order {
+                match step {
+                    ArmStore => hs.announce_arm(),
+                    ArmDecide => armed = hs.confirm_arm(),
+                    PermitClear => hs.set_permit(false),
+                    AdmitDecide => action = !hs.armed(),
+                    TickRead => seen = action,
+                    TickStore => hs.set_permit(!seen),
+                    SaveStore | SaveDecide => unreachable!(),
+                }
+            }
+            assert!(!(armed && action), "armed during an action: {order:?}");
+            assert_eq!(hs.armed(), armed, "{order:?}");
+            outcomes.push((armed, action));
+        }
+        std::println!(
+            "pre-arm interleavings: {} orders, (armed, action): {outcomes:?}",
+            orders.len()
+        );
     }
 
     #[test]
@@ -160,6 +283,7 @@ mod tests {
     fn two_threads_never_both_win() {
         const ROUNDS: u32 = 1_000_000;
         let hs = Handshake::new();
+        hs.set_permit(true);
         let go = AtomicU32::new(0);
         let arm_done = AtomicU32::new(0);
         let save_done = AtomicU32::new(0);

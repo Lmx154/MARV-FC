@@ -617,6 +617,7 @@ pub fn guard_negative() {
 /// the flight core's arming code), so every save must end FAILED "armed".
 #[cfg(feature = "fake-armed")]
 pub fn fake_arm() {
+    HANDSHAKE.set_permit(true);
     let armed = HANDSHAKE.try_arm();
     defmt::info!("[INFO] fake-armed: armed flag set at boot: {=bool}", armed);
 }

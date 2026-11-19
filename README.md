@@ -1062,9 +1062,9 @@ the colour is the state, and the highest row that applies wins:
 
 **Flashes.** Three quick flashes (100 ms on, 100 ms off) drawn over the running display, then back to it: green when a
 settings save (command 245, param1 = 1) or a calibration (gyro, accelerometer, compass) ends ACCEPTED, red when one of
-those ends FAILED (a calibration that runs out of time counts as FAILED). A cancelled calibration shows nothing. During
-the boot (the white and the roll call) an event waits until the roll call has finished; at most one event waits, and a
-newer one replaces an older one.
+those ends FAILED (a calibration that runs out of time counts as FAILED), and red when core 0 refuses an arm (see Flying,
+props off). A cancelled calibration shows nothing. During the boot (the white and the roll call) an event waits until
+the roll call has finished; at most one event waits, and a newer one replaces an older one.
 
 **Not shown, on purpose:** sensor reads, telemetry, radio or USB traffic, parameter writes, low battery (the firmware has no
 low-battery threshold), the watchdog's reset cause.
@@ -1245,7 +1245,8 @@ the host (291 tests, and 4 doc tests); the binary uses every module listed below
 | `dflog` | The log format, pure: ArduPilot DataFlash `.BIN` records, one table of the 11 types (FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF) from which both the FMT records and the encoders' lengths come, the 979-byte header, GPS week and ms from UTC (integer); `dflog::walk::Walker`, an incremental reader of our own files (per-type counts and first/last `TimeUS`, bad bytes, a truncated tail, the FMT check) |
 | `mbr` | Block 0 of the SD card: MBR partition 1 of type 0x0B or 0x0C inside the card, or why not (no 0x55AA, protective GPT, exFAT/NTFS, out of range) |
 | `logfile` | The SD log files' rules, pure: log numbers 1 to 500 then 1 again, the 8.3 name `NNNNNNNN.BIN` and its parse, `LASTLOG.TXT` (format, parse, the last-number rule), and the clean-up planner (one deletion per call, the oldest log in ring order, from the sum of the log sizes and the volume size; "card full" under 8 MiB) |
-| `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's |
+| `handshake` | Arming and saving settings can never both win: two flags, each side stores its own, then reads the other's; arming also needs core 0's permit, a third flag cleared at every command admission before it reads the armed flag |
+| `arming` | The pre-arm rule, pure: the reasons arming is not permitted (booting, IMU1 not OK, ESC not OK, busy) and the refusal text |
 | `health` | The per-device health state machine: Starting, Ok, Degraded, Recovering, Failed, Absent; error score, start retries, 4 recovery attempts with back-off, the flap limit. Events and time in, the next action out |
 | `params` | The parameter store over a static table of definitions: ranges enforced (a refused write keeps the old value), a validator per device for whole-configuration checks, per-device "apply" masks, and the `ParamStore` trait of `mavlink-device`. The tables are the firmware's (`crates/fw-settings/src/`, one file per device) |
 | `record` | The settings record for the two 4 KB flash sectors of the `SETTINGS` region: "MRVS", sequence, 24-byte entries, CRC-32; the choice of the current sector at boot |
@@ -1357,8 +1358,15 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
 says otherwise.** Not yet checked on the board (`docs/handoff.md`).
 
 - Arms: channel 5 goes from off to above 1800 us on a fresh CRSF report, with throttle low, the attitude valid, lean
-  within 30 deg and no settings save running (`HANDSHAKE.try_arm()`); the motors then run at idle at zero throttle and
-  the status LED is purple.
+  within 30 deg, no settings save running and core 0's permit set (`HANDSHAKE.try_arm()`); the motors then run at idle
+  at zero throttle and the status LED is purple.
+- Core 0's permit (decision-prearm-20261119; `fw_core::arming`, set or cleared every 10 ms by the supervisor): the
+  roll call has ended (9.15 s after boot), IMU1's and the ESC row are OK (with no battery the ESC row is ABSENT), and
+  no calibration, action or motor-test spin is running. A refused arm: the motors stay still, the LED does not turn
+  purple, it shows three red flashes (a refusal during the boot shows its red flashes right after the roll call), and
+  the station gets one WARNING text "Arming refused: booting" / "IMU1 not OK" / "ESC not OK" / "busy". Cycle the
+  switch to try again: a switch held on while the permit comes does not arm. Clearing the permit while armed changes
+  nothing.
 - Disarms (Stop at once): the switch off; no new CRSF stick report for 1.0 s (`RC_FS_TIMEOUT`; the switch must then be
   cycled to re-arm); a refusal by the controller while armed; a gap of more than 100 ms between flight steps
   (`FLIGHT_GAP_DISARM_US`, the IMU loop's first recovery back-off; the gate disarms at its next step, and the ESC task

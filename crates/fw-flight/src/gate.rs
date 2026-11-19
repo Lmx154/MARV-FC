@@ -209,6 +209,7 @@ mod tests {
 
     #[test]
     fn gate_arming_sequence() {
+        HANDSHAKE.set_permit(true);
         let mut gate = Gate::new(&Tuning::DEFAULT, &HANDSHAKE);
         let levels = Some([50, 600, 1500, 2500]);
         let want = [IDLE_LEVEL, 600, 1500, LEVEL_MAX];
@@ -291,5 +292,36 @@ mod tests {
         let cmd = step(&mut gate, t, Some(report(t, true, 0.0)), levels);
         assert_stopped(&gate, cmd, "ARMED cleared, switch still on");
         assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
+
+        // P-I1 (decision-prearm-20261119): arming is refused while core 0's permit is clear; with it set, a cycle arms.
+        HANDSHAKE.set_permit(false);
+        let cmd = cycle_on(&mut gate, &mut t);
+        assert_stopped(&gate, cmd, "permit clear");
+        HANDSHAKE.set_permit(true);
+        assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
+
+        // P-I2: setting the permit while the switch is on does not arm; a switch cycle does.
+        HANDSHAKE.set_permit(false);
+        let cmd = cycle_on(&mut gate, &mut t);
+        assert_stopped(&gate, cmd, "permit clear, switch on");
+        HANDSHAKE.set_permit(true);
+        t += 1_000;
+        let cmd = step(&mut gate, t, Some(report(t, true, 0.0)), levels);
+        assert_stopped(&gate, cmd, "permit set while the switch is on");
+        assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
+
+        // P-I3: clearing the permit while armed changes nothing (200 steps with throttles).
+        HANDSHAKE.set_permit(false);
+        for k in 0..200 {
+            t += 1_000;
+            let cmd = step(&mut gate, t, Some(report(t, true, 0.0)), levels);
+            let levels_out = cmd.throttles().map(|th| th.map(|x| x.level()));
+            assert_eq!(
+                levels_out,
+                Some(want),
+                "permit cleared while armed, step {k}"
+            );
+            assert!(gate.armed() && HANDSHAKE.armed(), "step {k}");
+        }
     }
 }

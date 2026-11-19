@@ -292,6 +292,8 @@ struct RcHooks {
     map: Option<RcMap>,
     /// CRSF stick reports seen.
     crsf_reports: u32,
+    /// The arm switch in the previous CRSF stick report.
+    arm_on: bool,
 }
 
 impl Hooks for RcHooks {
@@ -340,6 +342,21 @@ impl Hooks for RcHooks {
                 arm: arm_switch(ch[4]),
                 t_us,
             });
+        }
+        // A refused arm (decision-prearm-20261119, section 4): on the switch's off-to-on edge, while not armed and
+        // without core 0's permit, one WARNING text with the reason and the LED's three red flashes (the only
+        // formatting and queueing here, and only on such an edge). The gate reads the permit on core 1 a few hundred
+        // us apart from this read, so in that window a report without a refusal, or a refusal without a report, is
+        // possible; both are harmless.
+        let arm = arm_switch(ch[4]);
+        let edge = arm && !self.arm_on;
+        self.arm_on = arm;
+        if edge && !crate::settings::HANDSHAKE.armed() && !crate::settings::HANDSHAKE.permitted() {
+            crate::text(
+                mavlink_device::dialect::MavSeverity::MAV_SEVERITY_WARNING,
+                crate::actions::refusal(),
+            );
+            crate::led::event(false);
         }
     }
 
@@ -621,6 +638,7 @@ async fn rc_link(
         flight: FLIGHT_RC.take_writer(),
         map: None,
         crsf_reports: 0,
+        arm_on: false,
     };
     loop {
         let end = port

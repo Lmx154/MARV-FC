@@ -955,6 +955,7 @@ async fn supervise() -> ! {
         #[cfg(feature = "latency-text")]
         devices.latency_text(now);
         actions::tick(now.as_millis());
+        actions::permit(now.as_millis(), IMU1.row().state, esc::row().state);
         esc::report();
         let ping = PING.load(Ordering::Relaxed);
         let pong = PONG.load(Ordering::Acquire);

@@ -14,7 +14,7 @@
 
 use core::cell::{Cell, RefCell};
 
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicU8, Ordering};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::admission::{Action, ActionBook, Effect, MotorTest};
@@ -66,6 +66,38 @@ pub fn motor_spin() -> bool {
             .as_ref()
             .is_some_and(|m| m.state.spin_active(crate::now_us()))
     })
+}
+
+/// The pre-arm reasons the supervisor tick last found (`fw_core::arming::Reasons` bits), for the
+/// refusal text of the radio's arm-switch edge (core 0 only).
+static PREARM: AtomicU8 = AtomicU8::new(fw_core::arming::Reasons::BOOTING.bits());
+
+/// Every supervisor tick, after [`tick`] with the same `now_ms` (so `busy` ends nothing by time
+/// limit here): the pre-arm reasons (decision-prearm-20261119) and the permit. The three action
+/// states are read and the permit stored inside one critical section, `BOOK`'s lock (`MOTOR`'s
+/// nests in it as in `command`; embassy-rp's critical section is re-entrant on the core that holds
+/// it), so a command admitted on the radio's `SWI_IRQ_0` executor cannot run between the read and
+/// the store (`fw_core::handshake`).
+pub fn permit(now_ms: u64, imu1: fw_core::health::State, esc: fw_core::health::State) {
+    BOOK.lock(|b| {
+        let book_busy = b.borrow_mut().busy(now_ms);
+        let reasons = fw_core::arming::reasons(
+            now_ms,
+            imu1,
+            esc,
+            crate::calibration::calibrating(),
+            book_busy,
+            motor_spin(),
+        );
+        crate::settings::HANDSHAKE.set_permit(reasons.is_empty());
+        PREARM.store(reasons.bits(), Ordering::Relaxed);
+    });
+}
+
+/// The WARNING STATUSTEXT for a refused arm-switch edge: the first reason the tick last found, or
+/// "busy" when it found none (a command being admitted had cleared the permit).
+pub fn refusal() -> &'static str {
+    fw_core::arming::Reasons::from_bits(PREARM.load(Ordering::Relaxed)).refusal()
 }
 
 /// The number of the restart (or self-test) request the running `DeviceRestart` (`DeviceSelfTest`)
@@ -124,6 +156,9 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
         return motor_test(req, link, now_ms);
     }
     // While armed, while flight throttles are sent or while a motor-test spin runs, every other action is refused.
+    // The permit is cleared before ARMED is loaded (the Dekker pair with the gate, `fw_core::handshake`); no await
+    // from here to the action's state (the book's slot in `admit`, then `start`).
+    crate::settings::HANDSHAKE.set_permit(false);
     let flying = crate::esc::flight_spin() || crate::settings::HANDSHAKE.armed();
     let decision = BOOK.lock(|b| {
         let armed = flying
@@ -162,6 +197,8 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
 /// the flight core's cell. The same on every link. UNSUPPORTED when there is no ESC task (`esc-off`).
 fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
     // A spin is refused while armed or while flight throttles are sent; a running spin is replaced as before.
+    // The permit is cleared before ARMED is loaded, as in `command`.
+    crate::settings::HANDSHAKE.set_permit(false);
     let flying = crate::esc::flight_spin() || crate::settings::HANDSHAKE.armed();
     let decision = BOOK.lock(|b| {
         MOTOR.lock(|m| {

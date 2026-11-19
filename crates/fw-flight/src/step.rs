@@ -439,6 +439,7 @@ mod tests {
             t_us,
         };
         let mut t = 2_000;
+        HANDSHAKE.set_permit(true);
         for arm in [false, true] {
             t += 1_000;
             let mut i = level(t, [0.0; 3]);
