@@ -32,6 +32,11 @@ pub struct Tuning {
     pub rc_fs_timeout_us: u64,
     /// Highest throttle stick (0..1) that may arm. Betaflight's 1050 us = 0.05 (section 13, ARM_THR_MAX).
     pub arm_thr_max: f32,
+    /// Below this multiple of the weight m g the collective cannot lift the vehicle at any point of the thrust
+    /// spread, so the vehicle is treated as on the ground and the rate integrators are held at 0. 0.5/0.7 = 0.714:
+    /// half of the hover collective at the weakest point of the +/-30 % thrust spread
+    /// (decision-flight-ground-20261119, section 3: 0.5/0.7, ArduPilot's hover/2 at the weakest spread point; PROPOSED).
+    pub ground_thrust_g: f32,
 }
 
 impl Tuning {
@@ -50,5 +55,6 @@ impl Tuning {
         pilot_thrust_max_g: 2.0,
         rc_fs_timeout_us: 1_000_000,
         arm_thr_max: 0.05,
+        ground_thrust_g: 0.5 / 0.7,
     };
 }

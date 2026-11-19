@@ -5,6 +5,8 @@ use crate::gnc::{Controller, NavState, Refused, Saturation, Setpoint, ThrustTorq
 use crate::mahony::DT_MAX_US;
 use crate::quat::{conj, down_in_body, mul, pt1};
 use crate::tuning::Tuning;
+use fw_core::calib::GRAVITY_MSS;
+use marv_card::MASS;
 
 /// One rate-loop axis: gains and its memory.
 #[derive(Clone, Copy, Debug)]
@@ -37,6 +39,7 @@ impl Axis {
 
     /// Torque, N.m, for rate error `err` and measured `rate`, rad/s, over `dt_s`. `first`: the first step after a
     /// reset (dt 0, the D filter starts at the measurement). `limited`: this axis's flag from the previous allocation.
+    /// `ground`: the integrator is set to 0 and adds nothing to this step's torque.
     fn step(
         &mut self,
         err: f32,
@@ -44,6 +47,7 @@ impl Axis {
         dt_s: f32,
         first: bool,
         limited: bool,
+        ground: bool,
         fltd_hz: f32,
     ) -> f32 {
         // D on the filtered measurement, not the error (decision 3c).
@@ -59,11 +63,15 @@ impl Axis {
         };
         self.m = m;
         // I: keep i' unless the axis is limited and i' grows in magnitude, then clamp (ArduPilot's rule, 3c).
-        let i_next = self.i + self.ki * err * dt_s;
-        if !(limited && i_next.abs() > self.i.abs()) {
-            self.i = i_next;
+        if ground {
+            self.i = 0.0;
+        } else {
+            let i_next = self.i + self.ki * err * dt_s;
+            if !(limited && i_next.abs() > self.i.abs()) {
+                self.i = i_next;
+            }
+            self.i = self.i.max(-self.imax).min(self.imax);
         }
-        self.i = self.i.max(-self.imax).min(self.imax);
         self.kp * err + self.i + d
     }
 }
@@ -77,6 +85,8 @@ pub struct CascadedPid {
     k_y: f32,
     /// D filter cut-off, Hz.
     fltd_hz: f32,
+    /// The collective below which the vehicle counts as on the ground, N (`ground_thrust_g` x m g).
+    ground_thrust_n: f32,
     /// Roll, pitch, yaw.
     axes: [Axis; 3],
     /// The previous step's `nav.t_us`; `None` after `reset`.
@@ -94,6 +104,7 @@ impl CascadedPid {
             k_rp: tuning.atc_ang_rp_p,
             k_y: tuning.atc_ang_yaw_p,
             fltd_hz: tuning.atc_rat_fltd_hz,
+            ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
             axes: [
                 Axis::new(p0, i0, d0, m0),
                 Axis::new(p1, i1, d1, m1),
@@ -155,13 +166,16 @@ impl Controller for CascadedPid {
         let [sx, sy, sz] = rate_sp;
         let [mx, my, mz] = nav.rates_rads;
         let hz = self.fltd_hz;
+        // On the ground (the setpoint's collective below the threshold): the integrators are 0
+        // (decision-flight-ground-20261119, section 1).
+        let ground = thrust_n < self.ground_thrust_n;
         let [roll, pitch, yaw] = &mut self.axes;
         Ok(ThrustTorque {
             thrust_n: thrust_n.max(0.0),
             torque_nm: [
-                roll.step(sx - mx, mx, dt, first, limited.roll, hz),
-                pitch.step(sy - my, my, dt, first, limited.pitch, hz),
-                yaw.step(sz - mz, mz, dt, first, limited.yaw, hz),
+                roll.step(sx - mx, mx, dt, first, limited.roll, ground, hz),
+                pitch.step(sy - my, my, dt, first, limited.pitch, ground, hz),
+                yaw.step(sz - mz, mz, dt, first, limited.yaw, ground, hz),
             ],
         })
     }
@@ -211,7 +225,7 @@ mod tests {
     fn rates(roll_rads: f32) -> Setpoint {
         Setpoint::Rates {
             rates_rads: [roll_rads, 0.0, 0.0],
-            thrust_n: 1.0,
+            thrust_n: MASS * GRAVITY_MSS,
         }
     }
 
@@ -268,5 +282,63 @@ mod tests {
             pid.update(&nav(t), &position, &limited(false)),
             Err(Refused)
         );
+    }
+
+    #[test]
+    fn integrator_zero_below_ground_thrust() {
+        let tuning = Tuning::DEFAULT;
+        // The threshold must cover every stance window (0.5/0.7 of the weight) and stay below the lift-off of the
+        // strongest spread point (1/1.3 of the weight), for a thrust spread of +/-30 %.
+        assert!(
+            0.5_f32 / 0.7_f32 <= tuning.ground_thrust_g
+                && tuning.ground_thrust_g < 1.0_f32 / 1.3_f32,
+            "ground_thrust_g {} outside [0.5/0.7, 1/1.3)",
+            tuning.ground_thrust_g
+        );
+        let threshold = tuning.ground_thrust_g * MASS * GRAVITY_MSS;
+        let below = threshold * 0.999;
+        let above = threshold * 1.001;
+        assert!(below < threshold && threshold < above);
+        let setpoint = |thrust_n: f32| Setpoint::Rates {
+            rates_rads: [1.0, -0.5, 0.25],
+            thrust_n,
+        };
+        let mut pid = CascadedPid::new(&tuning);
+        let mut t = 0;
+        let mut step = |pid: &mut CascadedPid, thrust_n: f32| {
+            let out = pid
+                .update(&nav(t), &setpoint(thrust_n), &limited(false))
+                .unwrap();
+            t += PERIOD_US;
+            out.torque_nm
+        };
+        let p_part = [
+            tuning.atc_rat_p[0] * 1.0,
+            tuning.atc_rat_p[1] * -0.5,
+            tuning.atc_rat_p[2] * 0.25,
+        ];
+        // Below: a constant error for 1000 steps leaves every integrator 0 and the torque is P (D is 0, the rate is 0).
+        for _ in 0..1000 {
+            let torque = step(&mut pid, below);
+            assert_eq!(torque, p_part);
+            for axis in &pid.axes {
+                assert_eq!(axis.i, 0.0);
+            }
+        }
+        // Above: the same error grows every integrator.
+        for _ in 0..100 {
+            let before = [pid.axes[0].i, pid.axes[1].i, pid.axes[2].i];
+            step(&mut pid, above);
+            assert!(pid.axes[0].i > before[0], "roll I did not grow");
+            assert!(pid.axes[1].i < before[1], "pitch I did not grow");
+            assert!(pid.axes[2].i > before[2], "yaw I did not grow");
+        }
+        assert!(pid.axes.iter().all(|axis| axis.i != 0.0));
+        // Back below: 0 on the first step, and the torque has no I part.
+        let torque = step(&mut pid, below);
+        assert_eq!(torque, p_part);
+        for axis in &pid.axes {
+            assert_eq!(axis.i, 0.0);
+        }
     }
 }
