@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 80 parameters of BARO, MAG, BATT, the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
+  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 81 parameters of BARO, MAG, BATT, GNSS (its fix interval), the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
