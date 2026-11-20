@@ -87,7 +87,7 @@ RC-loss rules (section 5: an off-to-on switch cycle on fresh reports with thrott
 `RC_FS_TIMEOUT`, on switch off, or on a refusal while armed). The board image names them in `src/flight.rs`
 (`BoardFlight`). Since P6 the image spins the motors when armed (see Flying, props off, below). Only IMU1's sample and the
 newest CRSF stick report go in (IMU2 and the slow sensors come with later steps).
-PROPOSED, not approved (`decision-flight-ground-20261119.md`, section 1): while the collective is below `ground_thrust_g` x m g (0.5/0.7, the vehicle on the ground) `fw_flight::pid::CascadedPid` sets the three rate integrators to 0 every step; above it nothing changes.
+Ground rule (`decision-flight-ground-20261119.md`, section 1; approved by the owner on 2026-11-19): while the collective is below `ground_thrust_g` x m g (0.5/0.7, the vehicle on the ground) `fw_flight::pid::CascadedPid` sets the three rate integrators to 0 every step; above it nothing changes.
 `Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
 `decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
 core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
