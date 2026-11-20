@@ -91,6 +91,7 @@ Ground rule (`decision-flight-ground-20261119.md`, section 1; approved by the ow
 `Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
 `decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
 core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
+Attitude estimator (`fw_flight::mahony::Mahony`, `decision-estimator-accel-20261120.md`, approved 2026-11-20): Mahony's filter on IMU1, tilt only, Kp 0.25 armed and 2.5 disarmed. The accelerometer goes through a PT1 low-pass (`Tuning::ins_accel_lpf_hz`, default 10 Hz, seeded with the first sample) before anything is decided on it: the 0.9 g to 1.1 g window and the direction used for the correction both come from the filtered vector, never from a raw sample (selecting and normalising raw samples slid the tilt by up to 18 deg on the ground with the motors running). The gyro is integrated raw. Test `tilt_holds_on_the_ground_with_the_motors_running` replays `crates/fw-flight/testdata/ground-run-20261120.bin`, a recording of the first flights' ground run (log 182, IMU1, 23.0 s to 40.0 s, motors spinning up, vehicle not moving; 12 075 records of 33 bytes, little-endian: u64 t_us, f32 gyro x y z rad/s, f32 accel x y z m/s^2, u8 armed; IMU and armed flag only, one particular vehicle): from the first armed sample the tilt stays within 0.5 deg of the tilt of the mean of all accelerometer samples (about 0.08 deg roll and 0.11 deg pitch). The unit test holds 2 g and 0.5 g along the mirrored tilt, and 0 g, for 0.25 s from a converged estimator: the attitude stays within 0.1 deg only while the window rejects the filtered vector. After a zero first sample the tilt becomes valid only when the filtered |f| reaches 0.9 g (about 37 ms at 10 Hz); `step.rs`'s test pins that delay.
 `fw_flight::step::encode_step` writes one step as the records NAV, SETP, DMD and MOT (`fw_core::dflog::FLIGHT_TYPES`,
 ids 139 to 142; the board logs them, see Logging).
 After each step the task writes the step time and the command to the seqlock `flight::OUT`. The ESC task reads it at
@@ -1389,7 +1390,7 @@ says otherwise.** Not yet checked on the board (`docs/handoff.md`).
   ridden through). A non-finite IMU1 value never reaches the estimator: that step gives Stop and disarm.
 - While armed or while flight throttles go out, core 0 refuses every action (saves, calibrations, restarts) and a
   motor-test spin (TEMPORARILY_REJECTED); a motor-test stop is still accepted. The motor test runs only while disarmed.
-- Gains and limits are constants in `fw_flight::tuning` (`Tuning::DEFAULT`) for now; no parameter changes them.
+- Gains and limits are constants in `fw_flight::tuning` (`Tuning::DEFAULT`) for now; no parameter changes them. That includes the estimator's accelerometer cut-off `ins_accel_lpf_hz` (10 Hz).
 
 ### Motor test
 

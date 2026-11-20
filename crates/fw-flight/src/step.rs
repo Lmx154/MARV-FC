@@ -439,6 +439,18 @@ mod tests {
             t_us,
         };
         let mut t = 2_000;
+        // The first sample (zero accel) seeds the accelerometer filter: the tilt is valid only once the filtered |f|
+        // reaches 0.9 g, tau x ln(10) after the first level step. Run the level steps that takes, plus two.
+        const STEP_US: u64 = 1_000;
+        let tau_s = 1.0 / (2.0 * core::f32::consts::PI * tuning.ins_accel_lpf_hz);
+        let settle = (libm::logf(10.0) * tau_s / (STEP_US as f32 * 1e-6)).ceil() as u32 + 2;
+        t += STEP_US;
+        out = flight.step(&level(t, [0.0; 3]));
+        assert!(!out.nav.valid.tilt);
+        for _ in 1..settle {
+            t += STEP_US;
+            out = flight.step(&level(t, [0.0; 3]));
+        }
         HANDSHAKE.set_permit(true);
         for arm in [false, true] {
             t += 1_000;

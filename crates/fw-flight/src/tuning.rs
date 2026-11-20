@@ -21,6 +21,8 @@ pub struct Tuning {
     pub atc_rat_fltd_hz: f32,
     /// Gyro filter, Hz. Bound at 50 Hz or more in section 3g (section 13, INS_GYRO_LPF).
     pub ins_gyro_lpf_hz: f32,
+    /// Accelerometer PT1 cut-off of the estimator, Hz.
+    pub ins_accel_lpf_hz: f32,
     /// Largest tilt the sticks ask for, and the largest lean to arm, rad. ArduPilot's 30 deg (section 13, ANGLE_MAX).
     pub angle_max_rad: f32,
     /// Yaw rate at full stick, rad/s. PX4's 150 deg/s (section 13, PILOT_Y_RATE).
@@ -50,6 +52,7 @@ impl Tuning {
         atc_rat_imax: [0.273, 0.249, 0.0355],
         atc_rat_fltd_hz: 20.0,
         ins_gyro_lpf_hz: 60.0,
+        ins_accel_lpf_hz: 10.0,
         angle_max_rad: 30.0_f32.to_radians(),
         pilot_y_rate_rads: 150.0_f32.to_radians(),
         pilot_thrust_max_g: 2.0,

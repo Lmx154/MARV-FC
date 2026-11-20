@@ -1,5 +1,7 @@
 //! The attitude estimator: Mahony's complementary filter on IMU1, Betaflight's form, no integral term
-//! (decision-first-pair-20261119, section 2). q is body to NED, Hamilton, [w, x, y, z]; gyro rad/s and specific
+//! (decision-first-pair-20261119, section 2). The accelerometer is low-passed (PT1, `Tuning::ins_accel_lpf_hz`)
+//! before anything is decided on it: the 0.9 g to 1.1 g window and the direction both come from the filtered
+//! vector, never from a raw sample (decision-estimator-accel-20261120). q is body to NED, Hamilton, [w, x, y, z]; gyro rad/s and specific
 //! force m/s^2, both FRD. Tilt only: no heading, velocity or position.
 
 use crate::gnc::{Estimator, NavState, Sensors, Valid};
@@ -11,7 +13,7 @@ use fw_core::calib::GRAVITY_MSS;
 pub const KP_ARMED: f32 = 0.25;
 /// Correction gain while disarmed, 1/s: Betaflight's x10 (decision 2e, section 6a).
 pub const KP_DISARMED: f32 = 2.5;
-/// The accelerometer is used only from this |f|, in g (decision 2b: Betaflight and PX4).
+/// The filtered accelerometer is used only from this |f|, in g (decision 2b: Betaflight and PX4).
 pub const ACCEL_MIN_G: f32 = 0.9;
 /// ... up to this |f|, in g (decision 2b).
 pub const ACCEL_MAX_G: f32 = 1.1;
@@ -32,12 +34,16 @@ pub struct Mahony {
     tilt: bool,
     /// The gate's state after the previous step: selects the correction gain.
     armed: bool,
+    /// The accelerometer after the PT1, m/s^2, FRD: the window and the direction use it.
+    accel_lpf: [f32; 3],
     /// Gyro PT1 cut-off, Hz (INS_GYRO_LPF).
     gyro_lpf_hz: f32,
+    /// Accelerometer PT1 cut-off, Hz (`Tuning::ins_accel_lpf_hz`).
+    accel_lpf_hz: f32,
 }
 
 impl Mahony {
-    /// Disarmed, no sample seen. Takes the gyro filter cut-off, Hz, from `tuning`.
+    /// Disarmed, no sample seen. Takes the gyro and accelerometer filter cut-offs, Hz, from `tuning`.
     pub fn new(tuning: &Tuning) -> Self {
         Mahony {
             q: [1.0, 0.0, 0.0, 0.0],
@@ -45,7 +51,9 @@ impl Mahony {
             t_prev_us: None,
             tilt: false,
             armed: false,
+            accel_lpf: [0.0; 3],
             gyro_lpf_hz: tuning.ins_gyro_lpf_hz,
+            accel_lpf_hz: tuning.ins_accel_lpf_hz,
         }
     }
 }
@@ -62,26 +70,36 @@ impl Estimator for Mahony {
             None => 0.0,
         };
 
-        // rates_rads: PT1 of the gyro (decision 2h), started at the first sample.
-        self.rates = match self.t_prev_us {
+        // rates_rads: PT1 of the gyro (decision 2h), started at the first sample. The accelerometer gets a PT1 of
+        // its own, the same way (decision-estimator-accel-20261120, section 1).
+        match self.t_prev_us {
             Some(_) => {
                 let [r0, r1, r2] = self.rates;
                 let [w0, w1, w2] = omega;
                 let hz = self.gyro_lpf_hz;
-                [
+                self.rates = [
                     pt1(r0, w0, dt, hz),
                     pt1(r1, w1, dt, hz),
                     pt1(r2, w2, dt, hz),
-                ]
+                ];
+                let hz = self.accel_lpf_hz;
+                for (a, x) in self.accel_lpf.iter_mut().zip(f) {
+                    *a = pt1(*a, x, dt, hz);
+                }
             }
-            None => omega,
-        };
+            None => {
+                self.rates = omega;
+                self.accel_lpf = f;
+            }
+        }
         self.t_prev_us = Some(t_us);
 
-        // Measured down, d_meas = -f/|f|, only inside the window (decision 2b).
-        let norm = libm::sqrtf(f.iter().map(|v| v * v).sum());
+        // Measured down, d_meas = -f/|f| of the filtered f, only inside the window (decision 2b): the window and
+        // the direction come from the same filtered vector.
+        let fl = self.accel_lpf;
+        let norm = libm::sqrtf(fl.iter().map(|v| v * v).sum());
         let accepted = (ACCEL_MIN_G * GRAVITY_MSS..=ACCEL_MAX_G * GRAVITY_MSS).contains(&norm);
-        let d_meas = f.map(|v| -v / norm);
+        let d_meas = fl.map(|v| -v / norm);
 
         if !self.tilt {
             // Initialisation (decision 2f): the shortest rotation from d_meas to NED down, no yaw.
@@ -166,6 +184,16 @@ mod tests {
         (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y))
     }
 
+    /// The angle between two attitudes of the same hemisphere, rad (twice the length of the quaternions' difference).
+    fn angle(a: [f32; 4], b: [f32; 4]) -> f32 {
+        2.0 * a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - y) * (x - y))
+            .sum::<f32>()
+            .sqrt()
+    }
+
     fn check(nav: &NavState, t_us: u64) {
         let q = nav.attitude;
         let n: f32 = q.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -205,19 +233,44 @@ mod tests {
         }
         let held = m.update(&sensors(t, [0.0; 3], f)).attitude;
         t += PERIOD_US;
-        // 2. |f| outside the window (free fall, then 2 g): the attitude does not change. 0.5 s.
-        for k in 0..400 {
-            let out = if k % 2 == 0 {
-                [0.0; 3]
-            } else {
-                f.map(|v| 2.0 * v)
-            };
-            let nav = m.update(&sensors(t, [0.0; 3], out));
-            check(&nav, t);
-            for (a, b) in nav.attitude.iter().zip(held) {
-                assert!((a - b).abs() < 1e-6, "{:?} vs {held:?}", nav.attitude);
+        // 2. |f| held outside the window for 0.25 s (200 samples), each hold from a fresh estimator converged on d1 (the
+        //    tilt above, disarmed): 2 g along d2, the mirrored tilt; 0.5 g along d2; 0 g. The attitude at the end of
+        //    the hold is within the 0.1 deg of phases 1 and 4 of where it was before. Only a window that rejects the
+        //    filtered vector keeps it there: along d2 an accepted vector would pull the estimate toward d2.
+        let f2 = [f[0], -f[1], f[2]];
+        let tol_rad = 0.1f32.to_radians();
+        for (name, scale, dir) in [("2 g", 2.0, f2), ("0.5 g", 0.5, f2), ("0 g", 0.0, f)] {
+            let mut e = Mahony::new(&Tuning::DEFAULT);
+            let mut te = 0;
+            let mut before = [0.0; 4];
+            for _ in 0..1600 {
+                before = e.update(&sensors(te, [0.0; 3], f)).attitude;
+                te += PERIOD_US;
             }
-            t += PERIOD_US;
+            let mut worst = 0.0f32;
+            let mut end = before;
+            for _ in 0..200 {
+                let nav = e.update(&sensors(te, [0.0; 3], dir.map(|v| scale * v)));
+                check(&nav, te);
+                assert!(
+                    nav.attitude.iter().all(|v| v.is_finite()),
+                    "{name}: {:?}",
+                    nav.attitude
+                );
+                end = nav.attitude;
+                worst = worst.max(angle(end, before));
+                te += PERIOD_US;
+            }
+            std::println!(
+                "hold {name}: attitude change at the end {:.5} deg, largest during {:.5} deg",
+                angle(end, before).to_degrees(),
+                worst.to_degrees()
+            );
+            assert!(
+                angle(end, before) <= tol_rad,
+                "hold {name}: moved {} deg",
+                angle(end, before).to_degrees()
+            );
         }
         // 3. +1 rad/s about x for 0.1 s (80 samples), accelerometer outside the window: roll +0.1 rad within 1 %.
         let before = roll(held);
@@ -242,5 +295,68 @@ mod tests {
             "roll {} deg",
             r.to_degrees()
         );
+    }
+
+    /// Pitch, rad (conventions 7c): sin(pitch) = 2 (w y - z x).
+    fn pitch(q: [f32; 4]) -> f32 {
+        let [w, x, y, z] = q;
+        (2.0 * (w * y - z * x)).asin()
+    }
+
+    /// One record of `ground-run-20261120.bin`: log 182 of the first flights, IMU1, 23.0 s to 40.0 s, the motors
+    /// spinning up with the vehicle on the ground. IMU and armed flag only. 33 bytes, little-endian: u64 t_us,
+    /// f32 gyro x y z (rad/s), f32 accel x y z (m/s^2), u8 armed.
+    const RECORD_BYTES: usize = 33;
+    const GROUND_RUN: &[u8] = include_bytes!("../testdata/ground-run-20261120.bin");
+
+    #[test]
+    fn tilt_holds_on_the_ground_with_the_motors_running() {
+        // The motors' vibration puts |f| in and out of the window by sample; selecting or normalising raw samples
+        // slid the tilt by 3 deg here. The reference is the tilt of the mean of all the accelerometer samples.
+        assert_eq!(GROUND_RUN.len() % RECORD_BYTES, 0);
+        let records = GROUND_RUN.len() / RECORD_BYTES;
+        assert_eq!(records, 12_075);
+        let f32_at = |r: &[u8], o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
+        let rows: std::vec::Vec<(u64, [f32; 3], [f32; 3], bool)> = GROUND_RUN
+            .chunks_exact(RECORD_BYTES)
+            .map(|r| {
+                let t_us = u64::from_le_bytes(r[0..8].try_into().unwrap());
+                let gyro = [f32_at(r, 8), f32_at(r, 12), f32_at(r, 16)];
+                let accel = [f32_at(r, 20), f32_at(r, 24), f32_at(r, 28)];
+                (t_us, gyro, accel, r[32] != 0)
+            })
+            .collect();
+
+        let mut mean = [0.0f64; 3];
+        for (_, _, a, _) in &rows {
+            for (m, v) in mean.iter_mut().zip(a) {
+                *m += f64::from(*v) / records as f64;
+            }
+        }
+        // Down in the body is -f/|f| (conventions 7g): roll = atan2(d_y, d_z), pitch = atan2(-d_x, hypot(d_y, d_z)).
+        let [dx, dy, dz] = mean.map(|v| -v);
+        let ref_roll = dy.atan2(dz).to_degrees();
+        let ref_pitch = (-dx).atan2(dy.hypot(dz)).to_degrees();
+
+        let mut m = Mahony::new(&Tuning::DEFAULT);
+        let (mut worst_roll, mut worst_pitch) = (0.0f64, 0.0f64);
+        let mut seen_armed = false;
+        for (t_us, gyro, accel, armed) in rows {
+            m.set_armed(armed);
+            let nav = m.update(&sensors(t_us, gyro, accel));
+            seen_armed |= armed;
+            if seen_armed {
+                let r = f64::from(roll(nav.attitude).to_degrees());
+                let p = f64::from(pitch(nav.attitude).to_degrees());
+                worst_roll = worst_roll.max((r - ref_roll).abs());
+                worst_pitch = worst_pitch.max((p - ref_pitch).abs());
+            }
+        }
+        std::println!(
+            "reference roll {ref_roll:.3} pitch {ref_pitch:.3} deg; largest error roll {worst_roll:.3} pitch {worst_pitch:.3} deg"
+        );
+        assert!(seen_armed);
+        assert!(worst_roll <= 0.5, "roll error {worst_roll} deg");
+        assert!(worst_pitch <= 0.5, "pitch error {worst_pitch} deg");
     }
 }

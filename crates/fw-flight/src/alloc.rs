@@ -210,7 +210,7 @@ mod tests {
             "{lv:?}"
         );
 
-        // A small torque that fits at hover on every axis (decision 3e: authority 0.911, 0.831, 0.118 N.m).
+        // A small torque that fits at hover on every axis (decision 3e: yaw has far less authority than roll and pitch).
         let small = 0.01;
         // (axis, lines that rise for + torque): +x left (2, 3); +y front (0, 2); +z CCW (0, 3) (conventions 7e, 7f).
         for (axis, up) in [(0, [2, 3]), (1, [0, 2]), (2, [0, 3])] {
@@ -235,7 +235,7 @@ mod tests {
     fn allocator_gives_up_yaw_first() {
         let mut alloc = CardAllocator::new();
         let hover = MASS * GRAVITY_MSS;
-        // Roll 0.1 N.m fits (authority 0.911 N.m); yaw 10 N.m is far beyond its 0.118 N.m (decision 3e).
+        // Roll 0.1 N.m fits the roll authority; yaw 10 N.m is far beyond the yaw authority (decision 3e).
         let (tx, tz) = (0.1, 10.0);
         let d = demand(hover, [tx, 0.0, tz]);
         let (u, sat) = alloc.thrusts(&d);
