@@ -80,6 +80,9 @@ const RADIO_STREAMS: [(u32, i32); 6] = [
 const FRESH_US: u64 = 1_000_000;
 /// Pause before `run` is called again after it returned.
 const RESTART_MS: u64 = 100;
+/// The shortest time between two CRSF GPS frames: keeps the frame mix (GPS and battery) of the 1 Hz
+/// receiver on the radio link whatever `GPS_RATE_MS`.
+const GPS_FRAME_MIN_US: u64 = 1_000_000;
 /// The hook re-reads the stick map from the store at every this many CRSF stick reports (about 4/s).
 const MAP_EVERY: u32 = 64;
 
@@ -286,6 +289,8 @@ pub fn manual_control(now_us: u64) -> Option<MANUAL_CONTROL_DATA> {
 struct RcHooks {
     /// The GNSS sample (its `t_us`) last sent as a GPS frame.
     last_gps_us: Option<u64>,
+    /// Board time when the last GPS frame was sent.
+    last_gps_sent_us: Option<u64>,
     /// The writer of [`FLIGHT_RC`] (`None` if it was taken already: nothing is written).
     flight: Option<TripleWriter<'static, RcSample>>,
     /// The stick map last read from the store; `None` until the store gave one (no sample then).
@@ -379,6 +384,9 @@ impl Hooks for RcHooks {
             ..
         }) = GNSS.latest.try_get()
             && gps_frame_due(Some(t_us), self.last_gps_us)
+            && self
+                .last_gps_sent_us
+                .is_none_or(|sent| now_us.saturating_sub(sent) >= GPS_FRAME_MIN_US)
         {
             let g = crsf_gps(lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used);
             let gps = Gps {
@@ -391,6 +399,7 @@ impl Hooks for RcHooks {
             };
             if let Ok(n) = encode_gps(&gps, out) {
                 self.last_gps_us = Some(t_us);
+                self.last_gps_sent_us = Some(now_us);
                 return Some(n);
             }
         }
@@ -635,6 +644,7 @@ async fn rc_link(
     };
     let mut hooks = RcHooks {
         last_gps_us: None,
+        last_gps_sent_us: None,
         flight: FLIGHT_RC.take_writer(),
         map: None,
         crsf_reports: 0,

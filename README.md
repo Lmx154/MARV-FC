@@ -1029,7 +1029,7 @@ on the radio: in MAVLink mode there are no CRSF sticks. In CRSF mode the port ca
 latest sample is newer than the one last sent as a GPS frame, the hook sends a GPS frame (CRSF type 0x02: latitude, longitude, groundspeed,
 heading, altitude, satellites) built from it, in place of that call's battery frame (Betaflight's rule, "on each new solution"); otherwise it
 sends the battery frame from the BATT row's latest sample while it is younger than 1 s (remaining percent and capacity 0: not
-estimated). At the GNSS's 1 Hz that is 1 GPS frame and about 9 battery frames per second. Values (`fw_core::rc::crsf_gps`, host-tested): latitude and
+estimated). A GPS frame goes at most once per second (`GPS_FRAME_MIN_US`, the 1 Hz receiver's frame mix), whatever `GPS_RATE_MS`: 1 GPS frame and about 9 battery frames per second. Values (`fw_core::rc::crsf_gps`, host-tested): latitude and
 longitude in 1e-7 degree; groundspeed in 0.1 km/h, `(mm/s * 36 + 500) / 1000` (Betaflight's `(cm/s * 36 + 50) / 100` from a finer unit),
 at most 65 535; heading is the course over ground in 0.01 degree; altitude is the height above mean sea level in whole metres (floor),
 clamped to -1000 to 4000 m (wire value 0 to 5000), Betaflight's rule (`crsfFrameGps`: `constrain(altCm / 100 + 1000, 0, 5000)`); satellites

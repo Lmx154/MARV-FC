@@ -23,10 +23,15 @@
 //! may be dropped by the timeout or the wake signal at any await and nothing is lost. Nothing needs
 //! `recover` after a drop.
 //!
-//! A fix takes the deviations of its epoch's GST (the same UTC time, `fw_core::sample::same_epoch_sigmas`):
-//! a GST that came before the GGA + RMC pair at once; otherwise the fix waits for the one sentence
-//! after the pair and goes out without deviations if that is not its GST. A fix waiting there when
-//! the read is dropped is cleared by `recover`, `restart` and `apply`.
+//! A fix takes the deviations of its epoch's GST (the same UTC time; `fw_core::sample::GstOrder`): a GST
+//! that came before the GGA + RMC pair at once. A fix whose GST has not come goes out at once without
+//! deviations, unless the stream showed that GST follows the pair (its own GST was the sentence right after
+//! an earlier pair); then it waits for the one sentence after the pair and goes without deviations if that
+//! is not its GST, which also forgets the order. So when GST comes after the pair, the first fix after a
+//! start, a configuration or a flush has no deviations; the wait is one sentence (about 11 ms at 115200
+//! baud for a 128-byte sentence) and never a fix interval, except a single epoch if GST stops arriving.
+//! The order is forgotten at every configuration and flush; a fix waiting when the read is dropped is
+//! cleared by `recover`, `restart` and `apply`.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -40,7 +45,7 @@ use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_time::{Duration, Instant, with_deadline, with_timeout};
 use embedded_io_async::Read;
 use fw_core::health::{ErrorKind, Limits};
-use fw_core::sample::{UtcTime, horizontal_std_mm, same_epoch_sigmas};
+use fw_core::sample::{GstOrder, Publish, UtcTime, horizontal_std_mm};
 use lc76g::aux_sentences::Gst;
 use lc76g::sentence::{FixType, Quality, Time};
 use lc76g::{Command, Error, Fix, Lc76g, Message};
@@ -143,6 +148,8 @@ pub struct GnssAdapter {
     waiting: Option<Fix>,
     /// The latest GST read.
     gst: Option<Gst>,
+    /// Whether GST follows the GGA + RMC pair, as the stream showed it.
+    order: GstOrder,
     /// The error `data_ready` ended with, for the `acquire` that follows.
     failed: Option<ErrorKind>,
     calls: u32,
@@ -179,6 +186,7 @@ impl GnssAdapter {
             ready: None,
             waiting: None,
             gst: None,
+            order: GstOrder::default(),
             failed: None,
             calls: 0,
         }
@@ -253,6 +261,7 @@ impl GnssAdapter {
         self.ready = None;
         self.waiting = None;
         self.gst = None;
+        self.order.reset();
         self.failed = None;
         self.totals.resyncs = self.totals.resyncs.saturating_add(1);
         self.totals.drained = self.totals.drained.saturating_add(drained);
@@ -273,6 +282,7 @@ impl GnssAdapter {
         let result = self.send_configuration(begun).await;
         self.ready = None;
         self.waiting = None;
+        self.order.reset();
         if let Some(gps) = &self.gps {
             self.fixes_taken = gps.stats().fixes;
         }
@@ -364,20 +374,12 @@ fn utc(time: Option<Time>) -> Option<UtcTime> {
     })
 }
 
-/// Whether `gst` is of the epoch of `fix` (both carry the same UTC time).
-fn same_epoch(fix: &Fix, gst: &Gst) -> bool {
-    fix.time.is_some() && gst.time == fix.time
-}
-
-/// The deviations of `gst` for `fix`, `[lat, lon, alt]` mm: only from the same epoch (G-I7).
-fn sigmas(fix: &Fix, gst: Option<&Gst>) -> [Option<u32>; 3] {
-    gst.map_or([None; 3], |g| {
-        same_epoch_sigmas(
-            utc(fix.time),
-            utc(g.time),
-            [g.lat_std_mm, g.lon_std_mm, g.alt_std_mm],
-        )
-    })
+/// A GST's UTC time and deviations `[lat, lon, alt]`, mm.
+fn gst_std(gst: &Gst) -> (Option<UtcTime>, [Option<u32>; 3]) {
+    (
+        utc(gst.time),
+        [gst.lat_std_mm, gst.lon_std_mm, gst.alt_std_mm],
+    )
 }
 
 /// MAVLink's `GPS_FIX_TYPE` of a fix: 1 NO_FIX unless the RMC status, the GGA quality and the GSA
@@ -514,9 +516,9 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
 impl DeviceAdapter for GnssAdapter {
     /// The read of the next fix: droppable (see the module comment). Sentences on the way are
     /// decoded, counted and consumed; a UART error is counted and the read goes on. A fix the driver
-    /// already holds (completed while `start` read the first sentence) is handed out at once. A fix
-    /// whose GST came before it goes with it at once; otherwise it waits for the next sentence and
-    /// goes with it if that is its GST, without deviations if not (C-b2).
+    /// already holds (completed while `start` read the first sentence) is handed out at once. Whether
+    /// the fix goes now (with or without its GST's deviations) or waits one sentence is
+    /// `GstOrder`'s (see the module comment).
     async fn data_ready(&mut self) {
         loop {
             let Some(gps) = self.gps.as_mut() else {
@@ -527,13 +529,20 @@ impl DeviceAdapter for GnssAdapter {
                 && let Ok(fix) = gps.read_fix().await
             {
                 self.fixes_taken = gps.stats().fixes;
-                if self.gst.is_some_and(|gst| same_epoch(&fix, &gst)) {
-                    self.ready = Some((fix, sigmas(&fix, self.gst.as_ref())));
-                    self.publish();
-                    return;
+                match self
+                    .order
+                    .pair(utc(fix.time), self.gst.as_ref().map(gst_std))
+                {
+                    Publish::Now(std_mm) => {
+                        self.ready = Some((fix, std_mm));
+                        self.publish();
+                        return;
+                    }
+                    Publish::Wait => {
+                        self.waiting = Some(fix);
+                        continue;
+                    }
                 }
-                self.waiting = Some(fix);
-                continue;
             }
             match gps.read().await {
                 Ok(message) => {
@@ -545,8 +554,10 @@ impl DeviceAdapter for GnssAdapter {
                     if gst.is_some() {
                         self.gst = gst;
                     }
-                    if let Some(fix) = self.waiting.take() {
-                        self.ready = Some((fix, sigmas(&fix, gst.as_ref())));
+                    if let Some(std_mm) = self.order.sentence(gst.as_ref().map(gst_std))
+                        && let Some(fix) = self.waiting.take()
+                    {
+                        self.ready = Some((fix, std_mm));
                         return;
                     }
                 }
