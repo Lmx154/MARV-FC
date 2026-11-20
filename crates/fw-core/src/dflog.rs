@@ -741,6 +741,14 @@ pub fn encode_gpa(
     w.pos
 }
 
+/// GPA's `delta_ms`: milliseconds from the previous GNSS sample's `t_us` to this one's, 0 for the first
+/// (`previous_us` `None`) and for a time that went backwards.
+pub fn gpa_delta_ms(previous_us: Option<u64>, t_us: u64) -> u32 {
+    previous_us.map_or(0, |p| {
+        u32::try_from(t_us.saturating_sub(p) / 1000).unwrap_or(u32::MAX)
+    })
+}
+
 /// Days from 1970-01-01 to `y-m-d` (proleptic Gregorian, `m` 1 to 12, `d` 1 to 31), after
 /// Howard Hinnant's `days_from_civil`.
 const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -1219,6 +1227,28 @@ mod tests {
         encode_gpa(&mut b, 1, 0, None, None, None, 70_000);
         assert_eq!(b[22..24], [0xFF, 0xFF]);
         assert_eq!(encode_gpa(&mut [0x55u8; 23], 1, 0, None, None, None, 0), 0);
+    }
+
+    #[test]
+    fn gpa_delta_is_ms_since_the_previous_sample_and_0_for_the_first() {
+        assert_eq!(gpa_delta_ms(None, 5_000_000), 0);
+        assert_eq!(gpa_delta_ms(Some(5_000_000), 5_200_000), 200);
+        assert_eq!(gpa_delta_ms(Some(5_000_000), 5_100_999), 100);
+        assert_eq!(gpa_delta_ms(Some(5_000_000), 6_000_000), 1000);
+        assert_eq!(gpa_delta_ms(Some(5_000_000), 4_000_000), 0);
+        assert_eq!(gpa_delta_ms(Some(0), u64::MAX), u32::MAX);
+        // The record saturates it at 65 535.
+        let mut b = [0u8; 24];
+        encode_gpa(
+            &mut b,
+            1,
+            0,
+            None,
+            None,
+            None,
+            gpa_delta_ms(Some(0), 70_000_000),
+        );
+        assert_eq!(b[22..24], [0xFF, 0xFF]);
     }
 
     #[test]

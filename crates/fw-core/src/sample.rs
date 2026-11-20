@@ -67,6 +67,13 @@ pub fn same_epoch_sigmas(
     }
 }
 
+/// The horizontal deviation sqrt(lat^2 + lon^2), mm (rounded down; `u32::MAX` beyond), when both are
+/// known: GPS_RAW_INT's `h_acc`.
+pub fn horizontal_std_mm(lat_std_mm: Option<u32>, lon_std_mm: Option<u32>) -> Option<u32> {
+    let (lat, lon) = (u64::from(lat_std_mm?), u64::from(lon_std_mm?));
+    Some(u32::try_from((lat * lat).saturating_add(lon * lon).isqrt()).unwrap_or(u32::MAX))
+}
+
 /// Time of day, UTC: the fields of `lc76g::sentence::Time`, copied one for one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UtcTime {
@@ -156,5 +163,20 @@ mod tests {
         let part = [Some(1200), Some(900), None];
         assert_eq!(same_epoch_sigmas(t(5, 200), t(5, 200), part), part);
         assert_eq!(same_epoch_sigmas(t(5, 200), t(5, 200), [None; 3]), [None; 3]);
+    }
+
+    #[test]
+    fn horizontal_std_needs_both_and_does_not_overflow() {
+        assert_eq!(horizontal_std_mm(Some(3000), Some(4000)), Some(5000));
+        assert_eq!(horizontal_std_mm(Some(1), Some(1)), Some(1));
+        assert_eq!(horizontal_std_mm(Some(0), Some(0)), Some(0));
+        assert_eq!(horizontal_std_mm(Some(3000), None), None);
+        assert_eq!(horizontal_std_mm(None, Some(4000)), None);
+        assert_eq!(horizontal_std_mm(None, None), None);
+        assert_eq!(horizontal_std_mm(Some(u32::MAX), Some(0)), Some(u32::MAX));
+        assert_eq!(
+            horizontal_std_mm(Some(u32::MAX), Some(u32::MAX)),
+            Some(u32::MAX)
+        );
     }
 }

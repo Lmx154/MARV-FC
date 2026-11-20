@@ -41,6 +41,15 @@ pub fn validate(candidate: &Candidate<'_>) -> Result<(), &'static str> {
     }
 }
 
+/// The stored `GPS_RATE_MS` as the fix interval to configure: the value when [`validate`] accepts it,
+/// otherwise its refusal. A boot load runs no validator, so the adapter asks this before it configures.
+pub fn rate_ms(value: Option<i32>) -> Result<u16, &'static str> {
+    match value {
+        Some(v @ (100 | 200 | 500 | 1000)) => u16::try_from(v).map_err(|_| BAD_RATE),
+        _ => Err(BAD_RATE),
+    }
+}
+
 /// The receiver's configuration for a fix interval: the driver's `Config::with_fix_interval(ms)` with GGA,
 /// RMC and GST every fix, GSA every `ceil(1000 / ms)` fixes, GLL, VTG, GSV, ZDA, GRS and GNS off, EPE off.
 /// The navigation mode and PPS of the result are never sent by [`commands`].
@@ -243,5 +252,23 @@ mod tests {
         );
         // 50 is below the range: refused before the validator is asked.
         assert_eq!(p.set(80, ParamValue::I32(50)), Err(ParamError::OutOfRange));
+    }
+
+    /// `rate_ms` accepts exactly what the validator accepts, over the whole range and beyond it.
+    #[test]
+    fn rate_ms_agrees_with_the_validator() {
+        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
+        assert!(p.set_validator(DEVICE, validate));
+        for v in 100..=1000 {
+            let accepted = p.set(80, ParamValue::I32(v)).is_ok();
+            assert_eq!(rate_ms(Some(v)).is_ok(), accepted, "{v}");
+            if accepted {
+                assert_eq!(rate_ms(Some(v)), Ok(v as u16));
+            }
+        }
+        assert_eq!(rate_ms(Some(300)), Err(BAD_RATE));
+        for v in [None, Some(0), Some(-200), Some(65_736), Some(i32::MAX)] {
+            assert_eq!(rate_ms(v), Err(BAD_RATE), "{v:?}");
+        }
     }
 }

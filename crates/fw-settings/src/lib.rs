@@ -50,7 +50,7 @@ pub const COUNT: usize = baro::COUNT
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
 /// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` (appended, so the
-/// first 70 indices did not change).
+/// first 80 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
@@ -492,6 +492,58 @@ mod tests {
         assert_eq!(get(&p, "MAG_AVG"), ParamValue::I32(2));
         assert_eq!(get(&p, "MAG_OFFX"), ParamValue::F32(1.5));
         assert!(!p.dirty());
+    }
+
+    /// A record saved before `GPS_RATE_MS` existed (it can name only the first 80 parameters) loads by
+    /// the boot rule of `settings::load_from_flash` (`reset_all`, then each entry by name) with every one
+    /// of its 80 values and `GPS_RATE_MS` at its default, 200 ms, which the adapter accepts.
+    #[test]
+    fn a_record_of_the_first_80_parameters_loads_gps_rate_ms_at_its_default() {
+        use fw_core::record::{self, Boot, Entry, SECTOR_LEN};
+        use mavlink_device::ParamValue;
+        let old = &TABLE[..80];
+        assert!(old.iter().all(|d| d.name != gnss::RATE_MS));
+        let changed = |def: &ParamDef| match (def.default, def.max) {
+            (ParamValue::I32(d), ParamValue::I32(hi)) if d < hi => ParamValue::I32(d + 1),
+            (ParamValue::I32(_), ParamValue::I32(_)) => def.min,
+            (ParamValue::F32(d), ParamValue::F32(hi)) if d < hi => ParamValue::F32(hi.min(d + 0.5)),
+            _ => def.min,
+        };
+        let entries = old.iter().map(|d| Entry {
+            name: ParamName::new(d.name).unwrap(),
+            value: changed(d),
+        });
+        let mut a = [0u8; SECTOR_LEN];
+        let b = [0xFFu8; SECTOR_LEN];
+        record::encode(7, entries, &mut a).unwrap();
+        let Boot::Current { record, .. } = record::choose(&a, &b).boot else {
+            panic!("the old record is not current");
+        };
+        assert_eq!(record.declared_count(), 80);
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        // A value from before (a reload after a set): the boot rule puts it back to the default.
+        assert_eq!(p.set(80, ParamValue::I32(1000)), Ok(ParamValue::I32(1000)));
+        p.reset_all();
+        let mut loaded = 0;
+        for entry in record.entries() {
+            assert_eq!(
+                p.load(&entry.name, entry.value),
+                Ok(true),
+                "{}",
+                entry.name.as_str()
+            );
+            loaded += 1;
+        }
+        assert_eq!(loaded, 80);
+        for def in old {
+            assert_eq!(p.get_named(def.name), Some(changed(def)), "{}", def.name);
+        }
+        assert_eq!(p.get_named(gnss::RATE_MS), Some(ParamValue::I32(200)));
+        let stored = match p.get_named(gnss::RATE_MS) {
+            Some(ParamValue::I32(v)) => Some(v),
+            _ => None,
+        };
+        assert_eq!(gnss::rate_ms(stored), Ok(200));
     }
 
     /// The defaults make a setup for both IMUs: after the boot reset the setups cannot fail.
