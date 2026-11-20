@@ -20,6 +20,6 @@ dshot = { git = "https://github.com/Lmx154/dshot-rs.git", rev = "3557eb111097400
 # and run `cargo update -p marv-card`. To build against a local checkout instead, add to the workspace Cargo.toml:
 #   [patch."https://github.com/Lmx154/MARV-sim.git"]
 #   marv-card = { path = "../MARV-sim/marv-card" }
-marv-card = { git = "https://github.com/Lmx154/MARV-sim.git", rev = "98770847717fe5144aeafdd9027d80f375e9d222" }
+marv-card = { git = "https://github.com/Lmx154/MARV-sim.git", rev = "fd5e4963e8de91d3b4f1efe9b38ab41d35ce789c" }
 # sqrtf, sinf, cosf for the flight code (MIT, no dependencies; decision-first-pair 7b).
 libm = "0.2"

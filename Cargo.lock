@@ -1044,7 +1044,7 @@ dependencies = [
 [[package]]
 name = "marv-card"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/MARV-sim.git?rev=98770847717fe5144aeafdd9027d80f375e9d222#98770847717fe5144aeafdd9027d80f375e9d222"
+source = "git+https://github.com/Lmx154/MARV-sim.git?rev=fd5e4963e8de91d3b4f1efe9b38ab41d35ce789c#fd5e4963e8de91d3b4f1efe9b38ab41d35ce789c"
 dependencies = [
  "sha2",
  "toml",
