@@ -232,7 +232,7 @@ const SCALED_IMU2_ID: u32 = 116;
 const STANDARD_GRAVITY: f32 = 9.80665;
 const SCALED_PRESSURE_ID: u32 = 29;
 const VALUES_INTERVAL_US: i32 = 40_000;
-/// GPS_RAW_INT at the receiver's fix rate, 1 Hz.
+/// GPS_RAW_INT, default 1 Hz.
 const GPS_RAW_INT_ID: u32 = 24;
 const GPS_INTERVAL_US: i32 = 1_000_000;
 /// RC_CHANNELS at 5 Hz while stick reports are fresh (USB only).

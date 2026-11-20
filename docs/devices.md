@@ -201,6 +201,11 @@ Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; dr
   got a 64-bit path); `Lc76g<BufferedUart>` 440 bytes plus the buffers (RX 4096, TX 256). Bursts are about 1.4 kB, so
   use a buffered UART. After a probe reset the receive line can show a burst of framing errors (0 to 228 seen).
 - `$PAIR513*3D` saves the module's settings to its flash. Send it only when a permanent change is intended.
+- The firmware (`src/gnss.rs`) sends at every start, restart and apply only `fw_settings::gnss::commands` for `GPS_RATE_MS`
+  (100, 200, 500 or 1000 ms): version query, `$PAIR050,1000`, `$PAIR062` for the ten types (GGA, RMC, GST 1; GSA
+  ceil(1000 / ms); the rest 0), `$PQTMCFGMSGRATE,W,PQTMEPE,0,2`, then `$PAIR050,<ms>` if not 1000. Never `init` (navigation
+  mode), PPS, `$PAIR513` or `$PQTMSAVEPAR`: volatile; after a power cycle the module runs at its stored settings until the
+  next start, restart or apply. The epoch's sentence order with GST on is not recorded yet (bench B-g2).
 
 ## WS2812C-2020 status LED (D20)
 

@@ -1,8 +1,14 @@
 //! The GNSS receiver: Quectel LC76G on UART1 (GPIO24 = the board's TX, GPIO25 = RX, 115200 8N1), a
 //! core-0 device, a buffered UART read in thread mode without DMA. The `lc76g` driver is used as it
-//! is; the firmware only reads: nothing is ever sent to the receiver (no `init`, no setting, no save),
-//! so its stored configuration cannot change. The receiver's default stream, one epoch per second
-//! (GGA, RMC, GSA, GSV, GLL, VTG), is what the row sees. PPS (GPIO5) is not read.
+//! is. At every start, restart and apply (a `GPS_RATE_MS` write) the firmware sends the receiver its
+//! fix interval and message set, exactly the list of `fw_settings::gnss::commands` (version query,
+//! interval 1000 ms, the ten sentence rates, EPE off, then the interval of `GPS_RATE_MS` if not 1000 ms):
+//! never `init` (it writes the navigation mode), PPS, a restart or a save, so the settings are volatile
+//! and the receiver's stored configuration does not change. The stream is then GGA, RMC and GST every
+//! fix and GSA at most once per second. A configuration that fails (a refusal, no acknowledgement, the
+//! whole list not done within T) is a WARNING `GNSS: rate not applied (<reason>)`; `start` and
+//! `restart` still return Ok (the receiver keeps sending at the rate it has), `apply` returns a bus
+//! error. P stays 1 s and T 2.5 s whatever the rate. PPS (GPIO5) is not read.
 //!
 //! "Ok" means valid sentences keep arriving: one sample is one fix of the driver (the GGA and RMC
 //! of one epoch), WHETHER OR NOT it holds a position (indoors it does not). 2.5 s without a fix
@@ -16,6 +22,11 @@
 //! its bytes in the poll that completes it). So the data-ready wait IS the read of the next fix: it
 //! may be dropped by the timeout or the wake signal at any await and nothing is lost. Nothing needs
 //! `recover` after a drop.
+//!
+//! A fix takes the deviations of its epoch's GST (the same UTC time, `fw_core::sample::same_epoch_sigmas`):
+//! a GST that came before the GGA + RMC pair at once; otherwise the fix waits for the one sentence
+//! after the pair and goes out without deviations if that is not its GST. A fix waiting there when
+//! the read is dropped is cleared by `recover`, `restart` and `apply`.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -25,14 +36,15 @@ use embassy_rp::Peri;
 use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::{PIN_24, PIN_25, UART1};
 use embassy_rp::uart::{self, BufferedInterruptHandler, BufferedUart};
-use embassy_sync::blocking_mutex::Mutex;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_time::{Duration, Instant, with_deadline, with_timeout};
 use embedded_io_async::Read;
 use fw_core::health::{ErrorKind, Limits};
-use lc76g::sentence::{FixType, Quality};
-use lc76g::{Error, Fix, Lc76g, Message};
-use mavlink_device::dialect::{GPS_RAW_INT_DATA, GpsFixType};
+use fw_core::sample::{UtcTime, horizontal_std_mm, same_epoch_sigmas};
+use lc76g::aux_sentences::Gst;
+use lc76g::sentence::{FixType, Quality, Time};
+use lc76g::{Command, Error, Fix, Lc76g, Message};
+use mavlink_device::dialect::{GPS_RAW_INT_DATA, GpsFixType, MavSeverity};
 use static_cell::StaticCell;
 
 use crate::device::{
@@ -53,14 +65,16 @@ pub const DEADLINE_US: u32 = 2_500_000;
 /// health machine's start retries (100, 300, 1000 ms) are too short for that, so the wait is inside
 /// `start`: three retries after it make the longest start 4 x 5 s + 1.4 s before the row is Absent.
 const START_WAIT: Duration = Duration::from_secs(5);
-/// The UART's receive buffer (the driver's README: 4096 bytes) and its transmit buffer (unused: nothing
-/// is sent; the pin is driven so that the receiver's input does not float).
+/// The UART's receive buffer (the driver's README: 4096 bytes) and its transmit buffer, which holds the
+/// longest command sent (34 B).
 const RX_BUFFER: usize = 4096;
 const TX_BUFFER: usize = 64;
 /// `recover` empties the UART's buffer: reads until one finds it empty for this long ...
 const DRAIN_IDLE: Duration = Duration::from_millis(5);
 /// ... or at most this many reads.
 const DRAIN_READS: u32 = 128;
+/// The one deadline of the whole configuration list: the row's T.
+const CONFIGURE_DEADLINE: Duration = Duration::from_micros(DEADLINE_US as u64);
 
 /// What the GNSS row counts besides the health counters, summed over the driver instances (a
 /// `recover` builds a new driver, which starts its own counts at 0). Read by the supervisor's `[STAT]`.
@@ -93,7 +107,7 @@ pub struct Totals {
     pub silenced: bool,
 }
 
-static TOTALS: Mutex<CriticalSectionRawMutex, Cell<Totals>> = Mutex::new(Cell::new(Totals {
+static TOTALS: CriticalSectionMutex<Cell<Totals>> = CriticalSectionMutex::new(Cell::new(Totals {
     sentences: 0,
     checksum_errors: 0,
     overflows: 0,
@@ -109,7 +123,7 @@ static TOTALS: Mutex<CriticalSectionRawMutex, Cell<Totals>> = Mutex::new(Cell::n
     last_sentence_us: None,
     silenced: false,
 }));
-static SENTENCES_AT_STAT: Mutex<CriticalSectionRawMutex, Cell<u32>> = Mutex::new(Cell::new(0));
+static SENTENCES_AT_STAT: CriticalSectionMutex<Cell<u32>> = CriticalSectionMutex::new(Cell::new(0));
 static SILENCED: AtomicBool = AtomicBool::new(false);
 
 pub fn totals() -> Totals {
@@ -123,8 +137,12 @@ pub struct GnssAdapter {
     totals: Totals,
     /// `Stats::fixes` of the driver when the last fix was taken from it.
     fixes_taken: u32,
-    /// The fix `data_ready` ended with, for the `acquire` that follows.
-    ready: Option<Fix>,
+    /// The fix `data_ready` ended with and its GST deviations, for the `acquire` that follows.
+    ready: Option<(Fix, [Option<u32>; 3])>,
+    /// A fix whose GST did not come before it: it waits for the next sentence.
+    waiting: Option<Fix>,
+    /// The latest GST read.
+    gst: Option<Gst>,
     /// The error `data_ready` ended with, for the `acquire` that follows.
     failed: Option<ErrorKind>,
     calls: u32,
@@ -143,12 +161,12 @@ impl GnssAdapter {
             tx,
             rx,
             Irqs,
-            TX_BUF.init([0; TX_BUFFER]),
-            RX_BUF.init([0; RX_BUFFER]),
+            TX_BUF.init_with(|| [0; TX_BUFFER]),
+            RX_BUF.init_with(|| [0; RX_BUFFER]),
             uart::Config::default(),
         );
         defmt::info!(
-            "[INFO] GNSS: LC76G on UART1, TX GPIO24 RX GPIO25, 115200 8N1, receive only (nothing is sent), RX buffer {=usize} B, nominal period {=u32} us, deadline {=u32} us, PPS not read",
+            "[INFO] GNSS: LC76G on UART1, TX GPIO24 RX GPIO25, 115200 8N1, fix interval and messages sent at every start (never saved), RX buffer {=usize} B, nominal period {=u32} us, deadline {=u32} us, PPS not read",
             RX_BUFFER,
             PERIOD_US,
             DEADLINE_US
@@ -159,6 +177,8 @@ impl GnssAdapter {
             totals: Totals::default(),
             fixes_taken: 0,
             ready: None,
+            waiting: None,
+            gst: None,
             failed: None,
             calls: 0,
         }
@@ -231,6 +251,8 @@ impl GnssAdapter {
         self.gps = Some(Lc76g::new(uart));
         self.fixes_taken = 0;
         self.ready = None;
+        self.waiting = None;
+        self.gst = None;
         self.failed = None;
         self.totals.resyncs = self.totals.resyncs.saturating_add(1);
         self.totals.drained = self.totals.drained.saturating_add(drained);
@@ -240,6 +262,122 @@ impl GnssAdapter {
         );
         self.publish();
     }
+
+    /// Sends the configuration of the stored `GPS_RATE_MS`: `fw_settings::gnss::commands` in order,
+    /// stopping at the first failure, the whole list under one deadline T. A failure is a WARNING
+    /// (STATUSTEXT and defmt) and returned. A fix held or waiting from before is dropped: it is older
+    /// than the fixes the driver discarded during the commands.
+    async fn configure(&mut self) -> Result<(), &'static str> {
+        self.calls = self.calls.wrapping_add(1);
+        let begun = Instant::now();
+        let result = self.send_configuration(begun).await;
+        self.ready = None;
+        self.waiting = None;
+        if let Some(gps) = &self.gps {
+            self.fixes_taken = gps.stats().fixes;
+        }
+        self.publish();
+        if let Err(reason) = result {
+            defmt::warn!(
+                "[INFO] GNSS: rate not applied ({=str}) after {=u64} ms",
+                reason,
+                begun.elapsed().as_millis()
+            );
+            crate::text_fmt(
+                MavSeverity::MAV_SEVERITY_WARNING,
+                format_args!("GNSS: rate not applied ({})", reason),
+            );
+        }
+        result
+    }
+
+    async fn send_configuration(&mut self, begun: Instant) -> Result<(), &'static str> {
+        let ms = crate::store::gnss_rate_ms().map_err(|reason| {
+            defmt::warn!("[INFO] GNSS: stored GPS_RATE_MS refused: {=str}", reason);
+            "stored value refused"
+        })?;
+        let config = fw_settings::gnss::config(ms);
+        if !config.is_valid() {
+            return Err("configuration invalid");
+        }
+        let gps = self.gps.as_mut().ok_or("no driver")?;
+        let list = fw_settings::gnss::commands(&config);
+        let commands = list.as_slice();
+        let mut done = 0usize;
+        let mut version = None;
+        let outcome = with_deadline(begun + CONFIGURE_DEADLINE, async {
+            for command in commands {
+                match command {
+                    Command::QueryVersion => version = Some(gps.version().await?),
+                    _ => gps.command(command).await?,
+                }
+                done += 1;
+            }
+            Ok::<(), Error<uart::Error>>(())
+        })
+        .await;
+        match outcome {
+            Ok(Ok(())) => {
+                defmt::info!(
+                    "[INFO] GNSS: configured: {=u16} ms, GSA every {=u8}, GST every fix, other sentences off, EPE off, volatile (not saved), {=str}, {=u64} ms",
+                    ms,
+                    config.rates.gsa,
+                    version.as_ref().map_or("version unknown", |v| v.version()),
+                    begun.elapsed().as_millis()
+                );
+                Ok(())
+            }
+            Ok(Err(error)) => {
+                defmt::warn!(
+                    "[INFO] GNSS: configuration stopped at command {=usize} of {=usize}: {}",
+                    done + 1,
+                    commands.len(),
+                    error
+                );
+                Err(match error {
+                    Error::NoAck => "no acknowledgement",
+                    Error::Rejected { .. } => "refused by the receiver",
+                    Error::Uart(_) => "UART error",
+                    Error::Eof => "line closed",
+                    Error::InvalidConfig | Error::InvalidCommand => "invalid command",
+                })
+            }
+            Err(_) => {
+                defmt::warn!(
+                    "[INFO] GNSS: configuration not done in {=u64} ms, at command {=usize} of {=usize}",
+                    CONFIGURE_DEADLINE.as_millis(),
+                    done + 1,
+                    commands.len()
+                );
+                Err("no answer in 2.5 s")
+            }
+        }
+    }
+}
+
+fn utc(time: Option<Time>) -> Option<UtcTime> {
+    time.map(|t| UtcTime {
+        hour: t.hour,
+        minute: t.minute,
+        second: t.second,
+        millis: t.millis,
+    })
+}
+
+/// Whether `gst` is of the epoch of `fix` (both carry the same UTC time).
+fn same_epoch(fix: &Fix, gst: &Gst) -> bool {
+    fix.time.is_some() && gst.time == fix.time
+}
+
+/// The deviations of `gst` for `fix`, `[lat, lon, alt]` mm: only from the same epoch (G-I7).
+fn sigmas(fix: &Fix, gst: Option<&Gst>) -> [Option<u32>; 3] {
+    gst.map_or([None; 3], |g| {
+        same_epoch_sigmas(
+            utc(fix.time),
+            utc(g.time),
+            [g.lat_std_mm, g.lon_std_mm, g.alt_std_mm],
+        )
+    })
 }
 
 /// MAVLink's `GPS_FIX_TYPE` of a fix: 1 NO_FIX unless the RMC status, the GGA quality and the GSA
@@ -256,7 +394,7 @@ fn fix_type(fix: &Fix) -> u8 {
     }
 }
 
-fn reading(fix: &Fix) -> Reading {
+fn reading(fix: &Fix, [lat_std_mm, lon_std_mm, alt_std_mm]: [Option<u32>; 3]) -> Reading {
     let fix_type = fix_type(fix);
     // Without a position the coordinates are not reported, whatever the receiver put in the sentences.
     let position = fix_type >= 2;
@@ -272,6 +410,9 @@ fn reading(fix: &Fix) -> Reading {
         vdop_x100: fix.vdop_x100,
         time: fix.time,
         date: fix.date,
+        lat_std_mm,
+        lon_std_mm,
+        alt_std_mm,
     }
 }
 
@@ -280,6 +421,8 @@ fn reading(fix: &Fix) -> Reading {
 /// UINT16_MAX unless known; `eph`/`epv` are HDOP/VDOP x 100 whenever the receiver says them
 /// (UINT16_MAX when unknown); `satellites_visible` carries the satellites USED (the GGA's count; the
 /// GSV's count of visible satellites is not read), 255 when unknown. `time_usec` is the board time.
+/// `h_acc` is sqrt(lat^2 + lon^2) and `v_acc` the altitude of the GST's deviations, mm, 0 when not
+/// available.
 pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
     let Reading::Gnss {
         fix_type,
@@ -291,6 +434,9 @@ pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
         sats_used,
         hdop_x100,
         vdop_x100,
+        lat_std_mm,
+        lon_std_mm,
+        alt_std_mm,
         ..
     } = *reading
     else {
@@ -313,6 +459,8 @@ pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
             _ => GpsFixType::GPS_FIX_TYPE_NO_FIX,
         },
         satellites_visible: sats_used.unwrap_or(u8::MAX),
+        h_acc: horizontal_std_mm(lat_std_mm, lon_std_mm).unwrap_or(0),
+        v_acc: alt_std_mm.unwrap_or(0),
         ..GPS_RAW_INT_DATA::DEFAULT
     })
 }
@@ -366,22 +514,42 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
 impl DeviceAdapter for GnssAdapter {
     /// The read of the next fix: droppable (see the module comment). Sentences on the way are
     /// decoded, counted and consumed; a UART error is counted and the read goes on. A fix the driver
-    /// already holds (completed while `start` read the first sentence) is handed out at once.
+    /// already holds (completed while `start` read the first sentence) is handed out at once. A fix
+    /// whose GST came before it goes with it at once; otherwise it waits for the next sentence and
+    /// goes with it if that is its GST, without deviations if not (C-b2).
     async fn data_ready(&mut self) {
         loop {
             let Some(gps) = self.gps.as_mut() else {
                 return core::future::pending().await;
             };
-            if gps.stats().fixes != self.fixes_taken
+            if self.waiting.is_none()
+                && gps.stats().fixes != self.fixes_taken
                 && let Ok(fix) = gps.read_fix().await
             {
                 self.fixes_taken = gps.stats().fixes;
-                self.ready = Some(fix);
-                self.publish();
-                return;
+                if self.gst.is_some_and(|gst| same_epoch(&fix, &gst)) {
+                    self.ready = Some((fix, sigmas(&fix, self.gst.as_ref())));
+                    self.publish();
+                    return;
+                }
+                self.waiting = Some(fix);
+                continue;
             }
             match gps.read().await {
-                Ok(message) => self.sentence(&message),
+                Ok(message) => {
+                    self.sentence(&message);
+                    let gst = match message {
+                        Message::Gst(gst) => Some(gst),
+                        _ => None,
+                    };
+                    if gst.is_some() {
+                        self.gst = gst;
+                    }
+                    if let Some(fix) = self.waiting.take() {
+                        self.ready = Some((fix, sigmas(&fix, gst.as_ref())));
+                        return;
+                    }
+                }
                 Err(Error::Uart(e)) => {
                     self.uart_error(e);
                     self.publish();
@@ -389,6 +557,7 @@ impl DeviceAdapter for GnssAdapter {
                 }
                 Err(_) => {
                     // The UART returned zero bytes: the line is closed.
+                    self.waiting = None;
                     self.failed = Some(ErrorKind::Bus);
                     return;
                 }
@@ -396,8 +565,9 @@ impl DeviceAdapter for GnssAdapter {
         }
     }
 
-    /// Waits for the first valid sentence (any type) for up to [`START_WAIT`]. No identity query: the
-    /// firmware sends nothing, and a valid NMEA sentence is the receiver's answer.
+    /// Waits for the first valid sentence (any type) for up to [`START_WAIT`] (no identity query: a
+    /// valid NMEA sentence is the receiver's answer), then sends the configuration. A configuration
+    /// failure is reported and is not a start failure.
     async fn start(&mut self) -> Result<(), StartFailure> {
         self.calls = self.calls.wrapping_add(1);
         let begun = Instant::now();
@@ -417,6 +587,7 @@ impl DeviceAdapter for GnssAdapter {
                         self.totals.brk,
                         self.totals.parity
                     );
+                    let _ = self.configure().await;
                     return Ok(());
                 }
                 Ok(Err(Error::Uart(e))) => {
@@ -447,7 +618,7 @@ impl DeviceAdapter for GnssAdapter {
         }
         self.ready
             .take()
-            .map(|fix| reading(&fix))
+            .map(|(fix, sigmas)| reading(&fix, sigmas))
             .ok_or(ErrorKind::Bus)
     }
 
@@ -456,14 +627,14 @@ impl DeviceAdapter for GnssAdapter {
         Ok(Pending::Nothing)
     }
 
-    /// Nothing is configured, so there is nothing to check.
+    /// The configuration is not read back: a query every second would discard fixes.
     async fn verify(&mut self) -> Result<(), VerifyError> {
         Ok(())
     }
 
-    /// No parameters.
+    /// Sends the configuration of the stored `GPS_RATE_MS`; a failure is one bus error.
     async fn apply(&mut self) -> Result<(), ErrorKind> {
-        Ok(())
+        self.configure().await.map_err(|_| ErrorKind::Bus)
     }
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
@@ -472,9 +643,12 @@ impl DeviceAdapter for GnssAdapter {
         Ok(())
     }
 
-    /// The same as `recover`: a UART has no bus clear and nothing is configured.
+    /// `recover` (a UART has no bus clear), then the configuration. A configuration failure is
+    /// reported and is not a restart failure.
     async fn restart(&mut self) -> Result<(), ErrorKind> {
-        self.recover().await
+        self.recover().await?;
+        let _ = self.configure().await;
+        Ok(())
     }
 
     fn counters(&self) -> AdapterCounters {

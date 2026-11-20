@@ -32,6 +32,9 @@ pub fn init() {
     ) || !params.set_validator(
         MarvDevice::MARV_DEVICE_MAG as u8,
         fw_settings::mag::validate,
+    ) || !params.set_validator(
+        MarvDevice::MARV_DEVICE_GNSS as u8,
+        fw_settings::gnss::validate,
     ) {
         defmt::panic!("[FAIL] validator not installed");
     }
@@ -72,6 +75,17 @@ pub fn mag_config() -> Result<bmm350::Config, &'static str> {
         fw_settings::mag::settings_to_config(rate, avg)
     })
     .unwrap_or(Err("store not ready"))
+}
+
+/// The GNSS receiver's fix interval in ms from the stored `GPS_RATE_MS`, if the validator accepts it.
+pub fn gnss_rate_ms() -> Result<u16, &'static str> {
+    with(
+        |params| match params.get_named(fw_settings::gnss::RATE_MS) {
+            Some(ParamValue::I32(v)) => Some(v),
+            _ => None,
+        },
+    )
+    .map_or(Err("store not ready"), fw_settings::gnss::rate_ms)
 }
 
 /// The three stored values of IMU `imu` (0 = IMU1, 1 = IMU2): the accelerometer full scale in g,

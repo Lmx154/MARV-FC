@@ -9,7 +9,7 @@
 //! so that whole pieces are written in place), then a PARM for every parameter and a DEV for
 //! every row. Then, per Q5: IMU2 at 25 Hz from its seqlock (every 4th tick, only a new `seq`,
 //! `TimeUS` the sample's own time; IMU1 comes from the flight core, below), BARO, MAG, BAT and
-//! GPS at every new sample, RCIN at 10 Hz while stick reports are fresh, DEV for every row at
+//! GPS (each with a GPA) at every new sample, RCIN at 10 Hz while stick reports are fresh, DEV for every row at
 //! 1 Hz and at every state change, MSG for every text (the text ring's third cursor, so the boot
 //! texts come first), PARM after every change of a parameter's value, whatever made it (a set,
 //! a calibration result, a reset, a
@@ -94,6 +94,7 @@ async fn collect() -> ! {
         imu_due: false,
         imu_seq: None,
         seq: [None; 4],
+        gnss_t_us: None,
         rows: [None; ROWS],
         params: [None; fw_settings::COUNT],
     };
@@ -118,6 +119,8 @@ struct Collector {
     imu_seq: Option<u32>,
     /// The last `seq` logged of BARO, MAG, GNSS, BATT.
     seq: [Option<u32>; 4],
+    /// The `t_us` of the last GNSS sample logged in this log (GPA's `Delta`).
+    gnss_t_us: Option<u64>,
     /// Per row the state (and stuck flag) of its last DEV record.
     rows: [Option<(State, bool)>; ROWS],
     /// Per parameter the value of its last PARM record.
@@ -209,6 +212,7 @@ impl Collector {
         // FDS's first FMn covers this log only.
         self.flight.take_stats();
         self.rows = [None; ROWS];
+        self.gnss_t_us = None;
         self.imu_due = true;
         self.params = [None; fw_settings::COUNT];
         DSF_FIGURES.lock(|c| c.set(None));
@@ -303,6 +307,28 @@ impl Collector {
             p.push_with(dflog::GPS.length.into(), |b| {
                 dflog::encode_gps(b, sample.t_us, &g)
             });
+            if let Reading::Gnss {
+                vdop_x100,
+                lat_std_mm,
+                lon_std_mm,
+                alt_std_mm,
+                ..
+            } = sample.reading
+            {
+                let delta_ms =
+                    dflog::gpa_delta_ms(self.gnss_t_us.replace(sample.t_us), sample.t_us);
+                p.push_with(dflog::GPA.length.into(), |b| {
+                    dflog::encode_gpa(
+                        b,
+                        sample.t_us,
+                        vdop_x100.unwrap_or(u16::MAX),
+                        lat_std_mm,
+                        lon_std_mm,
+                        alt_std_mm,
+                        delta_ms,
+                    )
+                });
+            }
         }
     }
 

@@ -89,6 +89,11 @@ pub enum Reading {
         /// UTC time of the epoch and the date, when the receiver has them.
         time: Option<lc76g::sentence::Time>,
         date: Option<lc76g::sentence::Date>,
+        /// Standard deviations of the latitude, longitude and altitude error, mm, 1 sigma, from the
+        /// GST of the same epoch; `None` when not available for this epoch.
+        lat_std_mm: Option<u32>,
+        lon_std_mm: Option<u32>,
+        alt_std_mm: Option<u32>,
     },
 }
 
@@ -212,7 +217,8 @@ impl DeviceStatus {
 pub struct Device {
     pub id: MarvDevice,
     pub name: &'static str,
-    /// Nominal sample period P in microseconds; it follows the configured output data rate.
+    /// Nominal sample period P in microseconds; it follows the configured output data rate, except
+    /// GNSS: fixed 1 s.
     period_us: AtomicU32,
     pub latest: Watch<CriticalSectionRawMutex, Sample, READERS>,
     status: Mutex<CriticalSectionRawMutex, Cell<DeviceStatus>>,
