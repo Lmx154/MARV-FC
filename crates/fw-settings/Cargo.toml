@@ -20,3 +20,5 @@ mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "
 # The IMU drivers' `Config` types (same commits as the binary's, without `defmt`).
 icm45686 = { git = "https://github.com/Lmx154/icm45686-rs.git", rev = "78b13c709acc2464194c08731434750b85799927" }
 lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "447e881bbfa43ad216563f6ed751c1936b771952" }
+# The GNSS driver's `Config` and `Command` types (same commit as the binary's, without `defmt`).
+lc76g = { git = "https://github.com/Lmx154/lc76g-rs.git", rev = "2ee54f927bd0ffb7c4f7a4978c84cc2af962f405" }

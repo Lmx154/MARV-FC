@@ -829,6 +829,7 @@ dependencies = [
  "bmp581",
  "fw-core",
  "icm45686",
+ "lc76g",
  "lsm6dsk320x",
  "mavlink-device",
 ]

@@ -24,6 +24,7 @@ extern crate std;
 pub mod baro;
 pub mod batt;
 pub mod esc;
+pub mod gnss;
 pub mod imu;
 pub mod led;
 pub mod mag;
@@ -44,10 +45,11 @@ pub const COUNT: usize = baro::COUNT
     + imu::BOARD_COUNT
     + mag::ORIENT_COUNT
     + esc::COUNT
-    + led::COUNT;
+    + led::COUNT
+    + gnss::COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
-/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES` and `LED_BRIGHT` (appended, so the
+/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` (appended, so the
 /// first 70 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
@@ -139,6 +141,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < gnss::COUNT {
+        out[n] = gnss::TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -154,7 +162,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 80);
+        assert_eq!(COUNT, 81);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -166,7 +174,8 @@ mod tests {
             .chain(imu::BOARD.iter())
             .chain(mag::ORIENT_TABLE.iter())
             .chain(esc::TABLE.iter())
-            .chain(led::TABLE.iter());
+            .chain(led::TABLE.iter())
+            .chain(gnss::TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
@@ -263,6 +272,7 @@ mod tests {
             "MAG_ORIENT",
             "MOT_POLES",
             "LED_BRIGHT",
+            "GPS_RATE_MS",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
@@ -274,7 +284,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 80);
+        assert_eq!(COUNT, 81);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [
