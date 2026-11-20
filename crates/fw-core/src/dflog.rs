@@ -149,6 +149,8 @@ pub const ID_ESC: u8 = 143;
 pub const ID_RCS: u8 = 144;
 /// Type number of FDS (the flight ring's statistics).
 pub const ID_FDS: u8 = 145;
+/// Type number of GPA (the accuracy of a GNSS sample).
+pub const ID_GPA: u8 = 146;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -228,10 +230,14 @@ pub const ESC: RecordDef = def(
 pub const RCS: RecordDef = def(ID_RCS, "RCS", "QffffB", "TimeUS,R,P,T,Y,Arm");
 /// FDS: the flight ring's statistics: records dropped since the log opened, smallest free space.
 pub const FDS: RecordDef = def(ID_FDS, "FDS", "QII", "TimeUS,Dp,FMn");
+/// GPA: the accuracy of one GNSS sample (`TimeUS` is the sample's, as in its GPS record): vertical DOP,
+/// horizontal and vertical accuracy in metres, milliseconds since the previous sample.
+pub const GPA: RecordDef = def(ID_GPA, "GPA", "QBcffH", "TimeUS,I,VDop,HAcc,VAcc,Delta");
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 18] = [
+pub const TYPES: [RecordDef; 19] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
+    GPA,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -701,6 +707,40 @@ pub fn encode_fds(out: &mut [u8], time_us: u64, dropped: u32, free_min: u32) -> 
     w.pos
 }
 
+/// GPA: the accuracy of one GNSS sample, instance 0. `vdop_x100` is the vertical DOP x 100 (`u16::MAX` when
+/// unknown, as the GPS record's HDop; values over 327.67 saturate). `HAcc` is sqrt(lat^2 + lon^2) in metres
+/// and needs both deviations; `VAcc` is the altitude deviation in metres; each is NaN when not available.
+/// `delta_ms` is the time since the previous GNSS sample (the caller keeps it; 0 for the first).
+/// 24 bytes.
+pub fn encode_gpa(
+    out: &mut [u8],
+    time_us: u64,
+    vdop_x100: u16,
+    lat_std_mm: Option<u32>,
+    lon_std_mm: Option<u32>,
+    alt_std_mm: Option<u32>,
+    delta_ms: u32,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &GPA) else {
+        return 0;
+    };
+    let hacc_m = match (lat_std_mm, lon_std_mm) {
+        (Some(lat), Some(lon)) => {
+            let (lat, lon) = (lat as f32, lon as f32);
+            crate::calib::sqrt(lat * lat + lon * lon) / 1000.0
+        }
+        _ => f32::NAN,
+    };
+    let vacc_m = alt_std_mm.map_or(f32::NAN, |a| a as f32 / 1000.0);
+    w.u64(time_us);
+    w.u8(0);
+    w.i16(i16::try_from(vdop_x100).unwrap_or(i16::MAX));
+    w.f32(hacc_m);
+    w.f32(vacc_m);
+    w.u16(u16::try_from(delta_ms).unwrap_or(u16::MAX));
+    w.pos
+}
+
 /// Days from 1970-01-01 to `y-m-d` (proleptic Gregorian, `m` 1 to 12, `d` 1 to 31), after
 /// Howard Hinnant's `days_from_civil`.
 const fn days_from_civil(y: i64, m: i64, d: i64) -> i64 {
@@ -813,6 +853,8 @@ mod tests {
         out.push((ID_RCS, b[..n].to_vec()));
         let n = encode_fds(&mut b, 1, 1, 2);
         out.push((ID_FDS, b[..n].to_vec()));
+        let n = encode_gpa(&mut b, 1, 150, Some(1), Some(2), Some(3), 4);
+        out.push((ID_GPA, b[..n].to_vec()));
         out
     }
 
@@ -883,12 +925,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_18_fmt_records() {
-        assert_eq!(TYPES.len(), 18);
-        assert_eq!(HEADER_SEQUENCE_LEN, 1602);
+    fn header_sequence_is_19_fmt_records() {
+        assert_eq!(TYPES.len(), 19);
+        assert_eq!(HEADER_SEQUENCE_LEN, 1691);
         let mut buf = [0u8; 1700];
-        assert_eq!(write_header(&mut buf), 1602);
-        assert_eq!(write_header(&mut [0u8; 1601]), 0);
+        assert_eq!(write_header(&mut buf), 1691);
+        assert_eq!(write_header(&mut [0u8; 1690]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -925,7 +967,8 @@ mod tests {
                 ("MOT", 29),
                 ("ESC", 40),
                 ("RCS", 28),
-                ("FDS", 19)
+                ("FDS", 19),
+                ("GPA", 24)
             ]
         );
     }
@@ -1130,6 +1173,52 @@ mod tests {
                 0, 5, 0, 0, 0, 6, 0, 0, 0
             ]
         );
+    }
+
+    #[test]
+    fn golden_gpa() {
+        // A3 95 92 | time 7 | I 0 | VDop 150 = 96 00 | HAcc 5.0 = 00 00 A0 40 | VAcc 2.5 = 00 00 20 40 |
+        // Delta 200 = C8 00
+        let mut b = [0u8; 24];
+        assert_eq!(
+            encode_gpa(&mut b, 7, 150, Some(3000), Some(4000), Some(2500), 200),
+            24
+        );
+        assert_eq!(
+            b,
+            [
+                0xA3, 0x95, 0x92, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0x96, 0x00, 0x00, 0x00, 0xA0, 0x40,
+                0x00, 0x00, 0x20, 0x40, 0xC8, 0x00
+            ]
+        );
+        assert_eq!(GPA.format, "QBcffH");
+        assert_eq!(GPA.columns, "TimeUS,I,VDop,HAcc,VAcc,Delta");
+        assert_eq!(ID_GPA, 146);
+    }
+
+    #[test]
+    fn gpa_unknown_values_and_saturation() {
+        let f = |b: &[u8], at: usize| f32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
+        let mut b = [0u8; 24];
+        // Unknown VDop is u16::MAX, which saturates to i16::MAX as the GPS record's HDop does.
+        assert_eq!(encode_gpa(&mut b, 1, u16::MAX, None, None, None, 0), 24);
+        assert_eq!(b[12..14], 32_767i16.to_le_bytes());
+        assert!(f(&b, 14).is_nan() && f(&b, 18).is_nan());
+        // HAcc needs both lat and lon; VAcc is independent.
+        encode_gpa(&mut b, 1, 0, Some(3000), None, Some(1500), 0);
+        assert!(f(&b, 14).is_nan());
+        assert_eq!(f(&b, 18), 1.5);
+        encode_gpa(&mut b, 1, 0, None, Some(3000), None, 0);
+        assert!(f(&b, 14).is_nan() && f(&b, 18).is_nan());
+        // 3-4-5 in metres.
+        encode_gpa(&mut b, 1, 0, Some(3000), Some(4000), None, 0);
+        assert!((f(&b, 14) - 5.0).abs() < 1e-6);
+        // Delta saturates at 65 535.
+        encode_gpa(&mut b, 1, 0, None, None, None, 65_535);
+        assert_eq!(b[22..24], [0xFF, 0xFF]);
+        encode_gpa(&mut b, 1, 0, None, None, None, 70_000);
+        assert_eq!(b[22..24], [0xFF, 0xFF]);
+        assert_eq!(encode_gpa(&mut [0x55u8; 23], 1, 0, None, None, None, 0), 0);
     }
 
     #[test]

@@ -194,15 +194,30 @@ mod tests {
         }
     }
 
+    /// The whole list for 200 ms: version, 1000 ms, the ten rates, EPE off, the target interval.
     #[test]
-    fn print_commands_for_200_ms() {
+    fn commands_for_200_ms_are_exactly_these_fourteen() {
+        let rate = |sentence, rate| Command::SetSentenceRate { sentence, rate };
         let list = commands(&config(200));
-        let lines: Vec<std::string::String> = list
-            .as_slice()
-            .iter()
-            .map(|c| std::format!("{c:?}"))
-            .collect();
-        std::println!("{}", lines.join("\n"));
+        assert_eq!(
+            list.as_slice(),
+            [
+                Command::QueryVersion,
+                Command::SetFixInterval { ms: 1000 },
+                rate(SentenceType::Gga, 1),
+                rate(SentenceType::Gll, 0),
+                rate(SentenceType::Gsa, 5),
+                rate(SentenceType::Gsv, 0),
+                rate(SentenceType::Rmc, 1),
+                rate(SentenceType::Vtg, 0),
+                rate(SentenceType::Zda, 0),
+                rate(SentenceType::Grs, 0),
+                rate(SentenceType::Gst, 1),
+                rate(SentenceType::Gns, 0),
+                Command::SetEpe(false),
+                Command::SetFixInterval { ms: 200 },
+            ]
+        );
     }
 
     #[test]

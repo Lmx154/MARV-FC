@@ -45,6 +45,26 @@ pub struct GnssReading {
     pub time: Option<UtcTime>,
     /// UTC date of the epoch when the receiver has it.
     pub date: Option<UtcDate>,
+    /// Standard deviation of the latitude error, mm, 1 sigma; `None` when not available for this epoch.
+    pub lat_std_mm: Option<u32>,
+    /// Standard deviation of the longitude error, mm, 1 sigma; `None` when not available for this epoch.
+    pub lon_std_mm: Option<u32>,
+    /// Standard deviation of the altitude error, mm, 1 sigma; `None` when not available for this epoch.
+    pub alt_std_mm: Option<u32>,
+}
+
+/// The deviations to attach to a fix: the accuracy sentence's `[lat, lon, alt]` (mm) when its UTC time
+/// equals the fix's, otherwise all `None`. A deviation is never carried to another epoch (G-I7): a
+/// missing time on either side, or a different time, gives no deviation at all.
+pub fn same_epoch_sigmas(
+    fix_time: Option<UtcTime>,
+    gst_time: Option<UtcTime>,
+    gst_std_mm: [Option<u32>; 3],
+) -> [Option<u32>; 3] {
+    match (fix_time, gst_time) {
+        (Some(fix), Some(gst)) if fix == gst => gst_std_mm,
+        _ => [None; 3],
+    }
 }
 
 /// Time of day, UTC: the fields of `lc76g::sentence::Time`, copied one for one.
@@ -102,4 +122,39 @@ pub struct GnssSample {
     pub t_us: u64,
     /// +1 per publish.
     pub seq: u32,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn t(second: u8, millis: u16) -> Option<UtcTime> {
+        Some(UtcTime {
+            hour: 12,
+            minute: 34,
+            second,
+            millis,
+        })
+    }
+
+    const SIGMAS: [Option<u32>; 3] = [Some(1200), Some(900), Some(2500)];
+
+    #[test]
+    fn a_sigma_is_attached_only_in_its_own_epoch() {
+        assert_eq!(same_epoch_sigmas(t(5, 200), t(5, 200), SIGMAS), SIGMAS);
+        // Another epoch, even the very next one or a different millisecond: nothing.
+        assert_eq!(same_epoch_sigmas(t(5, 400), t(5, 200), SIGMAS), [None; 3]);
+        assert_eq!(same_epoch_sigmas(t(6, 200), t(5, 200), SIGMAS), [None; 3]);
+        // A missing time on either side: nothing.
+        assert_eq!(same_epoch_sigmas(None, t(5, 200), SIGMAS), [None; 3]);
+        assert_eq!(same_epoch_sigmas(t(5, 200), None, SIGMAS), [None; 3]);
+        assert_eq!(same_epoch_sigmas(None, None, SIGMAS), [None; 3]);
+    }
+
+    #[test]
+    fn partial_sigmas_pass_through_when_the_times_match() {
+        let part = [Some(1200), Some(900), None];
+        assert_eq!(same_epoch_sigmas(t(5, 200), t(5, 200), part), part);
+        assert_eq!(same_epoch_sigmas(t(5, 200), t(5, 200), [None; 3]), [None; 3]);
+    }
 }
