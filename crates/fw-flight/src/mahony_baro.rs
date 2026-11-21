@@ -48,6 +48,11 @@ pub struct VertKf {
     fused: u32,
     rejected: u32,
     resets: u32,
+    /// Covariance propagations so far (the NKF records' rate, packet E2).
+    predicts: u32,
+    /// The latest barometer step's (innovation, its variance), or for a height reset (applied change, new variance),
+    /// or at the initialisation (0, the measurement variance): the NKI record's Inn and Var (packet E2).
+    last_baro: (f32, f32),
     predict_us: u64,
     baro_delay_us: u64,
     baro_sigma_m: f32,
@@ -73,6 +78,8 @@ impl VertKf {
             fused: 0,
             rejected: 0,
             resets: 0,
+            predicts: 0,
+            last_baro: (0.0, 0.0),
             predict_us: tuning.nav_predict_us,
             baro_delay_us: tuning.nav_baro_delay_us,
             baro_sigma_m: tuning.nav_baro_sigma_m,
@@ -108,6 +115,17 @@ impl VertKf {
     /// Height resets so far (NKI Src 6 when logged, packet E2).
     pub fn resets(&self) -> u32 {
         self.resets
+    }
+
+    /// Covariance propagations so far.
+    pub fn predicts(&self) -> u32 {
+        self.predicts
+    }
+
+    /// The latest barometer step's (Inn, Var) for NKI: (innovation, its variance) of a fusion or gated sample,
+    /// (applied change, new variance) of a height reset, (0, the measurement variance) of the initialisation.
+    pub fn last_baro(&self) -> (f32, f32) {
+        self.last_baro
     }
 
     /// The state and P mean something.
@@ -167,6 +185,7 @@ impl VertKf {
         self.since_predict_us = 0;
         self.last_aid_us = t_us;
         self.fused = self.fused.wrapping_add(1);
+        self.last_baro = (0.0, sb * sb);
     }
 
     /// The state every IMU1 sample; F P F^T + Q every nav_predict_us of capped time.
@@ -187,6 +206,7 @@ impl VertKf {
         }
         let t = self.since_predict_us as f32 * 1e-6;
         self.since_predict_us = 0;
+        self.predicts = self.predicts.wrapping_add(1);
         let h = 0.5 * t * t;
         let [[a, b, c], [_, dd, e], [_, _, ff]] = self.p;
         // F P with F = [[1, T, -T^2/2], [0, 1, -T], [0, 0, 1]].
@@ -217,6 +237,7 @@ impl VertKf {
         let [d, vd, _] = self.x;
         let innov = h_b - (-d + vd * tau);
         let g = self.gate_sigma;
+        self.last_baro = (innov, s);
         if innov * innov <= g * g * s {
             for (xi, phi) in self.x.iter_mut().zip(ph) {
                 *xi += phi / s * innov;
@@ -236,6 +257,7 @@ impl VertKf {
         if t_us.saturating_sub(self.last_aid_us) >= self.aid_timeout_us {
             // EKF3 ResetHeight: D to the barometer, the D row and column of P zeroed, P_DD the measurement variance;
             // vD to 0 on the ground (disarmed), kept in the air.
+            self.last_baro = (-h_b - self.x[0], r);
             self.x[0] = -h_b;
             if !armed {
                 self.x[1] = 0.0;

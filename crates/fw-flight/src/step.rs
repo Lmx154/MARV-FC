@@ -154,6 +154,27 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         }
     }
 
+    /// The estimator, read only (the log of its own counters, packet E2).
+    pub fn estimator(&self) -> &E {
+        &self.estimator
+    }
+
+    /// [`Flight::step`], then the shadow estimator (decision-nav-eskf-20261120, 8a): the gate's armed state after the
+    /// step and the same sensors. The step's output is computed before the shadow runs and nothing of the shadow
+    /// reaches the flight code; its state is returned for the log only. `None`: no shadow, the plain step.
+    pub fn step_with_shadow<S: Estimator>(
+        &mut self,
+        inputs: &FlightInputs,
+        shadow: Option<&mut S>,
+    ) -> (StepOut, Option<NavState>) {
+        let out = self.step(inputs);
+        let nav = shadow.map(|s| {
+            s.set_armed(out.armed);
+            s.update(&inputs.sensors)
+        });
+        (out, nav)
+    }
+
     /// One call per IMU1 sample.
     pub fn step(&mut self, inputs: &FlightInputs) -> StepOut {
         let t_us = inputs.sensors.imu1.t_us;
@@ -241,22 +262,7 @@ pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
         return 0;
     }
     let t = out.t_us;
-    let Valid {
-        tilt,
-        heading,
-        rates,
-        velocity_ne,
-        velocity_d,
-        position_ne,
-        position_d,
-    } = out.nav.valid;
-    let valid = u8::from(tilt)
-        | u8::from(heading) << 1
-        | u8::from(rates) << 2
-        | u8::from(velocity_ne) << 3
-        | u8::from(velocity_d) << 4
-        | u8::from(position_ne) << 5
-        | u8::from(position_d) << 6;
+    let valid = valid_bits(&out.nav.valid);
     let (kind, attitude, sp_rates, thrust) = match out.setpoint {
         Setpoint::Rates {
             rates_rads,
@@ -327,6 +333,71 @@ pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
         command,
     );
     n
+}
+
+/// NAV's and NKF1's valid bits: tilt 1, heading 2, rates 4, velocity NE 8, velocity D 16, position NE 32,
+/// position D 64.
+fn valid_bits(v: &Valid) -> u8 {
+    let Valid {
+        tilt,
+        heading,
+        rates,
+        velocity_ne,
+        velocity_d,
+        position_ne,
+        position_d,
+    } = *v;
+    u8::from(tilt)
+        | u8::from(heading) << 1
+        | u8::from(rates) << 2
+        | u8::from(velocity_ne) << 3
+        | u8::from(velocity_d) << 4
+        | u8::from(position_ne) << 5
+        | u8::from(position_d) << 6
+}
+
+/// NKF1 then NKF2 of one estimator's state (decision-nav-eskf-20261120, 8c, B5) at the start of `buf`: instance
+/// `inst`, `TimeUS` = `nav.t_us`, the biases as given, the sigmas from `nav.sigma` (infinite when `None`). Returns the
+/// bytes written (113), or 0 (nothing written) if `buf` is too small.
+pub fn encode_nkf(
+    buf: &mut [u8],
+    inst: u8,
+    nav: &NavState,
+    gyro_bias_rads: [f32; 3],
+    accel_bias_ms2: [f32; 3],
+) -> usize {
+    let need = usize::from(dflog::NKF1.length) + usize::from(dflog::NKF2.length);
+    if buf.len() < need {
+        return 0;
+    }
+    let inf = f32::INFINITY;
+    let sigmas = nav.sigma.map_or([inf; 6], |s| {
+        [
+            s.tilt_rad,
+            s.heading_rad,
+            s.velocity_ne_ms,
+            s.velocity_d_ms,
+            s.position_ne_m,
+            s.position_d_m,
+        ]
+    });
+    let n = dflog::encode_nkf1(
+        buf,
+        nav.t_us,
+        inst,
+        nav.attitude,
+        nav.velocity_ms,
+        nav.position_m,
+        valid_bits(&nav.valid),
+    );
+    n + dflog::encode_nkf2(
+        buf.get_mut(n..).unwrap_or_default(),
+        nav.t_us,
+        inst,
+        gyro_bias_rads,
+        accel_bias_ms2,
+        sigmas,
+    )
 }
 
 #[cfg(test)]
@@ -598,6 +669,266 @@ mod tests {
             with.iter().filter_map(|o| o.2.motors.throttles()).collect();
         assert!(throttles.len() > 2000);
         assert!(throttles.windows(2).any(|w| w[0] != w[1]));
+    }
+
+    extern crate std;
+
+    /// The sequence of `slow_sensor_samples_do_not_change_a_mahony_step` at step `n`, with the barometer, compass and
+    /// GNSS samples (`mag_expected` gives the compass samples an expected field).
+    fn slow_inputs(n: u32, mag_expected: Option<fw_core::sample::MagExpected>) -> FlightInputs {
+        use fw_core::sample::{
+            BaroReading, BaroSample, GnssReading, GnssSample, MagReading, MagSample, UtcTime,
+        };
+        let t_us = 10_000 + u64::from(n) * 1_245;
+        let x = n as f32 * 0.01;
+        let mut i = inputs(t_us);
+        i.sensors.imu1.seq = n;
+        i.sensors.imu1.reading.gyro_rads = [
+            0.2 * libm::sinf(x),
+            0.1 * libm::cosf(1.3 * x),
+            0.05 * libm::sinf(0.7 * x),
+        ];
+        i.sensors.imu1.reading.accel_ms2 = [
+            0.3 * libm::sinf(0.9 * x),
+            -0.2 * libm::cosf(x),
+            -9.81 + 0.1 * libm::sinf(x),
+        ];
+        let stick = |k: f32| {
+            if n < 400 {
+                0.0
+            } else {
+                0.3 * libm::sinf(k * x)
+            }
+        };
+        i.rc = (n % 10 == 0).then_some(RcSample {
+            sticks: Sticks {
+                roll: stick(1.1),
+                pitch: stick(0.8),
+                throttle: if n < 400 { 0.0 } else { 0.5 + stick(0.5) },
+                yaw: stick(1.7),
+            },
+            arm: n >= 200,
+            t_us,
+        });
+        i.sensors.baro = (n % 16 == 3).then_some(BaroSample {
+            reading: BaroReading {
+                pressure_pa: 101_325.0 - x,
+                temperature_c: 25.0,
+            },
+            t_us: t_us - 500,
+            seq: n / 16,
+        });
+        i.sensors.mag = (n % 8 == 5).then_some(MagSample {
+            reading: MagReading {
+                field_ut: [20.0 * libm::cosf(x), 20.0 * libm::sinf(x), 40.0],
+                temperature_c: 30.0,
+            },
+            t_us: t_us - 300,
+            seq: n / 8,
+            expected: mag_expected,
+        });
+        i.sensors.gnss = (n % 160 == 7).then_some(GnssSample {
+            reading: GnssReading {
+                fix_type: 3,
+                lat_e7: Some(254_000_000 + n as i32),
+                lon_e7: Some(-801_000_000 - n as i32),
+                alt_mm: Some(12_000),
+                speed_mm_s: Some(n),
+                course_cdeg: Some(9_000),
+                sats_used: Some(12),
+                hdop_x100: Some(80),
+                vdop_x100: Some(120),
+                time: Some(UtcTime {
+                    hour: 12,
+                    minute: 0,
+                    second: (n / 160) as u8,
+                    millis: 0,
+                }),
+                date: None,
+                lat_std_mm: Some(1_200),
+                lon_std_mm: Some(900),
+                alt_std_mm: Some(2_500),
+                vel_ned_mm_s: None,
+            },
+            t_us: t_us - 430_000.min(t_us),
+            seq: n / 160,
+        });
+        i
+    }
+
+    /// The parts of a step output the flight uses and logs outside the vertical estimate: motors, armed, mode,
+    /// setpoint, demand, allocation, attitude, rates, the tilt, heading, rates and NE flags, and the step's records
+    /// with NAV's velocity-D and position-D bits cleared.
+    fn flight_part(out: &StepOut) -> (std::string::String, std::vec::Vec<u8>) {
+        let v = out.nav.valid;
+        let text = std::format!(
+            "{:?} {:?} {:?} {:?} {:?} {:?} {:?} {:?} {} {} {} {} {}",
+            out.t_us,
+            out.motors,
+            out.armed,
+            out.mode,
+            out.setpoint,
+            out.demand,
+            out.allocation,
+            (out.nav.attitude.map(f32::to_bits), out.nav.rates_rads.map(f32::to_bits)),
+            out.nav.t_us,
+            v.tilt,
+            v.heading,
+            v.rates,
+            v.velocity_ne || v.position_ne,
+        );
+        let mut records = [0u8; 256];
+        let len = encode_step(out, &mut records);
+        records[39] &= !(16 | 64);
+        (text, records[..len].to_vec())
+    }
+
+    /// Packet E2, item 1: the board's estimator `MahonyBaro` flies as `Mahony` did. The sequence of
+    /// `slow_sensor_samples_do_not_change_a_mahony_step` (with the barometer, compass and GNSS samples) gives the same
+    /// motors, setpoints, demands, allocations, attitude, rates and tilt flags, bit for bit, with either estimator; only
+    /// the vertical estimate (velocity D, position D, their flags and sigmas) differs, and it does.
+    #[test]
+    fn mahony_baro_steps_as_mahony_bit_for_bit() {
+        extern crate std;
+        use crate::mahony_baro::MahonyBaro;
+        static A: Handshake = Handshake::new();
+        static B: Handshake = Handshake::new();
+        let tuning = Tuning::DEFAULT;
+        let mut mahony = Flight::new(
+            Mahony::new(&tuning),
+            CascadedPid::new(&tuning),
+            CardAllocator::new(),
+            &tuning,
+            &A,
+        );
+        let mut baro = Flight::new(
+            MahonyBaro::new(&tuning),
+            CascadedPid::new(&tuning),
+            CardAllocator::new(),
+            &tuning,
+            &B,
+        );
+        A.set_permit(true);
+        B.set_permit(true);
+        let (mut spins, mut vertical) = (0u32, 0u32);
+        for n in 0..3000u32 {
+            let i = slow_inputs(n, None);
+            let (a, b) = (mahony.step(&i), baro.step(&i));
+            assert_eq!(flight_part(&a), flight_part(&b), "step {n}");
+            spins += u32::from(b.motors.throttles().is_some());
+            vertical += u32::from(b.nav.valid.position_d && b.nav.sigma.is_some());
+            assert!(a.nav.sigma.is_none());
+        }
+        assert!(A.armed() && B.armed());
+        assert!(spins > 2000, "{spins}");
+        assert!(vertical > 2000, "{vertical}");
+        assert!(baro.estimator().vert().fused() > 100);
+    }
+
+    /// Packet E2, item 6: the shadow never changes the step. The board's flight code over the same sequence with no
+    /// shadow, with the `Eskf` at the default tuning and with an `Eskf` of another tuning gives identical step outputs
+    /// and records (every field's exact `Debug` text), while the two shadows' states differ.
+    #[test]
+    fn the_shadow_never_changes_the_step() {
+        extern crate std;
+        use crate::eskf::Eskf;
+        use crate::mahony_baro::MahonyBaro;
+        use fw_core::sample::MagExpected;
+        static H: [Handshake; 3] = [Handshake::new(), Handshake::new(), Handshake::new()];
+        let mut other = Tuning::DEFAULT;
+        other.nav_gate_sigma *= 0.5;
+        other.nav_baro_sigma_m *= 3.0;
+        other.nav_predict_us *= 2;
+        let expected = Some(MagExpected {
+            strength_ut: libm::sqrtf(20.0 * 20.0 + 40.0 * 40.0),
+            inclination_rad: libm::atanf(40.0 / 20.0),
+            tol_strength_frac: 0.2,
+            tol_inclination_rad: 0.2,
+        });
+        let run = |handshake: &'static Handshake, shadow: Option<Tuning>| {
+            let tuning = Tuning::DEFAULT;
+            let mut flight = Flight::new(
+                MahonyBaro::new(&tuning),
+                CascadedPid::new(&tuning),
+                CardAllocator::new(),
+                &tuning,
+                handshake,
+            );
+            let mut eskf = shadow.map(|t| std::boxed::Box::new(Eskf::new(&t).unwrap()));
+            handshake.set_permit(true);
+            let mut outs = std::vec::Vec::new();
+            let mut navs = std::vec::Vec::new();
+            for n in 0..3000u32 {
+                let i = slow_inputs(n, expected);
+                let (out, nav) = flight.step_with_shadow(&i, eskf.as_deref_mut());
+                let mut records = [0u8; 256];
+                let len = encode_step(&out, &mut records);
+                outs.push((std::format!("{out:?}"), records[..len].to_vec()));
+                navs.push(nav.map(|v| std::format!("{v:?}")));
+            }
+            (outs, navs)
+        };
+        let (plain, none) = run(&H[0], None);
+        let (default, a) = run(&H[1], Some(Tuning::DEFAULT));
+        let (changed, b) = run(&H[2], Some(other));
+        assert!(none.iter().all(Option::is_none));
+        for n in 0..plain.len() {
+            assert_eq!(plain[n], default[n], "step {n}: the default shadow changed the step");
+            assert_eq!(plain[n], changed[n], "step {n}: the other shadow changed the step");
+        }
+        assert!(a.iter().all(Option::is_some));
+        assert!(a.iter().zip(&b).filter(|(x, y)| x != y).count() > 1000);
+        assert!(H.iter().all(Handshake::armed));
+    }
+
+    /// NKF1 and NKF2 of one state: the instance, the horizon time, the valid bits, the sigmas, infinite without them.
+    #[test]
+    fn encode_nkf_writes_the_two_records() {
+        use crate::gnc::NavSigma;
+        let mut nav = NavState {
+            t_us: 0x0102_0304_0506,
+            attitude: [0.5, -0.5, 0.25, 0.75],
+            rates_rads: [9.0; 3],
+            velocity_ms: [0.1, -0.2, 0.3],
+            position_m: [1.0, -2.0, 3.0],
+            valid: Valid {
+                tilt: true,
+                velocity_d: true,
+                position_d: true,
+                ..Valid::NONE
+            },
+            sigma: Some(NavSigma {
+                tilt_rad: 0.01,
+                heading_rad: 0.02,
+                velocity_ne_ms: 0.03,
+                velocity_d_ms: 0.04,
+                position_ne_m: 0.05,
+                position_d_m: 0.06,
+            }),
+        };
+        let f = |b: &[u8], at: usize| f32::from_le_bytes(b[at..at + 4].try_into().unwrap());
+        let mut buf = [0xEEu8; 120];
+        assert_eq!(encode_nkf(&mut buf, 1, &nav, [0.001, 0.002, 0.003], [0.1, 0.2, 0.3]), 113);
+        assert_eq!(encode_nkf(&mut [0u8; 112], 1, &nav, [0.0; 3], [0.0; 3]), 0);
+        let time = 0x0102_0304_0506u64.to_le_bytes();
+        assert_eq!(buf[0..3], [0xA3, 0x95, 147]);
+        assert_eq!(buf[3..11], time);
+        assert_eq!(buf[11], 1);
+        let q: [f32; 4] = core::array::from_fn(|k| f(&buf, 12 + 4 * k));
+        assert_eq!(q, nav.attitude);
+        let vp: [f32; 6] = core::array::from_fn(|k| f(&buf, 28 + 4 * k));
+        assert_eq!(vp, [0.1, -0.2, 0.3, 1.0, -2.0, 3.0]);
+        assert_eq!(buf[52], 1 | 16 | 64);
+        assert_eq!(buf[53..56], [0xA3, 0x95, 148]);
+        assert_eq!(buf[56..64], time);
+        assert_eq!(buf[64], 1);
+        let rest: [f32; 12] = core::array::from_fn(|k| f(&buf, 65 + 4 * k));
+        assert_eq!(rest, [0.001, 0.002, 0.003, 0.1, 0.2, 0.3, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06]);
+        assert_eq!(buf[113..], [0xEE; 7]);
+        nav.sigma = None;
+        encode_nkf(&mut buf, 0, &nav, [0.0; 3], [0.0; 3]);
+        assert_eq!(buf[11], 0);
+        assert!((0..6).all(|k| f(&buf, 65 + 24 + 4 * k) == f32::INFINITY));
     }
 
     /// Estimator, controller and allocator in one: each call appends its digit to `log`
