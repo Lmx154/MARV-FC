@@ -478,6 +478,126 @@ mod tests {
         );
     }
 
+    /// Decision-nav-eskf-20261120, section 4 (packet F1): with Mahony the barometer, compass and GNSS samples change
+    /// nothing. The same step sequence (level, arm, sticks moving, a moving IMU) with and without the three samples
+    /// gives the same outputs, bit for bit (every field's exact `Debug` text and the step's log records).
+    #[test]
+    fn slow_sensor_samples_do_not_change_a_mahony_step() {
+        extern crate std;
+        use fw_core::sample::{
+            BaroReading, BaroSample, GnssReading, GnssSample, MagReading, MagSample, UtcTime,
+        };
+        static WITHOUT: Handshake = Handshake::new();
+        static WITH: Handshake = Handshake::new();
+        let run = |handshake: &'static Handshake, slow: bool| {
+            let tuning = Tuning::DEFAULT;
+            let mut flight = Flight::new(
+                Mahony::new(&tuning),
+                CascadedPid::new(&tuning),
+                CardAllocator::new(),
+                &tuning,
+                handshake,
+            );
+            handshake.set_permit(true);
+            let mut outs = std::vec::Vec::new();
+            for n in 0..3000u32 {
+                let t_us = 10_000 + u64::from(n) * 1_245;
+                let x = n as f32 * 0.01;
+                let mut i = inputs(t_us);
+                i.sensors.imu1.seq = n;
+                i.sensors.imu1.reading.gyro_rads = [
+                    0.2 * libm::sinf(x),
+                    0.1 * libm::cosf(1.3 * x),
+                    0.05 * libm::sinf(0.7 * x),
+                ];
+                i.sensors.imu1.reading.accel_ms2 = [
+                    0.3 * libm::sinf(0.9 * x),
+                    -0.2 * libm::cosf(x),
+                    -9.81 + 0.1 * libm::sinf(x),
+                ];
+                // Arm after 200 steps (throttle low), then sticks that move.
+                let stick = |k: f32| {
+                    if n < 400 {
+                        0.0
+                    } else {
+                        0.3 * libm::sinf(k * x)
+                    }
+                };
+                i.rc = (n % 10 == 0).then_some(RcSample {
+                    sticks: Sticks {
+                        roll: stick(1.1),
+                        pitch: stick(0.8),
+                        throttle: if n < 400 { 0.0 } else { 0.5 + stick(0.5) },
+                        yaw: stick(1.7),
+                    },
+                    arm: n >= 200,
+                    t_us,
+                });
+                if slow {
+                    i.sensors.baro = (n % 16 == 3).then_some(BaroSample {
+                        reading: BaroReading {
+                            pressure_pa: 101_325.0 - x,
+                            temperature_c: 25.0,
+                        },
+                        t_us: t_us - 500,
+                        seq: n / 16,
+                    });
+                    i.sensors.mag = (n % 8 == 5).then_some(MagSample {
+                        reading: MagReading {
+                            field_ut: [20.0 * libm::cosf(x), 20.0 * libm::sinf(x), 40.0],
+                            temperature_c: 30.0,
+                        },
+                        t_us: t_us - 300,
+                        seq: n / 8,
+                    });
+                    i.sensors.gnss = (n % 160 == 7).then_some(GnssSample {
+                        reading: GnssReading {
+                            fix_type: 3,
+                            lat_e7: Some(254_000_000 + n as i32),
+                            lon_e7: Some(-801_000_000 - n as i32),
+                            alt_mm: Some(12_000),
+                            speed_mm_s: Some(n),
+                            course_cdeg: Some(9_000),
+                            sats_used: Some(12),
+                            hdop_x100: Some(80),
+                            vdop_x100: Some(120),
+                            time: Some(UtcTime {
+                                hour: 12,
+                                minute: 0,
+                                second: (n / 160) as u8,
+                                millis: 0,
+                            }),
+                            date: None,
+                            lat_std_mm: Some(1_200),
+                            lon_std_mm: Some(900),
+                            alt_std_mm: Some(2_500),
+                        },
+                        t_us: t_us - 430_000.min(t_us),
+                        seq: n / 160,
+                    });
+                }
+                let out = flight.step(&i);
+                let mut records = [0u8; 256];
+                let len = encode_step(&out, &mut records);
+                outs.push((std::format!("{out:?}"), records[..len].to_vec(), out));
+            }
+            outs
+        };
+        let (without, with) = (run(&WITHOUT, false), run(&WITH, true));
+        assert_eq!(without.len(), with.len());
+        for (n, (a, b)) in without.iter().zip(&with).enumerate() {
+            assert_eq!(a.0, b.0, "step {n}: outputs differ");
+            assert_eq!(a.1, b.1, "step {n}: log records differ");
+        }
+        // The sequence is not trivial: it armed, and the motors ran with commands that change.
+        let last = &with[with.len() - 1].2;
+        assert!(last.armed && WITH.armed());
+        let throttles: std::vec::Vec<_> =
+            with.iter().filter_map(|o| o.2.motors.throttles()).collect();
+        assert!(throttles.len() > 2000);
+        assert!(throttles.windows(2).any(|w| w[0] != w[1]));
+    }
+
     /// Estimator, controller and allocator in one: each call appends its digit to `log`
     /// (1 estimate, 2 reset, 5 control, 6 allocate).
     #[derive(Clone, Copy)]

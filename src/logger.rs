@@ -34,6 +34,7 @@ use embassy_time::{Duration, Instant, Ticker};
 use fw_core::dflog::{self, Dev, Dsf, Gps};
 use fw_core::health::State;
 use fw_core::relay::relay;
+use fw_core::sample::{BaroReading, GnssReading, MagReading};
 use fw_core::sys_status::{StatusInput, device_status};
 use fw_core::watchdog::task;
 use fw_core::xcore::{LogConsumer, LogProducer, LogRing};
@@ -261,10 +262,10 @@ impl Collector {
         let [baro, mag, gnss, batt] = &mut self.seq;
         if let Some(Sample {
             reading:
-                Reading::Baro {
+                Reading::Baro(BaroReading {
                     pressure_pa,
                     temperature_c,
-                },
+                }),
             t_us,
             ..
         }) = fresh(&BARO, baro)
@@ -274,7 +275,11 @@ impl Collector {
             });
         }
         if let Some(Sample {
-            reading: Reading::Mag { field_ut, .. },
+            reading:
+                Reading::Mag {
+                    reading: MagReading { field_ut, .. },
+                    ..
+                },
             t_us,
             ..
         }) = fresh(&MAG, mag)
@@ -307,13 +312,13 @@ impl Collector {
             p.push_with(dflog::GPS.length.into(), |b| {
                 dflog::encode_gps(b, sample.t_us, &g)
             });
-            if let Reading::Gnss {
+            if let Reading::Gnss(GnssReading {
                 vdop_x100,
                 lat_std_mm,
                 lon_std_mm,
                 alt_std_mm,
                 ..
-            } = sample.reading
+            }) = sample.reading
             {
                 let delta_ms =
                     dflog::gpa_delta_ms(self.gnss_t_us.replace(sample.t_us), sample.t_us);
@@ -404,7 +409,7 @@ fn fresh(dev: &Device, last: &mut Option<u32>) -> Option<Sample> {
 /// The GPS record of a receiver sample: Status 0 none, 1 no fix, 2 2D, 3 3D (DGPS counts as 3D);
 /// week and milliseconds from the UTC date and time, 0/0 while either is unknown.
 fn gps(reading: &Reading) -> Option<Gps> {
-    let Reading::Gnss {
+    let Reading::Gnss(GnssReading {
         fix_type,
         lat_e7,
         lon_e7,
@@ -416,7 +421,7 @@ fn gps(reading: &Reading) -> Option<Gps> {
         time,
         date,
         ..
-    } = *reading
+    }) = *reading
     else {
         return None;
     };

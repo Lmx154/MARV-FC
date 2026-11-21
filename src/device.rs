@@ -17,6 +17,7 @@ use embassy_sync::signal::Signal;
 use embassy_sync::watch::{Sender, Watch};
 use embassy_time::{Duration, Instant, Timer, with_timeout};
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
+use fw_core::sample::{BaroReading, GnssReading, MagReading, UtcDate, UtcTime};
 use fw_core::selftest::{Outcome as SelfTestOutcome, Verdict};
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_flight::imu::{ImuCells, TRANSITIONS};
@@ -47,20 +48,18 @@ pub enum Source {
     Hil,
 }
 
-/// The physical values of one sample (one variant per kind of device).
-#[derive(Clone, Copy, PartialEq, defmt::Format)]
+/// The physical values of one sample (one variant per kind of device). Barometer, compass and GNSS carry the
+/// flight code's types (`fw_core::sample`), so one field set serves both cores.
+#[derive(Clone, Copy, PartialEq)]
 pub enum Reading {
-    Baro {
-        pressure_pa: f32,
-        temperature_c: f32,
-    },
+    Baro(BaroReading),
     Mag {
-        /// The field in microtesla with the calibration applied, m = S (r - o).
-        field_ut: [f32; 3],
+        /// The field in microtesla with the calibration applied, m = S (r - o), and the die temperature:
+        /// what the flight core gets.
+        reading: MagReading,
         /// The raw field r in microtesla, body frame (after `MAG_ORIENT`, before the calibration):
-        /// what the compass calibration measures.
+        /// what the compass calibration measures. Core 0 only.
         raw_ut: [f32; 3],
-        temperature_c: f32,
     },
     Batt {
         voltage_v: f32,
@@ -73,31 +72,114 @@ pub enum Reading {
     },
     /// One fix of the receiver, in the driver's integer units. Position, speed and course are `None`
     /// without a fix; the rest is whatever the receiver says (it talks without a fix too).
-    Gnss {
-        /// MAVLink `GPS_FIX_TYPE`: 1 no fix, 2 2D, 3 3D, 4 DGPS/SBAS.
-        fix_type: u8,
-        /// 1e-7 degree, south and west negative.
-        lat_e7: Option<i32>,
-        lon_e7: Option<i32>,
-        /// Above mean sea level, mm.
-        alt_mm: Option<i32>,
-        speed_mm_s: Option<u32>,
-        /// 0.01 degree.
-        course_cdeg: Option<u16>,
-        /// Satellites used.
-        sats_used: Option<u8>,
-        /// Dilution of precision times 100.
-        hdop_x100: Option<u16>,
-        vdop_x100: Option<u16>,
-        /// UTC time of the epoch and the date, when the receiver has them.
-        time: Option<lc76g::sentence::Time>,
-        date: Option<lc76g::sentence::Date>,
-        /// Standard deviations of the latitude, longitude and altitude error, mm, 1 sigma, from the
-        /// GST of the same epoch; `None` when not available for this epoch.
-        lat_std_mm: Option<u32>,
-        lon_std_mm: Option<u32>,
-        alt_std_mm: Option<u32>,
-    },
+    Gnss(GnssReading),
+}
+
+/// The `[STAT]` text of a reading, field for field as the derived format printed it before the readings
+/// became `fw_core::sample` types (fw-core has no defmt).
+impl defmt::Format for Reading {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        match *self {
+            Reading::Baro(BaroReading {
+                pressure_pa,
+                temperature_c,
+            }) => defmt::write!(
+                f,
+                "Baro {{ pressure_pa: {=f32}, temperature_c: {=f32} }}",
+                pressure_pa,
+                temperature_c
+            ),
+            Reading::Mag {
+                reading:
+                    MagReading {
+                        field_ut,
+                        temperature_c,
+                    },
+                raw_ut,
+            } => defmt::write!(
+                f,
+                "Mag {{ field_ut: {}, raw_ut: {}, temperature_c: {=f32} }}",
+                field_ut,
+                raw_ut,
+                temperature_c
+            ),
+            Reading::Batt {
+                voltage_v,
+                current_a,
+            } => defmt::write!(
+                f,
+                "Batt {{ voltage_v: {=f32}, current_a: {=f32} }}",
+                voltage_v,
+                current_a
+            ),
+            Reading::Imu {
+                gyro_rads,
+                accel_ms2,
+                temperature_c,
+            } => defmt::write!(
+                f,
+                "Imu {{ gyro_rads: {}, accel_ms2: {}, temperature_c: {=f32} }}",
+                gyro_rads,
+                accel_ms2,
+                temperature_c
+            ),
+            Reading::Gnss(g) => defmt::write!(
+                f,
+                "Gnss {{ fix_type: {=u8}, lat_e7: {}, lon_e7: {}, alt_mm: {}, speed_mm_s: {}, course_cdeg: {}, sats_used: {}, hdop_x100: {}, vdop_x100: {}, time: {}, date: {}, lat_std_mm: {}, lon_std_mm: {}, alt_std_mm: {} }}",
+                g.fix_type,
+                g.lat_e7,
+                g.lon_e7,
+                g.alt_mm,
+                g.speed_mm_s,
+                g.course_cdeg,
+                g.sats_used,
+                g.hdop_x100,
+                g.vdop_x100,
+                Utc(g.time),
+                UtcDay(g.date),
+                g.lat_std_mm,
+                g.lon_std_mm,
+                g.alt_std_mm
+            ),
+        }
+    }
+}
+
+/// An epoch's UTC time in the `[STAT]` text, as `lc76g::sentence::Time`'s derived format printed it.
+pub(crate) struct Utc(pub Option<UtcTime>);
+
+impl defmt::Format for Utc {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        match self.0 {
+            Some(t) => defmt::write!(
+                f,
+                "Some(Time {{ hour: {=u8}, minute: {=u8}, second: {=u8}, millis: {=u16} }})",
+                t.hour,
+                t.minute,
+                t.second,
+                t.millis
+            ),
+            None => defmt::write!(f, "None"),
+        }
+    }
+}
+
+/// An epoch's UTC date in the `[STAT]` text, as `lc76g::sentence::Date`'s derived format printed it.
+struct UtcDay(Option<UtcDate>);
+
+impl defmt::Format for UtcDay {
+    fn format(&self, f: defmt::Formatter<'_>) {
+        match self.0 {
+            Some(d) => defmt::write!(
+                f,
+                "Some(Date {{ year: {=u16}, month: {=u8}, day: {=u8} }})",
+                d.year,
+                d.month,
+                d.day
+            ),
+            None => defmt::write!(f, "None"),
+        }
+    }
 }
 
 /// One published sample: values, board time of the read in us, `seq` (+1 per publish), source.
@@ -179,6 +261,10 @@ pub trait DeviceAdapter {
     }
     /// The adapter's own counters.
     fn counters(&self) -> AdapterCounters;
+    /// Called once for every sample published to the row's `Watch`, right after it: barometer, compass and
+    /// GNSS hand the reading's `fw_core::sample` sample to the flight core here (`crate::flight`); a wrapper
+    /// passes it to its inner adapter. Never waits.
+    fn to_flight(&mut self, sample: &Sample);
 }
 
 /// A device's health and counters as its task last wrote them.
@@ -836,12 +922,14 @@ async fn read<A: DeviceAdapter>(
                 status.max_gap_us = status.max_gap_us.max(t_us.saturating_sub(last));
             }
             status.last_sample_us = Some(t_us);
-            sender.send(Sample {
+            let sample = Sample {
                 reading,
                 t_us,
                 seq: *seq,
                 source: Source::Hardware,
-            });
+            };
+            sender.send(sample);
+            adapter.to_flight(&sample);
             *seq = seq.wrapping_add(1);
             status.samples = status.samples.wrapping_add(1);
             Event::Good
@@ -1106,7 +1194,11 @@ impl Supervision {
                 age_ms
             );
             if let Some(Sample {
-                reading: Reading::Mag { field_ut, .. },
+                reading:
+                    Reading::Mag {
+                        reading: MagReading { field_ut, .. },
+                        ..
+                    },
                 ..
             }) = latest
             {

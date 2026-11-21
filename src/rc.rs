@@ -30,6 +30,7 @@ use fw_core::health::Counters;
 use fw_core::rc::{
     PortMode, RcInput, RcSample, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, verdict,
 };
+use fw_core::sample::GnssReading;
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
 use fw_core::xcore::{TripleBuffer, TripleWriter};
@@ -371,7 +372,7 @@ impl Hooks for RcHooks {
     fn crsf_frame(&mut self, now_us: u64, out: &mut [u8; MAX_FRAME_LEN]) -> Option<usize> {
         if let Some(Sample {
             reading:
-                Reading::Gnss {
+                Reading::Gnss(GnssReading {
                     lat_e7,
                     lon_e7,
                     alt_mm,
@@ -379,7 +380,7 @@ impl Hooks for RcHooks {
                     course_cdeg,
                     sats_used,
                     ..
-                },
+                }),
             t_us,
             ..
         }) = GNSS.latest.try_get()

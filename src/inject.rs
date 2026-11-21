@@ -20,7 +20,8 @@ use fw_core::health::ErrorKind;
 use fw_core::selftest::Verdict;
 
 use crate::device::{
-    AdapterCounters, BARO, Device, DeviceAdapter, MAG, Pending, Reading, StartFailure, VerifyError,
+    AdapterCounters, BARO, Device, DeviceAdapter, MAG, Pending, Reading, Sample, StartFailure,
+    VerifyError,
 };
 
 const AFTER: Duration = Duration::from_secs(5);
@@ -266,5 +267,9 @@ impl<A: DeviceAdapter> DeviceAdapter for Inject<A> {
 
     fn counters(&self) -> AdapterCounters {
         self.inner.counters()
+    }
+
+    fn to_flight(&mut self, sample: &Sample) {
+        self.inner.to_flight(sample);
     }
 }

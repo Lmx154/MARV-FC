@@ -19,7 +19,8 @@ use embassy_time::{Duration, Instant, Timer, with_timeout};
 use fw_core::health::{ErrorKind, Limits};
 
 use crate::device::{
-    AdapterCounters, BATT, DeviceAdapter, Pending, Reading, StartFailure, VerifyError, run_device,
+    AdapterCounters, BATT, DeviceAdapter, Pending, Reading, Sample, StartFailure, VerifyError,
+    run_device,
 };
 
 bind_interrupts!(struct Irqs {
@@ -170,6 +171,9 @@ impl DeviceAdapter for BattAdapter {
     fn counters(&self) -> AdapterCounters {
         AdapterCounters { calls: self.calls }
     }
+
+    /// The battery is not a flight-core input.
+    fn to_flight(&mut self, _sample: &Sample) {}
 }
 
 pub fn adapter(

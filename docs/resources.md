@@ -233,7 +233,10 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    `actions` state, reader taken before core 1 starts and moved into the esc task, which reads it at every exchange;
    2026-11-18) and the sticks (`rc::FLIGHT_RC`, an `RcSample`, step 5 P6; writer taken by the RC port's hooks on core 0,
    written once per CRSF stick report; reader taken before core 1 starts and moved into IMU1's task and its `Stepper`,
-   which reads it once per step; the stick mapping runs on core 0). The `LogRing` out of it (`flight::LOG`, 16 KiB,
+   which reads it once per step; the stick mapping runs on core 0) and the slow sensors (`flight::FLIGHT_BARO`,
+   `FLIGHT_MAG`, `FLIGHT_GNSS`, a `BaroSample`, `MagSample` and `GnssSample`, decision-nav-eskf-20261120 section 4; each
+   writer taken by its device's adapter on core 0 and written once per published sample through the `to_flight` hook;
+   readers taken by IMU1's `Stepper` when it is built on core 1, read once per step). The `LogRing` out of it (`flight::LOG`, 16 KiB,
    decision-flight-logging-20261119, 2026-11-19): producer taken once by IMU1's `Stepper`, which pushes the step's
    records after it has written `flight::OUT` (wait-free, atomic loads and stores only: `head`, `tail` and `stat_req`
    loaded, the statistics seqlock written, then `head` stored, or for a record that does not fit `dropped` loaded

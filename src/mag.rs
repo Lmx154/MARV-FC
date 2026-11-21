@@ -15,12 +15,15 @@ use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::Delay;
 use fw_core::health::{ErrorKind, Limits};
 use fw_core::i2c::Gate;
+use fw_core::sample::{MagReading, MagSample};
 use fw_core::selftest::Verdict;
+use fw_core::xcore::TripleWriter;
 
 pub use fw_settings::mag as settings;
 
 use crate::device::{
-    AdapterCounters, DeviceAdapter, MAG, Pending, Reading, StartFailure, VerifyError, run_device,
+    AdapterCounters, DeviceAdapter, MAG, Pending, Reading, Sample, StartFailure, VerifyError,
+    run_device,
 };
 use crate::i2cbus::Timed;
 
@@ -54,6 +57,8 @@ pub struct Bmm350Adapter {
     chip: Option<Bmm350<Bus>>,
     config: Config,
     calls: u32,
+    /// The writer of `crate::flight::FLIGHT_MAG` (`None` if it was taken already: nothing is written).
+    flight: Option<TripleWriter<'static, MagSample>>,
 }
 
 impl Bmm350Adapter {
@@ -72,6 +77,7 @@ impl Bmm350Adapter {
             chip: None,
             config: config(),
             calls: 0,
+            flight: crate::flight::FLIGHT_MAG.take_writer(),
         };
         adapter.chip = Some(Bmm350::new(adapter.bus(), DEFAULT_ADDRESS));
         defmt::info!(
@@ -197,9 +203,11 @@ impl DeviceAdapter for Bmm350Adapter {
         let field = chip.read_field().await.map_err(|e| kind(&e))?;
         let raw_ut = orientation.rotate([field.x, field.y, field.z]);
         Ok(Reading::Mag {
-            field_ut: settings::apply(raw_ut, &calibration),
+            reading: MagReading {
+                field_ut: settings::apply(raw_ut, &calibration),
+                temperature_c: field.temperature,
+            },
             raw_ut,
-            temperature_c: field.temperature,
         })
     }
 
@@ -289,6 +297,12 @@ impl DeviceAdapter for Bmm350Adapter {
 
     fn counters(&self) -> AdapterCounters {
         AdapterCounters { calls: self.calls }
+    }
+
+    fn to_flight(&mut self, sample: &Sample) {
+        if let (Reading::Mag { reading: r, .. }, Some(w)) = (sample.reading, &mut self.flight) {
+            w.write(r.sample(sample.t_us, sample.seq));
+        }
     }
 }
 

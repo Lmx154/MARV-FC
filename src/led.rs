@@ -15,6 +15,7 @@ use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::{Duration, Instant, Ticker};
 use fw_core::health::State;
 use fw_core::led::{Inputs, Led, Output, ROWS};
+use fw_core::sample::GnssReading;
 use fw_core::watchdog::task;
 use fw_flight::tagged;
 use mavlink_device::ParamValue;
@@ -86,7 +87,7 @@ fn inputs(now_us: u64, level: i32) -> Inputs {
     ];
     let gnss_fix = GNSS.latest.try_get().is_some_and(|s| {
         now_us.saturating_sub(s.t_us) < GNSS_FRESH_US
-            && matches!(s.reading, Reading::Gnss { fix_type, .. } if fix_type >= 3)
+            && matches!(s.reading, Reading::Gnss(GnssReading { fix_type, .. }) if fix_type >= 3)
     });
     Inputs {
         rows,

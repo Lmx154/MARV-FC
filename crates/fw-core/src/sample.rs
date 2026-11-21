@@ -10,10 +10,11 @@ pub struct BaroReading {
     pub temperature_c: f32,
 }
 
-/// Compass: field, microtesla, body FRD, `MAG_ORIENT` applied and `MAG_OFF*` removed; die temperature, deg C.
+/// Compass: the calibrated field m = S (r - o), microtesla, body FRD (`MAG_ORIENT` applied, then the offsets and the
+/// soft-iron matrix, `fw_settings::mag::apply`); die temperature, deg C.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MagReading {
-    /// Microtesla, body FRD.
+    /// Microtesla, body FRD, calibrated.
     pub field_ut: [f32; 3],
     /// deg C.
     pub temperature_c: f32,
@@ -183,6 +184,39 @@ pub struct UtcDate {
     pub day: u8,
 }
 
+impl BaroReading {
+    /// Core 0's hook to the flight core: this reading as published at board time `t_us` with `seq`.
+    pub const fn sample(self, t_us: u64, seq: u32) -> BaroSample {
+        BaroSample {
+            reading: self,
+            t_us,
+            seq,
+        }
+    }
+}
+
+impl MagReading {
+    /// Core 0's hook to the flight core: this reading as published at board time `t_us` with `seq`.
+    pub const fn sample(self, t_us: u64, seq: u32) -> MagSample {
+        MagSample {
+            reading: self,
+            t_us,
+            seq,
+        }
+    }
+}
+
+impl GnssReading {
+    /// Core 0's hook to the flight core: this reading as published at board time `t_us` with `seq`.
+    pub const fn sample(self, t_us: u64, seq: u32) -> GnssSample {
+        GnssSample {
+            reading: self,
+            t_us,
+            seq,
+        }
+    }
+}
+
 /// A reading, the board time its read began (us), +1 per publish: the shape of `fw_flight::imu::ImuSample`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BaroSample {
@@ -320,6 +354,88 @@ mod tests {
         assert_eq!(o, GstOrder::default());
         assert_eq!(o.sentence(Some((t(5, 400), SIGMAS))), None);
         assert_eq!(o.pair(t(5, 600), None), Publish::Now([None; 3]));
+    }
+
+    const BARO: BaroReading = BaroReading {
+        pressure_pa: 101_325.5,
+        temperature_c: 24.25,
+    };
+    const MAG: MagReading = MagReading {
+        field_ut: [21.5, -3.25, 40.125],
+        temperature_c: 30.5,
+    };
+    const GNSS: GnssReading = GnssReading {
+        fix_type: 3,
+        lat_e7: Some(254_000_001),
+        lon_e7: Some(-801_000_002),
+        alt_mm: Some(12_345),
+        speed_mm_s: Some(1_234),
+        course_cdeg: Some(35_999),
+        sats_used: Some(11),
+        hdop_x100: Some(87),
+        vdop_x100: Some(132),
+        time: Some(UtcTime {
+            hour: 12,
+            minute: 34,
+            second: 5,
+            millis: 200,
+        }),
+        date: Some(UtcDate {
+            year: 2026,
+            month: 11,
+            day: 20,
+        }),
+        lat_std_mm: Some(1200),
+        lon_std_mm: Some(900),
+        alt_std_mm: Some(2500),
+    };
+
+    #[test]
+    fn each_reading_becomes_its_sample_with_its_time_and_seq() {
+        let b = BARO.sample(1_000_123, 7);
+        assert_eq!((b.reading, b.t_us, b.seq), (BARO, 1_000_123, 7));
+        let m = MAG.sample(2_000_456, u32::MAX);
+        assert_eq!((m.reading, m.t_us, m.seq), (MAG, 2_000_456, u32::MAX));
+        let g = GNSS.sample(u64::MAX, 0);
+        assert_eq!((g.reading, g.t_us, g.seq), (GNSS, u64::MAX, 0));
+    }
+
+    /// The flight core's view through the stick path's cell: a sample is fresh once, then stale until the next
+    /// write; only the newest of several writes is seen, and the gap shows in `seq`.
+    fn fresh_once<T: Copy + PartialEq + core::fmt::Debug>(initial: T, a: T, b: T, c: T) {
+        let cell = crate::xcore::TripleBuffer::new(initial);
+        let (mut w, mut r) = (cell.take_writer().unwrap(), cell.take_reader().unwrap());
+        assert_eq!(r.read(), (initial, false));
+        w.write(a);
+        assert_eq!(r.read(), (a, true));
+        assert_eq!(r.read(), (a, false));
+        assert_eq!(r.read(), (a, false));
+        w.write(b);
+        w.write(c);
+        assert_eq!(r.read(), (c, true));
+        assert_eq!(r.read(), (c, false));
+    }
+
+    #[test]
+    fn a_sample_is_fresh_once_on_the_flight_side() {
+        fresh_once(
+            BARO.sample(0, 0),
+            BARO.sample(10, 1),
+            BARO.sample(20, 2),
+            BARO.sample(30, 3),
+        );
+        fresh_once(
+            MAG.sample(0, 0),
+            MAG.sample(10, 1),
+            MAG.sample(20, 2),
+            MAG.sample(30, 3),
+        );
+        fresh_once(
+            GNSS.sample(0, 0),
+            GNSS.sample(10, 1),
+            GNSS.sample(20, 2),
+            GNSS.sample(30, 3),
+        );
     }
 
     #[test]

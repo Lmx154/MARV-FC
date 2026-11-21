@@ -98,6 +98,7 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Duration, Instant, Ticker, Timer};
 use embassy_usb::{Builder, Config as UsbConfig, UsbDevice};
 use embedded_io_async::{ErrorType, Read, Write};
+use fw_core::sample::{BaroReading, MagReading};
 use fw_core::sys_status::{DeviceRow, sensor_masks, system_status};
 use fw_core::text_ring::TextRing;
 use fw_core::watchdog::task;
@@ -506,7 +507,11 @@ pub fn push_highres_imu(now_us: u64, out: &mut Outgoing<'_>) -> bool {
         Some(Sample {
             reading:
                 Reading::Mag {
-                    field_ut: [x, y, z],
+                    reading:
+                        MagReading {
+                            field_ut: [x, y, z],
+                            ..
+                        },
                     ..
                 },
             t_us,
@@ -586,10 +591,10 @@ pub fn push_scaled_pressure(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     let Some(sample) = BARO.latest.try_get() else {
         return false;
     };
-    let Reading::Baro {
+    let Reading::Baro(BaroReading {
         pressure_pa,
         temperature_c,
-    } = sample.reading
+    }) = sample.reading
     else {
         return false;
     };

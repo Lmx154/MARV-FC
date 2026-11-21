@@ -10,11 +10,14 @@ use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::Delay;
 use fw_core::health::{ErrorKind, Limits};
 use fw_core::i2c::Gate;
+use fw_core::sample::{BaroReading, BaroSample};
+use fw_core::xcore::TripleWriter;
 
 pub use fw_settings::baro as settings;
 
 use crate::device::{
-    AdapterCounters, BARO, DeviceAdapter, Pending, Reading, StartFailure, VerifyError, run_device,
+    AdapterCounters, BARO, DeviceAdapter, Pending, Reading, Sample, StartFailure, VerifyError,
+    run_device,
 };
 use crate::i2cbus::Timed;
 
@@ -52,6 +55,8 @@ pub struct Bmp581Adapter {
     chip: Option<Bmp581<Bus>>,
     config: Config,
     calls: u32,
+    /// The writer of `crate::flight::FLIGHT_BARO` (`None` if it was taken already: nothing is written).
+    flight: Option<TripleWriter<'static, BaroSample>>,
 }
 
 impl Bmp581Adapter {
@@ -70,6 +75,7 @@ impl Bmp581Adapter {
             chip: None,
             config: config(),
             calls: 0,
+            flight: crate::flight::FLIGHT_BARO.take_writer(),
         };
         adapter.chip = Some(Bmp581::new(adapter.bus(), DEFAULT_ADDRESS));
         defmt::info!(
@@ -200,10 +206,10 @@ impl DeviceAdapter for Bmp581Adapter {
         }
         // `NoSample` (data registers at their reset value) counts as a decode error.
         let sample = chip.read().await.map_err(|e| kind(&e))?;
-        Ok(Reading::Baro {
+        Ok(Reading::Baro(BaroReading {
             pressure_pa: sample.pascals(),
             temperature_c: sample.celsius(),
-        })
+        }))
     }
 
     async fn status(&mut self) -> Result<Pending, ErrorKind> {
@@ -264,6 +270,12 @@ impl DeviceAdapter for Bmp581Adapter {
 
     fn counters(&self) -> AdapterCounters {
         AdapterCounters { calls: self.calls }
+    }
+
+    fn to_flight(&mut self, sample: &Sample) {
+        if let (Reading::Baro(r), Some(w)) = (sample.reading, &mut self.flight) {
+            w.write(r.sample(sample.t_us, sample.seq));
+        }
     }
 }
 

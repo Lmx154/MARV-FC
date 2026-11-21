@@ -47,15 +47,19 @@ use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_time::{Duration, Instant, Timer, with_deadline, with_timeout};
 use embedded_io_async::Read;
 use fw_core::health::{ErrorKind, Limits};
-use fw_core::sample::{GstOrder, Publish, UtcTime, horizontal_std_mm};
+use fw_core::sample::{
+    GnssReading, GnssSample, GstOrder, Publish, UtcDate, UtcTime, horizontal_std_mm,
+};
+use fw_core::xcore::TripleWriter;
 use lc76g::aux_sentences::Gst;
-use lc76g::sentence::{FixType, Quality, Time};
+use lc76g::sentence::{Date, FixType, Quality, Time};
 use lc76g::{Command, Error, Fix, Lc76g, Message};
 use mavlink_device::dialect::{GPS_RAW_INT_DATA, GpsFixType, MavSeverity};
 use static_cell::StaticCell;
 
 use crate::device::{
-    AdapterCounters, DeviceAdapter, GNSS, Pending, Reading, StartFailure, VerifyError, run_device,
+    AdapterCounters, DeviceAdapter, GNSS, Pending, Reading, Sample, StartFailure, VerifyError,
+    run_device,
 };
 
 bind_interrupts!(struct Irqs {
@@ -155,6 +159,8 @@ pub struct GnssAdapter {
     /// The error `data_ready` ended with, for the `acquire` that follows.
     failed: Option<ErrorKind>,
     calls: u32,
+    /// The writer of `crate::flight::FLIGHT_GNSS` (`None` if it was taken already: nothing is written).
+    flight: Option<TripleWriter<'static, GnssSample>>,
 }
 
 impl GnssAdapter {
@@ -191,6 +197,7 @@ impl GnssAdapter {
             order: GstOrder::default(),
             failed: None,
             calls: 0,
+            flight: crate::flight::FLIGHT_GNSS.take_writer(),
         }
     }
 
@@ -386,6 +393,14 @@ fn utc(time: Option<Time>) -> Option<UtcTime> {
     })
 }
 
+fn utc_date(date: Option<Date>) -> Option<UtcDate> {
+    date.map(|d| UtcDate {
+        year: d.year,
+        month: d.month,
+        day: d.day,
+    })
+}
+
 /// A GST's UTC time and deviations `[lat, lon, alt]`, mm.
 fn gst_std(gst: &Gst) -> (Option<UtcTime>, [Option<u32>; 3]) {
     (
@@ -412,7 +427,7 @@ fn reading(fix: &Fix, [lat_std_mm, lon_std_mm, alt_std_mm]: [Option<u32>; 3]) ->
     let fix_type = fix_type(fix);
     // Without a position the coordinates are not reported, whatever the receiver put in the sentences.
     let position = fix_type >= 2;
-    Reading::Gnss {
+    Reading::Gnss(GnssReading {
         fix_type,
         lat_e7: fix.lat_e7.filter(|_| position),
         lon_e7: fix.lon_e7.filter(|_| position),
@@ -422,12 +437,12 @@ fn reading(fix: &Fix, [lat_std_mm, lon_std_mm, alt_std_mm]: [Option<u32>; 3]) ->
         sats_used: fix.sats_used,
         hdop_x100: fix.hdop_x100,
         vdop_x100: fix.vdop_x100,
-        time: fix.time,
-        date: fix.date,
+        time: utc(fix.time),
+        date: utc_date(fix.date),
         lat_std_mm,
         lon_std_mm,
         alt_std_mm,
-    }
+    })
 }
 
 /// `GPS_RAW_INT` of a sample (`Reading::Gnss`) taken at board time `t_us`. With no fix: `fix_type` 1
@@ -438,7 +453,7 @@ fn reading(fix: &Fix, [lat_std_mm, lon_std_mm, alt_std_mm]: [Option<u32>; 3]) ->
 /// `h_acc` is sqrt(lat^2 + lon^2) and `v_acc` the altitude of the GST's deviations, mm, 0 when not
 /// available.
 pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
-    let Reading::Gnss {
+    let Reading::Gnss(GnssReading {
         fix_type,
         lat_e7,
         lon_e7,
@@ -452,7 +467,7 @@ pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
         lon_std_mm,
         alt_std_mm,
         ..
-    } = *reading
+    }) = *reading
     else {
         return None;
     };
@@ -488,13 +503,13 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
         .last_sentence_us
         .map_or(u64::MAX, |us| now.as_micros().saturating_sub(us) / 1000);
     let (fix_type, sats, hdop, utc) = match latest.map(|s| s.reading) {
-        Some(Reading::Gnss {
+        Some(Reading::Gnss(GnssReading {
             fix_type,
             sats_used,
             hdop_x100,
             time,
             ..
-        }) => (fix_type, sats_used, hdop_x100, time),
+        })) => (fix_type, sats_used, hdop_x100, time),
         _ => (0, None, None, None),
     };
     defmt::info!(
@@ -515,7 +530,7 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
         fix_type,
         sats,
         hdop,
-        utc,
+        crate::device::Utc(utc),
         age_ms,
         if t.silenced {
             ", SENTENCES SWALLOWED (inject)"
@@ -677,6 +692,12 @@ impl DeviceAdapter for GnssAdapter {
     fn counters(&self) -> AdapterCounters {
         AdapterCounters { calls: self.calls }
     }
+
+    fn to_flight(&mut self, sample: &Sample) {
+        if let (Reading::Gnss(r), Some(w)) = (sample.reading, &mut self.flight) {
+            w.write(r.sample(sample.t_us, sample.seq));
+        }
+    }
 }
 
 /// Feature `inject-gnss-silent`: 10 s after the row's first good sample the adapter stops seeing
@@ -765,6 +786,10 @@ impl<A: DeviceAdapter> DeviceAdapter for Silent<A> {
 
     fn counters(&self) -> AdapterCounters {
         self.inner.counters()
+    }
+
+    fn to_flight(&mut self, sample: &Sample) {
+        self.inner.to_flight(sample);
     }
 }
 

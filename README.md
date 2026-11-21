@@ -71,7 +71,7 @@ section, and the sample loop never schedules). Everything core 0 needs
 four transitions, attempt times, injection state) goes out through one `Seqlock`; the supervisor copies it
 into the IMU's registry row (IMU1, IMU2: one loop over the rows) each tick and logs and texts its events; while an IMU is Failed or Absent it gets
 no CHECK kick and is not flagged stuck (it is parked and waits only for RESTART). Host tests: `cargo host-test -p fw-flight`
-(41 tests and 1 doc test, the flight step's included).
+(47 tests and 1 doc test, the flight step's included).
 
 The flight step (build step 3 of the GNC plan; design: `~/Documents/MARV-V2-drivers/_plan/decision-sim-seams-20261119.md`).
 `fw_flight::step::Flight::step` runs once per good IMU1 sample, on core 1, inside IMU1's task, right after the sample
@@ -85,8 +85,17 @@ the real flight code (`decision-first-pair-20261119.md`): `fw_flight::mahony::Ma
 RC-loss rules (section 5: an off-to-on switch cycle on fresh reports with throttle low, attitude valid, lean within
 `ANGLE_MAX`, levels present and `HANDSHAKE.try_arm()` granted; Stop and disarm when the newest report is older than
 `RC_FS_TIMEOUT`, on switch off, or on a refusal while armed). The board image names them in `src/flight.rs`
-(`BoardFlight`). Since P6 the image spins the motors when armed (see Flying, props off, below). Only IMU1's sample and the
-newest CRSF stick report go in (IMU2 and the slow sensors come with later steps).
+(`BoardFlight`). Since P6 the image spins the motors when armed (see Flying, props off, below). IMU1's sample, the
+newest CRSF stick report and the newest barometer, compass and GNSS samples go in (IMU2 comes with a later step).
+The slow sensors (`decision-nav-eskf-20261120.md` section 4, packet F1): core 0's device loop, when it publishes a good
+sample to the row's `Watch` (`device::read`), hands it to the adapter's `DeviceAdapter::to_flight` hook; BARO, MAG and
+GNSS turn the reading into its `fw_core::sample` sample (`BaroSample`, `MagSample` with the calibrated field m, `GnssSample`
+with everything `Reading::Gnss` has, deviations included), each with the core-0 board time and `seq` of the publish, and
+write it to the triple buffer `flight::FLIGHT_BARO`, `FLIGHT_MAG` or `FLIGHT_GNSS` (the stick path's primitive, wait-free
+on both sides). `Stepper::sample` reads the three once per step and gives `Sensors.baro`, `.mag`, `.gnss` only the
+sample that is new since the previous step (newest only; a gap shows in `seq`). The read copies the three slots every
+step (24 + 32 + 104 bytes), no lock and no wait; Mahony ignores the three samples, so the step's outputs are the same
+bit for bit with and without them (test `slow_sensor_samples_do_not_change_a_mahony_step`).
 Ground rule (`decision-flight-ground-20261119.md`, section 1; approved by the owner on 2026-11-19): while the collective is below `ground_thrust_g` x m g (0.5/0.7, the vehicle on the ground) `fw_flight::pid::CascadedPid` sets the three rate integrators to 0 every step; above it nothing changes.
 `Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
 `decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
@@ -184,7 +193,10 @@ by the supervisor when `progress` stands still for max(1 s, 20 P)); `RUNNING` ho
 task that ran last. The supervisor turns each health transition into one STATUSTEXT naming the device
 (entered Recovering WARNING, recovered NOTICE, Failed or Absent ERROR; none for Ok/Degraded), at most one
 per device per second (later ones wait their turn). Adding a device is a new adapter, a new row and a new
-`Reading` variant.
+`Reading` variant. `Reading::Baro(BaroReading)`, `Reading::Mag { reading: MagReading, raw_ut }` and
+`Reading::Gnss(GnssReading)` carry the flight code's types from `fw_core::sample` (one field set for both cores);
+`Batt` and `Imu` have their own fields. Every adapter has the `to_flight` hook, called once per published sample (a
+wrapper such as fault injection passes it on; BATT does nothing).
 
 | Row | Device | Bus | Configuration | P | T | Stuck after |
 |---|---|---|---|---|---|---|
@@ -198,7 +210,8 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
 data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge: accepted, the bench-proven pulsed mode is kept and latched mode is not used), then `read_field`: the
 compensated field in microtesla and the die temperature, rotated by `MAG_ORIENT` (r), then the compass calibration m = S (r - o) in software
-(see Calibrations; the chip's offset registers are not used). `Reading::Mag { field_ut, raw_ut, temperature_c }`: m, r and the temperature. The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
+(see Calibrations; the chip's offset registers are not used). `Reading::Mag { reading: MagReading { field_ut, temperature_c }, raw_ut }`: m and the
+temperature (what the flight core gets, as `MagSample` through `flight::FLIGHT_MAG`), and r (core 0 only: the compass calibration reads it). The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
 `verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and
 rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
 The field at rest on the driver's bench was about 66 to 67 uT.
@@ -247,8 +260,8 @@ nor its bench program does anything with it beyond counting edges, and there is 
   is rebuilt over the same UART (`release` then `new`: no half sentence, no held fix). **`restart`** (the first attempt after an operator request, and
   the automatic recovery's second step) is the flush followed by the configuration: a UART has no bus clear
   (noticed: the UART block is not re-initialised). The driver's counts restart at 0 with the new driver; the row's totals add them up.
-- `Reading::Gnss { fix_type, lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used, hdop_x100, vdop_x100, time, date, lat_std_mm, lon_std_mm,
-  alt_std_mm }`, the driver's integer
+- `Reading::Gnss(GnssReading { fix_type, lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used, hdop_x100, vdop_x100, time, date, lat_std_mm,
+  lon_std_mm, alt_std_mm })` (`fw_core::sample`; `time` and `date` are the driver's UTC time and date copied once into `UtcTime` and `UtcDate`), the driver's integer
   units (1e-7 degree, mm, mm/s, 0.01 degree, DOP x 100; no `f64` anywhere: the build has 0 `__aeabi_d` symbols). `fix_type` is MAVLink's
   `GPS_FIX_TYPE`: 1 (NO_FIX) unless the RMC status, the GGA quality and the GSA fix mode all say there is a position, then 2 (2D), 3 (3D) or 4
   (the GGA quality says differential or SBAS-aided, 3D). Position, altitude, speed and course are `None` while `fix_type` is 1.
@@ -1317,7 +1330,7 @@ crates/fw-settings  per device, the parameter table and the pure settings-to-con
 ```
 
 `fw-core` holds the foundation layer's logic that needs no hardware. It is implemented and tested on
-the host (291 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
+the host (309 tests, and 4 doc tests); the binary uses every module listed below. Design: `~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`.
 
 | Module | What it is |
 |---|---|
