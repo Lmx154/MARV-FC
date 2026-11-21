@@ -12,6 +12,40 @@
 //!
 //! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to (C8: "for I = 1, TimeUS is
 //! the horizon time"); there is no output predictor in phase 1.
+//!
+//! Where the implementation takes a reading of the specification (checked against the code below, 2026-11-21):
+//! - The Src 9 reset fires at the first accepted, aligned, non-repeated epoch after EVERY arming; any change of the
+//!   armed state drops a queued GNSS job and the reject timers.
+//! - Horizontal aiding = armed AND started (a Src 9 reset since arming) AND a GNSS position fused or reset within
+//!   nav_aid_timeout_us. Otherwise the no-aid hold, at the position captured in the step aiding stops (N = E = 0 at
+//!   the tilt alignment).
+//! - The first fix (fix type >= 3 with a position) only starts the interval rule and is not accepted. Any such fix,
+//!   with or without GST, becomes the interval's and the frozen-fix screen's previous fix.
+//! - The accuracy (GST) part of the acceptance needs the latitude and longitude sigmas only.
+//! - The origin latches at the first accepted epoch, normally the second fix, armed or not, aligned or not; its
+//!   altitude is the fix's plus the filter's D, so that D keeps its datum.
+//! - A waiting compass sample is used only if it carried an `expected` field itself, with the newest value carried.
+//! - No velocity when the speed is at or above nav_gps_course_min_ms but the course is missing (nor when there is no
+//!   speed); then the speed screen (E3b) does not fire.
+//! - Job order: propagation, GNSS, barometer, compass.
+//! - The height reset counts from the last barometer aid (fusion, reset, or the initialisation after a
+//!   re-initialisation). After a re-initialisation the next barometer sample initialises the height at once, as
+//!   `MahonyBaro` re-initialises; it is logged and counted as a height reset.
+//! - No position process noise (Q on attitude, velocity and the biases only).
+//! - The declination is `Tuning::nav_mag_declination_rad`; the simulator sets it from its field model.
+//! - `ned_from_geo` uses the WGS 84 meridian and prime-vertical radii at the origin.
+//! - A Src 9 or C3 reset counts as "a GNSS position fused" for the flags and the aiding timeout.
+//! - velocity_ne and position_ne are one flag; it needs the yaw aligned, not the heading flag.
+//! - The first epoch after arming (a Src 9 reset) takes the receiver's velocity unscreened, its variance
+//!   nav_gps_vel_sigma_ms^2 also on the low-speed path; the C3 reset likewise.
+//! - Armed at rest, exactly repeated fixes are screened, the first epoch after arming included: GNSS is neither reset
+//!   nor fused until the fix changes.
+//! - C1b's H row is the exact Jacobian of the innovation in use (review ruling 1, [`yaw_h`]); a compass sample whose
+//!   NED field has no usable horizontal component is a refusal.
+//! - Compass refusals (Ok 2) are all counted; one NKI record per nav_mag_fuse_us at most.
+//! - A barometer, compass or GNSS sample whose time (validity time, sample time, arrival time minus
+//!   nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us, is dropped and counted
+//!   ([`EskfStats::stale`]).
 // Fixed-size arrays only; every index is a loop bound or a constant below the array length.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
@@ -133,7 +167,8 @@ pub struct EskfStats {
     pub height_resets: u32,
     /// No-aid scalars fused.
     pub noaid: u32,
-    /// Compass samples refused by the health test (Ok 2).
+    /// Compass samples refused by the health test or for a vanishing horizontal field (Ok 2; every one counted, one
+    /// NKI record per nav_mag_fuse_us at most).
     pub mag_refused: u32,
     /// Compass yaw fusions accepted.
     pub mag_fused: u32,
@@ -173,6 +208,9 @@ pub struct EskfStats {
     pub replaced: u32,
     /// Waiting barometer or compass samples dropped because their buffer was full.
     pub dropped: u32,
+    /// Barometer, compass or GNSS samples dropped on arrival because their time (validity time, sample time, or arrival
+    /// time minus nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us.
+    pub stale: u32,
 }
 
 /// The constructor's refusal (C2a).
@@ -295,6 +333,8 @@ pub struct Eskf {
     /// The barometer datum (ISA height of the first barometer sample after the tilt alignment), m; set once.
     datum_m: Option<f32>,
     last_baro_aid_us: Option<u64>,
+    /// Set by a re-initialisation: the next barometer job initialises the height (as `MahonyBaro` after its own).
+    baro_reinit: bool,
     origin: Option<GeoPoint>,
     /// Previous fix (fix type >= 3 with a position): t_us, lat, lon.
     gps_prev: Option<(u64, i32, i32)>,
@@ -307,6 +347,8 @@ pub struct Eskf {
     aiding_prev: bool,
     hold_ne: [f32; 2],
     next_mag_us: u64,
+    /// Sample time from which the next compass refusal is written as an NKI record.
+    next_refusal_us: u64,
     last_mag_acc_us: u64,
     mag_rej_since: Option<u64>,
     gps_job: Option<GpsJob>,
@@ -364,10 +406,31 @@ pub fn healthy(m_ned: &[f32; 3], e: &MagExpected) -> bool {
         && fabsf(inc - e.inclination_rad) <= e.tol_inclination_rad
 }
 
-/// The C1b yaw row on the NED attitude error for rotation `r`: [-R11 R31 / c, -R21 R31 / c, 1], c = R11^2 + R21^2.
-pub fn yaw_h(r: &[[f32; 3]; 3]) -> [f32; 3] {
-    let c = r[0][0] * r[0][0] + r[1][0] * r[1][0];
-    [-r[0][0] * r[2][0] / c, -r[1][0] * r[2][0] / c, 1.0]
+/// The compass field `m_b` rotated to NED by the attitude `q`: m = R(q) m_b.
+fn mag_ned(q: &[f32; 4], m_b: &[f32; 3]) -> [f32; 3] {
+    let r = rotation(q);
+    core::array::from_fn(|i| r[i][0] * m_b[0] + r[i][1] * m_b[1] + r[i][2] * m_b[2])
+}
+
+/// The C1b yaw innovation: wrap(dec - atan2(m_E, m_N)), m = R(q) m_b.
+pub fn yaw_innov(q: &[f32; 4], m_b: &[f32; 3], dec: f32) -> f32 {
+    let m = mag_ned(q, m_b);
+    wrap(dec - atan2f(m[1], m[0]))
+}
+
+/// The C1b yaw row on the NED attitude error, as corrected by the review (ruling 1, 2026-11-21): the exact Jacobian of
+/// the predicted azimuth atan2(m_E, m_N) of m = R(q) m_b, the error composed on the left (q <- [1, dθ/2] q, so
+/// m <- m + dθ x m): [-m_N m_D / c, -m_E m_D / c, 1], c = m_N^2 + m_E^2. None when c <= f32::EPSILON |m|^2: a
+/// horizontal component below sqrt(f32::EPSILON) (3.5e-4) of the field, where its direction is set by the rounding
+/// of m (one ulp of |m| per component) to worse than 3.5e-4 rad and the row's entries exceed 1/sqrt(f32::EPSILON).
+pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
+    let m = mag_ned(q, m_b);
+    let c = m[0] * m[0] + m[1] * m[1];
+    let norm2 = c + m[2] * m[2];
+    if !norm2.is_finite() || c <= f32::EPSILON * norm2 {
+        return None;
+    }
+    Some([-m[0] * m[2] / c, -m[1] * m[2] / c, 1.0])
 }
 
 impl Eskf {
@@ -403,6 +466,7 @@ impl Eskf {
             armed: false,
             datum_m: None,
             last_baro_aid_us: None,
+            baro_reinit: false,
             origin: None,
             gps_prev: None,
             started: false,
@@ -412,6 +476,7 @@ impl Eskf {
             aiding_prev: false,
             hold_ne: [0.0; 2],
             next_mag_us: 0,
+            next_refusal_us: 0,
             last_mag_acc_us: 0,
             mag_rej_since: None,
             gps_job: None,
@@ -475,6 +540,7 @@ impl Eskf {
         self.tilt_aligned = false;
         self.yaw_aligned = false;
         self.last_baro_aid_us = None;
+        self.baro_reinit = true;
         self.started = false;
         self.latest_ok = false;
         self.rej_since = [None; 2];
@@ -517,6 +583,10 @@ impl Eskf {
         if self.tilt_aligned {
             let (dvel, dt) = (self.nom.dvel, self.nom.dt_sum);
             n0::covariance_predict(&mut self.p, &self.nom.q, &dvel, dt, &self.noise);
+            // The diagonal held at or above 0, as after a fusion (section 1b).
+            for i in 0..N {
+                self.p[i][i] = self.p[i][i].max(0.0);
+            }
             self.nom.dvel = [0.0; 3];
             self.nom.dt_sum = 0.0;
             self.stats.predicts = self.stats.predicts.wrapping_add(1);
@@ -599,8 +669,7 @@ impl Eskf {
         (ok, s)
     }
 
-    /// A no-aid scalar on position `axis` (B2): not gated; with the inhibit, K's accelerometer-bias x and y entries are
-    /// zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
+    /// A no-aid scalar on position `axis` (B2): not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
     /// P - K ph^T - ph K^T + K K^T s.
     fn fuse_noaid(&mut self, axis: usize, innov: f32, var: f32) {
         let k = POS + axis;
@@ -613,6 +682,7 @@ impl Eskf {
         if self.noaid_inhibit {
             kg[ACCEL_BIAS] = 0.0;
             kg[ACCEL_BIAS + 1] = 0.0;
+            kg[ACCEL_BIAS + 2] = 0.0;
         }
         for i in 0..N {
             for j in i..N {
@@ -638,6 +708,18 @@ impl Eskf {
     fn baro_job(&mut self, mut job: BaroJob) {
         let horizon = self.horizon();
         match job.stage {
+            0 if self.baro_reinit => {
+                // After a re-initialisation the height is initialised at once (D = -h_b, its row and column
+                // re-initialised), as `MahonyBaro` re-initialises; logged and counted as a height reset.
+                let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
+                let change = -job.h_b - self.nom.p[2];
+                self.nom.p[2] = -job.h_b;
+                self.reset_state_var(POS + 2, r);
+                self.last_baro_aid_us = Some(horizon);
+                self.baro_reinit = false;
+                self.stats.height_resets = self.stats.height_resets.wrapping_add(1);
+                self.event(code::HEIGHT_RESET, change, r, code::FUSED);
+            }
             0 => {
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
                 // h = -D: fused as D = -h_b on the position's down error.
@@ -700,13 +782,13 @@ impl Eskf {
 
     /// The compass job (C1): alignment, the yaw fusion with the full H row, or the reset after the timeout.
     fn mag_job(&mut self, m_b: [f32; 3]) {
-        let r = rotation(&self.nom.q);
-        let m = [
-            r[0][0] * m_b[0] + r[0][1] * m_b[1] + r[0][2] * m_b[2],
-            r[1][0] * m_b[0] + r[1][1] * m_b[1] + r[1][2] * m_b[2],
-            r[2][0] * m_b[0] + r[2][1] * m_b[1] + r[2][2] * m_b[2],
-        ];
-        let y = wrap(self.t.nav_mag_declination_rad - atan2f(m[1], m[0]));
+        let q = self.nom.q;
+        let Some(hy) = yaw_h(&q, &m_b) else {
+            // The horizontal field vanishes: no heading in it.
+            self.mag_refuse(self.horizon());
+            return;
+        };
+        let y = yaw_innov(&q, &m_b, self.t.nav_mag_declination_rad);
         if !y.is_finite() {
             return;
         }
@@ -716,7 +798,6 @@ impl Eskf {
             self.stats.yaw_aligns = self.stats.yaw_aligns.wrapping_add(1);
             return;
         }
-        let hy = yaw_h(&r);
         if !hy.iter().all(|v| v.is_finite()) {
             return;
         }
@@ -746,6 +827,15 @@ impl Eskf {
         }
     }
 
+    /// A refused compass sample (Ok 2): counted; one NKI record per nav_mag_fuse_us at most (the log budget).
+    fn mag_refuse(&mut self, t_us: u64) {
+        self.stats.mag_refused = self.stats.mag_refused.wrapping_add(1);
+        if t_us >= self.next_refusal_us {
+            self.next_refusal_us = t_us.saturating_add(self.t.nav_mag_fuse_us);
+            self.event(code::MAG_YAW, 0.0, 0.0, code::REFUSED);
+        }
+    }
+
     /// A compass sample at the horizon: skipped inside the fusion period once aligned; the health test (cheap); a
     /// healthy one queues the compass job.
     fn mag_due(&mut self, w: MagWait) {
@@ -762,12 +852,8 @@ impl Eskf {
         let r = rotation(&self.nom.q);
         let m_b = w.field_ut;
         let m: [f32; 3] = core::array::from_fn(|i| r[i][0] * m_b[0] + r[i][1] * m_b[1] + r[i][2] * m_b[2]);
-        if !healthy(&m, &e) {
-            self.stats.mag_refused = self.stats.mag_refused.wrapping_add(1);
-            self.event(code::MAG_YAW, 0.0, 0.0, code::REFUSED);
-            return;
-        }
-        if !atan2f(m[1], m[0]).is_finite() {
+        if !healthy(&m, &e) || yaw_h(&self.nom.q, &m_b).is_none() {
+            self.mag_refuse(w.t_us);
             return;
         }
         self.next_mag_us = w.t_us.saturating_add(self.t.nav_mag_fuse_us);
@@ -864,6 +950,7 @@ impl Eskf {
         };
         let mut vel = vel;
         if matches!(plan, GpsPlan::Fuse { .. })
+            && vel.is_some()
             && pd_speed.is_some_and(|pd| pd >= self.t.nav_gps_spd_min_ms && h_speed < self.t.nav_gps_spd_ratio * pd)
         {
             self.stats.gps_e3b = self.stats.gps_e3b.wrapping_add(1);
@@ -975,7 +1062,7 @@ impl Eskf {
         let heading = self.armed
             && al
             && self.yaw_aligned
-            && sqrtf(self.p[ATT + 2][ATT + 2]) <= self.t.nav_heading_valid_sigma_rad
+            && sqrtf(self.p[ATT + 2][ATT + 2].max(0.0)) <= self.t.nav_heading_valid_sigma_rad
             && horizon.saturating_sub(self.last_mag_acc_us) < aid_to;
         let ne = self.armed
             && al
@@ -985,15 +1072,16 @@ impl Eskf {
             && horizon.saturating_sub(self.last_pos_us) < aid_to
             && self.latest_ok;
         let q = if n.q[0] < 0.0 { n.q.map(|x| -x) } else { n.q };
-        let p = &self.p;
+        // Variances from the diagonal floored at 0.
+        let v = |i: usize| self.p[i][i].max(0.0);
         let sigma = if al {
             NavSigma {
-                tilt_rad: sqrtf(p[ATT][ATT] + p[ATT + 1][ATT + 1]),
-                heading_rad: sqrtf(p[ATT + 2][ATT + 2]),
-                velocity_ne_ms: sqrtf(p[VEL][VEL] + p[VEL + 1][VEL + 1]),
-                velocity_d_ms: sqrtf(p[VEL + 2][VEL + 2]),
-                position_ne_m: sqrtf(p[POS][POS] + p[POS + 1][POS + 1]),
-                position_d_m: sqrtf(p[POS + 2][POS + 2]),
+                tilt_rad: sqrtf(v(ATT) + v(ATT + 1)),
+                heading_rad: sqrtf(v(ATT + 2)),
+                velocity_ne_ms: sqrtf(v(VEL) + v(VEL + 1)),
+                velocity_d_ms: sqrtf(v(VEL + 2)),
+                position_ne_m: sqrtf(v(POS) + v(POS + 1)),
+                position_d_m: sqrtf(v(POS + 2)),
             }
         } else {
             NavSigma {
@@ -1046,14 +1134,25 @@ impl Estimator for Eskf {
             self.ring.pop();
             self.integrate(e);
         }
-        // New slow samples: barometer and compass wait for the horizon; a GNSS epoch is due on arrival.
+        // New slow samples: barometer and compass wait for the horizon; a GNSS epoch is due on arrival. A sample whose
+        // time is older than the ring's span is dropped and counted.
+        let buffer_us = self.t.nav_buffer_us;
+        let stale = |t_us: u64| t_us.saturating_add(buffer_us) < now;
         if let Some(b) = sensors.baro.filter(|b| b.reading.pressure_pa.is_finite() && b.reading.pressure_pa > 0.0) {
             let w = BaroWait { t_valid_us: b.t_us.saturating_sub(self.t.nav_baro_delay_us), pressure_pa: b.reading.pressure_pa };
-            if self.baro_wait.push(w).is_some() {
+            if stale(w.t_valid_us) {
+                self.stats.stale = self.stats.stale.wrapping_add(1);
+            } else if self.baro_wait.push(w).is_some() {
                 self.stats.dropped = self.stats.dropped.wrapping_add(1);
             }
         }
-        if let Some(m) = sensors.mag {
+        if let Some(m) = sensors.mag.filter(|m| {
+            let old = stale(m.t_us);
+            if old {
+                self.stats.stale = self.stats.stale.wrapping_add(1);
+            }
+            !old
+        }) {
             if m.expected.is_some() {
                 self.mag_expected = m.expected;
             }
@@ -1065,7 +1164,11 @@ impl Estimator for Eskf {
             }
         }
         if let Some(g) = sensors.gnss {
-            self.gnss_arrival(&g);
+            if stale(g.t_us.saturating_sub(self.t.nav_gps_delay_us)) {
+                self.stats.stale = self.stats.stale.wrapping_add(1);
+            } else {
+                self.gnss_arrival(&g);
+            }
         }
         let horizon = self.horizon();
         while let Some(b) = self.baro_wait.front() {
@@ -1359,7 +1462,7 @@ mod tests {
     }
 
     #[test]
-    fn c11_health_boundaries_h_against_finite_differences_and_a_known_yaw_recovery() {
+    fn c11_health_boundaries_h_against_finite_differences_of_the_innovation_and_a_known_yaw_recovery() {
         let e = expected();
         let inc = e.inclination_rad;
         let field = |sf: f32, inc: f32| [sf * e.strength_ut * cosf(inc), 0.0, sf * e.strength_ut * sinf(inc)];
@@ -1371,25 +1474,51 @@ mod tests {
         assert!(healthy(&field(1.0, inc + e.tol_inclination_rad - d), &e));
         assert!(!healthy(&field(1.0, inc + e.tol_inclination_rad + d), &e));
         assert!(!healthy(&field(1.0, inc - e.tol_inclination_rad - d), &e));
-        // H: the 321 yaw's derivative along the NED attitude error, against central differences, f64.
-        let mut worst = 0.0f64;
-        for k in 0..200 {
-            let a = k as f32 * 0.37;
-            let q = normalized([1.0 + 0.3 * sinf(a), 0.3 * cosf(1.3 * a), 0.3 * sinf(2.1 * a), sinf(0.7 * a)]);
-            let h = yaw_h(&rotation(&q));
-            for j in 0..3 {
-                let eps = 1e-3f32;
-                let mut dq = [1.0, 0.0, 0.0, 0.0];
-                dq[j + 1] = 0.5 * eps;
-                let up = yaw_of(&normalized(qmul(&dq, &q)));
-                dq[j + 1] = -0.5 * eps;
-                let dn = yaw_of(&normalized(qmul(&dq, &q)));
-                let fd = wrap((up - dn) as f32) as f64 / (2.0 * f64::from(eps));
-                worst = worst.max((fd - f64::from(h[j])).abs());
+        // H (review ruling 1): against central differences of the innovation actually used, yaw_innov, under the error
+        // composed on the left (q <- [1, dθ/2] q): H_j = -(y(+eps e_j) - y(-eps e_j)) / (2 eps). Inclinations 0, 60 and
+        // 75 deg; tilts 0 and 30 deg (roll, pitch and both); eight yaws; a 3 deg attitude error about a generic axis so
+        // that the innovation is not zero. eps 1e-3 rad: the f32 rounding of y (about 2e-7) gives about 2e-4 of noise,
+        // the truncation (eps^2 / 6 times the third derivative) below 1e-4 at 75 deg; tolerance 2e-3 max(1, |H_j|).
+        let dec = Tuning::DEFAULT.nav_mag_declination_rad;
+        let axis_q = |ax: usize, ang: f32| {
+            let mut q = [cosf(0.5 * ang), 0.0, 0.0, 0.0];
+            q[ax + 1] = sinf(0.5 * ang);
+            q
+        };
+        let (mut worst, mut n, mut h60) = (0.0f32, 0, None);
+        for inc_deg in [0.0f32, 60.0, 75.0] {
+            let inc = inc_deg.to_radians();
+            let m_ned = [cosf(inc) * cosf(dec), cosf(inc) * sinf(dec), sinf(inc)].map(|x| x * e.strength_ut);
+            for (roll, pitch) in [(0.0f32, 0.0f32), (30.0, 0.0), (0.0, 30.0), (-30.0, 0.0), (21.0, -21.0)] {
+                for k in 0..8 {
+                    let yaw = (k as f32 * 45.0 + 10.0).to_radians();
+                    let q_true = qmul(&qmul(&axis_q(2, yaw), &axis_q(1, pitch.to_radians())), &axis_q(0, roll.to_radians()));
+                    let r = rotation(&q_true);
+                    let m_b: [f32; 3] = core::array::from_fn(|i| (0..3).map(|j| r[j][i] * m_ned[j]).sum());
+                    let err = 3.0f32.to_radians();
+                    let q = normalized(qmul(&[cosf(0.5 * err), 0.6 * sinf(0.5 * err), -0.48 * sinf(0.5 * err), 0.64 * sinf(0.5 * err)], &q_true));
+                    let h = yaw_h(&q, &m_b).expect("a horizontal field");
+                    if inc_deg == 60.0 && roll == 0.0 && pitch == 0.0 && k == 0 {
+                        h60 = Some(yaw_h(&q_true, &m_b).unwrap());
+                    }
+                    for j in 0..3 {
+                        let eps = 1e-3f32;
+                        let mut dq = [1.0, 0.0, 0.0, 0.0];
+                        dq[j + 1] = 0.5 * eps;
+                        let up = yaw_innov(&normalized(qmul(&dq, &q)), &m_b, dec);
+                        dq[j + 1] = -0.5 * eps;
+                        let dn = yaw_innov(&normalized(qmul(&dq, &q)), &m_b, dec);
+                        let fd = -wrap(up - dn) / (2.0 * eps);
+                        worst = worst.max(fabsf(fd - h[j]) / fabsf(h[j]).max(1.0));
+                        n += 1;
+                    }
+                }
             }
         }
-        println!("c11: H against finite differences, worst {worst:e}");
-        assert!(worst < 1e-2, "H differs by {worst}");
+        println!("c11: H against finite differences of the innovation, {n} entries, worst relative difference {worst:e}; H at 60 deg, level {h60:?}");
+        assert!(worst < 2e-3, "H differs by {worst}");
+        // The guard: a vertical field has no heading.
+        assert_eq!(yaw_h(&[1.0, 0.0, 0.0, 0.0], &[0.0, 0.0, 50.0]), None);
         // Known yaw: a vehicle at 40 deg aligns to it.
         let t = Tuning::DEFAULT;
         let mut f = Eskf::new(&t).unwrap();
@@ -1751,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn b5_no_aid_leaves_the_horizontal_accel_bias_and_without_the_inhibit_it_moves() {
+    fn b5_no_aid_leaves_the_accel_bias_and_without_the_inhibit_it_moves() {
         let t = Tuning::DEFAULT;
         let moved = |inhibit: bool| {
             let mut f = Eskf::new(&t).unwrap();
@@ -1760,9 +1889,9 @@ mod tests {
             w.expected = None;
             run(&mut f, &mut w, 2.0, |_| true, |_, _, _| {});
             let ba0 = f.biases().1;
-            // A horizontal manoeuvre: 1 m/s^2 north then south, 2 s each, then 1 s still. The change of b_a x and y in
-            // the steps whose job was a no-aid scalar (the nominal integration never changes a bias).
-            let mut by_noaid = 0.0f32;
+            // A horizontal manoeuvre: 1 m/s^2 north then south, 2 s each, then 1 s still. The change of b_a x and y, and
+            // of b_a z, in the steps whose job was a no-aid scalar (the nominal integration never changes a bias).
+            let (mut by_noaid, mut by_noaid_z) = (0.0f32, 0.0f32);
             let mut prev = f.biases().1;
             for a in [1.0, -1.0, 0.0] {
                 w.a = [a, 0.0, 0.0];
@@ -1770,17 +1899,31 @@ mod tests {
                     let ba = f.biases().1;
                     if f.events().any(|e| e.src == code::NOAID) {
                         by_noaid += (ba[0] - prev[0]).abs() + (ba[1] - prev[1]).abs();
+                        by_noaid_z += (ba[2] - prev[2]).abs();
                     }
                     prev = ba;
                 });
             }
             let ba = f.biases().1;
-            (by_noaid, (ba[0] - ba0[0]).abs() + (ba[1] - ba0[1]).abs(), f.stats().noaid)
+            // b_a z directly: one no-aid scalar on north with P holding a north/b_a z correlation of 0.5.
+            let c = 0.5 * sqrtf(f.p[POS][POS] * f.p[ACCEL_BIAS + 2][ACCEL_BIAS + 2]);
+            f.p[POS][ACCEL_BIAS + 2] = c;
+            f.p[ACCEL_BIAS + 2][POS] = c;
+            let z0 = f.nom.ba[2];
+            f.fuse_noaid(0, 1.0, t.nav_noaid_sigma_m * t.nav_noaid_sigma_m);
+            let direct_z = (f.nom.ba[2] - z0).abs();
+            (by_noaid, by_noaid_z, direct_z, (ba[0] - ba0[0]).abs() + (ba[1] - ba0[1]).abs(), f.stats().noaid)
         };
         let (with, without) = (moved(true), moved(false));
-        println!("b5: |d b_a x|+|d b_a y| by the no-aid scalars, in total (barometer included), no-aid scalars: with the inhibit {with:?}, without {without:?}");
-        assert!(with.2 > 0 && with.0 == 0.0, "the no-aid scalars moved b_a x/y: {with:?}");
+        println!(
+            "b5: |d b_a x|+|d b_a y| and |d b_a z| by the no-aid scalars, |d b_a z| by one no-aid scalar with a north/b_a z \
+             correlation of 0.5, |d b_a x|+|d b_a y| in total (barometer included), no-aid scalars: with the inhibit \
+             {with:?}, without {without:?}"
+        );
+        assert!(with.4 > 0 && with.0 == 0.0, "the no-aid scalars moved b_a x/y: {with:?}");
+        assert!(with.1 == 0.0 && with.2 == 0.0, "the no-aid scalars moved b_a z: {with:?}");
         assert!(without.0 > 0.0, "negative control: without the inhibit the no-aid scalars move b_a x/y");
+        assert!(without.2 > 0.0, "negative control: without the inhibit a no-aid scalar moves b_a z");
     }
 
     #[test]
@@ -1825,5 +1968,144 @@ mod tests {
             assert!(n.attitude.iter().chain(&n.velocity_ms).chain(&n.position_m).chain(&n.rates_rads).all(|v| v.is_finite()));
         }
         assert!(navs.last().unwrap().valid.tilt, "realigned");
+    }
+
+    #[test]
+    fn b8_after_a_reinitialisation_10_m_above_the_datum_the_vertical_flags_return() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        // At the first start the barometer initialises the height at once: the time from the first horizon to the flags.
+        let (mut h0, mut first) = (None, None);
+        run(&mut f, &mut w, 10.0, |_| false, |_, nav, _| {
+            let h0 = *h0.get_or_insert(nav.t_us);
+            if first.is_none() && nav.valid.position_d && nav.valid.velocity_d {
+                first = Some(nav.t_us - h0);
+            }
+        });
+        assert!(f.nav().valid.position_d);
+        // 10 m above the datum; once the horizon has passed the move (1 s, inside the timeout), a re-initialisation, as a
+        // non-finite state causes.
+        w.p[2] = -10.0;
+        run(&mut f, &mut w, 1.0, |_| false, |_, _, _| {});
+        f.reinitialise();
+        let t0 = f.horizon();
+        let mut back = None;
+        run(&mut f, &mut w, 8.0, |_| false, |f, nav, _| {
+            if back.is_none() && nav.valid.position_d && nav.valid.velocity_d {
+                back = Some((nav.t_us - t0, nav.position_m[2], nav.sigma.unwrap().position_d_m, f.stats().height_resets));
+            }
+        });
+        println!(
+            "b8: vertical flags at the first start after {first:?} us; after the re-initialisation (us, D, sigma D, height \
+             resets) {back:?}"
+        );
+        let (dt, d, sd, _) = back.expect("the vertical flags never returned");
+        // As at the first start, within one barometer period.
+        assert!(dt <= first.unwrap() + 1_000_000 / BARO_RATE_HZ, "returned after {dt} us");
+        assert!((d + 10.0).abs() <= SIGMAS * sd, "D {d} m");
+    }
+
+    #[test]
+    fn c13_compass_refusals_are_written_once_per_fusion_interval_and_all_counted() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        w.mag_field = (0.5, INC_DEG);
+        let mut events = 0u32;
+        run(&mut f, &mut w, 10.0, |_| false, |f, _, _| {
+            events += f.events().filter(|e| e.src == code::MAG_YAW && e.ok == code::REFUSED).count() as u32;
+        });
+        let refused = f.stats().mag_refused;
+        println!("c13: 10 s of unhealthy compass samples: {refused} refused, {events} refusal records");
+        assert!(refused > 900, "every refusal counted: {refused}");
+        assert!(u64::from(events) <= 10_000_000 / t.nav_mag_fuse_us + 1, "{events} records");
+        assert!(events > 0);
+    }
+
+    #[test]
+    fn c14_a_sample_older_than_the_ring_is_dropped_and_counted() {
+        let t = Tuning::DEFAULT;
+        let (mut f, mut w) = flying(&t, 10.0, [1.0, 0.0, 0.0]);
+        let quiet = |w: &mut World| {
+            let mut s = w.step();
+            s.baro = None;
+            s.mag = None;
+            s.gnss = None;
+            s
+        };
+        // Each sample stamped 0.6 s ago (older than now - nav_buffer_us, 0.5 s), on a step with no other slow sample.
+        let old = |w: &World| w.t_us() + PERIOD_US - 600_000;
+        let s0 = *f.stats();
+        let mut s = quiet(&mut w);
+        let t_b = w.t_us() - 600_000;
+        s.baro = Some(BaroSample { reading: BaroReading { pressure_pa: pressure_at(50.0), temperature_c: 15.0 }, t_us: t_b, seq: 0 });
+        f.update(&s);
+        let after_baro = (f.stats().stale, f.baro_job.map(|j| j.h_b));
+        let mut s = quiet(&mut w);
+        let mut m = w.clone_mag();
+        m.t_us = w.t_us() - 600_000;
+        m.reading.field_ut = [0.0, 50.0, 0.0];
+        s.mag = Some(m);
+        f.update(&s);
+        let after_mag = (f.stats().stale, f.mag_job, (0..f.mag_wait.len).any(|i| f.mag_wait.get(i).t_us == m.t_us));
+        let t_g = old(&w);
+        let mut s = quiet(&mut w);
+        let mut r = w.last_fix.unwrap();
+        r.lat_e7 = r.lat_e7.map(|l| l + 1_000);
+        s.gnss = Some(GnssSample { reading: r, t_us: t_g, seq: 0 });
+        f.update(&s);
+        let s1 = *f.stats();
+        println!("c14: stale after the barometer {after_baro:?}, the compass {after_mag:?}, GNSS {}; GNSS epochs {} -> {}", s1.stale, s0.gps_epochs, s1.gps_epochs);
+        assert_eq!(after_baro.0, s0.stale + 1);
+        assert!(after_baro.1.is_none_or(|h| h < 10.0), "the stale barometer sample was queued");
+        assert_eq!(after_mag.0, s0.stale + 2);
+        assert!(after_mag.1.is_none() && !after_mag.2, "the stale compass sample was kept");
+        assert_eq!((s1.stale, s1.gps_epochs), (s0.stale + 3, s0.gps_epochs), "the stale GNSS sample was used");
+    }
+
+    #[test]
+    fn n1_a_tiny_negative_variance_gives_finite_sigmas_and_stays_finite_through_a_propagation_and_a_fusion() {
+        let t = Tuning::DEFAULT;
+        let (mut f, _) = flying(&t, 10.0, [0.0; 3]);
+        // Down velocity and position uncorrelated with everything and -1e-9 (rounding below 0): the propagation adds
+        // nothing to the position variance (no position process noise, no velocity variance).
+        f.reset_state_var(VEL + 2, -1e-9);
+        f.reset_state_var(POS + 2, -1e-9);
+        let all = |f: &Eskf| {
+            let s = f.nav().sigma.unwrap();
+            [s.tilt_rad, s.heading_rad, s.velocity_ne_ms, s.velocity_d_ms, s.position_ne_m, s.position_d_m]
+        };
+        let before = all(&f);
+        f.predict();
+        let diag_min = (0..N).map(|i| f.p[i][i]).fold(f32::INFINITY, f32::min);
+        let (ok, _) = f.fuse_unit(POS + 2, 0.1, t.nav_baro_sigma_m * t.nav_baro_sigma_m);
+        let after = all(&f);
+        println!("n1: sigmas with the negative entries {before:?}; smallest diagonal after the propagation {diag_min:e}; fused {ok}, sigmas {after:?}");
+        assert!(before.iter().all(|v| v.is_finite()), "{before:?}");
+        assert!(diag_min >= 0.0);
+        assert!(f.finite() && after.iter().all(|v| v.is_finite()) && (0..N).all(|i| f.p[i][i] >= 0.0));
+    }
+
+    #[test]
+    fn c15_no_speed_screen_record_for_an_epoch_without_velocity() {
+        let t = Tuning::DEFAULT;
+        let (mut f, mut w) = flying(&t, 10.0, [2.0, 0.0, 0.0]);
+        let s0 = *f.stats();
+        let mut screened = 0;
+        for _ in 0..5_000_000 / PERIOD_US {
+            let mut s = w.step();
+            if let Some(g) = s.gnss.as_mut() {
+                g.reading.speed_mm_s = None;
+                g.reading.vel_ned_mm_s = None;
+            }
+            f.set_armed(true);
+            f.update(&s);
+            screened += f.events().filter(|e| e.src == code::VN && e.ok == code::SCREENED).count();
+        }
+        let s1 = *f.stats();
+        println!("c15: 5 s of epochs without speed at 2 m/s: screen records {screened}, E3b {} -> {}, positions fused {} -> {}", s0.gps_e3b, s1.gps_e3b, s0.gps_pos_fused, s1.gps_pos_fused);
+        assert_eq!((screened, s1.gps_e3b), (0, s0.gps_e3b));
+        assert!(s1.gps_pos_fused > s0.gps_pos_fused + 40);
     }
 }
