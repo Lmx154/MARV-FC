@@ -2,7 +2,9 @@
 //! core-0 device, a buffered UART read in thread mode without DMA. The `lc76g` driver is used as it
 //! is. At every start, restart and apply (a `GPS_RATE_MS` write) the firmware sends the receiver its
 //! fix interval and message set, exactly the list of `fw_settings::gnss::commands` (version query,
-//! interval 1000 ms, the ten sentence rates, EPE off, then the interval of `GPS_RATE_MS` if not 1000 ms):
+//! interval 1000 ms, the ten sentence rates, EPE off, then the interval of `GPS_RATE_MS` if not 1000 ms, held
+//! until `fw_settings::gnss::FIX_INTERVAL_SETTLE_MS` after the first interval's acknowledgement: sooner, a
+//! receiver whose rate the first one changed answers "being processed" and restarts by itself):
 //! never `init` (it writes the navigation mode), PPS, a restart or a save, so the settings are volatile
 //! and the receiver's stored configuration does not change. The stream is then GGA, RMC and GST every
 //! fix and GSA at most once per second. A configuration that fails (a refusal, no acknowledgement, the
@@ -42,7 +44,7 @@ use embassy_rp::bind_interrupts;
 use embassy_rp::peripherals::{PIN_24, PIN_25, UART1};
 use embassy_rp::uart::{self, BufferedInterruptHandler, BufferedUart};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
-use embassy_time::{Duration, Instant, with_deadline, with_timeout};
+use embassy_time::{Duration, Instant, Timer, with_deadline, with_timeout};
 use embedded_io_async::Read;
 use fw_core::health::{ErrorKind, Limits};
 use fw_core::sample::{GstOrder, Publish, UtcTime, horizontal_std_mm};
@@ -272,8 +274,9 @@ impl GnssAdapter {
         self.publish();
     }
 
-    /// Sends the configuration of the stored `GPS_RATE_MS`: `fw_settings::gnss::commands` in order,
-    /// stopping at the first failure, the whole list under one deadline T. A failure is a WARNING
+    /// Sends the configuration of the stored `GPS_RATE_MS`: `fw_settings::gnss::commands` in order, a
+    /// fix interval held until `fw_settings::gnss::not_before_ms`, stopping at the first failure, the whole
+    /// list under one deadline T. A failure is a WARNING
     /// (STATUSTEXT and defmt) and returned. A fix held or waiting from before is dropped: it is older
     /// than the fixes the driver discarded during the commands.
     async fn configure(&mut self) -> Result<(), &'static str> {
@@ -315,11 +318,20 @@ impl GnssAdapter {
         let commands = list.as_slice();
         let mut done = 0usize;
         let mut version = None;
+        let mut interval_acked: Option<Instant> = None;
         let outcome = with_deadline(begun + CONFIGURE_DEADLINE, async {
             for command in commands {
+                if let Some(t) =
+                    fw_settings::gnss::not_before_ms(command, interval_acked.map(|t| t.as_millis()))
+                {
+                    Timer::at(Instant::from_millis(t)).await;
+                }
                 match command {
                     Command::QueryVersion => version = Some(gps.version().await?),
                     _ => gps.command(command).await?,
+                }
+                if matches!(command, Command::SetFixInterval { .. }) {
+                    interval_acked = Some(Instant::now());
                 }
                 done += 1;
             }

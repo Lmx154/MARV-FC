@@ -28,7 +28,7 @@ pub static TABLE: [ParamDef; COUNT] = [ParamDef::i32(
     Apply::Configure,
 )];
 
-const BAD_RATE: &str = "GPS_RATE_MS: not 100, 200, 500 or 1000";
+const BAD_RATE: &str = "not 100, 200, 500 or 1000";
 
 /// The most commands [`commands`] returns: version query, interval 1000, ten sentence rates, EPE, interval.
 pub const MAX_COMMANDS: usize = 14;
@@ -73,6 +73,27 @@ pub fn config(ms: u16) -> Config {
     }
 }
 
+/// The least time from the acknowledgement of a fix interval to the sending of the next fix interval of the
+/// same list (the target, when it is not 1000 ms), ms. Measured on the bench (LC76GABNR12A05S, firmware
+/// 2025/09/25, 2026-11-20): a `$PAIR050` sent 18 to 170 ms after the acknowledgement of one that changed the
+/// rate is answered `$PAIR001,050,1` (being processed), then the receiver restarts by itself about 1.8 s
+/// later, at its stored settings (8 of 8); sent 207 ms or more after it, it is accepted (7 of 7; once also at
+/// 97 ms). After an applied change the receiver sends an unsolicited `$PAIR001,124,0` 114 to 241 ms after the
+/// acknowledgement. 500 ms is twice the latest of those (241 ms) and three times the latest restart (170 ms);
+/// with the driver's worst measured acknowledgement (93 ms) the 14 commands take at most 1.8 s, inside T.
+pub const FIX_INTERVAL_SETTLE_MS: u64 = 500;
+
+/// When `command` may be sent, in ms of the caller's clock: not before `Some(t)`, for a fix interval that
+/// follows a fix interval of the same list acknowledged at `interval_acked_ms`; `None`: at once.
+pub fn not_before_ms(command: &Command<'_>, interval_acked_ms: Option<u64>) -> Option<u64> {
+    match command {
+        Command::SetFixInterval { .. } => {
+            interval_acked_ms.map(|t| t.saturating_add(FIX_INTERVAL_SETTLE_MS))
+        }
+        _ => None,
+    }
+}
+
 /// A fixed-capacity, ordered list of commands (no allocator).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CommandList {
@@ -96,7 +117,8 @@ impl CommandList {
 
 /// The commands that apply `config`, in the driver's `init` order without the navigation mode and PPS:
 /// the version query, fix interval 1000 ms, the rate of every sentence type, EPE, then the fix interval
-/// of `config` last and only if it is not 1000 ms (the receiver is at 1 Hz while the rates change).
+/// of `config` last and only if it is not 1000 ms (the receiver is at 1 Hz while the rates change). The
+/// sender holds that last command until [`not_before_ms`].
 /// Only these four kinds of command: never a save, a restart, a baud rate, a mode, PPS or a raw sentence.
 pub fn commands(config: &Config) -> CommandList {
     let mut list = CommandList {
@@ -248,8 +270,10 @@ mod tests {
         assert_eq!(p.set(80, ParamValue::I32(300)), Err(ParamError::Rejected));
         assert_eq!(
             p.take_notice().unwrap().kind.text(),
-            "GPS_RATE_MS: not 100, 200, 500 or 1000"
+            "not 100, 200, 500 or 1000"
         );
+        // The STATUSTEXT puts the name before the text: the whole sentence fits its 50 characters once.
+        assert!("GPS_RATE_MS: ".len() + BAD_RATE.len() <= 50);
         // 50 is below the range: refused before the validator is asked.
         assert_eq!(p.set(80, ParamValue::I32(50)), Err(ParamError::OutOfRange));
     }
@@ -270,5 +294,106 @@ mod tests {
         for v in [None, Some(0), Some(-200), Some(65_736), Some(i32::MAX)] {
             assert_eq!(rate_ms(v), Err(BAD_RATE), "{v:?}");
         }
+    }
+
+    /// The receiver as measured on the bench (see [`FIX_INTERVAL_SETTLE_MS`]): a fix interval that arrives
+    /// within `UNSAFE_MS` of the acknowledgement of a fix interval that changed the rate gets no final
+    /// answer and the receiver restarts at its stored 1000 ms; anything else is acknowledged `ack_ms` after it
+    /// arrives.
+    struct Receiver {
+        rate: u16,
+        ack_ms: u64,
+        unsafe_until: Option<u64>,
+    }
+
+    /// Above the latest restart (170 ms) and the latest `$PAIR001,124,0` (241 ms) measured.
+    const UNSAFE_MS: u64 = 250;
+
+    impl Receiver {
+        fn receive(&mut self, command: &Command<'_>, t: u64) -> Option<u64> {
+            let ack = t + self.ack_ms;
+            if let Command::SetFixInterval { ms } = *command {
+                if self.unsafe_until.is_some_and(|u| t < u) {
+                    self.rate = 1000;
+                    self.unsafe_until = None;
+                    return None;
+                }
+                if ms != self.rate {
+                    self.rate = ms;
+                    self.unsafe_until = Some(ack + UNSAFE_MS);
+                }
+            }
+            Some(ack)
+        }
+    }
+
+    /// Sends the list of `to` to a receiver at `from`, as the adapter does (each command after the
+    /// acknowledgement of the one before, held until `not_before_ms` when `hold`). The receiver's rate at
+    /// the end, whether every command was answered, and the time taken, ms.
+    fn send(from: u16, to: u16, ack_ms: u64, hold: bool) -> (u16, bool, u64) {
+        let mut receiver = Receiver {
+            rate: from,
+            ack_ms,
+            unsafe_until: None,
+        };
+        let mut t = 0;
+        let mut interval_acked = None;
+        for command in commands(&config(to)).as_slice() {
+            if hold && let Some(not_before) = not_before_ms(command, interval_acked) {
+                t = t.max(not_before);
+            }
+            let Some(ack) = receiver.receive(command, t) else {
+                return (receiver.rate, false, t);
+            };
+            t = ack;
+            if matches!(command, Command::SetFixInterval { .. }) {
+                interval_acked = Some(t);
+            }
+        }
+        (receiver.rate, true, t)
+    }
+
+    /// Every transition among the allowed rates, at the fastest and the slowest acknowledgement measured
+    /// (4.4 and 93 ms, lc76g README): the receiver ends at the target, every command answered, inside T.
+    #[test]
+    fn every_transition_reaches_the_target_inside_the_deadline() {
+        for from in ALLOWED {
+            for to in ALLOWED {
+                for ack_ms in [5, 93] {
+                    let (rate, answered, took) = send(from, to, ack_ms, true);
+                    assert!(answered, "{from} -> {to}, ack {ack_ms} ms");
+                    assert_eq!(rate, to, "{from} -> {to}, ack {ack_ms} ms");
+                    assert!(took <= 2500, "{from} -> {to}, ack {ack_ms} ms: {took} ms");
+                }
+            }
+        }
+    }
+
+    /// The scripted receiver shows the bench failure when the target follows at once: from a rate other
+    /// than 1000 ms to another one other than 1000 ms, the list ends unanswered with the receiver at 1000 ms.
+    #[test]
+    fn without_the_hold_the_scripted_receiver_restarts_as_on_the_bench() {
+        for from in ALLOWED {
+            for to in ALLOWED {
+                let (rate, answered, _) = send(from, to, 5, false);
+                let fails = from != 1000 && to != 1000;
+                assert_eq!(answered, !fails, "{from} -> {to}");
+                assert_eq!(rate, if fails { 1000 } else { to }, "{from} -> {to}");
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_fix_interval_after_a_fix_interval_is_held() {
+        assert_eq!(
+            not_before_ms(&Command::SetFixInterval { ms: 200 }, None),
+            None
+        );
+        assert_eq!(
+            not_before_ms(&Command::SetFixInterval { ms: 200 }, Some(40)),
+            Some(40 + FIX_INTERVAL_SETTLE_MS)
+        );
+        assert_eq!(not_before_ms(&Command::SetEpe(false), Some(40)), None);
+        assert_eq!(not_before_ms(&Command::QueryVersion, Some(40)), None);
     }
 }

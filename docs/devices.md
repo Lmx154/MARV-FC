@@ -203,7 +203,11 @@ Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; dr
 - `$PAIR513*3D` saves the module's settings to its flash. Send it only when a permanent change is intended.
 - The firmware (`src/gnss.rs`) sends at every start, restart and apply only `fw_settings::gnss::commands` for `GPS_RATE_MS`
   (100, 200, 500 or 1000 ms): version query, `$PAIR050,1000`, `$PAIR062` for the ten types (GGA, RMC, GST 1; GSA
-  ceil(1000 / ms); the rest 0), `$PQTMCFGMSGRATE,W,PQTMEPE,0,2`, then `$PAIR050,<ms>` if not 1000. Never `init` (navigation
+  ceil(1000 / ms); the rest 0), `$PQTMCFGMSGRATE,W,PQTMEPE,0,2`, then `$PAIR050,<ms>` if not 1000, at least 500 ms after
+  the first `$PAIR050` was acknowledged (`FIX_INTERVAL_SETTLE_MS`). Measured 2026-11-20 (LC76GABNR12A05S, 2025/09/25): a
+  `$PAIR050` 18 to 170 ms after one that changed the rate gets `$PAIR001,050,1` (being processed), then the module restarts
+  by itself about 1.8 s later (ROM boot text, `BL Jump`, `$PQTMVER`) at its stored settings (8 of 8); from 207 ms on it is
+  accepted (7 of 7). An applied change is followed 114 to 241 ms later by an unsolicited `$PAIR001,124,0`. Never `init` (navigation
   mode), PPS, `$PAIR513` or `$PQTMSAVEPAR`: volatile; after a power cycle the module runs at its stored settings until the
   next start, restart or apply. The epoch's sentence order with GST on is not recorded yet (bench B-g2).
 

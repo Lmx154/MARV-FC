@@ -207,7 +207,11 @@ The field at rest on the driver's bench was about 66 to 67 uT.
 `read`. **The firmware configures the receiver's rate and messages at every start and never saves in the receiver**: at every start (after the
 first valid sentence), restart (after the flush) and apply (a `GPS_RATE_MS` write) it sends exactly `fw_settings::gnss::commands`: the version
 query, fix interval 1000 ms, the ten sentence rates, EPE off, then the interval of `GPS_RATE_MS` last if it is not 1000 ms; each is acknowledged,
-the list stops at the first failure and runs under one deadline T (2.5 s). Never `init` (it writes the navigation mode), PPS, a baud change, a
+the list stops at the first failure and runs under one deadline T (2.5 s). The last interval is held until `FIX_INTERVAL_SETTLE_MS` (500 ms)
+after the first interval's acknowledgement (`fw_settings::gnss::not_before_ms`, host-tested with a scripted receiver): on the bench
+(2026-11-20) a `$PAIR050` sent 18 to 170 ms after one that changed the rate was answered `$PAIR001,050,1` (being processed) and the receiver
+then restarted by itself about 1.8 s later at its stored settings (8 of 8: every change between two rates other than 1000 ms, and a warm
+reset of the board while the receiver ran faster than 1 Hz); from 207 ms on it was accepted (7 of 7). A configuration now takes about 0.55 s. Never `init` (it writes the navigation mode), PPS, a baud change, a
 restart or a save: the settings are volatile, the receiver's stored configuration does not change, and a receiver that resets on its own comes
 back at its stored settings until the next start, restart or apply. The row then sees GGA, RMC and GST every fix and GSA at most once per second.
 Success: `[INFO] GNSS: configured: <ms> ms, GSA every <n>, GST every fix, other sentences off, EPE off, volatile (not saved), <version>, <t> ms`.
