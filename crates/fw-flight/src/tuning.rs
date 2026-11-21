@@ -39,6 +39,26 @@ pub struct Tuning {
     /// half of the hover collective at the weakest point of the +/-30 % thrust spread
     /// (decision-flight-ground-20261119, section 3: 0.5/0.7, ArduPilot's hover/2 at the weakest spread point; PROPOSED).
     pub ground_thrust_g: f32,
+    /// `MahonyBaro`'s vertical filter: covariance propagation period, us (decision-nav-eskf-20261120, B3, approved
+    /// 2026-11-21).
+    pub nav_predict_us: u64,
+    /// The barometer's delay added to the sample's age, us: the BMP581's conversion time, x16 pressure 10.4 ms plus
+    /// x2 temperature 1.1 ms (B3; the card's baro.latency).
+    pub nav_baro_delay_us: u64,
+    /// The barometer's height noise, 1 sigma, m (B3).
+    pub nav_baro_sigma_m: f32,
+    /// The innovation gate, in sigmas of the scalar innovation (B3).
+    pub nav_gate_sigma: f32,
+    /// Time without an accepted barometer fusion after which the vertical flags drop and the height is reset, us (B3).
+    pub nav_aid_timeout_us: u64,
+    /// Accelerometer velocity random walk, m/s/sqrt(s) (B3, `vrw`).
+    pub nav_vrw: f32,
+    /// Accelerometer bias random walk, m/s^2/sqrt(s) (B3, `ba_rw`).
+    pub nav_ba_rw: f32,
+    /// Initial vertical velocity sigma, m/s (B3, `P0_vel`: the emulation's value, forward.py:30).
+    pub nav_p0_vel_ms: f32,
+    /// Initial accelerometer bias sigma, m/s^2 (B3, `P0_ba`: PX4 ekf2_abias_init, px4-common.h:348).
+    pub nav_p0_ba_ms2: f32,
 }
 
 impl Tuning {
@@ -59,5 +79,14 @@ impl Tuning {
         rc_fs_timeout_us: 1_000_000,
         arm_thr_max: 0.05,
         ground_thrust_g: 0.5 / 0.7,
+        nav_predict_us: 10_000,
+        nav_baro_delay_us: 11_500,
+        nav_baro_sigma_m: 0.5,
+        nav_gate_sigma: 5.0,
+        nav_aid_timeout_us: 5_000_000,
+        nav_vrw: 0.05,
+        nav_ba_rw: 3e-3,
+        nav_p0_vel_ms: 0.5,
+        nav_p0_ba_ms2: 0.2,
     };
 }

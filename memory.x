@@ -107,6 +107,8 @@ SECTIONS {
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
         /* The N0 bench (decision-nav-eskf-20261120): fw_flight::eskf_n0 and the bench binary eskf_bench; nothing in the flight image matches. */
         *(.text.*9fw_flight7eskf_n0* .text.*10eskf_bench*)
+        /* MahonyBaro (decision-nav-eskf-20261120, B1): the flight image does not run it until packet E2. */
+        *(.text.*9fw_flight11mahony_baro*)
         /* The flight log (decision-flight-logging-20261119): the dflog encoders the Stepper calls; core 0's stay in flash. */
         *(.text.*7fw_core5dflog10encode_imu* .text.*7fw_core5dflog10encode_nav* .text.*7fw_core5dflog11encode_setp*)
         *(.text.*7fw_core5dflog10encode_dmd* .text.*7fw_core5dflog10encode_mot* .text.*7fw_core5dflog10encode_esc*)
