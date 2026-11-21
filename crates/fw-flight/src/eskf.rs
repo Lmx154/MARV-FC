@@ -3,6 +3,19 @@
 //! and GNSS at a delayed time horizon, t_now - nav_gps_delay_us (C2a), so that every measurement is fused at its own
 //! time. It never steers in phase 1 and is not in the flight image (packet E2 puts it on the board in shadow).
 //!
+//! D1 (Amendment D): for `ImuBaro` and `Imu`, [`NavState::rates_rads`] is the PT1 of the raw gyro (`Tuning::ins_gyro_lpf_hz`,
+//! Mahony's form: dt from successive sample times capped at `DT_MAX_US`, started at the first sample with its value) minus
+//! the gyro-bias estimate, subtracted when the NavState is built; with the bias at 0 it equals `Mahony`'s rates bit for
+//! bit. `Full` keeps the raw gyro of its horizon sample minus the bias.
+//!
+//! D2 (Amendment D): for `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each disarmed covariance
+//! propagation keeps the mean bias-corrected specific force of its interval. In the first `update` after the armed state
+//! went false to true, when the tilt is aligned and that force is inside the alignment window, roll and pitch are set from it
+//! as in the first alignment with the yaw (the Euler yaw, atan2(R10, R00), of the attitude before the step) kept; v_N and v_E
+//! go to 0, the hold position to the current N and E, and the cross terms of the three attitude and the N/E velocity rows
+//! and columns of P are zeroed with every variance kept. It is that step's one heavy job; the queued jobs run later.
+//! Outside the window, or with no stored interval, nothing changes. `Full` never does it.
+//!
 //! The arithmetic is the N0 bench's ([`crate::eskf_n0`]): nominal integration on every IMU1 sample (at the horizon),
 //! the structured F P F^T + Q every nav_predict_us, sequential scalar fusions. Work rule I2: each step integrates the
 //! nominal state and does at most ONE heavy job (one covariance propagation, one scalar fusion, an alignment or a
@@ -61,6 +74,7 @@ use crate::eskf_n0::{
 use crate::gnc::{Estimator, GeoPoint, NavSigma, NavState, Sensors, Valid};
 use crate::mahony::{ACCEL_MAX_G, ACCEL_MIN_G, DT_MAX_US};
 use crate::mahony_baro::isa_height_m;
+use crate::quat::pt1;
 use crate::tuning::Tuning;
 use core::f32::consts::PI;
 use fw_core::calib::GRAVITY_MSS;
@@ -379,6 +393,14 @@ pub struct Eskf {
     noaid_inhibit: bool,
     /// Horizon time from which the next [`Aiding::Imu`] hold set is queued.
     next_hold_us: u64,
+    /// D1: PT1 of the raw gyro of the integrated samples ([`Aiding::ImuBaro`], [`Aiding::Imu`]).
+    rates_lpf: [f32; 3],
+    /// D2: mean bias-corrected specific force of the last completed disarmed covariance interval, body frame.
+    arm_f: Option<[f32; 3]>,
+    /// D2: the armed state went false to true and no `update` has run since.
+    arm_edge: bool,
+    /// D2: the arming-edge re-alignment is on; off only in a test's negative control.
+    arm_realign: bool,
 }
 
 const NOMINAL0: Nominal = Nominal {
@@ -513,6 +535,10 @@ impl Eskf {
             stats: EskfStats::default(),
             noaid_inhibit: true,
             next_hold_us: 0,
+            rates_lpf: [0.0; 3],
+            arm_f: None,
+            arm_edge: false,
+            arm_realign: true,
         })
     }
 
@@ -585,6 +611,7 @@ impl Eskf {
         self.aiding_prev = false;
         self.hold_ne = [0.0; 2];
         self.mag_rej_since = None;
+        self.arm_f = None;
         self.gps_job = None;
         self.baro_job = None;
         self.mag_job = None;
@@ -597,6 +624,16 @@ impl Eskf {
             Some(h) => s.t_us.saturating_sub(h).min(DT_MAX_US),
             None => 0,
         };
+        if self.aiding_set != Aiding::Full {
+            let hz = self.t.ins_gyro_lpf_hz;
+            self.rates_lpf = if self.horizon_us.is_some() {
+                let dt = dt_us as f32 * 1e-6;
+                let [r0, r1, r2] = self.rates_lpf;
+                [pt1(r0, s.gyro[0], dt, hz), pt1(r1, s.gyro[1], dt, hz), pt1(r2, s.gyro[2], dt, hz)]
+            } else {
+                s.gyro
+            };
+        }
         self.horizon_us = Some(s.t_us);
         self.horizon_gyro = s.gyro;
         let dt = dt_us as f32 * 1e-6;
@@ -620,6 +657,9 @@ impl Eskf {
         self.since_predict_us = 0;
         if self.tilt_aligned {
             let (dvel, dt) = (self.nom.dvel, self.nom.dt_sum);
+            if !self.armed && self.aiding_set != Aiding::Full && dt > 0.0 {
+                self.arm_f = Some([dvel[0] / dt, dvel[1] / dt, dvel[2] / dt]);
+            }
             n0::covariance_predict(&mut self.p, &self.nom.q, &dvel, dt, &self.noise);
             // The diagonal held at or above 0, as after a fusion (section 1b).
             for i in 0..N {
@@ -671,6 +711,42 @@ impl Eskf {
         self.tilt_aligned = true;
         self.hold_ne = [0.0; 2];
         self.aiding_prev = false;
+    }
+
+    /// D2: the tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step. True
+    /// when it ran, which is the step's one heavy job.
+    fn realign_at_arming(&mut self, q_pre: &[f32; 4]) -> bool {
+        let edge = self.arm_edge;
+        self.arm_edge = false;
+        if !edge || !self.arm_realign || !self.tilt_aligned || self.aiding_set == Aiding::Full {
+            return false;
+        }
+        let Some(f) = self.arm_f.take() else {
+            return false;
+        };
+        let nf = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+        if !(nf >= ACCEL_MIN_G * GRAVITY_MSS && nf <= ACCEL_MAX_G * GRAVITY_MSS && f[2] < 0.0) {
+            return false;
+        }
+        let roll = atan2f(-f[1], -f[2]);
+        let pitch = atan2f(f[0], sqrtf(f[1] * f[1] + f[2] * f[2]));
+        let r = rotation(q_pre);
+        let yaw = atan2f(r[1][0], r[0][0]);
+        let (cr, sr, cp, sp) = (cosf(0.5 * roll), sinf(0.5 * roll), cosf(0.5 * pitch), sinf(0.5 * pitch));
+        let qrp = [cr * cp, sr * cp, cr * sp, -sr * sp];
+        self.nom.q = normalized(qmul(&[cosf(0.5 * yaw), 0.0, 0.0, sinf(0.5 * yaw)], &qrp));
+        self.nom.v[0] = 0.0;
+        self.nom.v[1] = 0.0;
+        self.hold_ne = [self.nom.p[0], self.nom.p[1]];
+        for i in [ATT, ATT + 1, ATT + 2, VEL, VEL + 1] {
+            for j in 0..N {
+                if j != i {
+                    self.p[i][j] = 0.0;
+                    self.p[j][i] = 0.0;
+                }
+            }
+        }
+        true
     }
 
     /// Zeroes row and column `i` of P and sets its variance.
@@ -1133,7 +1209,7 @@ impl Eskf {
                 position_d_m: f32::INFINITY,
             }
         };
-        let g = self.horizon_gyro;
+        let g = if self.aiding_set == Aiding::Full { self.horizon_gyro } else { self.rates_lpf };
         NavState {
             t_us: horizon,
             attitude: q,
@@ -1157,6 +1233,7 @@ impl Eskf {
 impl Estimator for Eskf {
     fn update(&mut self, sensors: &Sensors) -> NavState {
         self.events = [None; EVENTS];
+        let q_pre = self.nom.q;
         let now = sensors.imu1.t_us;
         let r = &sensors.imu1.reading;
         // The ring: the sample in (a full ring first gives its oldest sample to the horizon), then the horizon advanced
@@ -1246,7 +1323,7 @@ impl Estimator for Eskf {
             self.hold_ne = [self.nom.p[0], self.nom.p[1]];
         }
         self.aiding_prev = aiding;
-        let jobs = self.one_job();
+        let jobs = if self.realign_at_arming(&q_pre) { 1 } else { self.one_job() };
         self.stats.max_jobs_per_step = self.stats.max_jobs_per_step.max(jobs);
         if self.tilt_aligned && !self.finite() {
             self.reinitialise();
@@ -1264,6 +1341,7 @@ impl Estimator for Eskf {
             self.started = false;
             self.gps_job = None;
             self.rej_since = [None; 2];
+            self.arm_edge = armed;
             if armed {
                 self.fix_hist = Fifo::new();
             }
@@ -2262,5 +2340,349 @@ mod tests {
             println!("p21: {aiding:?} tilted start, down-axis error {err_deg:e} deg");
             assert!(err_deg < 0.1, "{aiding:?}: {err_deg}");
         }
+    }
+
+    // ---- Amendment D, P1: D1 (rates) and D2 (arming-edge re-alignment) ----
+
+    use crate::mahony::Mahony;
+
+    fn tilt_err_deg(q: &[f32; 4]) -> f64 {
+        f64::from(rotation(q)[2][2]).clamp(-1.0, 1.0).acos().to_degrees()
+    }
+
+    fn roll_pitch(q: &[f32; 4]) -> (f64, f64) {
+        let r = rotation(q);
+        (f64::from(r[2][1]).atan2(f64::from(r[2][2])), -f64::from(r[2][0]).asin())
+    }
+
+    /// Every field of the filter a re-alignment could touch, as bit patterns (NaN-safe equality).
+    fn bits(e: &Eskf) -> Vec<u32> {
+        let n = &e.nom;
+        let mut v: Vec<u32> = n.q.iter().chain(&n.v).chain(&n.p).chain(&n.bg).chain(&n.ba).chain(&n.dvel).chain(&e.hold_ne).map(|x| x.to_bits()).collect();
+        v.extend(e.p.iter().flatten().map(|x| x.to_bits()));
+        v.push(n.dt_sum.to_bits());
+        v
+    }
+
+    fn rate_bits(n: &NavState) -> [u32; 3] {
+        n.rates_rads.map(f32::to_bits)
+    }
+
+    /// Heavy jobs run so far, from the counters a job moves (the ones the zero-delay variants have).
+    fn heavy(e: &Eskf) -> u32 {
+        let s = e.stats();
+        s.predicts + s.baro_fused + s.baro_gated + s.noaid + s.height_resets
+    }
+
+    #[test]
+    fn r1_zero_delay_rates_equal_mahonys_bit_for_bit_with_bias_learning_off() {
+        // Bias learning off: no initial bias variance and no bias random walk, so K's bias rows stay 0.
+        let t = Tuning { nav_p0_bg_rads: 0.0, nav_bg_rw: 0.0, ..Tuning::DEFAULT };
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let mut f = Eskf::with_aiding(&t, aiding).unwrap();
+            let mut m = Mahony::new(&t);
+            let mut w = World::new(&t);
+            let mut moved = 0.0f32;
+            for k in 0..10_000_000 / PERIOD_US {
+                let mut s = w.step();
+                let ph = k as f32 * PERIOD_US as f32 * 1e-6;
+                s.imu1.reading.gyro_rads = [0.3 * sinf(2.0 * PI * 1.7 * ph), 0.2 * cosf(2.0 * PI * 0.6 * ph), 0.1 * sinf(2.0 * PI * 3.1 * ph)];
+                let armed = w.t_us() >= 4_000_000;
+                f.set_armed(armed);
+                m.set_armed(armed);
+                let (nf, nm) = (f.update(&s), m.update(&s));
+                assert_eq!(rate_bits(&nf), rate_bits(&nm), "{aiding:?} step {k}");
+                assert_eq!(f.biases().0.map(f32::to_bits), [0; 3], "{aiding:?} step {k}: the gyro bias moved");
+                moved = moved.max(nf.rates_rads.iter().fold(0.0, |a, v| fabsf(*v).max(a)));
+            }
+            assert!(moved > 0.1, "the gyro did not move: {moved}");
+        }
+    }
+
+    #[test]
+    fn r2_a_constant_gyro_offset_with_learning_on_differs_from_mahony_by_the_bias_estimate() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        let mut m = Mahony::new(&t);
+        let mut w = World::new(&t);
+        let off = [0.02f32, -0.015, 0.0];
+        let (mut worst, mut bg) = (0.0f64, [0.0f32; 3]);
+        for _ in 0..60_000_000 / PERIOD_US {
+            let mut s = w.step();
+            s.imu1.reading.gyro_rads = off;
+            let (nf, nm) = (f.update(&s), m.update(&s));
+            bg = f.biases().0;
+            for i in 0..3 {
+                // nf = fl(x - b) with x Mahony's filtered gyro: |x - nf - b| <= u |x - b|, u = EPSILON / 2; the bound used
+                // is twice that, EPSILON max(|x|, |b|).
+                let d = f64::from(nm.rates_rads[i]) - f64::from(nf.rates_rads[i]) - f64::from(bg[i]);
+                let tol = f64::from(f32::EPSILON) * f64::from(nm.rates_rads[i].abs().max(bg[i].abs()));
+                assert!(d.abs() <= tol, "axis {i}: difference minus bias {d:e}, tolerance {tol:e}");
+                worst = worst.max(d.abs());
+            }
+        }
+        println!("r2: gyro offset {off:?}, bias estimate after 60 s {bg:?}, worst |difference - bias| {worst:e}");
+        assert!(bg[0] != 0.0 && bg[1] != 0.0, "the bias did not move: {bg:?}");
+    }
+
+    /// The disarmed handling scenario: level at rest, tilt and yaw driven into the filter by a gyro pulse the vehicle did
+    /// not make (0.5 s at [0.2, -0.1, 0.3] rad/s from 1 s: about 5.7 deg of roll, 2.9 deg of pitch, 8.6 deg of yaw),
+    /// then at rest until 4 s. Returns the filter after that, 80 further samples (at rest, or with `accelerate` a
+    /// forward acceleration of 0.6 g on the accelerometer), and whether the tilt flag stayed true from its first step.
+    fn handled(t: &Tuning, aiding: Aiding, accelerate: bool) -> (Eskf, Vec<Sensors>, bool) {
+        let mut f = Eskf::with_aiding(t, aiding).unwrap();
+        let mut w = World::new(t);
+        let (mut seen, mut ok) = (false, true);
+        while w.t_us() < 4_000_000 {
+            let mut s = w.step();
+            if w.t_us() >= 1_000_000 && w.t_us() < 1_500_000 {
+                s.imu1.reading.gyro_rads = [0.2, -0.1, 0.3];
+            }
+            f.set_armed(false);
+            let nav = f.update(&s);
+            ok &= nav.valid.tilt || !seen;
+            seen |= nav.valid.tilt;
+        }
+        let g = GRAVITY_MSS;
+        let next = (0..80)
+            .map(|_| {
+                let mut s = w.step();
+                if accelerate {
+                    s.imu1.reading.accel_ms2 = [0.6 * g, 0.0, -g];
+                }
+                s
+            })
+            .collect();
+        (f, next, ok && seen)
+    }
+
+    struct Edge {
+        pre: Eskf,
+        a: Eskf,
+        b: Eskf,
+        nav_pre: NavState,
+        na: NavState,
+        nb: NavState,
+        /// Heavy jobs the disabled run ran in the edge step; the re-aligned run's.
+        jobs_b: u32,
+        jobs_a: u32,
+        tilt_true: bool,
+    }
+
+    /// Arms `base` after `j` of the `next` samples, with the re-alignment on (`a`) and off (`b`); 40 further armed steps.
+    fn edge_at(base: &Eskf, next: &[Sensors], j: usize) -> Edge {
+        let (mut a, mut b) = (base.clone(), base.clone());
+        b.arm_realign = false;
+        let (mut nav_pre, mut tilt_true) = (a.nav(), true);
+        for s in &next[..j] {
+            a.set_armed(false);
+            b.set_armed(false);
+            nav_pre = a.update(s);
+            assert_eq!(nav_pre, b.update(s));
+        }
+        let pre = a.clone();
+        a.set_armed(true);
+        b.set_armed(true);
+        let (ha, hb) = (heavy(&a), heavy(&b));
+        let na = a.update(&next[j]);
+        let nb = b.update(&next[j]);
+        let edge = Edge { pre, nav_pre, na, nb, jobs_a: heavy(&a) - ha, jobs_b: heavy(&b) - hb, tilt_true: true, a: a.clone(), b: b.clone() };
+        tilt_true &= na.valid.tilt && nb.valid.tilt;
+        for s in &next[j + 1..j + 41] {
+            a.set_armed(true);
+            b.set_armed(true);
+            tilt_true &= a.update(s).valid.tilt && b.update(s).valid.tilt;
+        }
+        Edge { tilt_true, ..edge }
+    }
+
+    #[test]
+    fn al1_handled_set_down_armed_realigns_the_tilt_and_nothing_else() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let (base, next, tilt_ok) = handled(&t, aiding, false);
+            assert!(tilt_ok);
+            let (mut with_job, mut without_job) = (0, 0);
+            let (mut before_min, mut after_max) = (f64::INFINITY, 0.0f64);
+            let (mut yaw_worst, mut rp_worst) = (0.0f64, 0.0f64);
+            for j in 0..16 {
+                let e = edge_at(&base, &next, j);
+                assert!(e.tilt_true, "{aiding:?} j {j}: the tilt flag dropped");
+                let (before, after) = (tilt_err_deg(&e.nav_pre.attitude), tilt_err_deg(&e.na.attitude));
+                assert!(after < before, "{aiding:?} j {j}: error {before} deg before, {after} deg after");
+                before_min = before_min.min(before);
+                after_max = after_max.max(after);
+                // Yaw (atan2(R10, R00)) unchanged to round-off, and not trivially 0.
+                let (y0, y1) = (yaw_of(&e.pre.nom.q), yaw_of(&e.na.attitude));
+                assert!(y0.abs() > 0.05, "yaw {y0}");
+                yaw_worst = yaw_worst.max((y1 - y0).abs());
+                assert!((y1 - y0).abs() < 1e-6, "{aiding:?} j {j}: yaw {y0} -> {y1}");
+                // Roll and pitch are the first alignment's of the stored interval.
+                let f = e.pre.arm_f.expect("a stored interval").map(f64::from);
+                let roll = (-f[1]).atan2(-f[2]);
+                let pitch = f[0].atan2(f[1].hypot(f[2]));
+                let (r1, p1) = roll_pitch(&e.na.attitude);
+                rp_worst = rp_worst.max((r1 - roll).abs()).max((p1 - pitch).abs());
+                assert!((r1 - roll).abs() < 1e-6 && (p1 - pitch).abs() < 1e-6, "{aiding:?} j {j}: roll {r1} vs {roll}, pitch {p1} vs {pitch}");
+                // v_N = v_E = 0, hold at the current N/E.
+                assert_eq!((e.na.velocity_ms[0], e.na.velocity_ms[1]), (0.0, 0.0));
+                assert_eq!(e.a.hold_ne, [e.a.nom.p[0], e.a.nom.p[1]]);
+                // Biases and the 15 variances are bit-identical to the filter before the step: the re-alignment is the step's
+                // job and the integration does not touch them.
+                let diag = |f: &Eskf| (0..N).map(|i| f.p[i][i].to_bits()).collect::<Vec<_>>();
+                assert_eq!((e.a.nom.bg, e.a.nom.ba), (e.pre.nom.bg, e.pre.nom.ba));
+                assert_eq!(diag(&e.a), diag(&e.pre));
+                // The cross terms of the five rows and columns are gone, nothing else of P moved.
+                for i in 0..N {
+                    for k in 0..N {
+                        let five = |x: usize| (ATT..ATT + 3).contains(&x) || x == VEL || x == VEL + 1;
+                        if i != k && (five(i) || five(k)) {
+                            assert_eq!(e.a.p[i][k], 0.0, "P[{i}][{k}]");
+                        } else {
+                            assert_eq!(e.a.p[i][k].to_bits(), e.pre.p[i][k].to_bits(), "P[{i}][{k}]");
+                        }
+                    }
+                }
+                // One heavy job at most; a queued job is not consumed by it.
+                assert_eq!(e.a.stats().max_jobs_per_step, 1);
+                assert_eq!(e.jobs_a, 0, "the re-alignment replaced a counted job's slot, it ran one too");
+                assert!(e.jobs_b <= 1);
+                if e.jobs_b == 0 {
+                    without_job += 1;
+                    // The clone without the re-alignment ran no job: D, vD, the biases and the variances agree with it.
+                    assert_eq!((e.a.nom.p[2].to_bits(), e.a.nom.v[2].to_bits()), (e.b.nom.p[2].to_bits(), e.b.nom.v[2].to_bits()));
+                    assert_eq!((e.a.nom.bg, e.a.nom.ba), (e.b.nom.bg, e.b.nom.ba));
+                    assert_eq!(diag(&e.a), diag(&e.b));
+                } else {
+                    with_job += 1;
+                    // The job the clone ran is still queued in the re-aligned filter: it runs in a later step.
+                    assert!(e.a.predict_due || e.a.baro_job.is_some() || e.a.gps_job.is_some());
+                }
+            }
+            println!(
+                "al1 {aiding:?}: tilt error before the edge >= {before_min:.4} deg, after <= {after_max:.6} deg; worst yaw change {yaw_worst:e} rad, worst roll/pitch difference {rp_worst:e} rad; edges with a queued job {with_job}, without {without_job}"
+            );
+            assert!(with_job > 0 && without_job > 0, "{with_job} {without_job}");
+        }
+    }
+
+    #[test]
+    fn al2_negative_control_without_the_realignment_the_error_does_not_improve() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let (base, next, _) = handled(&t, aiding, false);
+            let (mut before_min, mut worst_change) = (f64::INFINITY, 0.0f64);
+            for j in 0..16 {
+                let e = edge_at(&base, &next, j);
+                let (before, after) = (tilt_err_deg(&e.nav_pre.attitude), tilt_err_deg(&e.nb.attitude));
+                // The gyro is 0 at rest, so one step turns the attitude by at most |bias| dt (plus the f32 rounding).
+                let bg = e.b.nom.bg.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+                let bound = (f64::from(bg) * PERIOD_US as f64 * 1e-6 * 3.0_f64.sqrt()).to_degrees() + 1e-4;
+                assert!((after - before).abs() <= bound, "{aiding:?} j {j}: {before} -> {after}, bound {bound:e}");
+                assert!(before > 1.0, "the handling error is gone before the edge: {before}");
+                before_min = before_min.min(before);
+                worst_change = worst_change.max((after - before).abs());
+            }
+            println!("al2 {aiding:?}: error before the edge >= {before_min:.4} deg, largest change across the edge without the re-alignment {worst_change:e} deg");
+        }
+    }
+
+    #[test]
+    fn al3_a_stored_interval_outside_the_window_changes_nothing() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let (base, next, _) = handled(&t, aiding, true);
+            for j in 16..32 {
+                let e = edge_at(&base, &next, j);
+                let f = e.pre.arm_f.expect("a stored interval");
+                let nf = sqrtf(f[0] * f[0] + f[1] * f[1] + f[2] * f[2]);
+                assert!(nf > ACCEL_MAX_G * GRAVITY_MSS, "{aiding:?} j {j}: force {nf} is inside the window");
+                assert_eq!(bits(&e.a), bits(&e.b), "{aiding:?} j {j}");
+                assert_eq!(e.na, e.nb);
+                assert!(e.tilt_true);
+            }
+        }
+    }
+
+    #[test]
+    fn f1_full_never_realigns_at_the_arming_edge_and_keeps_raw_gyro_minus_bias() {
+        let t = Tuning::DEFAULT;
+        let (base, next, tilt_ok) = handled(&t, Aiding::Full, false);
+        assert!(tilt_ok);
+        for j in [0usize, 3, 8, 13] {
+            let (mut a, mut b) = (base.clone(), base.clone());
+            b.arm_realign = false;
+            for (i, s) in next.iter().enumerate() {
+                let armed = i >= j;
+                a.set_armed(armed);
+                b.set_armed(armed);
+                let (na, nb) = (a.update(s), b.update(s));
+                assert_eq!(na, nb, "j {j} step {i}");
+                assert_eq!(bits(&a), bits(&b), "j {j} step {i}");
+                assert!(a.arm_f.is_none() && na.valid.tilt);
+                let (g, bg) = (a.horizon_gyro, a.biases().0);
+                assert_eq!(rate_bits(&na), [g[0] - bg[0], g[1] - bg[1], g[2] - bg[2]].map(f32::to_bits));
+            }
+        }
+    }
+
+    #[test]
+    fn z1_negative_control_full_lags_by_the_gps_delay_and_the_zero_delay_variants_do_not() {
+        let t = Tuning::DEFAULT;
+        assert_eq!(t.nav_gps_delay_us % PERIOD_US, 0);
+        for (aiding, lag) in [(Aiding::Full, t.nav_gps_delay_us), (Aiding::ImuBaro, 0), (Aiding::Imu, 0)] {
+            let mut f = Eskf::with_aiding(&t, aiding).unwrap();
+            let mut w = World::new(&t);
+            let mut checked = 0;
+            for _ in 0..3_000_000 / PERIOD_US {
+                let s = w.step();
+                let nav = f.update(&s);
+                if s.imu1.t_us >= t.nav_gps_delay_us {
+                    assert_eq!(s.imu1.t_us - nav.t_us, lag, "{aiding:?} at {}", s.imu1.t_us);
+                    checked += 1;
+                }
+            }
+            assert!(checked > 1000);
+        }
+    }
+
+    #[test]
+    fn b1_barometer_lost_while_armed_vertical_flags_drop_at_the_timeout_and_the_tilt_stays() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        let mut w = World::new(&t);
+        let stop_us = 10_000_000;
+        let (mut last_aid, mut dropped, mut after) = (None, None, 0u64);
+        let mut seen = false;
+        for _ in 0..60_000_000 / PERIOD_US {
+            let mut s = w.step();
+            if w.t_us() > stop_us {
+                s.baro = None;
+            }
+            f.set_armed(true);
+            let nav = f.update(&s);
+            if w.t_us() <= stop_us || dropped.is_none() {
+                last_aid = f.last_baro_aid_us;
+            }
+            seen |= nav.valid.tilt;
+            assert!(nav.valid.tilt == seen && !nav.valid.heading && !nav.valid.velocity_ne && !nav.valid.position_ne);
+            let finite = nav.attitude.iter().chain(&nav.rates_rads).chain(&nav.velocity_ms).chain(&nav.position_m).all(|v| v.is_finite());
+            let sg = nav.sigma.unwrap();
+            // The sigmas are infinite by design before the tilt alignment.
+            assert!(finite && (!nav.valid.tilt || [sg.tilt_rad, sg.heading_rad, sg.velocity_ne_ms, sg.velocity_d_ms, sg.position_ne_m, sg.position_d_m].iter().all(|v| v.is_finite())));
+            let vert = nav.valid.velocity_d || nav.valid.position_d;
+            assert_eq!(nav.valid.velocity_d, nav.valid.position_d);
+            if dropped.is_none() && !vert && w.t_us() > stop_us {
+                dropped = Some(nav.t_us);
+            } else if dropped.is_some() {
+                assert!(!vert, "the vertical flags came back");
+                after += 1;
+            }
+        }
+        let (last, drop) = (last_aid.unwrap(), dropped.expect("the flags never dropped"));
+        let late = drop - (last + t.nav_aid_timeout_us);
+        println!("b1: last barometer aid at {last} us, flags dropped at {drop} us: {late} us after the timeout ({} steps); {after} finite steps after", late / PERIOD_US);
+        assert!(late < PERIOD_US, "{late}");
+        assert!(after * PERIOD_US >= 30_000_000, "{after}");
     }
 }
