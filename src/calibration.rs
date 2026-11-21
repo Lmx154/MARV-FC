@@ -15,9 +15,11 @@
 //! the board's), so the measurement is in the frame the offsets are stored in. The decision is
 //! `fw_core::calib`. A result is written into the parameters and pushed; nothing is saved.
 //!
-//! The compass calibration is the same on the MAG row's latest sample (core 0's own device): the
-//! `MAG_OFF*` in force are added back to each sample, and the result is written to `MAG_OFF*`,
-//! which the adapter reads from the store for every sample (no push is needed). Its result or
+//! The compass calibration is the same on the MAG row's latest sample (core 0's own device): it
+//! measures the raw field r the adapter hands beside the calibrated one (body frame, nothing to
+//! undo), and the result is written as one coherent set (`MAG_OFF*`, S the identity,
+//! `MAG_CAL_TYPE` 1, `MAG_FLD_UT` 0), which the adapter reads from the store for every sample (no
+//! push is needed). Its result or
 //! failure text is queued before the action ends, and the final ACK waits until the text queue is
 //! empty (`actions::next_ack`), so the text precedes the ACK on the link.
 
@@ -28,7 +30,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::calib::{
     ACCEL_OFFSET_MAX_MSS, Failure, GYRO_FULL_SCALE_RADS, IMUS, ImuOffsets, Kind, MagCal, MagFit,
-    MagOutcome, Outcome, Run, Stats3, mag_raw, norm3, sqrt,
+    MagOutcome, Outcome, Run, Stats3, norm3, sqrt,
 };
 use fw_core::health::State;
 use fw_core::rotation::Rotation;
@@ -441,21 +443,20 @@ fn injected(seq: u32) -> [f32; 3] {
     p
 }
 
-/// Feeds the compass calibration the MAG row's latest sample (the `MAG_OFF*` in force added back).
+/// Feeds the compass calibration the MAG row's latest raw sample r (body frame, before the
+/// calibration in force).
 fn observe_mag() -> Option<(MagOutcome, u8)> {
     let sample = MAG.latest.try_get();
-    let offsets = store::mag_offsets();
     CORE0.lock(|c| {
         let mut c = c.borrow_mut();
         let cal = c.as_mut()?.mag.as_mut()?;
         if let Some(Sample {
-            reading: Reading::Mag { field_ut, .. },
+            reading: Reading::Mag { raw_ut: raw, .. },
             t_us,
             seq,
             ..
         }) = sample
         {
-            let raw = mag_raw(field_ut, offsets);
             #[cfg(feature = "inject-mag-rotation")]
             let raw = {
                 let _ = raw;
@@ -547,22 +548,14 @@ fn step_mag() -> Step {
     }
 }
 
-/// Writes `MAG_OFFX/Y/Z` (the store is dirty; nothing is saved; the adapter reads them from the
-/// next sample on). `false` when the store refuses a value (the pure check keeps them inside the
-/// parameters' range, so it does not happen).
+/// Writes the quick result as one coherent set in one store access (`MAG_OFFX/Y/Z`, S the
+/// identity, `MAG_CAL_TYPE` 1, `MAG_FLD_UT` 0: `fw_settings::mag::write_quick_result`; the store
+/// is dirty; nothing is saved; the adapter reads them from the next sample on). `false` when the
+/// store refuses a value (the pure check keeps the offsets inside the parameters' range, so it
+/// does not happen).
 fn write_mag(fit: &MagFit) -> bool {
     store::with(|p| {
-        let names = [
-            fw_settings::mag::OFF_X,
-            fw_settings::mag::OFF_Y,
-            fw_settings::mag::OFF_Z,
-        ];
-        let mut all = true;
-        for (n, v) in names.iter().zip(fit.offset_ut) {
-            let index = ParamName::new(n).ok().and_then(|n| p.find(&n));
-            let written = index.map(|i| p.set(i, ParamValue::F32(v)));
-            all &= matches!(written, Some(Ok(_)));
-        }
+        let all = fw_settings::mag::write_quick_result(p, fit.offset_ut);
         let _ = (p.take_notice(), p.take_configure_mask(), p.take_live_mask());
         all
     })

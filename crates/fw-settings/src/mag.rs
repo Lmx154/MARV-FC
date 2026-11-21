@@ -2,13 +2,15 @@
 //!
 //! Nothing here touches hardware or a clock. The table has two `Configure` parameters (the output
 //! data rate and the averaging, validated together by the driver's own `Config::validate`) and the
-//! three calibration offsets, which the device task subtracts from every sample in software
-//! (`Live`: no validator, no apply).
+//! three calibration offsets o; the soft-iron matrix S and the calibration's record are appended at
+//! indices 81 to 91. The device task applies m = S (r - o) to every sample in software ([`apply`];
+//! `Live`: no validator, no apply).
 
 use bmm350::{Averaging, Config, ConfigError, OutputDataRate};
 use fw_core::params::{Apply, Candidate, ParamDef};
 use fw_core::rotation::{self, Rotation};
 use mavlink_device::marv::MarvDevice;
+use mavlink_device::{ParamName, ParamStore, ParamValue};
 
 const DEVICE: u8 = MarvDevice::MARV_DEVICE_MAG as u8;
 
@@ -56,6 +58,55 @@ pub static ORIENT_TABLE: [ParamDef; ORIENT_COUNT] = [ParamDef::i32(
     rotation::MAX,
     Apply::Live,
 )];
+
+/// S's diagonal term XX (`F32`, 1.0 = no scaling).
+pub const DIAG_X: &str = "MAG_DIAGX";
+/// As [`DIAG_X`], YY.
+pub const DIAG_Y: &str = "MAG_DIAGY";
+/// As [`DIAG_X`], ZZ.
+pub const DIAG_Z: &str = "MAG_DIAGZ";
+/// S's off-diagonal term XY (= YX).
+pub const ODIAG_XY: &str = "MAG_ODIAGXY";
+/// As [`ODIAG_XY`], XZ (= ZX).
+pub const ODIAG_XZ: &str = "MAG_ODIAGXZ";
+/// As [`ODIAG_XY`], YZ (= ZY).
+pub const ODIAG_YZ: &str = "MAG_ODIAGYZ";
+/// How the calibration in force was made: 0 none or unknown, 1 quick (best effort), 2 guided.
+pub const CAL_TYPE: &str = "MAG_CAL_TYPE";
+/// The expected field strength in microtesla (World Magnetic Model at the calibration site); 0 = not set.
+pub const FLD_UT: &str = "MAG_FLD_UT";
+/// The expected inclination in degrees, positive down; meaningful only when `MAG_FLD_UT` > 0.
+pub const FLD_INC: &str = "MAG_FLD_INC";
+/// The health test's strength tolerance in % of `MAG_FLD_UT` (stored only; nothing reads it yet).
+pub const HLT_STR: &str = "MAG_HLT_STR";
+/// The health test's inclination tolerance in degrees (stored only; nothing reads it yet).
+pub const HLT_INC: &str = "MAG_HLT_INC";
+
+/// `MAG_CAL_TYPE` of the quick (minimum/maximum) calibration.
+pub const CAL_TYPE_QUICK: i32 = 1;
+
+/// The number of soft-iron and calibration-record parameters, appended after `GPS_RATE_MS`.
+pub const CAL_COUNT: usize = 11;
+
+/// The index of [`CAL_TABLE`]'s first entry (`MAG_DIAGX`) in the firmware's table: the last block.
+pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT;
+
+/// Appended to the firmware's table at indices 81 to 91 (decision-compass-cal-20261120, section 1).
+/// All `Live`; 81 to 89 are calibration results (`param reset-calibration` resets them with
+/// `MAG_OFF*`: S the identity, type 0, no expected field), the two health tolerances are not.
+pub static CAL_TABLE: [ParamDef; CAL_COUNT] = [
+    ParamDef::f32(DIAG_X, DEVICE, 1.0, 0.2, 5.0, Apply::Live).with_calibration(),
+    ParamDef::f32(DIAG_Y, DEVICE, 1.0, 0.2, 5.0, Apply::Live).with_calibration(),
+    ParamDef::f32(DIAG_Z, DEVICE, 1.0, 0.2, 5.0, Apply::Live).with_calibration(),
+    ParamDef::f32(ODIAG_XY, DEVICE, 0.0, -1.0, 1.0, Apply::Live).with_calibration(),
+    ParamDef::f32(ODIAG_XZ, DEVICE, 0.0, -1.0, 1.0, Apply::Live).with_calibration(),
+    ParamDef::f32(ODIAG_YZ, DEVICE, 0.0, -1.0, 1.0, Apply::Live).with_calibration(),
+    ParamDef::i32(CAL_TYPE, DEVICE, 0, 0, 2, Apply::Live).with_calibration(),
+    ParamDef::f32(FLD_UT, DEVICE, 0.0, 0.0, 95.0, Apply::Live).with_calibration(),
+    ParamDef::f32(FLD_INC, DEVICE, 0.0, -90.0, 90.0, Apply::Live).with_calibration(),
+    ParamDef::f32(HLT_STR, DEVICE, 10.0, 1.0, 50.0, Apply::Live),
+    ParamDef::f32(HLT_INC, DEVICE, 10.0, 1.0, 45.0, Apply::Live),
+];
 
 /// The stored `MAG_ORIENT` as a rotation (a value outside 0 to 15 cannot be stored; none reads as
 /// the default, 10).
@@ -122,11 +173,69 @@ pub fn period_us(odr: OutputDataRate) -> u32 {
     odr.period_us()
 }
 
-/// `sample - offset` per axis, the field in microtesla after the calibration offsets.
-pub fn apply_offsets(field_ut: [f32; 3], offsets_ut: [f32; 3]) -> [f32; 3] {
-    let [x, y, z] = field_ut;
+/// The calibration in force, as stored: the offsets o (`MAG_OFF*`) and the symmetric matrix S, its
+/// diagonal (`MAG_DIAGX/Y/Z`) and its off-diagonal terms (`MAG_ODIAGXY/XZ/YZ`), body frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Calibration {
+    /// o, microtesla (X, Y, Z).
+    pub offsets_ut: [f32; 3],
+    /// S's diagonal (XX, YY, ZZ).
+    pub diag: [f32; 3],
+    /// S's off-diagonal terms (XY, XZ, YZ).
+    pub odiag: [f32; 3],
+}
+
+impl Calibration {
+    /// The parameters' defaults: offsets 0, S the identity.
+    pub const NONE: Self = Self {
+        offsets_ut: [0.0; 3],
+        diag: [1.0; 3],
+        odiag: [0.0; 3],
+    };
+}
+
+/// m = S (r - o): the field `raw_ut` (r, microtesla, body frame after `MAG_ORIENT`) with the
+/// calibration applied. Single precision in this order: d = r - o, then per row
+/// m_i = (S_i0 d_0 + S_i1 d_1) + S_i2 d_2 (no fused multiply-add), with
+/// S = [[XX, XY, XZ], [XY, YY, YZ], [XZ, YZ, ZZ]].
+pub fn apply(raw_ut: [f32; 3], cal: &Calibration) -> [f32; 3] {
+    let [rx, ry, rz] = raw_ut;
+    let [ox, oy, oz] = cal.offsets_ut;
+    let [xx, yy, zz] = cal.diag;
+    let [xy, xz, yz] = cal.odiag;
+    let (dx, dy, dz) = (rx - ox, ry - oy, rz - oz);
+    [
+        (xx * dx + xy * dy) + xz * dz,
+        (xy * dx + yy * dy) + yz * dz,
+        (xz * dx + yz * dy) + zz * dz,
+    ]
+}
+
+/// The quick calibration's result as one coherent set, written into `params` in one call: `MAG_OFF*`
+/// = `offsets_ut`, S = the identity, `MAG_CAL_TYPE` = 1 (best effort), `MAG_FLD_UT` = 0 (no field
+/// model). `MAG_FLD_INC` and `MAG_HLT_*` are left as they are. `false` when the store refused a value.
+pub fn write_quick_result<P: ParamStore>(params: &mut P, offsets_ut: [f32; 3]) -> bool {
     let [ox, oy, oz] = offsets_ut;
-    [x - ox, y - oy, z - oz]
+    let set = [
+        (OFF_X, ParamValue::F32(ox)),
+        (OFF_Y, ParamValue::F32(oy)),
+        (OFF_Z, ParamValue::F32(oz)),
+        (DIAG_X, ParamValue::F32(1.0)),
+        (DIAG_Y, ParamValue::F32(1.0)),
+        (DIAG_Z, ParamValue::F32(1.0)),
+        (ODIAG_XY, ParamValue::F32(0.0)),
+        (ODIAG_XZ, ParamValue::F32(0.0)),
+        (ODIAG_YZ, ParamValue::F32(0.0)),
+        (CAL_TYPE, ParamValue::I32(CAL_TYPE_QUICK)),
+        (FLD_UT, ParamValue::F32(0.0)),
+    ];
+    let mut all = true;
+    for (name, value) in set {
+        let index = ParamName::new(name).ok().and_then(|n| params.find(&n));
+        let written = index.map(|i| params.set(i, value));
+        all &= matches!(written, Some(Ok(_)));
+    }
+    all
 }
 
 #[cfg(test)]
@@ -250,13 +359,219 @@ mod tests {
         assert_eq!(orientation(None), r);
     }
 
+    fn offsets(offsets_ut: [f32; 3]) -> Calibration {
+        Calibration {
+            offsets_ut,
+            ..Calibration::NONE
+        }
+    }
+
     #[test]
     fn offsets_are_subtracted_per_axis() {
         assert_eq!(
-            apply_offsets([30.0, -10.0, 40.0], [10.0, -5.0, 0.0]),
+            apply([30.0, -10.0, 40.0], &offsets([10.0, -5.0, 0.0])),
             [20.0, -5.0, 40.0]
         );
-        assert_eq!(apply_offsets([1.5, 2.5, 3.5], [0.0; 3]), [1.5, 2.5, 3.5]);
+        assert_eq!(
+            apply([1.5, 2.5, 3.5], &offsets([0.0; 3])),
+            [1.5, 2.5, 3.5]
+        );
+    }
+
+    /// The function this build replaced, kept here as it was: `sample - offset` per axis.
+    fn old_apply_offsets(field_ut: [f32; 3], offsets_ut: [f32; 3]) -> [f32; 3] {
+        let [x, y, z] = field_ut;
+        let [ox, oy, oz] = offsets_ut;
+        [x - ox, y - oy, z - oz]
+    }
+
+    /// I2: with the default S the output equals the old `r - o`: bit for bit, except that a
+    /// difference of -0.0 may come out as +0.0 (the S-row sum adds 0 * d of the other axes); those
+    /// are equal in value and compared by value.
+    #[test]
+    fn with_the_default_matrix_the_output_is_the_old_offset_subtraction() {
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let edges = [0.0f32, -0.0, 1e-30, -1e-30, 199.99, -200.0, 200.0, 0.1, -67.25];
+        let mut neg_zero = 0;
+        for k in 0..200_000u32 {
+            let mut pick = |range: f32| {
+                let bits = next();
+                if bits % 8 == 0 {
+                    edges[(bits >> 8) as usize % edges.len()]
+                } else {
+                    ((bits >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * range
+                }
+            };
+            let r = [pick(400.0), pick(400.0), pick(400.0)];
+            let o = [pick(200.0), pick(200.0), pick(200.0)];
+            let old = old_apply_offsets(r, o);
+            let new = apply(r, &offsets(o));
+            for i in 0..3 {
+                if old[i].to_bits() == (-0.0f32).to_bits() {
+                    neg_zero += 1;
+                    assert!(new[i] == old[i], "{k}: {r:?} {o:?}");
+                } else {
+                    assert_eq!(new[i].to_bits(), old[i].to_bits(), "{k}: {r:?} {o:?}");
+                }
+            }
+        }
+        assert!(neg_zero > 0, "the -0.0 case was exercised");
+        // -0.0 - 0.0 on X with a positive Y difference: +0.0 now, -0.0 before.
+        let new = apply([-0.0, 1.0, 0.0], &offsets([0.0; 3]));
+        assert_eq!(new[0].to_bits(), 0.0f32.to_bits());
+        assert_eq!(old_apply_offsets([-0.0, 1.0, 0.0], [0.0; 3])[0].to_bits(), (-0.0f32).to_bits());
+    }
+
+    /// I3: the worked vector of decision-compass-cal-20261120 (shared with the station), bit for bit.
+    #[test]
+    fn the_worked_vector_bit_for_bit() {
+        let cal = Calibration {
+            offsets_ut: [-14.2, -4.2, 1.5],
+            diag: [1.0625, 0.9375, 0.78125],
+            odiag: [0.03125, -0.046875, 0.0625],
+        };
+        let r = [20.5f32, -3.25, 38.0];
+        let d = [r[0] - cal.offsets_ut[0], r[1] - cal.offsets_ut[1], r[2] - cal.offsets_ut[2]];
+        assert_eq!(d.map(f32::to_bits), [0x420A_CCCD, 0x3F73_3330, 0x4212_0000]);
+        assert_eq!(
+            apply(r, &cal).map(f32::to_bits),
+            [0x420C_C000, 0x4088_3333, 0x41D7_9666]
+        );
+    }
+
+    /// I7: the quick calibration's result writer leaves the coherent set in one call: the
+    /// offsets, S the identity, type 1, no expected field; `MAG_FLD_INC` and the health
+    /// tolerances as they were.
+    #[test]
+    fn the_quick_result_is_written_as_one_coherent_set() {
+        use crate::{COUNT as ALL, TABLE as FIRMWARE};
+        let mut p = Params::<ALL>::new(&FIRMWARE).unwrap();
+        let before = [
+            (OFF_X, ParamValue::F32(3.0)),
+            (DIAG_X, ParamValue::F32(1.0625)),
+            (DIAG_Z, ParamValue::F32(0.78125)),
+            (ODIAG_XZ, ParamValue::F32(-0.046875)),
+            (CAL_TYPE, ParamValue::I32(2)),
+            (FLD_UT, ParamValue::F32(48.5)),
+            (FLD_INC, ParamValue::F32(58.0)),
+            (HLT_STR, ParamValue::F32(15.0)),
+            (HLT_INC, ParamValue::F32(12.0)),
+        ];
+        for (n, v) in before {
+            let i = p.find(&name(n)).unwrap();
+            assert_eq!(p.set(i, v), Ok(v), "{n}");
+        }
+        let _ = (p.take_notice(), p.take_configure_mask(), p.take_live_mask());
+        assert!(write_quick_result(&mut p, [10.0, -20.5, 30.25]));
+        let expected = [
+            (OFF_X, ParamValue::F32(10.0)),
+            (OFF_Y, ParamValue::F32(-20.5)),
+            (OFF_Z, ParamValue::F32(30.25)),
+            (DIAG_X, ParamValue::F32(1.0)),
+            (DIAG_Y, ParamValue::F32(1.0)),
+            (DIAG_Z, ParamValue::F32(1.0)),
+            (ODIAG_XY, ParamValue::F32(0.0)),
+            (ODIAG_XZ, ParamValue::F32(0.0)),
+            (ODIAG_YZ, ParamValue::F32(0.0)),
+            (CAL_TYPE, ParamValue::I32(1)),
+            (FLD_UT, ParamValue::F32(0.0)),
+            (FLD_INC, ParamValue::F32(58.0)),
+            (HLT_STR, ParamValue::F32(15.0)),
+            (HLT_INC, ParamValue::F32(12.0)),
+        ];
+        for (n, v) in expected {
+            assert_eq!(p.get_named(n), Some(v), "{n}");
+        }
+        assert_eq!(p.take_configure_mask(), 0);
+        assert!(p.dirty());
+        // An offset the store refuses is reported (the pure check keeps them in range).
+        assert!(!write_quick_result(&mut p, [250.0, 0.0, 0.0]));
+    }
+
+    /// I4: the quick calibration measures the raw field r (what the adapter hands it beside m),
+    /// so its offsets are the same whatever S and o are in force; undoing only the offsets of a
+    /// published m (the old path) would not be, once S is not the identity.
+    #[test]
+    fn the_quick_calibration_gives_the_same_offsets_whatever_calibration_is_in_force() {
+        use fw_core::calib::{MagCal, MagOutcome};
+        const CENTRE: [f32; 3] = [10.0, -20.0, 30.0];
+        let raw = |i: u32| {
+            let z = 1.0 - 2.0 * (i as f32 + 0.5) / 3_000.0;
+            let r = (1.0 - z * z).sqrt();
+            let a = i as f32 * 2.399_963;
+            [
+                CENTRE[0] + 50.0 * r * a.cos(),
+                CENTRE[1] + 50.0 * r * a.sin(),
+                CENTRE[2] + 50.0 * z,
+            ]
+        };
+        let run = |fed: &dyn Fn([f32; 3]) -> [f32; 3]| {
+            let mut cal = MagCal::new();
+            for i in 0..3_100u32 {
+                cal.push(i, 1_000_000 + i as u64 * 10_000, fed(raw(i)));
+            }
+            match cal.outcome() {
+                MagOutcome::Done(fit) => fit.offset_ut,
+                other => panic!("{other:?}"),
+            }
+        };
+        let in_force = [
+            Calibration::NONE,
+            offsets([3.0, -4.0, 5.0]),
+            Calibration {
+                offsets_ut: [-14.2, -4.2, 1.5],
+                diag: [1.0625, 0.9375, 0.78125],
+                odiag: [0.03125, -0.046875, 0.0625],
+            },
+            Calibration {
+                offsets_ut: [40.0, 0.0, -60.0],
+                diag: [0.5, 2.0, 1.25],
+                odiag: [-0.5, 0.25, 0.75],
+            },
+        ];
+        let reference = run(&|r| r);
+        assert!(reference.iter().zip(CENTRE).all(|(a, b)| (a - b).abs() < 0.5));
+        for cal in &in_force {
+            // The adapter publishes m = apply(r, cal) and hands r to the calibration.
+            let fed = |r: [f32; 3]| {
+                let _published = apply(r, cal);
+                r
+            };
+            assert_eq!(run(&fed), reference, "{cal:?}");
+        }
+        // Negative control: m + o with S not the identity is not r, and its offsets differ.
+        let cal = in_force[2];
+        let undone = run(&|r| {
+            let m = apply(r, &cal);
+            [
+                m[0] + cal.offsets_ut[0],
+                m[1] + cal.offsets_ut[1],
+                m[2] + cal.offsets_ut[2],
+            ]
+        });
+        assert!(
+            undone.iter().zip(reference).any(|(a, b)| (a - b).abs() > 1.0),
+            "{undone:?}"
+        );
+    }
+
+    /// The matrix is symmetric and each term lands where S says: one unit difference per axis.
+    #[test]
+    fn each_matrix_term_lands_in_its_row_and_column() {
+        let cal = Calibration {
+            offsets_ut: [0.0; 3],
+            diag: [2.0, 3.0, 4.0],
+            odiag: [0.5, 0.25, 0.125],
+        };
+        assert_eq!(apply([1.0, 0.0, 0.0], &cal), [2.0, 0.5, 0.25]);
+        assert_eq!(apply([0.0, 1.0, 0.0], &cal), [0.5, 3.0, 0.125]);
+        assert_eq!(apply([0.0, 0.0, 1.0], &cal), [0.25, 0.125, 4.0]);
     }
 
     #[test]

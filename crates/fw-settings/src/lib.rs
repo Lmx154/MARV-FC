@@ -46,11 +46,12 @@ pub const COUNT: usize = baro::COUNT
     + mag::ORIENT_COUNT
     + esc::COUNT
     + led::COUNT
-    + gnss::COUNT;
+    + gnss::COUNT
+    + mag::CAL_COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
-/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` (appended, so the
-/// first 80 indices did not change).
+/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's
+/// soft-iron matrix and calibration record (`mag::CAL_TABLE`) (appended, so the first 81 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
@@ -147,6 +148,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < mag::CAL_COUNT {
+        out[n] = mag::CAL_TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -162,7 +169,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 81);
+        assert_eq!(COUNT, 92);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -175,7 +182,8 @@ mod tests {
             .chain(mag::ORIENT_TABLE.iter())
             .chain(esc::TABLE.iter())
             .chain(led::TABLE.iter())
-            .chain(gnss::TABLE.iter());
+            .chain(gnss::TABLE.iter())
+            .chain(mag::CAL_TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
@@ -273,10 +281,110 @@ mod tests {
             "MOT_POLES",
             "LED_BRIGHT",
             "GPS_RATE_MS",
+            "MAG_DIAGX",
+            "MAG_DIAGY",
+            "MAG_DIAGZ",
+            "MAG_ODIAGXY",
+            "MAG_ODIAGXZ",
+            "MAG_ODIAGYZ",
+            "MAG_CAL_TYPE",
+            "MAG_FLD_UT",
+            "MAG_FLD_INC",
+            "MAG_HLT_STR",
+            "MAG_HLT_INC",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
         }
+        assert_eq!(70 + appended.len(), COUNT);
+    }
+
+    /// I1: the compass's soft-iron matrix and calibration record are indices 81 to 91 with the
+    /// decision's types, defaults, ranges and classes (decision-compass-cal-20261120, section 1);
+    /// each range is the whole check.
+    #[test]
+    fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
+        use mavlink_device::{ParamError, ParamValue};
+        use ParamValue::{F32, I32};
+        assert_eq!(COUNT, 92);
+        assert_eq!(mag::CAL_OFFSET, 81);
+        let expected = [
+            ("MAG_DIAGX", F32(1.0), F32(0.2), F32(5.0), true),
+            ("MAG_DIAGY", F32(1.0), F32(0.2), F32(5.0), true),
+            ("MAG_DIAGZ", F32(1.0), F32(0.2), F32(5.0), true),
+            ("MAG_ODIAGXY", F32(0.0), F32(-1.0), F32(1.0), true),
+            ("MAG_ODIAGXZ", F32(0.0), F32(-1.0), F32(1.0), true),
+            ("MAG_ODIAGYZ", F32(0.0), F32(-1.0), F32(1.0), true),
+            ("MAG_CAL_TYPE", I32(0), I32(0), I32(2), true),
+            ("MAG_FLD_UT", F32(0.0), F32(0.0), F32(95.0), true),
+            ("MAG_FLD_INC", F32(0.0), F32(-90.0), F32(90.0), true),
+            ("MAG_HLT_STR", F32(10.0), F32(1.0), F32(50.0), false),
+            ("MAG_HLT_INC", F32(10.0), F32(1.0), F32(45.0), false),
+        ];
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        for (k, (name, default, min, max, calibration)) in expected.into_iter().enumerate() {
+            let i = 81 + k;
+            let def = &TABLE[i];
+            assert_eq!(def.name, name, "index {i}");
+            assert_eq!(def.device, mag::TABLE[0].device, "{name}");
+            assert_eq!(def.default, default, "{name}");
+            assert_eq!((def.min, def.max), (min, max), "{name}");
+            assert_eq!(def.apply, Apply::Live, "{name}");
+            assert_eq!(def.calibration, calibration, "{name}");
+            assert!(!def.read_only, "{name}");
+            let i = u16::try_from(i).unwrap();
+            assert_eq!(p.set(i, min), Ok(min), "{name}");
+            assert_eq!(p.set(i, max), Ok(max), "{name}");
+            let (below, above) = match (min, max) {
+                (I32(lo), I32(hi)) => (I32(lo - 1), I32(hi + 1)),
+                (F32(lo), F32(hi)) => (F32(lo - 0.01), F32(hi + 0.01)),
+                _ => panic!("{name}"),
+            };
+            assert_eq!(p.set(i, below), Err(ParamError::OutOfRange), "{name}");
+            assert_eq!(p.set(i, above), Err(ParamError::OutOfRange), "{name}");
+        }
+    }
+
+    /// I6: "calibration to defaults" gives a coherent "not calibrated": 81 to 89 and `MAG_OFF*` at
+    /// their defaults (S the identity, offsets 0, type 0, no expected field); the two health
+    /// tolerances and `MAG_ORIENT` are not calibration results and keep their values.
+    #[test]
+    fn reset_calibration_returns_the_compass_calibration_to_not_calibrated() {
+        use mavlink_device::ParamValue::{self, F32, I32};
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        let changed = [
+            ("MAG_OFFX", F32(-14.2)),
+            ("MAG_OFFY", F32(-4.2)),
+            ("MAG_OFFZ", F32(1.5)),
+            ("MAG_DIAGX", F32(1.0625)),
+            ("MAG_DIAGY", F32(0.9375)),
+            ("MAG_DIAGZ", F32(0.78125)),
+            ("MAG_ODIAGXY", F32(0.03125)),
+            ("MAG_ODIAGXZ", F32(-0.046875)),
+            ("MAG_ODIAGYZ", F32(0.0625)),
+            ("MAG_CAL_TYPE", I32(2)),
+            ("MAG_FLD_UT", F32(48.5)),
+            ("MAG_FLD_INC", F32(58.0)),
+            ("MAG_HLT_STR", F32(15.0)),
+            ("MAG_HLT_INC", F32(15.0)),
+            ("MAG_ORIENT", I32(3)),
+        ];
+        for (n, v) in changed {
+            let i = p.find(&ParamName::new(n).unwrap()).unwrap();
+            assert_eq!(p.set(i, v), Ok(v), "{n}");
+        }
+        p.reset_calibration();
+        let default = |n: &str| TABLE.iter().find(|d| d.name == n).unwrap().default;
+        for (n, v) in changed {
+            let reset = TABLE.iter().find(|d| d.name == n).unwrap().calibration;
+            let want: ParamValue = if reset { default(n) } else { v };
+            assert_eq!(p.get_named(n), Some(want), "{n}");
+        }
+        for def in &TABLE[81..=89] {
+            assert_eq!(p.get_named(def.name), Some(def.default), "{}", def.name);
+        }
+        assert_eq!(p.get_named("MAG_HLT_STR"), Some(F32(15.0)));
+        assert_eq!(p.get_named("MAG_ORIENT"), Some(I32(3)));
     }
 
     /// H4: the two orientation parameters are appended after the first 76 (names unchanged in
@@ -284,7 +392,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 81);
+        assert_eq!(COUNT, 92);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [
@@ -544,6 +652,53 @@ mod tests {
             _ => None,
         };
         assert_eq!(gnss::rate_ms(stored), Ok(200));
+    }
+
+    /// An old record (offsets only: `MAG_OFF*` its only non-default values) loads by the boot rule
+    /// with S the identity, `MAG_CAL_TYPE` 0 and no expected field; with them the output is the
+    /// offset subtraction of before.
+    #[test]
+    fn an_offsets_only_record_loads_with_the_identity_matrix_and_type_0() {
+        use fw_core::record::{self, Boot, Entry, SECTOR_LEN};
+        use mavlink_device::ParamValue::{self, F32};
+        let stored = [("MAG_OFFX", -14.2f32), ("MAG_OFFY", -4.2), ("MAG_OFFZ", 1.5)];
+        let entries = stored.iter().map(|(n, v)| Entry {
+            name: ParamName::new(n).unwrap(),
+            value: F32(*v),
+        });
+        let mut a = [0u8; SECTOR_LEN];
+        let b = [0xFFu8; SECTOR_LEN];
+        record::encode(3, entries, &mut a).unwrap();
+        let Boot::Current { record, .. } = record::choose(&a, &b).boot else {
+            panic!("the record is not current");
+        };
+        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
+        p.reset_all();
+        for entry in record.entries() {
+            assert_eq!(p.load(&entry.name, entry.value), Ok(true));
+        }
+        let f = |n: &str| match p.get_named(n) {
+            Some(F32(v)) => v,
+            other => panic!("{n}: {other:?}"),
+        };
+        for n in ["MAG_DIAGX", "MAG_DIAGY", "MAG_DIAGZ"] {
+            assert_eq!(f(n), 1.0, "{n}");
+        }
+        for n in ["MAG_ODIAGXY", "MAG_ODIAGXZ", "MAG_ODIAGYZ", "MAG_FLD_UT", "MAG_FLD_INC"] {
+            assert_eq!(f(n), 0.0, "{n}");
+        }
+        assert_eq!(p.get_named("MAG_CAL_TYPE"), Some(ParamValue::I32(0)));
+        let cal = mag::Calibration {
+            offsets_ut: [f("MAG_OFFX"), f("MAG_OFFY"), f("MAG_OFFZ")],
+            diag: [f("MAG_DIAGX"), f("MAG_DIAGY"), f("MAG_DIAGZ")],
+            odiag: [f("MAG_ODIAGXY"), f("MAG_ODIAGXZ"), f("MAG_ODIAGYZ")],
+        };
+        assert_eq!(cal.offsets_ut, [-14.2, -4.2, 1.5]);
+        let r = [20.5f32, -3.25, 38.0];
+        assert_eq!(
+            mag::apply(r, &cal).map(f32::to_bits),
+            [r[0] + 14.2, r[1] + 4.2, r[2] - 1.5].map(f32::to_bits)
+        );
     }
 
     /// The defaults make a setup for both IMUs: after the boot reset the setups cannot fail.

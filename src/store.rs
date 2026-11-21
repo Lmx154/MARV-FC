@@ -132,38 +132,49 @@ pub fn board() -> fw_core::rotation::Rotation {
     )
 }
 
-/// The compass's orientation `MAG_ORIENT` and its calibration offsets in microtesla (X, Y, Z),
-/// read together for every sample: the rotation comes first, the offsets (body frame) after it.
-pub fn mag_frame() -> (fw_core::rotation::Rotation, [f32; 3]) {
+/// The compass's orientation `MAG_ORIENT` and its calibration (offsets and matrix), read together
+/// for every sample: the rotation comes first, the calibration (body frame) after it.
+pub fn mag_frame() -> (fw_core::rotation::Rotation, fw_settings::mag::Calibration) {
     with(|params| {
         let orientation = match params.get_named(fw_settings::mag::ORIENT) {
             Some(ParamValue::I32(v)) => Some(v),
             _ => None,
         };
+        let none = fw_settings::mag::Calibration::NONE;
+        let ([dx, dy, dz], [xy, xz, yz]) = (none.diag, none.odiag);
+        let offsets_ut = [
+            fw_settings::mag::OFF_X,
+            fw_settings::mag::OFF_Y,
+            fw_settings::mag::OFF_Z,
+        ]
+        .map(|name| match params.get_named(name) {
+            Some(ParamValue::F32(v)) => v,
+            _ => 0.0,
+        });
+        // The six matrix terms by index (the table's last block, `CAL_OFFSET`, pinned by a test):
+        // no name search inside the store's critical section.
+        let term = |k: usize, default: f32| {
+            match u16::try_from(fw_settings::mag::CAL_OFFSET + k)
+                .ok()
+                .and_then(|i| params.get(i))
+            {
+                Some(ParamValue::F32(v)) => v,
+                _ => default,
+            }
+        };
         (
             fw_settings::mag::orientation(orientation),
-            mag_offsets_in(params),
+            fw_settings::mag::Calibration {
+                offsets_ut,
+                diag: [term(0, dx), term(1, dy), term(2, dz)],
+                odiag: [term(3, xy), term(4, xz), term(5, yz)],
+            },
         )
     })
-    .unwrap_or((fw_settings::mag::orientation(None), [0.0; 3]))
-}
-
-/// The three `MAG_OFF*` values of a store, microtesla.
-fn mag_offsets_in(params: &Params<COUNT>) -> [f32; 3] {
-    [
-        fw_settings::mag::OFF_X,
-        fw_settings::mag::OFF_Y,
-        fw_settings::mag::OFF_Z,
-    ]
-    .map(|name| match params.get_named(name) {
-        Some(ParamValue::F32(v)) => v,
-        _ => 0.0,
-    })
-}
-
-/// The magnetometer's calibration offsets in microtesla (X, Y, Z), read for every sample.
-pub fn mag_offsets() -> [f32; 3] {
-    with(|params| mag_offsets_in(params)).unwrap_or([0.0; 3])
+    .unwrap_or((
+        fw_settings::mag::orientation(None),
+        fw_settings::mag::Calibration::NONE,
+    ))
 }
 
 /// The battery monitor's configuration for the next sample from the stored values (a value that

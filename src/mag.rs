@@ -1,9 +1,10 @@
 //! The magnetometer: BMM350 on I2C0 (SDA GPIO12, SCL GPIO13, 400 kHz, the board's 4.7k pull-ups),
 //! data-ready on GPIO4; a core-0 device, async I2C without DMA. The `bmm350` driver is used as it
 //! is; the bus clear before a restart is the firmware's (`busclear`). The sample is the driver's
-//! compensated field in microtesla rotated by `MAG_ORIENT` (chip axes to body FRD), then minus the
-//! `MAG_OFFX/Y/Z` offsets (body frame), subtracted here in software (the chip's own offset
-//! registers are not used). `AHRS_ORIENTATION` is never read here: the compass frame does not
+//! compensated field in microtesla rotated by `MAG_ORIENT` (chip axes to body FRD), r, then the
+//! calibration m = S (r - o) with the `MAG_OFF*` offsets and the `MAG_DIAG*`/`MAG_ODIAG*` matrix
+//! (body frame), applied here in software (the chip's own offset registers are not used); the
+//! sample carries both m and r. `AHRS_ORIENTATION` is never read here: the compass frame does not
 //! depend on the board's orientation.
 
 use bmm350::{Bmm350, Config, DEFAULT_ADDRESS, Error};
@@ -188,17 +189,16 @@ impl DeviceAdapter for Bmm350Adapter {
     }
 
     async fn acquire(&mut self) -> Result<Reading, ErrorKind> {
-        let (orientation, offsets) = crate::store::mag_frame();
+        let (orientation, calibration) = crate::store::mag_frame();
         let chip = self.chip()?;
         // INT_STATUS is clear-on-read (and in pulsed mode clears itself after 1.25 ms): reading it
         // with every sample keeps the flag that `status` sees after a data-ready timeout fresh.
         chip.interrupt_status().await.map_err(|e| kind(&e))?;
         let field = chip.read_field().await.map_err(|e| kind(&e))?;
+        let raw_ut = orientation.rotate([field.x, field.y, field.z]);
         Ok(Reading::Mag {
-            field_ut: settings::apply_offsets(
-                orientation.rotate([field.x, field.y, field.z]),
-                offsets,
-            ),
+            field_ut: settings::apply(raw_ut, &calibration),
+            raw_ut,
             temperature_c: field.temperature,
         })
     }

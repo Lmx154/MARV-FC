@@ -55,8 +55,11 @@ pub enum Reading {
         temperature_c: f32,
     },
     Mag {
-        /// The field in microtesla, the calibration offsets already subtracted.
+        /// The field in microtesla with the calibration applied, m = S (r - o).
         field_ut: [f32; 3],
+        /// The raw field r in microtesla, body frame (after `MAG_ORIENT`, before the calibration):
+        /// what the compass calibration measures.
+        raw_ut: [f32; 3],
         temperature_c: f32,
     },
     Batt {

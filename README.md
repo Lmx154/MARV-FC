@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 81 parameters of BARO, MAG, BATT, GNSS (its fix interval), the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
+  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 92 parameters of BARO, MAG (with the compass calibration's soft-iron matrix and record), BATT, GNSS (its fix interval), the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -197,8 +197,8 @@ per device per second (later ones wait their turn). Adding a device is a new ada
 
 **MAG.** `acquire` reads INT_STATUS (clear-on-read; in the driver's pulsed mode it also clears itself 1.25 ms after the edge, so after a
 data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge: accepted, the bench-proven pulsed mode is kept and latched mode is not used), then `read_field`: the
-compensated field in microtesla and the die temperature, minus `MAG_OFFX/Y/Z` in software (the chip's offset registers are not
-used). `Reading::Mag { field_ut, temperature_c }`. The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
+compensated field in microtesla and the die temperature, rotated by `MAG_ORIENT` (r), then the compass calibration m = S (r - o) in software
+(see Calibrations; the chip's offset registers are not used). `Reading::Mag { field_ut, raw_ut, temperature_c }`: m, r and the temperature. The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
 `verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and
 rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
 The field at rest on the driver's bench was about 66 to 67 uT.
@@ -413,7 +413,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (81 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1 + 1 + 1: `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` are appended last, indices 76, 77, 78, 79 and 80). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (92 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1 + 1 + 1 + 11: `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` are appended at indices 76, 77, 78, 79 and 80, and the compass calibration's eleven `MAG_DIAG*` to `MAG_HLT_INC` last, indices 81 to 91). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -458,8 +458,15 @@ through the driver's `Config::validate` before the value is stored); the three o
 |---|---|---|---|---|
 | `MAG_ODR_HZ` | F32 | 100 | 1.5625 to 400 | output data rate in Hz: 400, 200, 100, 50, 25, 12.5, 6.25, 3.125 or 1.5625; refused otherwise ("rate not offered by the chip") |
 | `MAG_AVG` | I32 | 2 | 1 to 8 | samples averaged: 1, 2, 4 or 8 ("not 1, 2, 4 or 8"); the rate allows at most 1 at 400 Hz, 2 at 200 Hz, 4 at 100 Hz, 8 below ("averaging too high for the rate") |
-| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla subtracted from the field of that axis in every sample, in the body frame, after `MAG_ORIENT` (by the core-0 adapter, `fw_settings::mag::apply_offsets`) |
+| `MAG_OFFX`, `MAG_OFFY`, `MAG_OFFZ` | F32 | 0 | -200 to 200 | offset in microtesla o of that axis, subtracted from the field in every sample before S is applied, in the body frame, after `MAG_ORIENT` (by the core-0 adapter, `fw_settings::mag::apply`, see Calibrations) |
 | `MAG_ORIENT` | I32 | 10 | 0 to 15 | the external compass's orientation, chip to vehicle: ArduPilot's rotation numbers (`COMPASS_ORIENT`; 0 none, 1 to 7 yaw 45 to 315, 8 roll 180, 9 to 11 roll 180 and yaw 45 to 135, 12 pitch 180, 13 to 15 roll 180 and yaw 225 to 315, `fw_core::rotation`). 10 is `ROLL_180_YAW_90`: the BMM350 mounted +X right, +Y forward, +Z up. `Live`, applied to the next sample, before `MAG_OFF*`; the range is the whole check. Index 77 |
+| `MAG_DIAGX`, `MAG_DIAGY`, `MAG_DIAGZ` | F32 | 1 | 0.2 to 5 | the soft-iron matrix S's diagonal (body frame), applied after the offsets: m = S (r - o) (see Calibrations). `Live`, calibration. Indices 81 to 83 |
+| `MAG_ODIAGXY`, `MAG_ODIAGXZ`, `MAG_ODIAGYZ` | F32 | 0 | -1 to 1 | S's off-diagonal terms (S is symmetric). `Live`, calibration. Indices 84 to 86 |
+| `MAG_CAL_TYPE` | I32 | 0 | 0 to 2 | how the calibration in force was made: 0 none or unknown, 1 quick (best effort), 2 guided (the station's fit). `Live`, calibration. Index 87 |
+| `MAG_FLD_UT` | F32 | 0 | 0 to 95 | expected field strength in microtesla (World Magnetic Model at the calibration site); 0 = not set. `Live`, calibration. Index 88 |
+| `MAG_FLD_INC` | F32 | 0 | -90 to 90 | expected inclination in degrees, positive down; meaningful only when `MAG_FLD_UT` > 0. `Live`, calibration. Index 89 |
+| `MAG_HLT_STR` | F32 | 10 | 1 to 50 | flight health test's strength tolerance in % of `MAG_FLD_UT`; stored only, nothing reads it yet. `Live`, not a calibration. Index 90 |
+| `MAG_HLT_INC` | F32 | 10 | 1 to 45 | flight health test's inclination tolerance in degrees; stored only, nothing reads it yet. `Live`, not a calibration. Index 91 |
 
 ### BATT parameters
 
@@ -643,7 +650,7 @@ written.
   seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (the fix rate:
   status, GPS week and ms from UTC, 0/0 before a time is known) and with each GPS record one GPA (below), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 81 parameters when a log opens and after
+  text ring's third cursor: the boot texts first), PARM for all 92 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second), and with it FDS (Dp flight-ring records dropped in this log, FMn the flight
@@ -851,7 +858,7 @@ Features for the checks (off by default):
 
 ## Frames
 
-Every IMU and compass value that leaves the board is in the body frame, FRD (x forward, y right, z down), as in MAVLink and ArduPilot: level and at rest the accelerometer reads z about -9.81 m/s^2 (specific force, up). The IMU adapters (core 1) apply the chip's fixed rotation (`ROLL_180`), then subtract the offsets (the board frame), then apply `AHRS_ORIENTATION`; the compass adapter (core 0) applies `MAG_ORIENT`, then subtracts `MAG_OFF*` (the body frame). The log's IMU and MAG records and the `[STAT]` lines carry the same values. Measurements made before this build (this README's, `docs/handoff.md`'s) and offsets and logs stored before it are in the chips' own axes, and the stored offsets must be redone. Design: `_plan/decision-orientation-20261117.md`.
+Every IMU and compass value that leaves the board is in the body frame, FRD (x forward, y right, z down), as in MAVLink and ArduPilot: level and at rest the accelerometer reads z about -9.81 m/s^2 (specific force, up). The IMU adapters (core 1) apply the chip's fixed rotation (`ROLL_180`), then subtract the offsets (the board frame), then apply `AHRS_ORIENTATION`; the compass adapter (core 0) applies `MAG_ORIENT`, then the calibration m = S (r - o) with `MAG_OFF*` and the `MAG_DIAG*`/`MAG_ODIAG*` matrix (the body frame). The log's IMU and MAG records and the `[STAT]` lines carry the same values. Measurements made before this build (this README's, `docs/handoff.md`'s) and offsets and logs stored before it are in the chips' own axes, and the stored offsets must be redone. Design: `_plan/decision-orientation-20261117.md`.
 
 On 2026-11-18 the owner checked the IMU and compass signs on both IMUs (moved by hand), calibrated the gyroscopes, accelerometers and compass in the body frame, and saved the offsets to flash; they were kept after a reboot.
 
@@ -879,11 +886,12 @@ one `fw_core::xcore::TripleBuffer<ImuOffsets>` per IMU (at boot before core 1 st
 supervisor tick of any change of the stored values: a parameter set, `param reset-calibration`, a reload,
 a calibration result; pushes wait while a calibration runs, so the offsets stay constant during the
 measurement); each IMU's adapter on the flight core reads it wait-free with every sample and publishes
-`raw - offset`. MAG offsets: the core-0 adapter (`src/mag.rs`) reads `MAG_OFFX/Y/Z` from the store for every
-sample and publishes `raw - offset` (`fw_settings::mag::apply_offsets`). So the samples on the link and in
-the rows are corrected, and a calibration measures the RAW value: it adds the offsets in force back to each
-sample it sees (`ImuOffsets::restore`, `fw_core::calib::mag_raw`); a second calibration with the first's
-offsets in force gives the same result. Core 0 sees the rows' latest sample (the supervisor mirrors the
+`raw - offset`. Compass: the core-0 adapter (`src/mag.rs`) reads the compass calibration (below) from the
+store for every sample and publishes m = S (r - o) (`fw_settings::mag::apply`); the sample also carries the
+raw field r. So the samples on the link and in the rows are corrected, and a calibration measures the RAW
+value: the IMU calibrations add the offsets in force back to each sample they see (`ImuOffsets::restore`), the
+compass calibration takes r from the adapter; a second calibration with the first's result in force gives the
+same result. Core 0 sees the rows' latest sample (the supervisor mirrors the
 flight rows every 10 ms, about 100 per second per IMU); every sample is counted once by its `seq`.
 
 ### Gyro (`calibrate gyro`, both IMUs)
@@ -910,7 +918,34 @@ The largest offset accepted per axis is one gravity (`AccelCalibrator::accept_re
 calibration: moving" (not converged), "accel calibration: IMUn offset too large", "accel calibration: no IMU
 Ok", "accel calibration: IMUn not Ok, skipped"; the result "accel cal: |IMU1| N |IMU2| N mm/s^2".
 
-### Compass (`calibrate compass`, MAG)
+### Compass: model, parameters and state
+
+Model (decision-compass-cal-20261120): m = S (r - o), microtesla. r is the raw field in the body frame,
+after `MAG_ORIENT`; o is the hard-iron offsets `MAG_OFFX/Y/Z`; S is a symmetric 3x3 soft-iron matrix,
+[[`MAG_DIAGX`, `MAG_ODIAGXY`, `MAG_ODIAGXZ`], [`MAG_ODIAGXY`, `MAG_DIAGY`, `MAG_ODIAGYZ`], [`MAG_ODIAGXZ`,
+`MAG_ODIAGYZ`, `MAG_DIAGZ`]]. Single precision in this order: d = r - o, then m_i = (S_i0 d_0 + S_i1 d_1) +
+S_i2 d_2, no fused multiply-add (`fw_settings::mag::apply`; the worked vector of the decision is a host test,
+bit for bit). The offsets are subtracted (PX4's sign); an ArduPilot offset has the opposite sign. Every
+compass value that leaves the board (the log's MAG record, HIGHRES_IMU's `x/y/zmag`, the `[STAT] MAG:` line)
+is m. With S the identity (the defaults) m equals the old `r - o` (bit for bit, except that a difference of
+-0.0 may come out as +0.0). The parameters (indices 81 to 91, see Parameters): S's six terms, `MAG_CAL_TYPE`
+(0 none or unknown, 1 quick, 2 guided), the expected field `MAG_FLD_UT` and `MAG_FLD_INC` (from the World
+Magnetic Model at the calibration site, 0 = not set), and the flight health test's tolerances `MAG_HLT_STR`
+and `MAG_HLT_INC` (stored only: nothing on the board reads them yet). `param reset-calibration` returns
+`MAG_OFF*` and indices 81 to 89 to their defaults: S the identity, offsets 0, type 0, no expected field. A
+record saved before these parameters existed (offsets only) loads with S the identity and type 0. Changing
+`MAG_ORIENT` invalidates the calibration (S and o are in the body frame after it); nothing on the board warns.
+
+States, as a station shows them (the board stores the parameters and does not compute a state): **not
+calibrated**: `MAG_CAL_TYPE` 0 and the offsets all 0; **best effort**: type 1, or type 0 with offsets (an
+older calibration); **guided**: type 2 with `MAG_FLD_UT` > 0.
+
+The guided calibration is done by the station and written as parameters: MARV-GCS collects HIGHRES_IMU and
+GPS on USB, fits S and o and writes `MAG_CAL_TYPE` 0, then `MAG_OFF*`, `MAG_DIAG*`, `MAG_ODIAG*`,
+`MAG_FLD_UT` and `MAG_FLD_INC`, then `MAG_CAL_TYPE` 2, and reads them back. The board has no fit, coverage or
+pose logic. As with every calibration, nothing is saved until the user's Save.
+
+### Compass quick calibration (`calibrate compass`, MAG, best effort)
 
 Method: Betaflight's compass calibration by minimum and maximum, `compassUpdate`
 (`src/main/sensors/compass.c`, release tags up to 4.4.3): for 30 s (`(currentTimeUs - tCal) < 30000000`) the
@@ -926,9 +961,13 @@ FIELD_RADIUS_MAX` is `FAILED_RADIUS`), that is more than 15 and less than 95 mic
 accepts whatever comes out. Texts: "compass cal: not rotated, radius X Y Z uT" (integers; a vehicle at rest
 shows about 1 each), "compass cal: offset out of range X Y Z uT" (the offsets would fall outside
 `MAG_OFF*`'s -200 to 200), "compass cal: MAG not ok" (the row is not Ok when the action starts; FAILED
-at once); the result "compass cal: off X Y Z r X Y Z uT" (offsets and radii, integers, INFO). On success
-`MAG_OFFX/Y/Z` hold the midpoints and the adapter uses them from the next sample. Not built: soft-iron
-(matrix) fit, automatic or in-flight compass learning.
+at once); the result "compass cal: off X Y Z r X Y Z uT" (offsets and radii, integers, INFO). It measures
+the raw field r the adapter hands beside m (nothing is undone), so its result does not depend on the
+calibration in force. On success it writes, in one store access within one supervisor tick, one coherent set
+(`fw_settings::mag::write_quick_result`): `MAG_OFFX/Y/Z` = the midpoints, S = the identity (`MAG_DIAG*` 1,
+`MAG_ODIAG*` 0), `MAG_CAL_TYPE` = 1, `MAG_FLD_UT` = 0 (its offsets mean something only with S the identity,
+and it has no field model); `MAG_FLD_INC` and `MAG_HLT_*` are left as they are. The adapter uses the set from
+the next sample. Not built: automatic or in-flight compass learning.
 
 ### Test feature
 
@@ -965,7 +1004,7 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 |---|---|
 | `device restart IMU1`, `IMU2`, `BARO`, `MAG`, `GNSS`, `BATT`, `SD` (every row of the registry) | raises that device's RESTART request; the loop feeds `Event::Restart` (from any state) and starts the device again; ACCEPTED when the device reaches Ok, FAILED when it reaches Failed or Absent first (the book's own 5 s limit covers a hang); the action records the number of the restart request it raised and ends only on that request's outcome, so an older restart finishing late never ends a later action; progress stays 0 |
 | `param reset-all --yes` | `Params::reset_all`; each device whose values changed gets its APPLY request; ACCEPTED as soon as the store is reset and the requests are raised, without waiting for the applies (as a parameter write does not wait; a device that is Failed or Recovering picks the values up when it is restarted) |
-| `param reset-calibration --yes` | `Params::reset_calibration`, the same way: the twelve `IMUx_*_OFF*` and the three `MAG_OFF*` go to 0 and the IMU offsets are pushed to the flight core; ACCEPTED |
+| `param reset-calibration --yes` | `Params::reset_calibration`, the same way: the twelve `IMUx_*_OFF*` and the three `MAG_OFF*` go to 0, the compass's `MAG_DIAG*` (1), `MAG_ODIAG*`, `MAG_CAL_TYPE`, `MAG_FLD_UT` and `MAG_FLD_INC` (0) to their defaults, and the IMU offsets are pushed to the flight core; ACCEPTED |
 | `param save` | writes the parameters that differ from their defaults to the flash settings region (see Settings in flash); ACCEPTED when the record was read back and verified, FAILED with one text otherwise ("armed", "flight core not answering", "verify failed") |
 | `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
 | `reboot --yes` | MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN param1 = 1: the action writes the REQUESTED scratch record and ends ACCEPTED; when the final ACK is handed to the link the watchdog monitor resets the board (`trigger_reset`) 100 to 200 ms later (1 s after the action when no ACK could be handed). Nothing is saved: an unsaved parameter change is gone after the reboot. The boot report then says INFO "reboot: requested" |
