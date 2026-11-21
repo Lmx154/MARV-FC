@@ -145,6 +145,7 @@ pub static NAV_STAT: Seqlock<NavStat> = Seqlock::new(NavStat {
         gps_vel_fused: 0,
         gps_vel_gated: 0,
         gps_resets: 0,
+        stale: 0,
         reinits: 0,
         max_jobs_per_step: 0,
         replaced: 0,
