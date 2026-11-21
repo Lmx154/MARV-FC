@@ -17,6 +17,13 @@
 //! and columns of P are zeroed with every variance kept. It is that step's one heavy job; the queued jobs run later.
 //! Outside the window, or with no stored interval, nothing changes. `Full` never does it.
 //!
+//! Amendment E (E1): for `ImuBaro` the barometer scalar's Kalman gain has its accelerometer-bias x and y entries set to
+//! zero and P is updated in Joseph form with that gain (as the no-aid scalars do for all three), so in `ImuBaro` and `Imu`
+//! b_a,x and b_a,y are exactly 0.0 on every step, from the alignment and after every re-initialisation; b_a,z is still
+//! learned. `Full` and `Imu` are untouched. Without GPS the horizontal accelerometer bias is not estimated: the real one
+//! (about +0.1 to +0.2 m/s^2 in x per ESKF3) remains as a tilt offset of up to about 1 deg, as with Mahony. The mask is
+//! switched off only by test-only fields.
+//!
 //! The arithmetic is the N0 bench's ([`crate::eskf_n0`]): nominal integration on every IMU1 sample (at the horizon),
 //! the structured F P F^T + Q every nav_predict_us, sequential scalar fusions. Work rule I2: each step integrates the
 //! nominal state and does at most ONE heavy job (one covariance propagation, one scalar fusion, an alignment or a
@@ -404,6 +411,12 @@ pub struct Eskf {
     interval_armed: bool,
     /// D2: the arming-edge re-alignment is on; off only in a test's negative control.
     arm_realign: bool,
+    /// E1: the `ImuBaro` barometer scalar leaves b_a,x and b_a,y alone; off only in a test's negative control.
+    #[cfg(test)]
+    baro_abias_xy_mask: bool,
+    /// E1 test control: the same scalar also leaves b_a,z alone.
+    #[cfg(test)]
+    baro_abias_z_mask: bool,
 }
 
 const NOMINAL0: Nominal = Nominal {
@@ -543,6 +556,10 @@ impl Eskf {
             arm_edge: false,
             interval_armed: false,
             arm_realign: true,
+            #[cfg(test)]
+            baro_abias_xy_mask: true,
+            #[cfg(test)]
+            baro_abias_z_mask: false,
         })
     }
 
@@ -819,6 +836,45 @@ impl Eskf {
         self.event(code::NOAID, innov, s, code::FUSED);
     }
 
+    /// The `ImuBaro` barometer scalar on D (E1), gated as [`n0::fuse_position`] gates (innovation^2 <= gate^2 s, s = P_DD + var):
+    /// K's accelerometer-bias x and y entries are zeroed and P is updated in Joseph form with that K, as `fuse_noaid` does,
+    /// then mirrored and the diagonal held at or above 0. Returns (accepted, innovation variance); nothing changes when gated out.
+    fn fuse_baro_masked(&mut self, innov: f32, var: f32) -> (bool, f32) {
+        let k = POS + 2;
+        let ph = self.p[k];
+        let s = ph[k] + var;
+        let gate = self.t.nav_gate_sigma;
+        if s.is_nan() || s <= 0.0 || innov * innov > gate * gate * s {
+            return (false, s);
+        }
+        let inv = 1.0 / s;
+        let mut kg: [f32; N] = core::array::from_fn(|i| ph[i] * inv);
+        #[cfg(test)]
+        let (mask_xy, mask_z) = (self.baro_abias_xy_mask, self.baro_abias_z_mask);
+        #[cfg(not(test))]
+        let (mask_xy, mask_z) = (true, false);
+        if mask_xy {
+            kg[ACCEL_BIAS] = 0.0;
+            kg[ACCEL_BIAS + 1] = 0.0;
+        }
+        if mask_z {
+            kg[ACCEL_BIAS + 2] = 0.0;
+        }
+        for i in 0..N {
+            for j in i..N {
+                let v = self.p[i][j] - kg[i] * ph[j] - ph[i] * kg[j] + kg[i] * kg[j] * s;
+                self.p[i][j] = v;
+                self.p[j][i] = v;
+            }
+            if self.p[i][i] < 0.0 {
+                self.p[i][i] = 0.0;
+            }
+        }
+        let dx: [f32; N] = core::array::from_fn(|i| kg[i] * innov);
+        self.inject(&dx);
+        (true, s)
+    }
+
     /// Horizontal aiding (C-1): armed, started, and a GNSS position fused within nav_aid_timeout_us.
     fn horizontal_aiding(&self) -> bool {
         self.armed && self.started && self.horizon().saturating_sub(self.last_pos_us) < self.t.nav_aid_timeout_us
@@ -843,7 +899,11 @@ impl Eskf {
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
                 // h = -D: fused as D = -h_b on the position's down error.
                 let innov = -job.h_b - self.nom.p[2];
-                let (ok, s) = self.fuse_unit(POS + 2, innov, r);
+                let (ok, s) = if self.aiding_set == Aiding::ImuBaro {
+                    self.fuse_baro_masked(innov, r)
+                } else {
+                    self.fuse_unit(POS + 2, innov, r)
+                };
                 if ok {
                     self.last_baro_aid_us = Some(horizon);
                     self.stats.baro_fused = self.stats.baro_fused.wrapping_add(1);
@@ -2872,6 +2932,321 @@ mod tests {
                     yaw0.to_degrees(),
                     before_min.to_degrees()
                 );
+            }
+        }
+    }
+
+    // ---- Amendment E, packet E-1: the ImuBaro barometer scalar does not update b_a,x and b_a,y ----
+
+    /// Specific force, body frame, of a vehicle at rest rolled by `roll` and pitched by `pitch` (the inverse of the first
+    /// alignment's formulas), plus the constant accelerometer offset `off`.
+    fn rest_force(roll: f64, pitch: f64, off: [f32; 3]) -> [f32; 3] {
+        let g = f64::from(GRAVITY_MSS);
+        let f = [g * pitch.sin(), -g * pitch.cos() * roll.sin(), -g * pitch.cos() * roll.cos()];
+        core::array::from_fn(|i| f[i] as f32 + off[i])
+    }
+
+    /// `secs` of an `ImuBaro` filter held tilted (`tilt` = roll, pitch, rad) at the World's constant barometer height with the
+    /// accelerometer offset `off`, disarmed until `arm_s` s and armed after. Returns the filter, the largest |b_a,x| and |b_a,y|
+    /// seen, whether b_a,x and b_a,y were bit-exact 0.0 after every step, and the largest |v_D| over the last half.
+    fn held_tilted(t: &Tuning, tilt: (f64, f64), off: [f32; 3], secs: f64, arm_s: f64, masked: bool) -> (Eskf, [f32; 2], bool, f32) {
+        let mut f = Eskf::with_aiding(t, Aiding::ImuBaro).unwrap();
+        f.baro_abias_xy_mask = masked;
+        let mut w = World::new(t);
+        let (mut worst, mut exact, mut vd) = ([0.0f32; 2], true, 0.0f32);
+        for _ in 0..(secs * 1e6) as u64 / PERIOD_US {
+            let mut s = w.step();
+            s.imu1.reading.accel_ms2 = rest_force(tilt.0, tilt.1, off);
+            f.set_armed(w.t_us() as f64 * 1e-6 >= arm_s);
+            let nav = f.update(&s);
+            let ba = f.biases().1;
+            exact &= ba[0].to_bits() == 0 && ba[1].to_bits() == 0;
+            worst = [worst[0].max(fabsf(ba[0])), worst[1].max(fabsf(ba[1]))];
+            if w.t_us() as f64 * 1e-6 >= 0.5 * secs {
+                vd = vd.max(fabsf(nav.velocity_ms[2]));
+            }
+        }
+        (f, worst, exact, vd)
+    }
+
+    #[test]
+    fn e1_t1_imu_baro_tilted_with_a_horizontal_accelerometer_offset_keeps_b_a_x_and_y_at_exactly_zero() {
+        let t = Tuning::DEFAULT;
+        // 10 deg roll and 20 deg pitch: the tilt is inside angle_max_rad (30 deg) and both horizontal body axes have a
+        // vertical component, which is what lets the barometer's height error reach b_a,x and b_a,y.
+        let tilt = (10.0_f64.to_radians(), 20.0_f64.to_radians());
+        assert!(tilt.0.hypot(tilt.1) < f64::from(t.angle_max_rad));
+        let off = [0.15f32, -0.1, 0.0];
+        let (f, _, exact, _) = held_tilted(&t, tilt, off, 70.0, 25.0, true);
+        assert!(exact, "b_a,x or b_a,y left 0.0");
+        assert!(f.stats().baro_fused > 1000 && f.stats().predicts > 1000);
+        // Control: the mask off, the same input.
+        let (c, worst, exact_c, _) = held_tilted(&t, tilt, off, 70.0, 25.0, false);
+        println!("e1 t1: offset {off:?}; masked ba {:?} (bit-exact zero every step); mask off: ba {:?}, largest |ba_x| {:e}, |ba_y| {:e}", f.biases().1, c.biases().1, worst[0], worst[1]);
+        assert!(!exact_c && worst[0] > 0.0 && worst[1] > 0.0, "the control did not move: {worst:?}");
+    }
+
+    #[test]
+    fn e1_t2_imu_baro_level_with_a_vertical_offset_still_learns_b_a_z() {
+        let t = Tuning::DEFAULT;
+        let off = [0.0f32, 0.0, 0.2];
+        let run = |z_masked: bool| {
+            let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+            f.baro_abias_z_mask = z_masked;
+            let mut w = World::new(&t);
+            let (mut sq, mut n, mut vmax) = (0.0f64, 0u32, 0.0f64);
+            for _ in 0..60_000_000 / PERIOD_US {
+                let mut s = w.step();
+                s.imu1.reading.accel_ms2 = rest_force(0.0, 0.0, off);
+                f.set_armed(w.t_us() >= 20_000_000);
+                let nav = f.update(&s);
+                if w.t_us() >= 30_000_000 {
+                    // Truth: at rest, v_D = 0.
+                    let e = f64::from(nav.velocity_ms[2]);
+                    sq += e * e;
+                    vmax = vmax.max(e.abs());
+                    n += 1;
+                }
+            }
+            (f.biases().1, (sq / f64::from(n)).sqrt(), vmax)
+        };
+        let (ba, rms, vmax) = run(false);
+        let (ba_m, rms_m, vmax_m) = run(true);
+        println!("e1 t2: offset {off:?}; ba_z after 60 s {:e} (offset {}); v_D error over the last 30 s rms {rms:e} max {vmax:e}; z masked: ba_z {:e}, rms {rms_m:e} max {vmax_m:e}", ba[2], off[2], ba_m[2]);
+        assert_eq!((ba[0].to_bits(), ba[1].to_bits()), (0, 0));
+        assert!(ba[2] > 0.0 && fabsf(ba[2] - off[2]) < off[2], "ba_z {} does not move toward {}", ba[2], off[2]);
+        assert_eq!((ba_m[0].to_bits(), ba_m[1].to_bits(), ba_m[2].to_bits()), (0, 0, 0));
+        assert!(rms_m > rms, "z masked rms {rms_m} not larger than {rms}");
+    }
+
+    #[test]
+    fn e1_t3_the_arming_edge_aligns_to_the_raw_horizontal_force_with_the_barometer_running() {
+        let t = Tuning::DEFAULT;
+        let off = [0.15f32, -0.1, 0.0];
+        let g = f64::from(GRAVITY_MSS);
+        // The AL1 fixture with the offset on every sample, with the handling made physical: held tilted (10 deg roll, 20 deg
+        // pitch, inside angle_max_rad) for 60 s, where the barometer's height error reaches b_a,x and b_a,y when the mask is
+        // off; set down level in 0.5 s (a gyro pulse of the same angles); rest to 64 s; then 80 samples at rest.
+        let tilt = (10.0_f64.to_radians(), 20.0_f64.to_radians());
+        let fixture = |masked: bool| {
+            let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+            f.baro_abias_xy_mask = masked;
+            let mut w = World::new(&t);
+            while w.t_us() < 64_000_000 {
+                let mut s = w.step();
+                let held = w.t_us() < 60_000_000;
+                s.imu1.reading.accel_ms2 = if held { rest_force(tilt.0, tilt.1, off) } else { rest_force(0.0, 0.0, off) };
+                if (60_000_000..60_500_000).contains(&w.t_us()) {
+                    s.imu1.reading.gyro_rads = [-2.0 * tilt.0 as f32, -2.0 * tilt.1 as f32, 0.0];
+                }
+                f.set_armed(false);
+                f.update(&s);
+            }
+            let next: Vec<Sensors> = (0..80)
+                .map(|_| {
+                    let mut s = w.step();
+                    s.imu1.reading.accel_ms2 = rest_force(0.0, 0.0, off);
+                    s
+                })
+                .collect();
+            (f, next)
+        };
+        let mut departures = [0.0f64; 2];
+        for (k, masked) in [true, false].into_iter().enumerate() {
+            let (base, next) = fixture(masked);
+            let (mut worst, mut bound_max, mut ba_x) = (0.0f64, 0.0f64, 0.0f32);
+            for j in 0..16 {
+                let e = edge_at(&base, &next, j);
+                let f = e.pre.arm_f.expect("a stored interval").map(f64::from);
+                // The raw mean force of the interval: the samples are constant, so it is the sample, with the z of the sample.
+                let raw = [f64::from(off[0]), f64::from(off[1]), -g];
+                if masked {
+                    // x and y of the stored force are the raw ones up to the f32 mean of constant samples.
+                    assert!((f[0] - raw[0]).abs() <= 1e-6 * raw[0].abs() && (f[1] - raw[1]).abs() <= 1e-6 * raw[1].abs(), "j {j}: stored {f:?} raw {raw:?}");
+                }
+                let roll = (-raw[1]).atan2(-raw[2]);
+                let pitch = raw[0].atan2(raw[1].hypot(raw[2]));
+                let (r1, p1) = roll_pitch(&e.na.attitude);
+                let d = (r1 - roll).abs().max((p1 - pitch).abs());
+                // The stored z is the raw z minus b_a,z; roll = atan2(-f_y, -f_z) changes by at most |f_y| d / (f_y^2 + f_z^2) and
+                // pitch = atan2(f_x, hypot(f_y, f_z)) by at most |f_x| d / hypot(f_y, f_z)^2 for a change d of f_z, with
+                // d = |b_a,z| and hypot >= g - d; the bound adds 1e-6 rad for the f32 rounding of the alignment.
+                let dz = f64::from(e.pre.nom.ba[2]).abs();
+                let bound = raw[0].abs().max(raw[1].abs()) * dz / ((g - dz) * (g - dz)) + 1e-6;
+                if masked {
+                    assert_eq!((e.pre.nom.ba[0].to_bits(), e.pre.nom.ba[1].to_bits()), (0, 0));
+                    assert!(d <= bound, "j {j}: roll {r1} vs {roll}, pitch {p1} vs {pitch}, bound {bound:e}");
+                    let y0 = yaw_of(&e.pre.nom.q);
+                    assert!((yaw_of(&e.na.attitude) - y0).abs() < 1e-6);
+                } else {
+                    ba_x = ba_x.max(fabsf(e.pre.nom.ba[0]));
+                    assert!(d > 100.0 * bound, "j {j}: the mask-off tilt differs by only {d:e}, bound {bound:e}");
+                    // About the learned bias over g: the pitch departure is b_a,x / g to the bound, the roll's b_a,y / g.
+                    let (ba, ratio) = (f64::from(e.pre.nom.ba[0]), (p1 - pitch).abs() * g);
+                    assert!((ratio - ba.abs()).abs() <= 0.05 * ba.abs() + bound * g, "j {j}: pitch departure * g {ratio:e}, |b_a,x| {}", ba.abs());
+                }
+                worst = worst.max(d);
+                bound_max = bound_max.max(bound);
+            }
+            departures[k] = worst;
+            println!("e1 t3: mask {masked}: largest roll/pitch departure from the raw-force alignment {worst:e} rad (bound {bound_max:e}; offset/g = {:e}, ba_x before the edge {ba_x:e})", f64::from(off[0]) / g);
+        }
+        assert!(departures[1] > departures[0]);
+    }
+
+    #[test]
+    fn e1_t4_a_rejected_barometer_changes_nothing_resets_the_height_in_time_and_p_stays_a_covariance() {
+        let t = Tuning::DEFAULT;
+        // (a) Warm filter, then a direct call beyond the gate: bit-identical, rejected.
+        let (f, _, _, _) = held_tilted(&t, (0.2, 0.3), [0.15, -0.1, 0.1], 20.0, 5.0, true);
+        let r = t.nav_baro_sigma_m * t.nav_baro_sigma_m;
+        let s = f.p[POS + 2][POS + 2] + r;
+        let innov = 1.001 * t.nav_gate_sigma * sqrtf(s);
+        let (mut a, before) = (f.clone(), bits(&f));
+        assert_eq!(a.fuse_baro_masked(innov, r), (false, s));
+        assert_eq!(bits(&a), before);
+        assert_eq!(a.fuse_baro_masked(-innov, r), (false, s));
+        assert_eq!(bits(&a), before);
+        assert!(a.fuse_baro_masked(0.999 * t.nav_gate_sigma * sqrtf(s), r).0, "just inside the gate was rejected");
+        // The unmasked path gates on the same test.
+        let mut u = f.clone();
+        assert!(!u.fuse_unit(POS + 2, innov, r).0 && bits(&u) == before);
+        // (b) End to end: the barometer 100 m high from 20 s on, armed; counted as gated, nothing fused, and the height reset
+        // at the timeout after the last accepted sample.
+        let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        let mut w = World::new(&t);
+        let (mut last_aid, mut reset_at) = (0u64, None);
+        for _ in 0..40_000_000 / PERIOD_US {
+            let mut s = w.step();
+            s.imu1.reading.accel_ms2 = rest_force(0.2, 0.3, [0.0; 3]);
+            if w.t_us() >= 20_000_000 {
+                if let Some(b) = s.baro.as_mut() {
+                    b.reading.pressure_pa = pressure_at(100.0);
+                }
+            }
+            f.set_armed(w.t_us() >= 5_000_000);
+            let (aid, resets) = (f.last_baro_aid_us, f.stats().height_resets);
+            f.update(&s);
+            if reset_at.is_none() && w.t_us() >= 20_000_000 && f.stats().height_resets > resets {
+                (last_aid, reset_at) = (aid.unwrap(), Some(f.horizon()));
+            }
+        }
+        let gated = f.stats().baro_gated;
+        let at = reset_at.expect("no height reset");
+        println!("e1 t4: last accepted barometer aid at {last_aid} us, height reset at {at} us ({} us later, timeout {}), gated samples {gated}", at - last_aid, t.nav_aid_timeout_us);
+        assert!(gated > 0 && at - last_aid >= t.nav_aid_timeout_us && at - last_aid < t.nav_aid_timeout_us + 100_000, "{}", at - last_aid);
+        assert!(f.stats().baro_fused > 1000);
+        // (c) 120 s of mixed motion with arm changes and a barometer dropout and a bad stretch: P a covariance throughout.
+        let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        let mut w = World::new(&t);
+        let mut bad = 0u32;
+        for k in 0..120_000_000 / PERIOD_US {
+            let sec = w.t_us() as f64 * 1e-6;
+            let phase = (sec / 7.0) as u32;
+            w.a = [[0.0, 1.5, -1.0, 0.5][phase as usize % 4], [0.5, 0.0, 1.0, -2.0][phase as usize % 4], [0.3, -0.4, 0.0, 0.8][phase as usize % 4]];
+            w.yaw_rate = 0.3 * ((phase % 3) as f64 - 1.0);
+            let mut s = w.step();
+            let tilt = (0.3 * (sec * 0.7).sin(), 0.4 * (sec * 0.45).cos());
+            s.imu1.reading.accel_ms2 = {
+                let a = rest_force(tilt.0, tilt.1, [0.15, -0.1, 0.1]);
+                [a[0] + 0.2 * s.imu1.reading.accel_ms2[0], a[1] + 0.2 * s.imu1.reading.accel_ms2[1], a[2] + 0.2 * (s.imu1.reading.accel_ms2[2] + GRAVITY_MSS)]
+            };
+            s.imu1.reading.gyro_rads = [(0.2 * (sec * 1.3).sin()) as f32, (0.15 * (sec * 0.9).cos()) as f32, s.imu1.reading.gyro_rads[2]];
+            if (60.0..75.0).contains(&sec) {
+                s.baro = None;
+            } else if (90.0..100.0).contains(&sec) {
+                if let Some(b) = s.baro.as_mut() {
+                    b.reading.pressure_pa = pressure_at(60.0);
+                }
+            }
+            f.set_armed(sec >= 10.0 && (sec < 50.0 || sec >= 80.0));
+            f.update(&s);
+            if k % 8 == 0 {
+                let sym = (0..N).all(|i| (0..N).all(|j| f.p[i][j].to_bits() == f.p[j][i].to_bits()));
+                let fin = f.finite() && (0..N).all(|i| f.p[i][i] >= 0.0);
+                bad += u32::from(!(sym && fin));
+            }
+        }
+        let st = f.stats();
+        println!("e1 t4: 120 s mixed motion, steps with P not symmetric/finite/non-negative {bad}, stats baro fused {} gated {} resets {} reinits {}", st.baro_fused, st.baro_gated, st.height_resets, st.reinits);
+        assert_eq!(bad, 0);
+        assert!(st.baro_fused > 1000 && st.baro_gated > 0);
+    }
+
+    #[test]
+    fn e1_t5_the_masked_update_equals_an_independent_f64_joseph_reference() {
+        let t = Tuning::DEFAULT;
+        let (f, _, _, _) = held_tilted(&t, (0.2, 0.3), [0.15, -0.1, 0.1], 20.0, 5.0, true);
+        let r = f64::from(t.nav_baro_sigma_m * t.nav_baro_sigma_m);
+        let innov = 0.3f32;
+        let k = POS + 2;
+        let p: Vec<Vec<f64>> = f.p.iter().map(|row| row.iter().map(|&x| f64::from(x)).collect()).collect();
+        let s = p[k][k] + r;
+        // K = P H^T / s with the two horizontal accelerometer-bias entries zeroed; (I - K H) P (I - K H)^T + K R K^T.
+        let mut kg: Vec<f64> = (0..N).map(|i| p[i][k] / s).collect();
+        kg[ACCEL_BIAS] = 0.0;
+        kg[ACCEL_BIAS + 1] = 0.0;
+        let imkh = |i: usize, j: usize| f64::from(u8::from(i == j)) - kg[i] * f64::from(u8::from(j == k));
+        let reference: Vec<Vec<f64>> = (0..N)
+            .map(|i| {
+                (0..N)
+                    .map(|j| {
+                        let mut v = kg[i] * r * kg[j];
+                        for a in 0..N {
+                            for b in 0..N {
+                                v += imkh(i, a) * p[a][b] * imkh(j, b);
+                            }
+                        }
+                        v
+                    })
+                    .collect()
+            })
+            .collect();
+        let mut g = f.clone();
+        assert!(g.fuse_baro_masked(innov, r as f32).0);
+        let mut worst = 0.0f64;
+        for i in 0..N {
+            for j in 0..N {
+                let scale = (p[i][i] * p[j][j]).sqrt().max(1e-30);
+                worst = worst.max((f64::from(g.p[i][j]) - reference[i][j]).abs() / scale);
+            }
+        }
+        // The state: dx = K innovation, so b_a,x and b_a,y stay 0 and b_a,z moves by K_z innovation.
+        let dz = kg[ACCEL_BIAS + 2] * f64::from(innov);
+        let moved = f64::from(g.nom.ba[2] - f.nom.ba[2]);
+        println!("e1 t5: worst |P - reference| / sqrt(P_ii P_jj) {worst:e}; b_a,z step {moved:e} vs reference {dz:e}; unmasked K of b_a,x {:e}", p[ACCEL_BIAS][k] / s);
+        assert!(worst < 1e-5, "{worst:e}");
+        assert!(p[ACCEL_BIAS][k].abs() > 0.0 && p[ACCEL_BIAS + 1][k].abs() > 0.0, "the masked entries were already 0");
+        assert_eq!((g.nom.ba[0].to_bits(), g.nom.ba[1].to_bits()), (f.nom.ba[0].to_bits(), f.nom.ba[1].to_bits()));
+        // The difference of two f32 values near |b_a,z|: rounding of 4 ulp of it, plus the 1e-6 of dz of the f32 K.
+        assert!((moved - dz).abs() <= 4.0 * f64::from(f32::EPSILON) * f64::from(g.nom.ba[2].abs()) + 1e-6 * dz.abs(), "{moved:e} vs {dz:e}");
+    }
+
+    #[test]
+    fn e1_f_i_full_and_imu_are_bit_identical_with_the_mask_on_and_off() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::Full, Aiding::Imu] {
+            let (mut a, mut b) = (Eskf::with_aiding(&t, aiding).unwrap(), Eskf::with_aiding(&t, aiding).unwrap());
+            b.baro_abias_xy_mask = false;
+            let mut w = World::new(&t);
+            w.v = [1.0, 0.5, 0.0];
+            let mut ba_moved = false;
+            for _ in 0..30_000_000 / PERIOD_US {
+                let s = w.step();
+                let armed = w.t_us() >= 5_000_000;
+                a.set_armed(armed);
+                b.set_armed(armed);
+                assert_eq!(a.update(&s), b.update(&s));
+                assert_eq!(a.biases(), b.biases());
+                assert_eq!(bits(&a), bits(&b));
+                ba_moved |= a.biases().1 != [0.0; 3];
+            }
+            assert_eq!(a.stats(), b.stats());
+            println!("e1 f/i {aiding:?}: stats {:?}, accelerometer bias ever non-zero {ba_moved}", a.stats());
+            if aiding == Aiding::Full {
+                assert!(a.stats().gps_pos_fused > 0 && a.stats().mag_fused > 0 && a.stats().baro_fused > 0);
+            } else {
+                assert!(a.stats().noaid > 0 && a.stats().baro_fused == 0);
             }
         }
     }
