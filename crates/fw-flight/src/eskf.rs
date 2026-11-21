@@ -10,6 +10,12 @@
 //! of the same kind replaces an unprocessed one (C9). Pure arithmetic: no lock, timer or log. The log codes of C8 are
 //! returned by [`Eskf::events`] for the caller to write.
 //!
+//! Three variants, chosen at construction ([`Aiding`]): `Full` (ESKF3) is the filter described here; `ImuBaro` (ESKF2)
+//! ignores GNSS and compass, has no horizon delay (every IMU1 sample is integrated in the step it arrives, so the state
+//! refers to the current sample), never aligns the yaw and holds N and E with each barometer set; `Imu` (ESKF1) also
+//! ignores the barometer and holds N, E and D at the tilt alignment's values, one set per barometer period of horizon
+//! time (no-aid source code 5 for all three axes).
+//!
 //! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to (C8: "for I = 1, TimeUS is
 //! the horizon time"); there is no output predictor in phase 1.
 //!
@@ -213,6 +219,17 @@ pub struct EskfStats {
     pub stale: u32,
 }
 
+/// The aiding set of an [`Eskf`], fixed at construction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Aiding {
+    /// IMU1 only (ESKF1).
+    Imu,
+    /// IMU1 and barometer (ESKF2).
+    ImuBaro,
+    /// IMU1, barometer, compass and GNSS (ESKF3).
+    Full,
+}
+
 /// The constructor's refusal (C2a).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EskfError {
@@ -280,7 +297,8 @@ struct MagWait {
     expected: bool,
 }
 
-/// The barometer set: the barometer scalar, then no-aid N and E (B2).
+/// The barometer set: the barometer scalar, then no-aid N and E (B2). For [`Aiding::Imu`] the hold set: stages 1 to 3,
+/// no-aid N, E and D.
 #[derive(Clone, Copy, Debug)]
 struct BaroJob {
     h_b: f32,
@@ -309,6 +327,7 @@ struct GpsJob {
 #[derive(Clone, Debug)]
 pub struct Eskf {
     t: Tuning,
+    aiding_set: Aiding,
     noise: Noise,
     ring: Fifo<ImuEntry, RING>,
     baro_wait: Fifo<BaroWait, BARO_WAIT>,
@@ -358,6 +377,8 @@ pub struct Eskf {
     stats: EskfStats,
     /// The accelerometer-bias inhibit of the no-aid scalars (B2); off only in a test's negative control.
     noaid_inhibit: bool,
+    /// Horizon time from which the next [`Aiding::Imu`] hold set is queued.
+    next_hold_us: u64,
 }
 
 const NOMINAL0: Nominal = Nominal {
@@ -436,11 +457,17 @@ pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
 impl Eskf {
     /// Not aligned, disarmed, no sample seen. Err when nav_gps_delay_us > nav_buffer_us (C2a).
     pub fn new(tuning: &Tuning) -> Result<Self, EskfError> {
+        Self::with_aiding(tuning, Aiding::Full)
+    }
+
+    /// As [`Eskf::new`] with the aiding set `aiding`.
+    pub fn with_aiding(tuning: &Tuning, aiding: Aiding) -> Result<Self, EskfError> {
         if tuning.nav_gps_delay_us > tuning.nav_buffer_us {
             return Err(EskfError::DelayBeyondBuffer);
         }
         let t = *tuning;
         Ok(Eskf {
+            aiding_set: aiding,
             noise: Noise {
                 gyro: t.nav_arw * t.nav_arw,
                 accel: t.nav_vrw * t.nav_vrw,
@@ -485,7 +512,18 @@ impl Eskf {
             events: [None; EVENTS],
             stats: EskfStats::default(),
             noaid_inhibit: true,
+            next_hold_us: 0,
         })
+    }
+
+    /// The aiding set.
+    pub fn aiding(&self) -> Aiding {
+        self.aiding_set
+    }
+
+    /// The horizon delay: nav_gps_delay_us, none without GNSS.
+    fn delay_us(&self) -> u64 {
+        if self.aiding_set == Aiding::Full { self.t.nav_gps_delay_us } else { 0 }
     }
 
     /// The counters.
@@ -701,7 +739,7 @@ impl Eskf {
     }
 
     /// Horizontal aiding (C-1): armed, started, and a GNSS position fused within nav_aid_timeout_us.
-    fn aiding(&self) -> bool {
+    fn horizontal_aiding(&self) -> bool {
         self.armed && self.started && self.horizon().saturating_sub(self.last_pos_us) < self.t.nav_aid_timeout_us
     }
 
@@ -752,13 +790,15 @@ impl Eskf {
             axis => {
                 let axis = usize::from(axis - 1);
                 let sg = if self.armed { self.t.nav_noaid_sigma_m } else { self.t.nav_noaid_sigma_dis_m };
-                let innov = self.hold_ne[axis] - self.nom.p[axis];
+                let held = if axis < 2 { self.hold_ne[axis] } else { 0.0 };
+                let innov = held - self.nom.p[axis];
                 self.fuse_noaid(axis, innov, sg * sg);
             }
         }
         job.stage += 1;
         // The no-aid pair only while horizontal aiding is not running.
-        self.baro_job = (job.stage < 3 && !self.aiding()).then_some(job);
+        let last = if self.aiding_set == Aiding::Imu { 4 } else { 3 };
+        self.baro_job = (job.stage < last && !self.horizontal_aiding()).then_some(job);
     }
 
     /// Yaw := yaw + dpsi (a rotation about NED down); the yaw row and column of P re-initialised to the compass noise;
@@ -1128,7 +1168,7 @@ impl Estimator for Eskf {
             }
         }
         while let Some(e) = self.ring.front() {
-            if e.t_us.saturating_add(self.t.nav_gps_delay_us) > now {
+            if e.t_us.saturating_add(self.delay_us()) > now {
                 break;
             }
             self.ring.pop();
@@ -1138,7 +1178,9 @@ impl Estimator for Eskf {
         // time is older than the ring's span is dropped and counted.
         let buffer_us = self.t.nav_buffer_us;
         let stale = |t_us: u64| t_us.saturating_add(buffer_us) < now;
-        if let Some(b) = sensors.baro.filter(|b| b.reading.pressure_pa.is_finite() && b.reading.pressure_pa > 0.0) {
+        let full = self.aiding_set == Aiding::Full;
+        let baro = sensors.baro.filter(|_| self.aiding_set != Aiding::Imu);
+        if let Some(b) = baro.filter(|b| b.reading.pressure_pa.is_finite() && b.reading.pressure_pa > 0.0) {
             let w = BaroWait { t_valid_us: b.t_us.saturating_sub(self.t.nav_baro_delay_us), pressure_pa: b.reading.pressure_pa };
             if stale(w.t_valid_us) {
                 self.stats.stale = self.stats.stale.wrapping_add(1);
@@ -1146,7 +1188,7 @@ impl Estimator for Eskf {
                 self.stats.dropped = self.stats.dropped.wrapping_add(1);
             }
         }
-        if let Some(m) = sensors.mag.filter(|m| {
+        if let Some(m) = sensors.mag.filter(|_| full).filter(|m| {
             let old = stale(m.t_us);
             if old {
                 self.stats.stale = self.stats.stale.wrapping_add(1);
@@ -1163,7 +1205,7 @@ impl Estimator for Eskf {
                 self.stats.dropped = self.stats.dropped.wrapping_add(1);
             }
         }
-        if let Some(g) = sensors.gnss {
+        if let Some(g) = sensors.gnss.filter(|_| full) {
             if stale(g.t_us.saturating_sub(self.t.nav_gps_delay_us)) {
                 self.stats.stale = self.stats.stale.wrapping_add(1);
             } else {
@@ -1192,8 +1234,14 @@ impl Estimator for Eskf {
             self.mag_wait.pop();
             self.mag_due(m);
         }
+        if self.aiding_set == Aiding::Imu && self.tilt_aligned && self.horizon_us.is_some() && horizon >= self.next_hold_us {
+            self.next_hold_us = horizon.saturating_add(1_000_000 / BARO_RATE_HZ);
+            if self.baro_job.replace(BaroJob { h_b: 0.0, stage: 1 }).is_some() {
+                self.stats.replaced = self.stats.replaced.wrapping_add(1);
+            }
+        }
         // The no-aid hold position: where the filter is when horizontal aiding stops.
-        let aiding = self.aiding();
+        let aiding = self.horizontal_aiding();
         if self.aiding_prev && !aiding {
             self.hold_ne = [self.nom.p[0], self.nom.p[1]];
         }
@@ -2107,5 +2155,112 @@ mod tests {
         println!("c15: 5 s of epochs without speed at 2 m/s: screen records {screened}, E3b {} -> {}, positions fused {} -> {}", s0.gps_e3b, s1.gps_e3b, s0.gps_pos_fused, s1.gps_pos_fused);
         assert_eq!((screened, s1.gps_e3b), (0, s0.gps_e3b));
         assert!(s1.gps_pos_fused > s0.gps_pos_fused + 40);
+    }
+
+    #[test]
+    fn p21_full_is_new_bit_for_bit() {
+        let t = Tuning::DEFAULT;
+        let (mut a, mut b) = (Eskf::new(&t).unwrap(), Eskf::with_aiding(&t, Aiding::Full).unwrap());
+        assert_eq!((a.aiding(), b.aiding()), (Aiding::Full, Aiding::Full));
+        let mut w = World::new(&t);
+        w.v = [1.0, 0.5, 0.0];
+        for _ in 0..30_000_000 / PERIOD_US {
+            let s = w.step();
+            let armed = w.t_us() >= 5_000_000;
+            a.set_armed(armed);
+            b.set_armed(armed);
+            assert_eq!(a.update(&s), b.update(&s));
+        }
+        assert_eq!(a.stats(), b.stats());
+        assert!(a.stats().gps_pos_fused > 0 && a.stats().mag_fused > 0 && a.stats().baro_fused > 0);
+    }
+
+    #[test]
+    fn p21_imu_baro_ignores_gnss_and_compass_and_has_no_delay() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        assert_eq!(f.aiding(), Aiding::ImuBaro);
+        let mut w = World::new(&t);
+        let mut vert = false;
+        for _ in 0..30_000_000 / PERIOD_US {
+            let s = w.step();
+            f.set_armed(true);
+            let nav = f.update(&s);
+            assert_eq!(nav.t_us, s.imu1.t_us);
+            assert!(!nav.valid.heading && !nav.valid.velocity_ne && !nav.valid.position_ne);
+            assert!(f.origin().is_none() && !f.yaw_aligned());
+            assert_eq!(f.events().filter(|e| e.src != code::BARO && e.src != code::NOAID && e.src != code::HEIGHT_RESET).count(), 0);
+            vert |= nav.valid.velocity_d && nav.valid.position_d;
+        }
+        let st = f.stats();
+        println!("p21: imu_baro stats {st:?}");
+        assert!(vert && f.tilt_aligned());
+        assert_eq!(
+            (st.gps_epochs, st.gps_unaccepted, st.gps_prealign, st.gps_disarmed, st.gps_e1s, st.gps_e3b, st.gps_pos_fused, st.gps_vel_fused, st.gps_resets),
+            (0, 0, 0, 0, 0, 0, 0, 0, 0)
+        );
+        assert_eq!((st.mag_refused, st.mag_fused, st.mag_gated, st.yaw_aligns, st.yaw_resets, st.stale, st.dropped), (0, 0, 0, 0, 0, 0, 0));
+        assert!(f.mag_expected.is_none());
+        assert!(st.baro_fused > 0 && st.noaid > 0);
+        assert_eq!(st.max_jobs_per_step, 1);
+    }
+
+    #[test]
+    fn p21_imu_only_holds_three_axes_and_ignores_the_barometer() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::with_aiding(&t, Aiding::Imu).unwrap();
+        assert_eq!(f.aiding(), Aiding::Imu);
+        let mut w = World::new(&t);
+        let mut worst = [0.0f32; 3];
+        let mut tilt = false;
+        for _ in 0..40_000_000 / PERIOD_US {
+            let s = w.step();
+            f.set_armed(w.t_us() >= 20_000_000);
+            let nav = f.update(&s);
+            assert_eq!(nav.t_us, s.imu1.t_us);
+            assert!(!nav.valid.velocity_d && !nav.valid.position_d);
+            assert!(!nav.valid.heading && !nav.valid.velocity_ne && !nav.valid.position_ne);
+            assert!(nav.attitude.iter().chain(&nav.velocity_ms).chain(&nav.position_m).all(|v| v.is_finite()));
+            tilt |= nav.valid.tilt;
+            if w.t_us() >= 10_000_000 && w.t_us() < 20_000_000 {
+                let sg = f.sigmas();
+                for i in 0..3 {
+                    worst[i] = worst[i].max(sg[POS + i]);
+                }
+            }
+        }
+        let st = f.stats();
+        println!("p21: imu worst position sigma N/E/D after 10 s disarmed {worst:?} (limit {}), stats {st:?}", t.nav_noaid_sigma_dis_m);
+        assert!(tilt && f.origin().is_none() && !f.yaw_aligned() && f.datum_m.is_none());
+        assert_eq!((st.baro_fused, st.baro_gated, st.height_resets, st.stale, st.dropped, st.gps_epochs, st.mag_fused), (0, 0, 0, 0, 0, 0, 0));
+        assert!(st.noaid > 0);
+        assert_eq!(st.max_jobs_per_step, 1);
+        assert!(worst.iter().all(|&x| x <= t.nav_noaid_sigma_dis_m), "{worst:?}");
+    }
+
+    #[test]
+    fn p21_imu_baro_and_imu_align_a_tilted_start() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let mut f = Eskf::with_aiding(&t, aiding).unwrap();
+            let mut w = World::new(&t);
+            let roll = 20.0_f64.to_radians();
+            let g = f64::from(GRAVITY_MSS);
+            let mut nav = None;
+            for _ in 0..5_000_000 / PERIOD_US {
+                let mut s = w.step();
+                s.imu1.reading.accel_ms2 = [0.0, (-g * roll.sin()) as f32, (-g * roll.cos()) as f32];
+                nav = Some(f.update(&s));
+            }
+            let nav = nav.unwrap();
+            assert!(nav.valid.tilt);
+            // Truth: the body-frame down axis of a vehicle rolled by `roll` is (0, sin, cos); the estimate's is the third
+            // row of R(q).
+            let r = rotation(&nav.attitude);
+            let dot = f64::from(r[2][1]) * roll.sin() + f64::from(r[2][2]) * roll.cos();
+            let err_deg = dot.clamp(-1.0, 1.0).acos().to_degrees();
+            println!("p21: {aiding:?} tilted start, down-axis error {err_deg:e} deg");
+            assert!(err_deg < 0.1, "{aiding:?}: {err_deg}");
+        }
     }
 }
