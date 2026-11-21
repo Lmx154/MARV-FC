@@ -234,23 +234,28 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
 /// What the log writes at one flight step (decision-flight-logging-20261119, section 1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogDue {
-    /// Write the step block (IMU1 sample, NAV, SETP, DMD, MOT) this step.
+    /// Write the IMU1 sample this step (every step, armed or not).
+    pub imu: bool,
+    /// Write the four flight records (NAV, SETP, DMD, MOT) this step.
     pub block: bool,
     /// Write an ESC record this step.
     pub esc: bool,
 }
 
-/// The decimation rule. `step` counts flight steps (the caller adds 1 after each). Armed: a block
-/// every step and an ESC record every 4th; disarmed: both every 8th step.
+/// The decimation rule. `step` counts flight steps (the caller adds 1 after each). The IMU1 sample is
+/// logged every step. Armed: the four flight records every step and an ESC record every 4th; disarmed:
+/// the four flight records and the ESC record every 8th step.
 pub fn log_due(step: u32, armed: bool) -> LogDue {
     if armed {
         LogDue {
+            imu: true,
             block: true,
             esc: step % 4 == 0,
         }
     } else {
         let every_8th = step % 8 == 0;
         LogDue {
+            imu: true,
             block: every_8th,
             esc: every_8th,
         }
@@ -773,7 +778,10 @@ mod tests {
             out.setpoint,
             out.demand,
             out.allocation,
-            (out.nav.attitude.map(f32::to_bits), out.nav.rates_rads.map(f32::to_bits)),
+            (
+                out.nav.attitude.map(f32::to_bits),
+                out.nav.rates_rads.map(f32::to_bits)
+            ),
             out.nav.t_us,
             v.tilt,
             v.heading,
@@ -876,8 +884,14 @@ mod tests {
         let (changed, b) = run(&H[2], Some(other));
         assert!(none.iter().all(Option::is_none));
         for n in 0..plain.len() {
-            assert_eq!(plain[n], default[n], "step {n}: the default shadow changed the step");
-            assert_eq!(plain[n], changed[n], "step {n}: the other shadow changed the step");
+            assert_eq!(
+                plain[n], default[n],
+                "step {n}: the default shadow changed the step"
+            );
+            assert_eq!(
+                plain[n], changed[n],
+                "step {n}: the other shadow changed the step"
+            );
         }
         assert!(a.iter().all(Option::is_some));
         assert!(a.iter().zip(&b).filter(|(x, y)| x != y).count() > 1000);
@@ -911,7 +925,10 @@ mod tests {
         };
         let f = |b: &[u8], at: usize| f32::from_le_bytes(b[at..at + 4].try_into().unwrap());
         let mut buf = [0xEEu8; 120];
-        assert_eq!(encode_nkf(&mut buf, 1, &nav, [0.001, 0.002, 0.003], [0.1, 0.2, 0.3]), 113);
+        assert_eq!(
+            encode_nkf(&mut buf, 1, &nav, [0.001, 0.002, 0.003], [0.1, 0.2, 0.3]),
+            113
+        );
         assert_eq!(encode_nkf(&mut [0u8; 112], 1, &nav, [0.0; 3], [0.0; 3]), 0);
         let time = 0x0102_0304_0506u64.to_le_bytes();
         assert_eq!(buf[0..3], [0xA3, 0x95, 147]);
@@ -926,7 +943,12 @@ mod tests {
         assert_eq!(buf[56..64], time);
         assert_eq!(buf[64], 1);
         let rest: [f32; 12] = core::array::from_fn(|k| f(&buf, 65 + 4 * k));
-        assert_eq!(rest, [0.001, 0.002, 0.003, 0.1, 0.2, 0.3, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06]);
+        assert_eq!(
+            rest,
+            [
+                0.001, 0.002, 0.003, 0.1, 0.2, 0.3, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06
+            ]
+        );
         assert_eq!(buf[113..], [0xEE; 7]);
         nav.sigma = None;
         encode_nkf(&mut buf, 0, &nav, [0.0; 3], [0.0; 3]);
@@ -1118,15 +1140,20 @@ mod tests {
         let count = |armed| {
             (0..64u32)
                 .map(|n| log_due(n, armed))
-                .fold((0, 0), |(b, e), d| {
-                    (b + u32::from(d.block), e + u32::from(d.esc))
+                .fold((0, 0, 0), |(i, b, e), d| {
+                    (
+                        i + u32::from(d.imu),
+                        b + u32::from(d.block),
+                        e + u32::from(d.esc),
+                    )
                 })
         };
-        assert_eq!(count(true), (64, 16));
-        assert_eq!(count(false), (8, 8));
+        assert_eq!(count(true), (64, 64, 16));
+        assert_eq!(count(false), (64, 8, 8));
         assert_eq!(
             log_due(0, false),
             LogDue {
+                imu: true,
                 block: true,
                 esc: true
             }
@@ -1134,6 +1161,7 @@ mod tests {
         assert_eq!(
             log_due(1, false),
             LogDue {
+                imu: true,
                 block: false,
                 esc: false
             }
@@ -1141,6 +1169,7 @@ mod tests {
         assert_eq!(
             log_due(4, true),
             LogDue {
+                imu: true,
                 block: true,
                 esc: true
             }
@@ -1148,9 +1177,23 @@ mod tests {
         assert_eq!(
             log_due(5, true),
             LogDue {
+                imu: true,
                 block: true,
                 esc: false
             }
         );
+    }
+
+    #[test]
+    fn log_due_disarmed_imu_every_step_block_every_8th() {
+        for k in 0..64u32 {
+            let d = log_due(k, false);
+            assert!(d.imu);
+            assert_eq!(d.block, k % 8 == 0);
+            assert_eq!(d.esc, k % 8 == 0);
+            let a = log_due(k, true);
+            assert!(a.imu && a.block);
+            assert_eq!(a.esc, k % 4 == 0);
+        }
     }
 }

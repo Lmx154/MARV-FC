@@ -292,7 +292,8 @@ pub const LOG_BYTES: usize = 16384;
 /// The flight records: producer IMU1's [`Stepper`] (core 1), consumer `logger`'s collector (core 0).
 pub static LOG: LogRing<LOG_BYTES> = LogRing::new();
 
-/// One step block: IMU1's sample, then NAV, SETP, DMD, MOT (182 bytes).
+/// One step block: IMU1's sample, then NAV, SETP, DMD, MOT (182 bytes); disarmed, only every 8th step has the
+/// four flight records, the other steps log the 40-byte IMU1 record alone.
 const BLOCK: usize = dflog::IMU.length as usize
     + dflog::NAV.length as usize
     + dflog::SETP.length as usize
@@ -435,12 +436,17 @@ impl SampleSink for Stepper {
         // The log, after the command is out. A record that does not fit is dropped and counted by the ring.
         let due = log_due(self.step, out.armed);
         self.step = self.step.wrapping_add(1);
-        if due.block {
+        if due.imu {
             let r = &sample.reading;
-            self.log.push_with(BLOCK, |b| {
+            let len = if due.block { BLOCK } else { dflog::IMU.length as usize };
+            self.log.push_with(len, |b| {
                 let n =
                     dflog::encode_imu(b, sample.t_us, 0, r.gyro_rads, r.accel_ms2, r.temperature_c);
-                n + encode_step(&out, b.get_mut(n..).unwrap_or_default())
+                if due.block {
+                    n + encode_step(&out, b.get_mut(n..).unwrap_or_default())
+                } else {
+                    n
+                }
             });
         }
         if due.esc

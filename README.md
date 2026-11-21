@@ -682,11 +682,11 @@ written.
   45 282 IMU records per instance = 25.0 per second each, wall-clock time from the GPS records correct), the
   8.5-hour log 5 (161 MB, no bad bytes, DSF 30 804, GPS 30 885) and log 13 (the one cut by the card pull below:
   reads clean). UAV Log Viewer and Mission Planner were not tried.
-- What and how often (Q5 and decision-flight-logging-20261119 section 1; about 166 kB/s armed, 34 kB/s
-  disarmed, of which core 0's own records are about 4.6 kB/s with fresh stick reports): from the flight core
+- What and how often (Q5 and decision-flight-logging-20261119 section 1; about 166 kB/s armed, 62 kB/s
+  disarmed (decision-flight-logging-20261119 as amended 2026-11-21: IMU1 at every step), of which core 0's own records are about 4.6 kB/s with fresh stick reports): from the flight core
   (IMU1's `flight::Stepper`, after the motor command is published) IMU instance 0 (IMU1, this step's sample) with
   NAV, SETP, DMD and MOT at every flight step while armed (803.6 Hz, 182 B per step) and every 8th step while
-  disarmed (100.4 Hz), ESC (eRPM, volts, degC by DShot line, the fresh bits; `TimeUS` the exchange's) every 4th
+  disarmed (100.4 Hz; the IMU record alone, 40 B, at every step disarmed, so a log replays through the estimators), ESC (eRPM, volts, degC by DShot line, the fresh bits; `TimeUS` the exchange's) every 4th
   step armed (200.9 Hz) and every 8th disarmed, RCS (sticks and arm switch, the report's own time) for each stick
   report the step takes in (up to about 250 Hz); from the collector IMU instance 1 (IMU2) at 25 Hz (from its
   seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (the fix rate:
@@ -736,7 +736,7 @@ written.
 - When: from boot, one log per boot and a new number after every recovery or RESTART (`device restart SD`
   writes what waits in the ring, flushes, closes, un-mounts, mounts and opens the next number). Off with
   `LOG_BACKEND_TYPE` = 0 (nothing collected, the card untouched).
-- Stalls and failures: the main ring absorbs about 0.4 s of a stalled card while armed (about 1.9 s disarmed);
+- Stalls and failures: the main ring absorbs about 0.4 s of a stalled card while armed (about 1.0 s disarmed);
   beyond that records are dropped (counted in `overflows` and DSF Dp). A failed write is retried once at once; a second failure is one error event and the piece
   is discarded (the file then has a gap); three such events make the row Recovering, and the recovery opens the
   next log. FAT is not power-safe: a power cut or reset loses what was not yet flushed (about 1 to 2 s).
