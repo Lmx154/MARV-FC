@@ -119,6 +119,8 @@ SECTIONS {
         *(.text.*7fw_core5dflog10encode_rcs*)
         /* The navigation records (packet E2). */
         *(.text.*7fw_core5dflog11encode_nkf1* .text.*7fw_core5dflog11encode_nkf2* .text.*7fw_core5dflog10encode_nki*)
+        /* MODE and SPN (decision-nav-eskf-20261120, 8c, F1, F6). */
+        *(.text.*7fw_core5dflog11encode_mode* .text.*7fw_core5dflog10encode_spn*)
         /* esc: only its core-1 items (the driver's build, the task); its core-0 readers stay in flash. */
         *(.text.*16marv_v2_firmware3esc6driver* .text.*16marv_v2_firmware3esc4task* .text.*16marv_v2_firmware3esc11___task_task*)
         *(.text.*16marv_v2_firmware10imu_inject* .text.*16marv_v2_firmware14flight_latency*)

@@ -25,11 +25,11 @@ use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
 use fw_flight::eskf::{Aiding, Eskf, EskfStats};
 use fw_flight::gate::MotorCommand;
-use fw_flight::gnc::{NavState, Sensors};
+use fw_flight::gnc::{NavState, Sensors, Setpoint};
 use fw_flight::imu::{ImuSample, SampleSink};
 use fw_flight::pid::CascadedPid;
 use fw_flight::step::{
-    Flight, FlightInputs, ModeLog, StepOut, encode_mode, encode_nkf, encode_step, log_due,
+    Flight, FlightInputs, ModeLog, StepOut, encode_mode, encode_nkf, encode_spn, encode_step, log_due,
 };
 use fw_flight::tuning::Tuning;
 use static_cell::StaticCell;
@@ -462,6 +462,12 @@ impl SampleSink for Stepper {
                 .push_with(dflog::MODE.length.into(), |b| encode_mode(&out, b))
         {
             self.mode_log.done(&out);
+        }
+        // SPN: the altitude target, with the step block's cadence (armed: every step; disarmed: every 8th), only while
+        // the setpoint is Altitude, so a flight in Angle logs none (F1).
+        if due.block && matches!(out.setpoint, Setpoint::Altitude { .. }) {
+            self.log
+                .push_with(dflog::SPN.length.into(), |b| encode_spn(&out, b));
         }
         if due.esc
             && let Some(status) = crate::esc::ESC.try_read(1)
