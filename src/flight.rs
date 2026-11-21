@@ -25,10 +25,12 @@ use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
 use fw_flight::eskf::{Aiding, Eskf, EskfStats};
 use fw_flight::gate::MotorCommand;
-use fw_flight::gnc::{NavState, Sensors};
+use fw_flight::gnc::{NavState, Sensors, Setpoint};
 use fw_flight::imu::{ImuSample, SampleSink};
 use fw_flight::pid::CascadedPid;
-use fw_flight::step::{Flight, FlightInputs, StepOut, encode_nkf, encode_step, log_due};
+use fw_flight::step::{
+    Flight, FlightInputs, ModeLog, StepOut, encode_mode, encode_nkf, encode_spn, encode_step, log_due,
+};
 use fw_flight::tuning::Tuning;
 use static_cell::StaticCell;
 
@@ -318,6 +320,8 @@ pub struct Stepper {
     /// Covariance propagations already seen, I = 0 and I = 1 (the NKF records' rate).
     predicts: [u32; 2],
     stat: SeqlockWriter<'static, NavStat>,
+    /// When MODE is due (the first step and every change of the selected or the effective mode).
+    mode_log: ModeLog,
 }
 
 impl Stepper {
@@ -349,6 +353,7 @@ impl Stepper {
             shadow,
             predicts: [0; 2],
             stat: NAV_STAT.take_writer()?,
+            mode_log: ModeLog::new(),
         })
     }
 
@@ -448,6 +453,21 @@ impl SampleSink for Stepper {
                     n
                 }
             });
+        }
+        // MODE (decision-nav-eskf-20261120, 8c, F6): at the first step and on every change of the selected or the
+        // effective mode, armed or not (a change is rare, so it has no cadence). A dropped record is offered again.
+        if self.mode_log.pending(&out)
+            && self
+                .log
+                .push_with(dflog::MODE.length.into(), |b| encode_mode(&out, b))
+        {
+            self.mode_log.done(&out);
+        }
+        // SPN: the altitude target, with the step block's cadence (armed: every step; disarmed: every 8th), only while
+        // the setpoint is Altitude, so a flight in Angle logs none (F1).
+        if due.block && matches!(out.setpoint, Setpoint::Altitude { .. }) {
+            self.log
+                .push_with(dflog::SPN.length.into(), |b| encode_spn(&out, b));
         }
         if due.esc
             && let Some(status) = crate::esc::ESC.try_read(1)

@@ -34,7 +34,7 @@ use fw_core::sample::GnssReading;
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
 use fw_core::xcore::{TripleBuffer, TripleWriter};
-use fw_settings::rc::{RcMap, arm_switch};
+use fw_settings::rc::{RcMap, arm_switch, mode_switch};
 use mavlink_device::dialect::{MANUAL_CONTROL_DATA, MavState, RC_CHANNELS_DATA};
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
 use mavlink_device::{
@@ -97,6 +97,7 @@ pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
         yaw: 0.0,
     },
     arm: false,
+    switch6: fw_core::rc::Switch3::Low,
     t_us: 0,
 });
 
@@ -346,6 +347,7 @@ impl Hooks for RcHooks {
             w.write(RcSample {
                 sticks: map.sticks(&ch),
                 arm: arm_switch(ch[4]),
+                switch6: mode_switch(ch[5], &map.channels[5]),
                 t_us,
             });
         }

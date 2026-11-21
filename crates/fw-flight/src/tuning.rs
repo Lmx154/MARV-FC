@@ -2,6 +2,15 @@
 //! (step 6). Fields: decision-first-pair-20261119, section 9; values and their sources: its section 13
 //! (rulings file, ruling 3). Units: rad, rad/s, us.
 
+use fw_core::calib::GRAVITY_MSS;
+use marv_card::{K_F, MASS, MAX_ROTOR_SPEED};
+
+/// The collective at full throttle stick, N: `pilot_thrust_max_g` times the weight m g, or four rotors at full speed
+/// if that is less. Angle's stick map and altitude hold's thrust clamp use this one value.
+pub fn full_thrust_n(pilot_thrust_max_g: f32) -> f32 {
+    (pilot_thrust_max_g * MASS * GRAVITY_MSS).min(4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED)
+}
+
 /// Gains and limits of the flight code. Arrays are [roll, pitch, yaw].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
@@ -59,6 +68,23 @@ pub struct Tuning {
     pub nav_p0_vel_ms: f32,
     /// Initial accelerometer bias sigma, m/s^2 (B3, `P0_ba`: PX4 ekf2_abias_init, px4-common.h:348).
     pub nav_p0_ba_ms2: f32,
+    /// Altitude hold (decision-nav-eskf-20261120, Amendment F; the seven values owner-approved 2026-11-21): height
+    /// error to climb-rate setpoint, 1/s. PX4 MPC_Z_P, ArduPilot's POS P 1.0.
+    pub psc_posz_p: f32,
+    /// Climb-rate error to vertical acceleration, (m/s^2)/(m/s). PX4 MPC_Z_VEL_P_ACC. PX4's thrust is m (g - a) in
+    /// newtons, as here, so the gain transfers unchanged.
+    pub psc_velz_p: f32,
+    /// Climb-rate error integral to vertical acceleration, (m/s^2)/m. PX4 MPC_Z_VEL_I_ACC.
+    pub psc_velz_i: f32,
+    /// Limit of the vertical integrator, m/s^2: standard gravity (PX4 PositionControl.cpp:146, +-CONSTANTS_ONE_G).
+    pub psc_velz_imax: f32,
+    /// Fastest climb the throttle stick asks for, and the largest climb-rate setpoint, m/s. PX4 MPC_Z_VEL_MAX_UP.
+    pub pilot_speed_up_ms: f32,
+    /// Fastest descent the throttle stick asks for, and the largest descent-rate setpoint, m/s. PX4 MPC_Z_VEL_MAX_DN.
+    pub pilot_speed_dn_ms: f32,
+    /// Dead zone of the throttle stick in altitude hold, as a share of full travel on each side of the centre 0.5.
+    /// ArduPilot THR_DZ, 100 us of 1000 (ArduCopter/config.h:523).
+    pub pilot_thr_dz: f32,
     /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
     /// may use, us (section 10).
     pub nav_buffer_us: u64,
@@ -143,5 +169,12 @@ impl Tuning {
         nav_gps_spd_ratio: 0.3,
         nav_gps_spd_min_ms: 0.5,
         nav_mag_declination_rad: 3.195_f32.to_radians(),
+        psc_posz_p: 1.0,
+        psc_velz_p: 4.0,
+        psc_velz_i: 2.0,
+        psc_velz_imax: GRAVITY_MSS,
+        pilot_speed_up_ms: 3.0,
+        pilot_speed_dn_ms: 1.5,
+        pilot_thr_dz: 0.10,
     };
 }

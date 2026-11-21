@@ -188,15 +188,15 @@ pub enum Setpoint {
         thrust_n: f32,
     },
     /// Altitude hold. Tilt and heading come from `attitude`; height is given as down from the origin, m, with its
-    /// rate, m/s.
+    /// rate, m/s. The controller makes the collective (decision-nav-eskf-20261120, 7b, F1).
     Altitude {
         /// Body to NED [w, x, y, z].
         attitude: [f32; 4],
         /// Heading-rate feed-forward, rad/s.
         heading_rate_rads: f32,
-        /// Down from the origin, m.
+        /// The target height: down from the origin, m (down positive).
         down_m: f32,
-        /// Down velocity, m/s.
+        /// The climb-rate feed-forward, m/s, down positive (the stick's climb rate; 0 in the throttle dead zone).
         velocity_d_ms: f32,
     },
     /// Position hold. NED position, m, with a NED velocity feed-forward, m/s; heading, rad.
