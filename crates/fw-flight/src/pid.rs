@@ -9,21 +9,12 @@ use crate::tuning::{Tuning, full_thrust_n};
 use fw_core::calib::GRAVITY_MSS;
 use marv_card::MASS;
 
-/// The cosine of the tilt below which altitude hold stops raising the thrust to hold the height: the divisor in the
-/// tilt compensation is clamped to at least this (ArduPilot `AC_AttitudeControl_Multi.cpp:398`, `MAX(cos, 0.1)`;
-/// PROPOSED to the owner, Amendment F "Numbers").
-pub const TILT_COS_FLOOR: f32 = 0.1;
-/// The factor on the cosine in the numerator of the tilt compensation, which takes the thrust to 0 once the vehicle
-/// is within 1/this of upside down in cosine terms (ArduPilot `AC_AttitudeControl_Multi.cpp:400`,
-/// `constrain(10 * cos, 0, 1)`, the "inverted" ramp; PROPOSED to the owner, Amendment F "Numbers").
-pub const TILT_INVERTED_FACTOR: f32 = 10.0;
-
 /// The thrust multiplier for a tilt whose cosine is `cos` (third component of the estimated down vector in the body):
-/// clamp(10 cos, 0, 1) / clamp(cos, 0.1, 1). 1 when level, 1/cos to the floor, then up to 10, and 0 at or past
-/// upright-sideways (cos <= 0).
-fn tilt_factor(cos: f32) -> f32 {
-    let inverted = (TILT_INVERTED_FACTOR * cos).clamp(0.0, 1.0);
-    let lift = cos.clamp(TILT_COS_FLOOR, 1.0);
+/// clamp(gain cos, 0, 1) / clamp(cos, cos_min, 1), with `gain` = `thr_inverted_gain` and `cos_min` = `thr_tilt_cos_min`.
+/// 1 when level, 1/cos to the floor, then up to the gain, and 0 at or past upright-sideways (cos <= 0).
+fn tilt_factor(cos: f32, cos_min: f32, gain: f32) -> f32 {
+    let inverted = (gain * cos).clamp(0.0, 1.0);
+    let lift = cos.clamp(cos_min, 1.0);
     inverted / lift
 }
 
@@ -122,6 +113,10 @@ pub struct CascadedPid {
     speed_up_ms: f32,
     /// Largest descent-rate setpoint (down), m/s.
     speed_dn_ms: f32,
+    /// The smallest cos(tilt) of the tilt compensation (`thr_tilt_cos_min`).
+    tilt_cos_min: f32,
+    /// The factor on cos(tilt) in the tilt compensation's numerator (`thr_inverted_gain`).
+    tilt_inverted_gain: f32,
     /// The largest collective the vertical loop asks for, N: the same maximum Angle's stick map reaches.
     thrust_full_n: f32,
     /// The vertical integrator, m/s^2, down positive (NED), like the acceleration it adds to.
@@ -158,6 +153,8 @@ impl CascadedPid {
             velz_imax: tuning.psc_velz_imax,
             speed_up_ms: tuning.pilot_speed_up_ms,
             speed_dn_ms: tuning.pilot_speed_dn_ms,
+            tilt_cos_min: tuning.thr_tilt_cos_min,
+            tilt_inverted_gain: tuning.thr_inverted_gain,
             thrust_full_n: full_thrust_n(tuning.pilot_thrust_max_g),
             alt_i: 0.0,
             alt_active: false,
@@ -195,7 +192,7 @@ impl CascadedPid {
         let a_d = self.velz_p * e_v + self.alt_i;
         // Thrust, N, positive up: m (g - a_d) holds at a_d = 0 and falls when a_d > 0; then the tilt factor (F4).
         let cos = down_in_body(nav.attitude)[2];
-        let wanted = MASS * (GRAVITY_MSS - a_d) * tilt_factor(cos);
+        let wanted = MASS * (GRAVITY_MSS - a_d) * tilt_factor(cos, self.tilt_cos_min, self.tilt_inverted_gain);
         let thrust_n = wanted.max(0.0).min(self.thrust_full_n);
         // F5: no integration into a saturated thrust, from either source: our own clamp or the allocator's flags.
         let at_min = wanted <= 0.0 || limited.thrust_low;
@@ -550,7 +547,8 @@ mod tests {
         // clamp(10 cos, 0, 1) / clamp(cos, 0.1, 1)
         let table = [(1.0, 1.0), (0.5, 2.0), (0.1, 10.0), (0.05, 5.0), (0.0, 0.0), (-0.1, 0.0)];
         for (cos, factor) in table {
-            assert!((tilt_factor(cos) - factor).abs() <= 1e-5, "cos {cos}: {}", tilt_factor(cos));
+            let (cos_min, gain) = (t.thr_tilt_cos_min, t.thr_inverted_gain);
+            assert!((tilt_factor(cos, cos_min, gain) - factor).abs() <= 1e-5, "cos {cos}: {}", tilt_factor(cos, cos_min, gain));
             // Through the controller: tilted about x by acos(cos), at rest at the target, a_d = 0.
             let a = libm::acosf(cos);
             let mut n = alt_nav(0, 0.0, 0.0);

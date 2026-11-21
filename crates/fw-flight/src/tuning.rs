@@ -85,6 +85,15 @@ pub struct Tuning {
     /// Dead zone of the throttle stick in altitude hold, as a share of full travel on each side of the centre 0.5.
     /// ArduPilot THR_DZ, 100 us of 1000 (ArduCopter/config.h:523).
     pub pilot_thr_dz: f32,
+    /// Altitude hold: the height target is integrated only while it is within this many seconds of the limit climb or
+    /// descent speed from the estimate, s (Amendment F, F2: Betaflight alt_hold_multirotor.c:146).
+    pub pilot_alt_lead_s: f32,
+    /// Altitude hold: the smallest cos(tilt) used in the 1/cos thrust compensation (Amendment F, F4: ArduPilot
+    /// AC_AttitudeControl_Multi.cpp:400).
+    pub thr_tilt_cos_min: f32,
+    /// Altitude hold: thrust factor clamp(gain x cos(tilt), 0, 1), which takes the thrust to 0 as the vehicle goes past
+    /// 90 deg (Amendment F, F4: ArduPilot AC_AttitudeControl_Multi.cpp:398).
+    pub thr_inverted_gain: f32,
     /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
     /// may use, us (section 10).
     pub nav_buffer_us: u64,
@@ -176,5 +185,8 @@ impl Tuning {
         pilot_speed_up_ms: 3.0,
         pilot_speed_dn_ms: 1.5,
         pilot_thr_dz: 0.10,
+        pilot_alt_lead_s: 1.0,
+        thr_tilt_cos_min: 0.1,
+        thr_inverted_gain: 10.0,
     };
 }

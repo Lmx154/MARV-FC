@@ -52,11 +52,6 @@ pub struct StepOut {
     pub allocation: Option<Allocation>,
 }
 
-/// How far ahead of the vehicle the altitude target may run, in seconds of the limit speed of its direction: the target
-/// stops integrating while the vehicle is that far from it (Betaflight `alt_hold_multirotor.c:146`, 1 s, the target
-/// velocity is still passed on at :141; Amendment F, F2; PROPOSED to the owner).
-pub const ALT_LEAD_S: f32 = 1.0;
-
 /// The throttle stick's centre in altitude hold: the dead zone is this plus and minus `pilot_thr_dz`
 /// (ArduPilot `Attitude.cpp:97-112`, the centre fixed at half travel).
 const THROTTLE_CENTRE: f32 = 0.5;
@@ -72,6 +67,9 @@ struct StickShaper {
     pilot_speed_up_ms: f32,
     pilot_speed_dn_ms: f32,
     pilot_thr_dz: f32,
+    /// How far ahead of the vehicle the altitude target may run: seconds of the limit speed of its direction
+    /// (`pilot_alt_lead_s`).
+    pilot_alt_lead_s: f32,
     /// The altitude target, m down (positive down); `None` outside Altitude. Captured at the first step whose
     /// effective mode is Altitude.
     target_d: Option<f32>,
@@ -117,7 +115,7 @@ impl StickShaper {
 
     /// Altitude hold (F1, F2): roll, pitch and yaw as Angle; the target height captured at the first call after any
     /// other mode (no jump: it is the current height), then integrated at the stick's rate while the vehicle is
-    /// within [`ALT_LEAD_S`] of the limit speed from it. Down is positive.
+    /// within `pilot_alt_lead_s` of the limit speed from it. Down is positive.
     fn altitude(&mut self, nav: &NavState, dt_s: f32) -> Setpoint {
         let (attitude, heading_rate_rads, _) = self.attitude_setpoint(nav);
         let d = nav.position_m[2];
@@ -131,7 +129,7 @@ impl StickShaper {
                 } else {
                     self.pilot_speed_up_ms
                 };
-                let within = libm::fabsf(d - target) < limit * ALT_LEAD_S;
+                let within = libm::fabsf(d - target) < limit * self.pilot_alt_lead_s;
                 #[cfg(test)]
                 let within = within || self.lead_cap_off;
                 if within { target + v_ff * dt_s } else { target }
@@ -237,6 +235,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 pilot_speed_up_ms: tuning.pilot_speed_up_ms,
                 pilot_speed_dn_ms: tuning.pilot_speed_dn_ms,
                 pilot_thr_dz: tuning.pilot_thr_dz,
+                pilot_alt_lead_s: tuning.pilot_alt_lead_s,
                 target_d: None,
                 t_prev_us: None,
                 #[cfg(test)]

@@ -392,17 +392,18 @@ fn the_lead_cap_limits_how_far_the_target_runs_and_the_control_shows_it_runs_awa
             other => panic!("not Altitude: {other:?}"),
         }
     };
-    // Down: stops at dn x ALT_LEAD_S (plus at most one step's travel). Up: at up x ALT_LEAD_S.
+    // Down: stops at dn x pilot_alt_lead_s (plus at most one step's travel). Up: at up x pilot_alt_lead_s.
+    let lead = tuning.pilot_alt_lead_s;
     let down = gap(0.0, false);
-    assert!(down >= dn * ALT_LEAD_S && down <= dn * ALT_LEAD_S + dn * dt_s + 1e-5, "{down}");
+    assert!(down >= dn * lead && down <= dn * lead + dn * dt_s + 1e-5, "{down}");
     let climb = gap(1.0, false);
-    assert!(-climb >= up * ALT_LEAD_S && -climb <= up * ALT_LEAD_S + up * dt_s + 1e-5, "{climb}");
+    assert!(-climb >= up * lead && -climb <= up * lead + up * dt_s + 1e-5, "{climb}");
     // Control: with the cap off the target runs at the stick's rate for the whole 10 s.
     let down_off = gap(0.0, true);
     let climb_off = gap(1.0, true);
     assert!(down_off > 9.0 * dn && -climb_off > 9.0 * up, "{down_off} {climb_off}");
     std::println!("lead cap: down {down:.3} m (limit {:.3}), up {:.3} m (limit {:.3}); cap off {down_off:.1} / {climb_off:.1} m",
-        dn * ALT_LEAD_S, -climb, up * ALT_LEAD_S);
+        dn * lead, -climb, up * lead);
 }
 
 #[test]
