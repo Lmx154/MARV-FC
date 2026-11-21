@@ -295,6 +295,8 @@ pub struct Eskf {
     /// The barometer datum (ISA height of the first barometer sample after the tilt alignment), m; set once.
     datum_m: Option<f32>,
     last_baro_aid_us: Option<u64>,
+    /// Set by a re-initialisation: the next barometer job initialises the height (as `MahonyBaro` after its own).
+    baro_reinit: bool,
     origin: Option<GeoPoint>,
     /// Previous fix (fix type >= 3 with a position): t_us, lat, lon.
     gps_prev: Option<(u64, i32, i32)>,
@@ -403,6 +405,7 @@ impl Eskf {
             armed: false,
             datum_m: None,
             last_baro_aid_us: None,
+            baro_reinit: false,
             origin: None,
             gps_prev: None,
             started: false,
@@ -475,6 +478,7 @@ impl Eskf {
         self.tilt_aligned = false;
         self.yaw_aligned = false;
         self.last_baro_aid_us = None;
+        self.baro_reinit = true;
         self.started = false;
         self.latest_ok = false;
         self.rej_since = [None; 2];
@@ -599,8 +603,7 @@ impl Eskf {
         (ok, s)
     }
 
-    /// A no-aid scalar on position `axis` (B2): not gated; with the inhibit, K's accelerometer-bias x and y entries are
-    /// zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
+    /// A no-aid scalar on position `axis` (B2): not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
     /// P - K ph^T - ph K^T + K K^T s.
     fn fuse_noaid(&mut self, axis: usize, innov: f32, var: f32) {
         let k = POS + axis;
@@ -613,6 +616,7 @@ impl Eskf {
         if self.noaid_inhibit {
             kg[ACCEL_BIAS] = 0.0;
             kg[ACCEL_BIAS + 1] = 0.0;
+            kg[ACCEL_BIAS + 2] = 0.0;
         }
         for i in 0..N {
             for j in i..N {
@@ -638,6 +642,18 @@ impl Eskf {
     fn baro_job(&mut self, mut job: BaroJob) {
         let horizon = self.horizon();
         match job.stage {
+            0 if self.baro_reinit => {
+                // After a re-initialisation the height is initialised at once (D = -h_b, its row and column
+                // re-initialised), as `MahonyBaro` re-initialises; logged and counted as a height reset.
+                let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
+                let change = -job.h_b - self.nom.p[2];
+                self.nom.p[2] = -job.h_b;
+                self.reset_state_var(POS + 2, r);
+                self.last_baro_aid_us = Some(horizon);
+                self.baro_reinit = false;
+                self.stats.height_resets = self.stats.height_resets.wrapping_add(1);
+                self.event(code::HEIGHT_RESET, change, r, code::FUSED);
+            }
             0 => {
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
                 // h = -D: fused as D = -h_b on the position's down error.
@@ -1751,7 +1767,7 @@ mod tests {
     }
 
     #[test]
-    fn b5_no_aid_leaves_the_horizontal_accel_bias_and_without_the_inhibit_it_moves() {
+    fn b5_no_aid_leaves_the_accel_bias_and_without_the_inhibit_it_moves() {
         let t = Tuning::DEFAULT;
         let moved = |inhibit: bool| {
             let mut f = Eskf::new(&t).unwrap();
@@ -1760,9 +1776,9 @@ mod tests {
             w.expected = None;
             run(&mut f, &mut w, 2.0, |_| true, |_, _, _| {});
             let ba0 = f.biases().1;
-            // A horizontal manoeuvre: 1 m/s^2 north then south, 2 s each, then 1 s still. The change of b_a x and y in
-            // the steps whose job was a no-aid scalar (the nominal integration never changes a bias).
-            let mut by_noaid = 0.0f32;
+            // A horizontal manoeuvre: 1 m/s^2 north then south, 2 s each, then 1 s still. The change of b_a x and y, and
+            // of b_a z, in the steps whose job was a no-aid scalar (the nominal integration never changes a bias).
+            let (mut by_noaid, mut by_noaid_z) = (0.0f32, 0.0f32);
             let mut prev = f.biases().1;
             for a in [1.0, -1.0, 0.0] {
                 w.a = [a, 0.0, 0.0];
@@ -1770,17 +1786,31 @@ mod tests {
                     let ba = f.biases().1;
                     if f.events().any(|e| e.src == code::NOAID) {
                         by_noaid += (ba[0] - prev[0]).abs() + (ba[1] - prev[1]).abs();
+                        by_noaid_z += (ba[2] - prev[2]).abs();
                     }
                     prev = ba;
                 });
             }
             let ba = f.biases().1;
-            (by_noaid, (ba[0] - ba0[0]).abs() + (ba[1] - ba0[1]).abs(), f.stats().noaid)
+            // b_a z directly: one no-aid scalar on north with P holding a north/b_a z correlation of 0.5.
+            let c = 0.5 * sqrtf(f.p[POS][POS] * f.p[ACCEL_BIAS + 2][ACCEL_BIAS + 2]);
+            f.p[POS][ACCEL_BIAS + 2] = c;
+            f.p[ACCEL_BIAS + 2][POS] = c;
+            let z0 = f.nom.ba[2];
+            f.fuse_noaid(0, 1.0, t.nav_noaid_sigma_m * t.nav_noaid_sigma_m);
+            let direct_z = (f.nom.ba[2] - z0).abs();
+            (by_noaid, by_noaid_z, direct_z, (ba[0] - ba0[0]).abs() + (ba[1] - ba0[1]).abs(), f.stats().noaid)
         };
         let (with, without) = (moved(true), moved(false));
-        println!("b5: |d b_a x|+|d b_a y| by the no-aid scalars, in total (barometer included), no-aid scalars: with the inhibit {with:?}, without {without:?}");
-        assert!(with.2 > 0 && with.0 == 0.0, "the no-aid scalars moved b_a x/y: {with:?}");
+        println!(
+            "b5: |d b_a x|+|d b_a y| and |d b_a z| by the no-aid scalars, |d b_a z| by one no-aid scalar with a north/b_a z \
+             correlation of 0.5, |d b_a x|+|d b_a y| in total (barometer included), no-aid scalars: with the inhibit \
+             {with:?}, without {without:?}"
+        );
+        assert!(with.4 > 0 && with.0 == 0.0, "the no-aid scalars moved b_a x/y: {with:?}");
+        assert!(with.1 == 0.0 && with.2 == 0.0, "the no-aid scalars moved b_a z: {with:?}");
         assert!(without.0 > 0.0, "negative control: without the inhibit the no-aid scalars move b_a x/y");
+        assert!(without.2 > 0.0, "negative control: without the inhibit a no-aid scalar moves b_a z");
     }
 
     #[test]
@@ -1825,5 +1855,41 @@ mod tests {
             assert!(n.attitude.iter().chain(&n.velocity_ms).chain(&n.position_m).chain(&n.rates_rads).all(|v| v.is_finite()));
         }
         assert!(navs.last().unwrap().valid.tilt, "realigned");
+    }
+
+    #[test]
+    fn b8_after_a_reinitialisation_10_m_above_the_datum_the_vertical_flags_return() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        // At the first start the barometer initialises the height at once: the time from the first horizon to the flags.
+        let (mut h0, mut first) = (None, None);
+        run(&mut f, &mut w, 10.0, |_| false, |_, nav, _| {
+            let h0 = *h0.get_or_insert(nav.t_us);
+            if first.is_none() && nav.valid.position_d && nav.valid.velocity_d {
+                first = Some(nav.t_us - h0);
+            }
+        });
+        assert!(f.nav().valid.position_d);
+        // 10 m above the datum; once the horizon has passed the move (1 s, inside the timeout), a re-initialisation, as a
+        // non-finite state causes.
+        w.p[2] = -10.0;
+        run(&mut f, &mut w, 1.0, |_| false, |_, _, _| {});
+        f.reinitialise();
+        let t0 = f.horizon();
+        let mut back = None;
+        run(&mut f, &mut w, 8.0, |_| false, |f, nav, _| {
+            if back.is_none() && nav.valid.position_d && nav.valid.velocity_d {
+                back = Some((nav.t_us - t0, nav.position_m[2], nav.sigma.unwrap().position_d_m, f.stats().height_resets));
+            }
+        });
+        println!(
+            "b8: vertical flags at the first start after {first:?} us; after the re-initialisation (us, D, sigma D, height \
+             resets) {back:?}"
+        );
+        let (dt, d, sd, _) = back.expect("the vertical flags never returned");
+        // As at the first start, within one barometer period.
+        assert!(dt <= first.unwrap() + 1_000_000 / BARO_RATE_HZ, "returned after {dt} us");
+        assert!((d + 10.0).abs() <= SIGMAS * sd, "D {d} m");
     }
 }
