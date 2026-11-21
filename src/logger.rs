@@ -9,7 +9,7 @@
 //! so that whole pieces are written in place), then a PARM for every parameter and a DEV for
 //! every row. Then, per Q5: IMU2 at 25 Hz from its seqlock (every 4th tick, only a new `seq`,
 //! `TimeUS` the sample's own time; IMU1 comes from the flight core, below), BARO, MAG, BAT and
-//! GPS (each with a GPA) at every new sample, RCIN at 10 Hz while stick reports are fresh, DEV for every row at
+//! GPS (each with a GPA, and a GPV when it has a velocity) at every new sample, RCIN at 10 Hz while stick reports are fresh, DEV for every row at
 //! 1 Hz and at every state change, MSG for every text (the text ring's third cursor, so the boot
 //! texts come first), PARM after every change of a parameter's value, whatever made it (a set,
 //! a calibration result, a reset, a
@@ -331,6 +331,24 @@ impl Collector {
                         lon_std_mm,
                         alt_std_mm,
                         delta_ms,
+                    )
+                });
+            }
+            if let Reading::Gnss(GnssReading {
+                time,
+                vel_ned_mm_s: Some(vel),
+                ..
+            }) = sample.reading
+            {
+                let pvt = crate::gnss::pvt_log(time);
+                p.push_with(dflog::GPV.length.into(), |b| {
+                    dflog::encode_gpv(
+                        b,
+                        sample.t_us,
+                        vel,
+                        pvt.map_or(0, |x| x.tow_ms),
+                        pvt.and_then(|x| x.speed_mm_s).unwrap_or(u32::MAX),
+                        pvt.and_then(|x| x.heading_cdeg).unwrap_or(u16::MAX),
                     )
                 });
             }

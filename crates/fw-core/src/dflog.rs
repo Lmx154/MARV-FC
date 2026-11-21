@@ -16,6 +16,7 @@
 //! | `H`  | 2    | `u16`                                                         |
 //! | `h`  | 2    | `i16`                                                         |
 //! | `c`  | 2    | `i16`, value x 100 (readers divide by 100)                    |
+//! | `i`  | 4    | `i32`                                                         |
 //! | `I`  | 4    | `u32`                                                         |
 //! | `e`  | 4    | `i32`, value x 100 (readers divide by 100)                    |
 //! | `f`  | 4    | `f32`                                                         |
@@ -69,7 +70,7 @@ const fn char_size(c: u8) -> usize {
     match c {
         b'B' => 1,
         b'H' | b'h' | b'c' => 2,
-        b'I' | b'e' | b'f' | b'L' | b'n' => 4,
+        b'i' | b'I' | b'e' | b'f' | b'L' | b'n' => 4,
         b'Q' => 8,
         b'N' => 16,
         b'Z' => 64,
@@ -151,6 +152,8 @@ pub const ID_RCS: u8 = 144;
 pub const ID_FDS: u8 = 145;
 /// Type number of GPA (the accuracy of a GNSS sample).
 pub const ID_GPA: u8 = 146;
+/// Type number of GPV (the velocity of a GNSS sample; 147 to 151 are reserved for other records).
+pub const ID_GPV: u8 = 152;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -233,11 +236,20 @@ pub const FDS: RecordDef = def(ID_FDS, "FDS", "QII", "TimeUS,Dp,FMn");
 /// GPA: the accuracy of one GNSS sample (`TimeUS` is the sample's, as in its GPS record): vertical DOP,
 /// horizontal and vertical accuracy in metres, milliseconds since the previous sample.
 pub const GPA: RecordDef = def(ID_GPA, "GPA", "QBcffH", "TimeUS,I,VDop,HAcc,VAcc,Delta");
+/// GPV: the velocity of one GNSS sample from the receiver's `$PQTMPVT` (`TimeUS` is the sample's, as in its GPS
+/// record): velocity north, east and down (mm/s; the sign of down is not verified), the PVT's GPS time of week
+/// (ms), ground speed (mm/s) and heading (0.01 degree). No position.
+pub const GPV: RecordDef = def(
+    ID_GPV,
+    "GPV",
+    "QBiiiIIH",
+    "TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg",
+);
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 19] = [
+pub const TYPES: [RecordDef; 20] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA,
+    GPA, GPV,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -741,6 +753,31 @@ pub fn encode_gpa(
     w.pos
 }
 
+/// GPV: the velocity of one GNSS sample, instance 0: north, east, down in mm/s, the GPS time of week in ms (0 when
+/// not known), ground speed in mm/s (`u32::MAX` when unknown) and heading in 0.01 degree (`u16::MAX` when unknown),
+/// all from the epoch's `$PQTMPVT`. 34 bytes.
+pub fn encode_gpv(
+    out: &mut [u8],
+    time_us: u64,
+    vel_ned_mm_s: [i32; 3],
+    tow_ms: u32,
+    speed_mm_s: u32,
+    heading_cdeg: u16,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &GPV) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(0);
+    for v in vel_ned_mm_s {
+        w.i32(v);
+    }
+    w.u32(tow_ms);
+    w.u32(speed_mm_s);
+    w.u16(heading_cdeg);
+    w.pos
+}
+
 /// GPA's `delta_ms`: milliseconds from the previous GNSS sample's `t_us` to this one's, 0 for the first
 /// (`previous_us` `None`) and for a time that went backwards.
 pub fn gpa_delta_ms(previous_us: Option<u64>, t_us: u64) -> u32 {
@@ -863,6 +900,8 @@ mod tests {
         out.push((ID_FDS, b[..n].to_vec()));
         let n = encode_gpa(&mut b, 1, 150, Some(1), Some(2), Some(3), 4);
         out.push((ID_GPA, b[..n].to_vec()));
+        let n = encode_gpv(&mut b, 1, [1, -2, 3], 4, 5, 6);
+        out.push((ID_GPV, b[..n].to_vec()));
         out
     }
 
@@ -933,12 +972,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_19_fmt_records() {
-        assert_eq!(TYPES.len(), 19);
-        assert_eq!(HEADER_SEQUENCE_LEN, 1691);
-        let mut buf = [0u8; 1700];
-        assert_eq!(write_header(&mut buf), 1691);
-        assert_eq!(write_header(&mut [0u8; 1690]), 0);
+    fn header_sequence_is_20_fmt_records() {
+        assert_eq!(TYPES.len(), 20);
+        assert_eq!(HEADER_SEQUENCE_LEN, 1780);
+        let mut buf = [0u8; 1790];
+        assert_eq!(write_header(&mut buf), 1780);
+        assert_eq!(write_header(&mut [0u8; 1779]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -949,6 +988,12 @@ mod tests {
         let gps = &buf[6 * 89..7 * 89];
         assert_eq!(gps[3..9], [0x86, 0x2A, b'G', b'P', b'S', 0]);
         assert_eq!(gps[9..25], *b"QBBIHBcLLeff\0\0\0\0");
+        // The FMT of GPV by hand: type 152 = 0x98, length 34 = 0x22, "GPV", its format and columns.
+        let gpv = &buf[19 * 89..20 * 89];
+        assert_eq!(gpv[3..9], [0x98, 0x22, b'G', b'P', b'V', 0]);
+        assert_eq!(gpv[9..25], *b"QBiiiIIH\0\0\0\0\0\0\0\0");
+        assert_eq!(gpv[25..60], *b"TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg");
+        assert!(gpv[60..].iter().all(|&c| c == 0));
     }
 
     /// The table, as the file announces it (also printed into the report by hand).
@@ -976,7 +1021,8 @@ mod tests {
                 ("ESC", 40),
                 ("RCS", 28),
                 ("FDS", 19),
-                ("GPA", 24)
+                ("GPA", 24),
+                ("GPV", 34)
             ]
         );
     }
@@ -1202,6 +1248,31 @@ mod tests {
         assert_eq!(GPA.format, "QBcffH");
         assert_eq!(GPA.columns, "TimeUS,I,VDop,HAcc,VAcc,Delta");
         assert_eq!(ID_GPA, 146);
+    }
+
+    #[test]
+    fn golden_gpv() {
+        // A3 95 98 | time 7 | I 0 | N -12 | E 34 | D -1 | GMS 542618800 | Spd 450 | Hdg 25118
+        let mut b = [0xEEu8; 40];
+        assert_eq!(encode_gpv(&mut b, 7, [-12, 34, -1], 542_618_800, 450, 25_118), 34);
+        let want = cat(&[
+            &[0xA3, 0x95, 0x98],
+            &7u64.to_le_bytes(),
+            &[0],
+            &(-12i32).to_le_bytes(),
+            &34i32.to_le_bytes(),
+            &(-1i32).to_le_bytes(),
+            &542_618_800u32.to_le_bytes(),
+            &450u32.to_le_bytes(),
+            &25_118u16.to_le_bytes(),
+        ]);
+        assert_eq!(b[..34], want[..]);
+        assert_eq!(b[34..], [0xEE; 6], "nothing beyond the record is touched");
+        assert_eq!(b[12..16], [0xF4, 0xFF, 0xFF, 0xFF]);
+        assert_eq!(GPV.format, "QBiiiIIH");
+        assert_eq!(GPV.columns, "TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg");
+        assert_eq!(ID_GPV, 152);
+        assert_eq!(encode_gpv(&mut [0u8; 33], 7, [0; 3], 0, 0, 0), 0);
     }
 
     #[test]

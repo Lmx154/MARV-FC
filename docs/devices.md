@@ -203,7 +203,8 @@ Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; dr
 - `$PAIR513*3D` saves the module's settings to its flash. Send it only when a permanent change is intended.
 - The firmware (`src/gnss.rs`) sends at every start, restart and apply only `fw_settings::gnss::commands` for `GPS_RATE_MS`
   (100, 200, 500 or 1000 ms): version query, `$PAIR050,1000`, `$PAIR062` for the ten types (GGA, RMC, GST 1; GSA
-  ceil(1000 / ms); the rest 0), `$PQTMCFGMSGRATE,W,PQTMEPE,0,2`, then `$PAIR050,<ms>` if not 1000, at least 500 ms after
+  ceil(1000 / ms); the rest 0), `$PQTMCFGMSGRATE,W,PQTMEPE,0,2`, `$PQTMCFGMSGRATE,W,PQTMPVT,1,1` (`$PQTMPVT` every fix,
+  answered `$PQTMCFGMSGRATE,OK` in 6 ms on the driver's bench), then `$PAIR050,<ms>` if not 1000, at least 500 ms after
   the first `$PAIR050` was acknowledged (`FIX_INTERVAL_SETTLE_MS`). Measured 2026-11-20 (LC76GABNR12A05S, 2025/09/25): a
   `$PAIR050` 18 to 170 ms after one that changed the rate gets `$PAIR001,050,1` (being processed), then the module restarts
   by itself about 1.8 s later (ROM boot text, `BL Jump`, `$PQTMVER`) at its stored settings (8 of 8); from 207 ms on it is
@@ -218,6 +219,11 @@ Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; dr
   driver's 100 sentences (1.48 s); the interval stayed 200 ms. With the module up for a while (warm resets of the board, the
   same state) the same list passes. The firmware therefore sends a failed list again every `CONFIGURE_RETRY_MS` (5 s)
   until it succeeds. The epoch's sentence order with GST on is not recorded yet (bench B-g2).
+- `$PQTMPVT` (driver rev 9fbd8be decodes it; 134 to 139 bytes): one per fix, the same UTC time as the RMC of its epoch, about 16 ms
+  after that RMC in the same burst (driver bench 2026-11-21). At rest, mm/s: north and east scatter 12 to 14 (sd), down 0.7. The firmware
+  puts its velocity north, east, down into the reading of the same epoch (`vel_ned_mm_s`) and logs it (GPV); nothing uses it yet. **The
+  sign of the down velocity and its response to vertical motion are not verified** (needs a lift-and-lower test). With it the stream at
+  200 ms is 24 sentences/s (19 without).
 
 ## WS2812C-2020 status LED (D20)
 
