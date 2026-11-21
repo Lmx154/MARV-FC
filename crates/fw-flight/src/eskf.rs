@@ -8,8 +8,9 @@
 //! the gyro-bias estimate, subtracted when the NavState is built; with the bias at 0 it equals `Mahony`'s rates bit for
 //! bit. `Full` keeps the raw gyro of its horizon sample minus the bias.
 //!
-//! D2 (Amendment D): for `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each disarmed covariance
-//! propagation keeps the mean bias-corrected specific force of its interval. In the first `update` after the armed state
+//! D2 (Amendment D): for `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each covariance
+//! propagation closing an interval that was disarmed throughout keeps its mean bias-corrected specific force (the first
+//! one after a disarm is skipped, and the disarm clears it). In the first `update` after the armed state
 //! went false to true, when the tilt is aligned and that force is inside the alignment window, roll and pitch are set from it
 //! as in the first alignment with the yaw (the Euler yaw, atan2(R10, R00), of the attitude before the step) kept; v_N and v_E
 //! go to 0, the hold position to the current N and E, and the cross terms of the three attitude and the N/E velocity rows
@@ -399,6 +400,8 @@ pub struct Eskf {
     arm_f: Option<[f32; 3]>,
     /// D2: the armed state went false to true and no `update` has run since.
     arm_edge: bool,
+    /// D2: the current covariance interval began armed (the armed state went true to false since the last propagation).
+    interval_armed: bool,
     /// D2: the arming-edge re-alignment is on; off only in a test's negative control.
     arm_realign: bool,
 }
@@ -538,6 +541,7 @@ impl Eskf {
             rates_lpf: [0.0; 3],
             arm_f: None,
             arm_edge: false,
+            interval_armed: false,
             arm_realign: true,
         })
     }
@@ -657,9 +661,10 @@ impl Eskf {
         self.since_predict_us = 0;
         if self.tilt_aligned {
             let (dvel, dt) = (self.nom.dvel, self.nom.dt_sum);
-            if !self.armed && self.aiding_set != Aiding::Full && dt > 0.0 {
+            if !self.armed && !self.interval_armed && self.aiding_set != Aiding::Full && dt > 0.0 {
                 self.arm_f = Some([dvel[0] / dt, dvel[1] / dt, dvel[2] / dt]);
             }
+            self.interval_armed = false;
             n0::covariance_predict(&mut self.p, &self.nom.q, &dvel, dt, &self.noise);
             // The diagonal held at or above 0, as after a fusion (section 1b).
             for i in 0..N {
@@ -1342,6 +1347,10 @@ impl Estimator for Eskf {
             self.gps_job = None;
             self.rej_since = [None; 2];
             self.arm_edge = armed;
+            if !armed {
+                self.arm_f = None;
+                self.interval_armed = true;
+            }
             if armed {
                 self.fix_hist = Fifo::new();
             }
@@ -2684,5 +2693,186 @@ mod tests {
         println!("b1: last barometer aid at {last} us, flags dropped at {drop} us: {late} us after the timeout ({} steps); {after} finite steps after", late / PERIOD_US);
         assert!(late < PERIOD_US, "{late}");
         assert!(after * PERIOD_US >= 30_000_000, "{after}");
+    }
+
+    /// `base` armed after `first` of the `next` samples (re-alignment per `realign_first`), armed for 20 steps, disarmed for
+    /// `k` steps (the disarm edge is the first of them; at most 8 is inside one propagation, nav_predict_us / PERIOD_US).
+    /// Returns the filter before the next step, which is index 24 + k, and that index.
+    fn disarmed_again(base: &Eskf, next: &[Sensors], first: usize, realign_first: bool, k: usize) -> (Eskf, usize) {
+        let mut f = base.clone();
+        f.arm_realign = realign_first;
+        for (i, s) in next[..24 + k].iter().enumerate() {
+            f.set_armed(i >= first && i < 24);
+            f.update(s);
+        }
+        f.arm_realign = true;
+        (f, 24 + k)
+    }
+
+    /// Steps `a` (re-alignment on) and `c` (off) over the same samples, armed or disarmed, and says whether they agree.
+    fn agree(a: &mut Eskf, c: &mut Eskf, samples: &[Sensors], armed: bool) -> bool {
+        let mut same = true;
+        for s in samples {
+            a.set_armed(armed);
+            c.set_armed(armed);
+            let (na, nc) = (a.update(s), c.update(s));
+            same &= na == nc && bits(a) == bits(c);
+        }
+        same
+    }
+
+    #[test]
+    fn al4_a_rearm_before_a_complete_disarmed_interval_does_nothing() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let (base, next, _) = handled(&t, aiding, false);
+            for k in 1..=8 {
+                let (mut a, idx) = disarmed_again(&base, &next, 4, true, k);
+                assert!(a.arm_f.is_none(), "{aiding:?} k {k}: a force is stored");
+                let mut c = a.clone();
+                c.arm_realign = false;
+                assert!(agree(&mut a, &mut c, &next[idx..idx + 20], true), "{aiding:?} k {k}: the second arming did something");
+            }
+        }
+    }
+
+    #[test]
+    fn al5_the_disarm_edge_does_nothing() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let (base, next, _) = handled(&t, aiding, false);
+            // Armed without the first re-alignment, so the handling error is still there.
+            let mut f = base.clone();
+            f.arm_realign = false;
+            let mut nav = f.nav();
+            for (i, s) in next[..24].iter().enumerate() {
+                f.set_armed(i >= 4);
+                nav = f.update(s);
+            }
+            let (mut a, mut c) = (f.clone(), f.clone());
+            a.arm_realign = true;
+            c.arm_realign = false;
+            let before = tilt_err_deg(&nav.attitude);
+            a.set_armed(false);
+            c.set_armed(false);
+            assert!(a.arm_f.is_none());
+            // A force inside the window forced in after the edge: only an edge flag set by the disarm could use it.
+            let level = Some([0.0, 0.0, -GRAVITY_MSS]);
+            a.arm_f = level;
+            c.arm_f = level;
+            let (na, nc) = (a.update(&next[24]), c.update(&next[24]));
+            assert_eq!(na, nc);
+            assert_eq!(bits(&a), bits(&c));
+            let after = tilt_err_deg(&na.attitude);
+            println!("al5 {aiding:?}: tilt error {before:.4} deg before the disarm step, {after:.4} deg after");
+            assert!(before > 1.0 && (after - before).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn al6_the_stored_force_is_used_once() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            for accelerate in [false, true] {
+                let (base, next, _) = handled(&t, aiding, accelerate);
+                let mut a = base.clone();
+                let j = if accelerate { 20 } else { 4 };
+                for s in &next[..j] {
+                    a.set_armed(false);
+                    a.update(s);
+                }
+                assert!(a.arm_f.is_some());
+                a.set_armed(true);
+                a.update(&next[j]);
+                assert!(a.arm_f.is_none(), "{aiding:?} accelerate {accelerate}: the force was not consumed");
+                // No second re-alignment without a new edge.
+                let mut c = a.clone();
+                c.arm_realign = false;
+                assert!(agree(&mut a, &mut c, &next[j + 1..j + 41], true));
+            }
+            // After a re-alignment, a re-arm with no complete disarmed interval in between does nothing.
+            let (base, next, _) = handled(&t, aiding, false);
+            for k in 1..=3 {
+                let (mut a, idx) = disarmed_again(&base, &next, 4, true, k);
+                assert!(a.arm_f.is_none());
+                let mut c = a.clone();
+                c.arm_realign = false;
+                assert!(agree(&mut a, &mut c, &next[idx..idx + 5], true), "{aiding:?} k {k}");
+            }
+        }
+    }
+
+    /// The angle between the filter's body-frame down axis (third row of R(q)) and `d`, rad.
+    fn down_err_rad(q: &[f32; 4], d: [f64; 3]) -> f64 {
+        let r = rotation(q);
+        let e = [f64::from(r[2][0]), f64::from(r[2][1]), f64::from(r[2][2])];
+        let c = [e[1] * d[2] - e[2] * d[1], e[2] * d[0] - e[0] * d[2], e[0] * d[1] - e[1] * d[0]];
+        (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt().atan2(e[0] * d[0] + e[1] * d[1] + e[2] * d[2])
+    }
+
+    #[test]
+    fn al7_large_tilt_and_large_yaw_are_realigned_with_the_yaw_kept() {
+        let t = Tuning::DEFAULT;
+        let (roll, pitch) = (35.0_f64.to_radians(), 20.0_f64.to_radians());
+        // Truth at rest, tilted: the body-frame down axis d and the specific force -g d.
+        let d = [-pitch.sin(), roll.sin() * pitch.cos(), roll.cos() * pitch.cos()];
+        let g = f64::from(GRAVITY_MSS);
+        let force = d.map(|x| (-g * x) as f32);
+        for rate in [1.0f64, -1.0] {
+            for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+                let mut f = Eskf::with_aiding(&t, aiding).unwrap();
+                let mut w = World::new(&t);
+                let sample = |w: &mut World, gyro: [f64; 3]| {
+                    let mut s = w.step();
+                    s.imu1.reading.accel_ms2 = force;
+                    s.imu1.reading.gyro_rads = gyro.map(|x| x as f32);
+                    s
+                };
+                // A true turn about the vertical at `rate` rad/s: the body rates are rate * d; 3.05 s gives 174.7 deg.
+                // Then a 0.5 s pulse the vehicle did not make, and rest until 5 s.
+                while w.t_us() < 5_000_000 {
+                    let gyro = if w.t_us() < 3_050_000 {
+                        d.map(|x| rate * x)
+                    } else if w.t_us() >= 3_500_000 && w.t_us() < 4_000_000 {
+                        [0.2, -0.1, 0.0]
+                    } else {
+                        [0.0; 3]
+                    };
+                    let s = sample(&mut w, gyro);
+                    f.set_armed(false);
+                    f.update(&s);
+                }
+                let next: Vec<Sensors> = (0..80).map(|_| sample(&mut w, [0.0; 3])).collect();
+                let (mut yaw_worst, mut before_min, mut after_worst, mut ba_worst) = (0.0f64, f64::INFINITY, 0.0f64, 0.0f64);
+                let yaw0 = yaw_of(&f.nom.q);
+                assert!(yaw0.abs() > 170.0_f64.to_radians() && yaw0.abs() < 178.0_f64.to_radians(), "yaw {yaw0}");
+                for j in 0..16 {
+                    let e = edge_at(&f, &next, j);
+                    let (before, after) = (down_err_rad(&e.nav_pre.attitude, d), down_err_rad(&e.na.attitude, d));
+                    let dy = yaw_of(&e.na.attitude) - yaw_of(&e.pre.nom.q);
+                    assert!(e.tilt_true);
+                    assert!(before > 1.0_f64.to_radians(), "j {j}: error before {before}");
+                    // The input is the bias-corrected force: the truth differs from it by the learned accelerometer bias, at
+                    // most |ba| / |f| rad (|ba| the norm of the three), and the alignment of the stored force is exact.
+                    let ba = e.pre.nom.ba.map(f64::from);
+                    let bound = (ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]).sqrt() / g + 1e-6;
+                    assert!(after <= bound, "{aiding:?} rate {rate} j {j}: down-axis error after {after} rad, bound {bound:e}");
+                    let f = e.pre.arm_f.expect("a stored interval").map(f64::from);
+                    let (roll_a, pitch_a) = ((-f[1]).atan2(-f[2]), f[0].atan2(f[1].hypot(f[2])));
+                    let (r1, p1) = roll_pitch(&e.na.attitude);
+                    assert!((r1 - roll_a).abs() < 1e-6 && (p1 - pitch_a).abs() < 1e-6, "j {j}: roll {r1} vs {roll_a}, pitch {p1} vs {pitch_a}");
+                    ba_worst = ba_worst.max(bound - 1e-6);
+                    assert!(dy.abs() < 1e-6, "{aiding:?} rate {rate} j {j}: yaw change {dy}");
+                    before_min = before_min.min(before);
+                    after_worst = after_worst.max(after);
+                    yaw_worst = yaw_worst.max(dy.abs());
+                }
+                println!(
+                    "al7 {aiding:?} rate {rate}: yaw before the edge {:.2} deg; down-axis error before >= {:.3} deg, after <= {after_worst:e} rad (|ba|/g up to {ba_worst:e}); worst yaw change {yaw_worst:e} rad",
+                    yaw0.to_degrees(),
+                    before_min.to_degrees()
+                );
+            }
+        }
     }
 }
