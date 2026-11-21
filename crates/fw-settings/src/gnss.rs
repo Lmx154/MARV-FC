@@ -30,8 +30,9 @@ pub static TABLE: [ParamDef; COUNT] = [ParamDef::i32(
 
 const BAD_RATE: &str = "not 100, 200, 500 or 1000";
 
-/// The most commands [`commands`] returns: version query, interval 1000, ten sentence rates, EPE, interval.
-pub const MAX_COMMANDS: usize = 14;
+/// The most commands [`commands`] returns: version query, interval 1000, ten sentence rates, EPE, PVT rate,
+/// interval.
+pub const MAX_COMMANDS: usize = 15;
 
 /// The store's validator for the GNSS receiver: 100, 200, 500 or 1000 ms.
 pub fn validate(candidate: &Candidate<'_>) -> Result<(), &'static str> {
@@ -51,8 +52,8 @@ pub fn rate_ms(value: Option<i32>) -> Result<u16, &'static str> {
 }
 
 /// The receiver's configuration for a fix interval: the driver's `Config::with_fix_interval(ms)` with GGA,
-/// RMC and GST every fix, GSA every `ceil(1000 / ms)` fixes, GLL, VTG, GSV, ZDA, GRS and GNS off, EPE off.
-/// The navigation mode and PPS of the result are never sent by [`commands`].
+/// RMC and GST every fix, GSA every `ceil(1000 / ms)` fixes, GLL, VTG, GSV, ZDA, GRS and GNS off, EPE off,
+/// `$PQTMPVT` every fix (`pvt_rate` 1). The navigation mode and PPS of the result are never sent by [`commands`].
 pub fn config(ms: u16) -> Config {
     let base = Config::with_fix_interval(ms);
     Config {
@@ -69,6 +70,7 @@ pub fn config(ms: u16) -> Config {
             gns: 0,
         },
         epe: false,
+        pvt_rate: 1,
         ..base
     }
 }
@@ -80,7 +82,8 @@ pub fn config(ms: u16) -> Config {
 /// later, at its stored settings (8 of 8); sent 207 ms or more after it, it is accepted (7 of 7; once also at
 /// 97 ms). After an applied change the receiver sends an unsolicited `$PAIR001,124,0` 114 to 241 ms after the
 /// acknowledgement. 500 ms is twice the latest of those (241 ms) and three times the latest restart (170 ms);
-/// with the driver's worst measured acknowledgement (93 ms) the 14 commands take at most 1.8 s, inside T.
+/// with the driver's worst measured acknowledgement (93 ms) the 15 commands take at most 15 x 93 + 500 = 1895 ms
+/// (1.9 s), inside T.
 pub const FIX_INTERVAL_SETTLE_MS: u64 = 500;
 
 /// When `command` may be sent, in ms of the caller's clock: not before `Some(t)`, for a fix interval that
@@ -181,10 +184,11 @@ impl CommandList {
 }
 
 /// The commands that apply `config`, in the driver's `init` order without the navigation mode and PPS:
-/// the version query, fix interval 1000 ms, the rate of every sentence type, EPE, then the fix interval
+/// the version query, fix interval 1000 ms, the rate of every sentence type, EPE, the `$PQTMPVT` rate
+/// (`$PQTMCFGMSGRATE,W,PQTMPVT,<rate>,1`, acknowledged `OK` like EPE), then the fix interval
 /// of `config` last and only if it is not 1000 ms (the receiver is at 1 Hz while the rates change). The
 /// sender holds that last command until [`not_before_ms`].
-/// Only these four kinds of command: never a save, a restart, a baud rate, a mode, PPS or a raw sentence.
+/// Only these five kinds of command: never a save, a restart, a baud rate, a mode, PPS or a raw sentence.
 pub fn commands(config: &Config) -> CommandList {
     let mut list = CommandList {
         items: [Command::QueryVersion; MAX_COMMANDS],
@@ -199,6 +203,9 @@ pub fn commands(config: &Config) -> CommandList {
         });
     }
     list.push(Command::SetEpe(config.epe));
+    list.push(Command::SetPvt {
+        rate: config.pvt_rate,
+    });
     if config.fix_interval_ms != 1000 {
         list.push(Command::SetFixInterval {
             ms: config.fix_interval_ms,
@@ -232,12 +239,13 @@ mod tests {
                 "{ms}"
             );
             assert!(!c.epe);
+            assert_eq!(c.pvt_rate, 1, "{ms}");
         }
         assert_eq!(config(200).rates.gsa, 5);
         assert_eq!(config(100).rates.gsa, 10);
     }
 
-    /// The order: version, 1000 ms, the ten rates, EPE, then the target interval last.
+    /// The order: version, 1000 ms, the ten rates, EPE, the PVT rate, then the target interval last.
     #[test]
     fn commands_are_in_the_decided_order() {
         for ms in ALLOWED {
@@ -256,24 +264,25 @@ mod tests {
                 );
             }
             assert_eq!(cmds[12], Command::SetEpe(false));
+            assert_eq!(cmds[13], Command::SetPvt { rate: 1 }, "{ms}");
             let intervals = cmds
                 .iter()
                 .filter(|c| matches!(c, Command::SetFixInterval { .. }))
                 .count();
             if ms == 1000 {
-                assert_eq!(cmds.len(), 13);
+                assert_eq!(cmds.len(), 14);
                 assert_eq!(intervals, 1);
             } else {
-                assert_eq!(cmds.len(), 14);
+                assert_eq!(cmds.len(), 15);
                 assert_eq!(intervals, 2);
-                assert_eq!(cmds[13], Command::SetFixInterval { ms });
+                assert_eq!(cmds[14], Command::SetFixInterval { ms });
             }
         }
     }
 
-    /// Only the four allowed kinds: no navigation mode, PPS, save, restart or raw command.
+    /// Only the five allowed kinds: no navigation mode, PPS, save, restart or raw command.
     #[test]
-    fn commands_are_only_version_interval_rate_and_epe() {
+    fn commands_are_only_version_interval_rate_epe_and_pvt() {
         for ms in ALLOWED {
             for c in commands(&config(ms)).as_slice() {
                 assert!(
@@ -283,6 +292,7 @@ mod tests {
                             | Command::SetFixInterval { .. }
                             | Command::SetSentenceRate { .. }
                             | Command::SetEpe(_)
+                            | Command::SetPvt { rate: 1 }
                     ),
                     "{c:?}"
                 );
@@ -290,9 +300,9 @@ mod tests {
         }
     }
 
-    /// The whole list for 200 ms: version, 1000 ms, the ten rates, EPE off, the target interval.
+    /// The whole list for 200 ms: version, 1000 ms, the ten rates, EPE off, PVT every fix, the target interval.
     #[test]
-    fn commands_for_200_ms_are_exactly_these_fourteen() {
+    fn commands_for_200_ms_are_exactly_these_fifteen() {
         let rate = |sentence, rate| Command::SetSentenceRate { sentence, rate };
         let list = commands(&config(200));
         assert_eq!(
@@ -311,6 +321,7 @@ mod tests {
                 rate(SentenceType::Gst, 1),
                 rate(SentenceType::Gns, 0),
                 Command::SetEpe(false),
+                Command::SetPvt { rate: 1 },
                 Command::SetFixInterval { ms: 200 },
             ]
         );
