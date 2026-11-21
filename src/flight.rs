@@ -62,6 +62,9 @@ static STEER: StaticCell<Eskf> = StaticCell::new();
 /// Builds the steering estimator into [`STEER`]. Call once, on core 0 before core 1 starts (the value passes through
 /// core 0's stack, not core 1's 16 KB one). `None` if the constructor refused, which the assertion above rules out,
 /// or on a second call; [`Stepper::new`] then returns `None` and the board does not fly.
+// Never inlined: the roughly 16 KB value (and its move into the static) must live in this call's own frame, not in
+// the frame of the caller's `poll`, which core 0 would then carry under everything the main task ever calls.
+#[inline(never)]
 pub fn steer() -> Option<&'static mut Eskf> {
     STEER.try_init(Eskf::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro).ok()?)
 }
@@ -72,6 +75,7 @@ static SHADOW: StaticCell<BoardShadow> = StaticCell::new();
 /// Builds the shadow into [`SHADOW`]. Call once, on core 0 before core 1 starts (the value passes through core 0's
 /// stack, not core 1's 16 KB one). `None` (no shadow, the board flies without it) if the constructor refused, which
 /// the assertion above rules out, or on a second call.
+#[inline(never)]
 pub fn shadow() -> Option<&'static mut BoardShadow> {
     SHADOW.try_init(Eskf::new(&Tuning::DEFAULT).ok()?)
 }
