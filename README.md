@@ -169,6 +169,7 @@ core-0 task spins 1.2 s without yielding 20 s after start and logs IMU1's and IM
 The watchdog survives that spin (fed again before 1.6 s without a feed; a "core 0 stalled" text, no reset); the
 feature does not act after a watchdog reset, so it does not loop.
 `tools/run.sh` opt-ins (default off): `NO_CATCH_HARDFAULT=1` passes `--no-catch-hardfault` to `probe-rs run` (a fault does not halt the run; the watchdog can reset the board); `ATTACH=1` uses `probe-rs attach` (no flash, no reset: reads the RTT log of the image already running, built with the same `FEATURES`).
+`BIN=eskf_bench FEATURES=eskf-bench tools/run.sh 60`: the N0 bench (`src/bin/eskf_bench.rs`, decision-nav-eskf-20261120 section 11): times the 15-state ESKF arithmetic of `fw_flight::eskf_n0` (feature `eskf-n0`, host-tested) on core 1 from SRAM with core 1's DWT cycle counter and prints min/median/max per job; it starts no device. The flight binary is built without the feature.
 `FEATURES=f4-negative tools/run.sh 20`: a DMA channel (6, since 2 and 3 are IMU2's) is built on core 0 before the start-up check
 (negative control of F4: `[FAIL] DMA_IRQ_0 not enabled on core 0`), its line disabled again before core 1
 starts.

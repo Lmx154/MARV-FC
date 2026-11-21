@@ -89,3 +89,7 @@ mod tests {
         assert_eq!(running.load(Ordering::Relaxed), 17);
     }
 }
+
+// Last in the file, so that no line of the flight code moves (panic locations carry line numbers).
+#[cfg(feature = "eskf-n0")]
+pub mod eskf_n0;

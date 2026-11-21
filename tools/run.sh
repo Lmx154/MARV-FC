@@ -9,12 +9,13 @@
 #   ATTACH=1: `probe-rs attach` instead of `run`: no flash, no reset; reads the RTT log of the image
 #   already running (build with the same FEATURES, for its symbols); default off.
 #   FEATURES=no-fbeat tools/run.sh 30    # the negative control (see README)
+#   BIN=eskf_bench FEATURES=eskf-bench tools/run.sh 60   # another binary: the N0 bench (src/bin/eskf_bench.rs)
 # Before flashing, tools/check-ram-code.py (python3, arm-none-eabi-binutils) checks that nothing the
 # flight core runs lies in flash (decision-ram-code-20261115, R1): it must pass, or with the feature
 # ram-negative (its negative control) it must fail; otherwise nothing is flashed (exit 3).
 set -u
 tmo="${1:-120}"
-bin="marv-v2-firmware"
+bin="${BIN:-marv-v2-firmware}"
 cd "$(dirname "$0")/.." || exit 1
 
 cargo build --release --bin "$bin" ${FEATURES:+--features "$FEATURES"} || exit $?

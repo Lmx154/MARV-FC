@@ -23,3 +23,7 @@ dshot = { git = "https://github.com/Lmx154/dshot-rs.git", rev = "3557eb111097400
 marv-card = { git = "https://github.com/Lmx154/MARV-sim.git", rev = "fd5e4963e8de91d3b4f1efe9b38ab41d35ce789c" }
 # sqrtf, sinf, cosf for the flight code (MIT, no dependencies; decision-first-pair 7b).
 libm = "0.2"
+
+[features]
+# The N0 bench's arithmetic (src/eskf_n0.rs), for the bench binary eskf_bench only; not in the flight image.
+eskf-n0 = []

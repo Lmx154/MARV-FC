@@ -5,7 +5,7 @@
 Usage: tools/check-ram-code.py <elf>
 
 A static may-reach closure over the linked Thumb ELF, from the flight core's roots:
-  roots      `core1_main`, `DMA_IRQ_0`, `IO_IRQ_BANK0`, `SIO_IRQ_FIFO`, `PIO2_IRQ_0`, and the park function of the
+  roots      `core1_main` (of the flight image or of the N0 bench `eskf_bench`), `DMA_IRQ_0`, `IO_IRQ_BANK0`, `SIO_IRQ_FIFO`, `PIO2_IRQ_0`, and the park function of the
              feature `xip-park` when present; each must match exactly once.
   edges      direct branches that leave the function (long-branch thunks included); constants formed
              by movw/movt pairs; pc-relative literal loads; adr; and the code and data pointers inside
@@ -35,7 +35,7 @@ import sys
 XIP_LO, XIP_HI = 0x1000_0000, 0x2000_0000
 
 ROOTS = [
-    (r"16marv_v2_firmware10core1_main$", True),
+    (r"(16marv_v2_firmware|10eskf_bench)10core1_main$", True),  # the flight image, or the N0 bench
     (r"^DMA_IRQ_0$", True),
     (r"^IO_IRQ_BANK0$", True),
     (r"^SIO_IRQ_FIFO$", True),
