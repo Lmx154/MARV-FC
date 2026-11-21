@@ -7,10 +7,12 @@
 //! collector touches this module as [`LOG`]'s consumer, and the barometer, compass and GNSS device tasks as the writers
 //! of the three sample cells (decision-nav-eskf-20261120, section 4); core 0 learns "armed" from
 //! `settings::HANDSHAKE` and "flight throttles sent" from `esc::ESC`.
-//! The step runs `MahonyBaro` (Mahony, bit for bit, plus the vertical filter on the barometer), the cascaded PID and
-//! the card's allocator with the constant gains of `fw_flight::tuning`. After each step the shadow estimator `Eskf`
-//! (decision-nav-eskf-20261120, 8a) gets the same sensors and the armed state; its state goes to the log (NKF1, NKF2,
-//! NKI) and to [`NAV_STAT`] only, never to the flight code.
+//! The step runs the steering estimator, `Eskf` with `Aiding::ImuBaro` ("ESKF2", decision-nav-eskf-20261120, D7: the
+//! IMU and the barometer, no compass or GNSS), the cascaded PID and the card's allocator with the constant gains of
+//! `fw_flight::tuning`. After each step the shadow estimator `Eskf` with `Aiding::Full` (8a) gets the same sensors and
+//! the armed state; its state goes to the log (NKF1, NKF2, NKI) and to [`NAV_STAT`] only, never to the flight code.
+//! The steering estimator's state goes to the log the same way (I = 0). `MahonyBaro` stays in `fw_flight` and is not
+//! run on the board.
 //! No `[STAT] FLT:` line: one was tried on 2026-11-19 and removed, because that one extra log line lengthened the
 //! flight core's longest wait behind the log (README, Flight-core device loop). The `[STAT] NAV:` line of [`stat`]
 //! (packet E2) prints the estimators' state from [`NAV_STAT`].
@@ -21,18 +23,27 @@ use fw_core::sample::{BaroReading, BaroSample, GnssReading, GnssSample, MagReadi
 use fw_core::xcore::{LogProducer, LogRing, Seqlock, SeqlockWriter, TripleBuffer, TripleReader};
 use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
-use fw_flight::eskf::{Eskf, EskfStats, code};
+use fw_flight::eskf::{Aiding, Eskf, EskfStats};
 use fw_flight::gate::MotorCommand;
 use fw_flight::gnc::{NavState, Sensors};
 use fw_flight::imu::{ImuSample, SampleSink};
-use fw_flight::mahony_baro::MahonyBaro;
 use fw_flight::pid::CascadedPid;
 use fw_flight::step::{Flight, FlightInputs, StepOut, encode_nkf, encode_step, log_due};
 use fw_flight::tuning::Tuning;
 use static_cell::StaticCell;
 
-/// The flight code this image runs; edit this line to change it (seams decision, section 9).
-pub type BoardFlight = Flight<MahonyBaro, CascadedPid, CardAllocator>;
+/// The flight code this image runs; edit this line to change it (seams decision, section 9). It steers on an `Eskf`
+/// with `Aiding::ImuBaro` that lives in [`STEER`] (decision-nav-eskf-20261120, D7). To go back to `MahonyBaro`: make
+/// this `Flight<MahonyBaro, CascadedPid, CardAllocator>`, pass `MahonyBaro::new(&Tuning::DEFAULT)` to `Flight::new`
+/// in [`Stepper::new`] and give the I = 0 records in `log_nav` their old source (`MahonyBaro::vert()`).
+pub type BoardFlight = Flight<&'static mut Eskf, CascadedPid, CardAllocator>;
+
+// `Flight` owns its estimator: by value the `Eskf` (its IMU ring, waiting buffers and P, about 16 KB) would be built
+// on core 1's 16 KB stack. `BoardFlight` must hold the reference only.
+const _: () = assert!(
+    core::mem::size_of::<BoardFlight>() < core::mem::size_of::<Eskf>(),
+    "BoardFlight holds an Eskf by value: it must hold the &'static mut into STEER"
+);
 
 /// The shadow estimator (decision-nav-eskf-20261120, 8a): logged, never steering.
 pub type BoardShadow = Eskf;
@@ -42,6 +53,16 @@ const _: () = assert!(
     Tuning::DEFAULT.nav_gps_delay_us <= Tuning::DEFAULT.nav_buffer_us,
     "Eskf::new(&Tuning::DEFAULT) would refuse the compiled tuning"
 );
+
+/// The steering estimator's storage (about 16 KB: the same instance as the shadow's), in `.bss`.
+static STEER: StaticCell<Eskf> = StaticCell::new();
+
+/// Builds the steering estimator into [`STEER`]. Call once, on core 0 before core 1 starts (the value passes through
+/// core 0's stack, not core 1's 16 KB one). `None` if the constructor refused, which the assertion above rules out,
+/// or on a second call; [`Stepper::new`] then returns `None` and the board does not fly.
+pub fn steer() -> Option<&'static mut Eskf> {
+    STEER.try_init(Eskf::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro).ok()?)
+}
 
 /// The shadow's storage (about 16 KB: the IMU ring, the waiting buffers, P), in `.bss`.
 static SHADOW: StaticCell<BoardShadow> = StaticCell::new();
@@ -91,7 +112,8 @@ impl EstStat {
 pub struct NavStat {
     /// Steps since the start.
     pub steps: u32,
-    /// `MahonyBaro` (I = 0) and its barometer counts (fused, gated, height resets).
+    /// The steering estimator (I = 0; named for `MahonyBaro`, which steered before D7) and its barometer counts
+    /// (fused, gated, height resets).
     pub mb: EstStat,
     pub mb_baro: [u32; 3],
     /// The shadow (I = 1): present, tilt aligned, yaw aligned, its state and counters.
@@ -161,7 +183,7 @@ pub fn stat() {
     };
     let (m, e, k) = (&s.mb, &s.ek, &s.ek_stats);
     defmt::info!(
-        "[STAT] NAV: steps {=u32}; MahonyBaro valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), baro fused {=u32} gated {=u32} height resets {=u32}; Eskf present {=bool}, tilt aligned {=bool}, yaw aligned {=bool}, valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), predicts {=u32}, baro fused {=u32} gated {=u32}, compass refused {=u32} fused {=u32} gated {=u32}, GPS epochs {=u32} unaccepted {=u32} before yaw {=u32} disarmed {=u32} screened {=u32} scalars fused {=u32} gated {=u32}, resets height {=u32} yaw align {=u32} yaw {=u32} GPS {=u32}, reinits {=u32}, most jobs in a step {=u32}, replaced {=u32}, dropped {=u32}",
+        "[STAT] NAV: steps {=u32}; steering Eskf valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), baro fused {=u32} gated {=u32} height resets {=u32}; Eskf present {=bool}, tilt aligned {=bool}, yaw aligned {=bool}, valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), predicts {=u32}, baro fused {=u32} gated {=u32}, compass refused {=u32} fused {=u32} gated {=u32}, GPS epochs {=u32} unaccepted {=u32} before yaw {=u32} disarmed {=u32} screened {=u32} scalars fused {=u32} gated {=u32}, resets height {=u32} yaw align {=u32} yaw {=u32} GPS {=u32}, reinits {=u32}, most jobs in a step {=u32}, replaced {=u32}, dropped {=u32}",
         s.steps,
         m.valid,
         m.d_m,
@@ -294,22 +316,22 @@ pub struct Stepper {
     shadow: Option<&'static mut BoardShadow>,
     /// Covariance propagations already seen, I = 0 and I = 1 (the NKF records' rate).
     predicts: [u32; 2],
-    /// `MahonyBaro`'s barometer counts already seen: fused, gated, height resets (its NKI records).
-    baro_counts: [u32; 3],
     stat: SeqlockWriter<'static, NavStat>,
 }
 
 impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
     /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`] or [`FLIGHT_GNSS`] or the writer of [`NAV_STAT`] was taken already.
+    /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     /// `shadow`: from [`shadow`]; `None` runs without the shadow.
     pub fn new(
         rc: Option<TripleReader<'static, RcSample>>,
+        steer: Option<&'static mut Eskf>,
         shadow: Option<&'static mut BoardShadow>,
     ) -> Option<Self> {
         Some(Self {
             flight: Flight::new(
-                MahonyBaro::new(&Tuning::DEFAULT),
+                steer?,
                 CascadedPid::new(&Tuning::DEFAULT),
                 CardAllocator::new(),
                 &Tuning::DEFAULT,
@@ -325,7 +347,6 @@ impl Stepper {
             esc_since_us: 0,
             shadow,
             predicts: [0; 2],
-            baro_counts: [0; 3],
             stat: NAV_STAT.take_writer()?,
         })
     }
@@ -336,31 +357,19 @@ impl Stepper {
     fn log_nav(&mut self, out: &StepOut, shadow: Option<&NavState>) {
         const NKF: usize = dflog::NKF1.length as usize + dflog::NKF2.length as usize;
         let armed = out.armed;
-        let vert = self.flight.estimator().vert();
-        // I = 0, MahonyBaro: Q Mahony's, VN VE PN PE 0, VD PD from VertKf; GB 0, AB (0, 0, bD); sigmas as it gives.
-        let p0 = vert.predicts();
+        // I = 0, the steering estimator: its own state (`out.nav`), biases and events, as the shadow's below.
+        let st: &Eskf = self.flight.estimator();
+        let p0 = st.stats().predicts;
         if p0 != self.predicts[0] {
             self.predicts[0] = p0;
             if armed || p0 % 8 == 0 {
-                let bd = vert.bias_d();
-                self.log
-                    .push_with(NKF, |b| encode_nkf(b, 0, &out.nav, [0.0; 3], [0.0, 0.0, bd]));
+                let (bg, ba) = st.biases();
+                self.log.push_with(NKF, |b| encode_nkf(b, 0, &out.nav, bg, ba));
             }
         }
-        let counts = [vert.fused(), vert.rejected(), vert.resets()];
-        if counts != self.baro_counts {
-            let (src, ok) = if counts[2] != self.baro_counts[2] {
-                (code::HEIGHT_RESET, code::FUSED)
-            } else if counts[0] != self.baro_counts[0] {
-                (code::BARO, code::FUSED)
-            } else {
-                (code::BARO, code::GATED)
-            };
-            self.baro_counts = counts;
-            let (inn, var) = vert.last_baro();
-            let t = out.nav.t_us;
+        for ev in st.events() {
             self.log.push_with(dflog::NKI.length.into(), |b| {
-                dflog::encode_nki(b, t, 0, src, inn, var, ok)
+                dflog::encode_nki(b, ev.t_us, 0, ev.src, ev.inn, ev.var, ev.ok)
             });
         }
         // I = 1, the shadow: TimeUS the horizon time.
@@ -384,7 +393,7 @@ impl Stepper {
             self.stat.write(NavStat {
                 steps: self.step,
                 mb: EstStat::of(&out.nav),
-                mb_baro: counts,
+                mb_baro: [st.stats().baro_fused, st.stats().baro_gated, st.stats().height_resets],
                 shadow: e.is_some(),
                 tilt_aligned: e.is_some_and(|e| e.tilt_aligned()),
                 yaw_aligned: e.is_some_and(|e| e.yaw_aligned()),
