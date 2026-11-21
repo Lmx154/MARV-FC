@@ -209,7 +209,15 @@ Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; dr
   by itself about 1.8 s later (ROM boot text, `BL Jump`, `$PQTMVER`) at its stored settings (8 of 8); from 207 ms on it is
   accepted (7 of 7). An applied change is followed 114 to 241 ms later by an unsolicited `$PAIR001,124,0`. Never `init` (navigation
   mode), PPS, `$PAIR513` or `$PQTMSAVEPAR`: volatile; after a power cycle the module runs at its stored settings until the
-  next start, restart or apply. The epoch's sentence order with GST on is not recorded yet (bench B-g2).
+  next start, restart or apply.
+- Cold power-on, measured 2026-11-20 (3 of 3, off 22, 23 and 47 s, the module last at 200 ms): the module comes up at the fix
+  interval it had before power was removed (200 ms: the interval survives at least 47 s without power) with its default
+  sentence set (GGA, GLL, 4 GSA, about 12 GSV, RMC, VTG every fix; GST off; 77 to 100 sentences/s). Its first sentence came
+  110 ms after the board's start and `$PQTMVERNO` was answered in 11 ms, but `$PAIR050,1000` sent at once got only
+  `$PAIR001,050,1` (being processed), `$PAIR001,124,0` and `$PAIR011,001` about 240 ms later, and no result within the
+  driver's 100 sentences (1.48 s); the interval stayed 200 ms. With the module up for a while (warm resets of the board, the
+  same state) the same list passes. The firmware therefore sends a failed list again every `CONFIGURE_RETRY_MS` (5 s)
+  until it succeeds. The epoch's sentence order with GST on is not recorded yet (bench B-g2).
 
 ## WS2812C-2020 status LED (D20)
 

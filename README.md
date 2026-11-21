@@ -214,9 +214,17 @@ then restarted by itself about 1.8 s later at its stored settings (8 of 8: every
 reset of the board while the receiver ran faster than 1 Hz); from 207 ms on it was accepted (7 of 7). A configuration now takes about 0.55 s. Never `init` (it writes the navigation mode), PPS, a baud change, a
 restart or a save: the settings are volatile, the receiver's stored configuration does not change, and a receiver that resets on its own comes
 back at its stored settings until the next start, restart or apply. The row then sees GGA, RMC and GST every fix and GSA at most once per second.
-Success: `[INFO] GNSS: configured: <ms> ms, GSA every <n>, GST every fix, other sentences off, EPE off, volatile (not saved), <version>, <t> ms`.
+Success: `[INFO] GNSS: configured: <ms> ms, GSA every <n>, GST every fix, other sentences off, EPE off, volatile (not saved), <version>, <t> ms, try <n>`.
 A failure is a WARNING `GNSS: rate not applied (<reason>)` (STATUSTEXT and defmt), never a start or restart failure; `apply` returns one bus
-error; no retry until the next start, restart or apply. PPS (GPIO5) is not configured or read: neither the driver
+error. **A failed configuration is tried again** (start, restart or apply): the whole list, `CONFIGURE_RETRY_MS` (5000 ms, for the owner's
+approval) after each failure, until a try succeeds; the adapter raises its row's APPLY request, so a try runs in the task's loop, never under
+the data-ready deadline, and the row keeps publishing fixes between tries. Only the first try's failure is the WARNING; a retry that succeeds
+is the INFO text `GNSS: rate applied on try <n>`; a failed retry is a defmt line only (`fw_settings::gnss::Retry`, host-tested with a
+scripted cold receiver). Why: at three cold power-ons (2026-11-20, off 22, 23 and 47 s) the receiver came up at the fix interval it had
+before (200 ms, kept without power) with its default sentence set (about 80 to 100 sentences/s), answered the version query in 11 ms, and
+answered `$PAIR050,1000` 0.1 s after its first sentence only with `$PAIR001,050,1` (being processed), then `$PAIR001,124,0` and
+`$PAIR011,001` at about 240 ms and never the result: the try ended after the driver's 100 sentences (1.48 s) with no acknowledgement and the
+receiver stayed at 200 ms with its default set. The same list passes after a warm reset (the receiver up for a while). PPS (GPIO5) is not configured or read: neither the driver
 nor its bench program does anything with it beyond counting edges, and there is no time synchronisation here.
 - **Cancel answer (the design's "GNSS only after the `lc76g` cancel check").** Dropping the driver's `read`, `read_fix` or `read_sentence` future is
   SAFE: nothing is lost, no sentence is corrupted, and `recover` is not needed afterwards. Evidence: the driver README, "Dropped reads"

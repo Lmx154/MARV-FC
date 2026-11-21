@@ -10,7 +10,11 @@
 //! fix and GSA at most once per second. A configuration that fails (a refusal, no acknowledgement, the
 //! whole list not done within T) is a WARNING `GNSS: rate not applied (<reason>)`; `start` and
 //! `restart` still return Ok (the receiver keeps sending at the rate it has), `apply` returns a bus
-//! error. P stays 1 s and T 2.5 s whatever the rate. PPS (GPIO5) is not read.
+//! error. After every failure the whole list is sent again `fw_settings::gnss::CONFIGURE_RETRY_MS` later,
+//! until a try succeeds (a receiver just powered on does not complete a fix-interval change): the adapter
+//! raises the row's APPLY request, so a try runs in the task's loop and is never cut by the data-ready
+//! deadline. Only a first try's failure is the WARNING; a retry that succeeds is the INFO
+//! `GNSS: rate applied on try <n>`. P stays 1 s and T 2.5 s whatever the rate. PPS (GPIO5) is not read.
 //!
 //! "Ok" means valid sentences keep arriving: one sample is one fix of the driver (the GGA and RMC
 //! of one epoch), WHETHER OR NOT it holds a position (indoors it does not). 2.5 s without a fix
@@ -48,6 +52,7 @@ use embassy_time::{Duration, Instant, Timer, with_deadline, with_timeout};
 use embedded_io_async::Read;
 use fw_core::health::{ErrorKind, Limits};
 use fw_core::sample::{GstOrder, Publish, UtcTime, horizontal_std_mm};
+use fw_settings::gnss::{CONFIGURE_RETRY_MS, Retry, RetryReport};
 use lc76g::aux_sentences::Gst;
 use lc76g::sentence::{FixType, Quality, Time};
 use lc76g::{Command, Error, Fix, Lc76g, Message};
@@ -155,6 +160,10 @@ pub struct GnssAdapter {
     /// The error `data_ready` ended with, for the `acquire` that follows.
     failed: Option<ErrorKind>,
     calls: u32,
+    /// When a failed configuration is tried again.
+    retry: Retry,
+    /// The APPLY request of a due retry is raised and not yet carried out.
+    retry_raised: bool,
 }
 
 impl GnssAdapter {
@@ -191,6 +200,8 @@ impl GnssAdapter {
             order: GstOrder::default(),
             failed: None,
             calls: 0,
+            retry: Retry::default(),
+            retry_raised: false,
         }
     }
 
@@ -279,10 +290,13 @@ impl GnssAdapter {
     /// list under one deadline T. A failure is a WARNING
     /// (STATUSTEXT and defmt) and returned. A fix held or waiting from before is dropped: it is older
     /// than the fixes the driver discarded during the commands.
-    async fn configure(&mut self) -> Result<(), &'static str> {
+    /// `retry`: a try the retry schedule raised (its failure is not reported again).
+    async fn configure(&mut self, retry: bool) -> Result<(), &'static str> {
         self.calls = self.calls.wrapping_add(1);
+        self.retry_raised = false;
+        let tries = self.retry.begin(retry);
         let begun = Instant::now();
-        let result = self.send_configuration(begun).await;
+        let result = self.send_configuration(begun, tries).await;
         self.ready = None;
         self.waiting = None;
         self.order.reset();
@@ -290,21 +304,31 @@ impl GnssAdapter {
             self.fixes_taken = gps.stats().fixes;
         }
         self.publish();
+        let report = self.retry.end(result.is_ok(), Instant::now().as_millis());
         if let Err(reason) = result {
             defmt::warn!(
-                "[INFO] GNSS: rate not applied ({=str}) after {=u64} ms",
+                "[INFO] GNSS: rate not applied ({=str}) after {=u64} ms, try {=u32}, the next in {=u64} ms",
                 reason,
-                begun.elapsed().as_millis()
+                begun.elapsed().as_millis(),
+                tries,
+                CONFIGURE_RETRY_MS
             );
-            crate::text_fmt(
+        }
+        match (report, result) {
+            (RetryReport::Warn, Err(reason)) => crate::text_fmt(
                 MavSeverity::MAV_SEVERITY_WARNING,
                 format_args!("GNSS: rate not applied ({})", reason),
-            );
+            ),
+            (RetryReport::Applied { tries }, _) => crate::text_fmt(
+                MavSeverity::MAV_SEVERITY_INFO,
+                format_args!("GNSS: rate applied on try {}", tries),
+            ),
+            _ => {}
         }
         result
     }
 
-    async fn send_configuration(&mut self, begun: Instant) -> Result<(), &'static str> {
+    async fn send_configuration(&mut self, begun: Instant, tries: u32) -> Result<(), &'static str> {
         let ms = crate::store::gnss_rate_ms().map_err(|reason| {
             defmt::warn!("[INFO] GNSS: stored GPS_RATE_MS refused: {=str}", reason);
             "stored value refused"
@@ -341,11 +365,12 @@ impl GnssAdapter {
         match outcome {
             Ok(Ok(())) => {
                 defmt::info!(
-                    "[INFO] GNSS: configured: {=u16} ms, GSA every {=u8}, GST every fix, other sentences off, EPE off, volatile (not saved), {=str}, {=u64} ms",
+                    "[INFO] GNSS: configured: {=u16} ms, GSA every {=u8}, GST every fix, other sentences off, EPE off, volatile (not saved), {=str}, {=u64} ms, try {=u32}",
                     ms,
                     config.rates.gsa,
                     version.as_ref().map_or("version unknown", |v| v.version()),
-                    begun.elapsed().as_millis()
+                    begun.elapsed().as_millis(),
+                    tries
                 );
                 Ok(())
             }
@@ -533,6 +558,11 @@ impl DeviceAdapter for GnssAdapter {
     /// `GstOrder`'s (see the module comment).
     async fn data_ready(&mut self) {
         loop {
+            if !self.retry_raised && self.retry.due(Instant::now().as_millis()) {
+                self.retry_raised = true;
+                defmt::info!("[INFO] GNSS: configuration retry due: APPLY raised");
+                GNSS.request_apply();
+            }
             let Some(gps) = self.gps.as_mut() else {
                 return core::future::pending().await;
             };
@@ -610,7 +640,7 @@ impl DeviceAdapter for GnssAdapter {
                         self.totals.brk,
                         self.totals.parity
                     );
-                    let _ = self.configure().await;
+                    let _ = self.configure(false).await;
                     return Ok(());
                 }
                 Ok(Err(Error::Uart(e))) => {
@@ -655,9 +685,15 @@ impl DeviceAdapter for GnssAdapter {
         Ok(())
     }
 
-    /// Sends the configuration of the stored `GPS_RATE_MS`; a failure is one bus error.
+    /// Sends the configuration of the stored `GPS_RATE_MS`; a failure is one bus error, except for a retry
+    /// the adapter raised itself (a failed retry is only scheduled again).
     async fn apply(&mut self) -> Result<(), ErrorKind> {
-        self.configure().await.map_err(|_| ErrorKind::Bus)
+        let retry = core::mem::take(&mut self.retry_raised);
+        let result = self.configure(retry).await;
+        if retry {
+            return Ok(());
+        }
+        result.map_err(|_| ErrorKind::Bus)
     }
 
     async fn recover(&mut self) -> Result<(), ErrorKind> {
@@ -670,7 +706,7 @@ impl DeviceAdapter for GnssAdapter {
     /// reported and is not a restart failure.
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         self.recover().await?;
-        let _ = self.configure().await;
+        let _ = self.configure(false).await;
         Ok(())
     }
 
