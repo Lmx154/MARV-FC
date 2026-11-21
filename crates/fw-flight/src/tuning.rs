@@ -59,6 +59,43 @@ pub struct Tuning {
     pub nav_p0_vel_ms: f32,
     /// Initial accelerometer bias sigma, m/s^2 (B3, `P0_ba`: PX4 ekf2_abias_init, px4-common.h:348).
     pub nav_p0_ba_ms2: f32,
+    /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
+    /// may use, us (section 10).
+    pub nav_buffer_us: u64,
+    /// The delayed horizon: GNSS delay, us (section 10; measured at 1 Hz, re-measured at 5 Hz in E2).
+    pub nav_gps_delay_us: u64,
+    /// Lowest GNSS epoch rate accepted, Hz: 1000/215, ArduPilot's is_healthy 215 ms (section 10, C-b7; a parameter).
+    pub nav_gps_min_rate_hz: f32,
+    /// Floor of the GNSS position sigma, m (section 10, recon.py:39).
+    pub nav_gps_pos_sigma_min_m: f32,
+    /// GNSS velocity sigma, m/s (section 10).
+    pub nav_gps_vel_sigma_ms: f32,
+    /// Lowest ground speed whose course is used, m/s (section 10, recon.py:42).
+    pub nav_gps_course_min_ms: f32,
+    /// No-aid position noise while armed, m (section 10, ArduPilot NOAID_M_NSE).
+    pub nav_noaid_sigma_m: f32,
+    /// No-aid position noise while disarmed, m (B3, ap-AP_NavEKF3_PosVelFusion.cpp:782-784).
+    pub nav_noaid_sigma_dis_m: f32,
+    /// Initial tilt and yaw sigma, rad (B3, `P0_tilt`: PX4 EKF2_ANGERR_INIT).
+    pub nav_p0_tilt_rad: f32,
+    /// Initial gyro bias sigma, rad/s (B3, `P0_bg`: px4-common.h:347).
+    pub nav_p0_bg_rads: f32,
+    /// Gyro angular random walk, rad/sqrt(s) (section 10, `arw`).
+    pub nav_arw: f32,
+    /// Gyro bias random walk, rad/s/sqrt(s) (section 10, `bg_rw`).
+    pub nav_bg_rw: f32,
+    /// Largest heading sigma for `Valid.heading`, rad: 15 deg, PX4 EKFGSF_yaw_err_max (C6).
+    pub nav_heading_valid_sigma_rad: f32,
+    /// Compass heading noise, 1 sigma, rad: 12.5 deg (C6).
+    pub nav_mag_heading_sigma_rad: f32,
+    /// One compass yaw fusion per this period, us (C6).
+    pub nav_mag_fuse_us: u64,
+    /// Velocity screen: GNSS speed below this share of the position-difference speed (C6, E3b).
+    pub nav_gps_spd_ratio: f32,
+    /// Velocity screen: only at a position-difference speed at or above this, m/s (C6, E3b).
+    pub nav_gps_spd_min_ms: f32,
+    /// Magnetic declination, east positive, rad: 3.195 deg E, the owner's field, WMM2025 (C4, C6; compiled for now).
+    pub nav_mag_declination_rad: f32,
 }
 
 impl Tuning {
@@ -88,5 +125,23 @@ impl Tuning {
         nav_ba_rw: 3e-3,
         nav_p0_vel_ms: 0.5,
         nav_p0_ba_ms2: 0.2,
+        nav_buffer_us: 500_000,
+        nav_gps_delay_us: 430_000,
+        nav_gps_min_rate_hz: 1000.0 / 215.0,
+        nav_gps_pos_sigma_min_m: 0.3,
+        nav_gps_vel_sigma_ms: 0.2,
+        nav_gps_course_min_ms: 0.3,
+        nav_noaid_sigma_m: 10.0,
+        nav_noaid_sigma_dis_m: 0.5,
+        nav_p0_tilt_rad: 0.1,
+        nav_p0_bg_rads: 0.1,
+        nav_arw: 1e-3,
+        nav_bg_rw: 1e-4,
+        nav_heading_valid_sigma_rad: 0.262,
+        nav_mag_heading_sigma_rad: 0.218,
+        nav_mag_fuse_us: 1_000_000,
+        nav_gps_spd_ratio: 0.3,
+        nav_gps_spd_min_ms: 0.5,
+        nav_mag_declination_rad: 3.195_f32.to_radians(),
     };
 }

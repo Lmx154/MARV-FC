@@ -91,6 +91,6 @@ mod tests {
 }
 
 // Last in the file, so that no line of the flight code moves (panic locations carry line numbers).
-#[cfg(feature = "eskf-n0")]
 pub mod eskf_n0;
 pub mod mahony_baro;
+pub mod eskf;
