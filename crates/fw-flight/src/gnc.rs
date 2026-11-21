@@ -140,6 +140,19 @@ pub trait Estimator {
     fn set_armed(&mut self, _armed: bool) {}
 }
 
+/// A borrowed estimator is an estimator: the board's steering `Eskf` lives in a static and `Flight` owns the reference.
+impl<E: Estimator + ?Sized> Estimator for &mut E {
+    fn update(&mut self, sensors: &Sensors) -> NavState {
+        (**self).update(sensors)
+    }
+    fn origin(&self) -> Option<GeoPoint> {
+        (**self).origin()
+    }
+    fn set_armed(&mut self, armed: bool) {
+        (**self).set_armed(armed);
+    }
+}
+
 /// The flight mode the pilot selected. It tells the stick shaper which `Setpoint` to build. It is not a controller
 /// input.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -308,6 +321,45 @@ pub trait Allocator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::imu::{ImuReading, ImuSample};
+    use crate::mahony::Mahony;
+    use crate::tuning::Tuning;
+
+    #[test]
+    fn a_borrowed_estimator_gives_the_same_states_as_the_one_it_borrows() {
+        let mut owned = Mahony::new(&Tuning::DEFAULT);
+        let mut lent = Mahony::new(&Tuning::DEFAULT);
+        let mut by_ref = &mut lent;
+        let mut last = None;
+        for i in 0..400u64 {
+            let t = i as f32 * 0.01;
+            let s = Sensors {
+                imu1: ImuSample {
+                    reading: ImuReading {
+                        gyro_rads: [0.3 * t, -0.2, 0.1],
+                        accel_ms2: [1.0 + 0.5 * t, -0.7, -9.7],
+                        temperature_c: 0.0,
+                    },
+                    t_us: i * 1_250,
+                    seq: i as u32,
+                },
+                imu2: None,
+                baro: None,
+                mag: None,
+                gnss: None,
+                external: None,
+            };
+            let armed = i >= 100;
+            owned.set_armed(armed);
+            by_ref.set_armed(armed);
+            let (a, b) = (owned.update(&s), by_ref.update(&s));
+            assert_eq!(a, b, "step {i}");
+            assert_eq!(owned.origin(), by_ref.origin());
+            last = Some(a);
+        }
+        let last = last.unwrap();
+        assert!(last.valid.tilt, "the samples must align the filter, or the test proves nothing");
+    }
 
     #[test]
     fn requires_per_variant_and_covers() {

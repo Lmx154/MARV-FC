@@ -304,6 +304,7 @@ fn core1_main(
         fw_core::esc::TestCmd,
     >,
     flight_rc: Option<fw_core::xcore::TripleReader<'static, fw_core::rc::RcSample>>,
+    steer: Option<&'static mut fw_flight::eskf::Eskf>,
     shadow: Option<&'static mut flight::BoardShadow>,
 ) -> ! {
     let table = CORE1_VECTOR_TABLE.0.get() as u32;
@@ -346,7 +347,7 @@ fn core1_main(
         if let Ok(token) = fbeat() {
             spawner.spawn(token);
         }
-        if let Ok(token) = imu1::task(imu1, imu1_period_us, flight_rc, shadow) {
+        if let Ok(token) = imu1::task(imu1, imu1_period_us, flight_rc, steer, shadow) {
             spawner.spawn(token);
         }
         if let Ok(token) = imu2::task(imu2, imu2_period_us) {
@@ -1304,7 +1305,8 @@ async fn main(spawner: Spawner) {
     actions::init_motor_test();
     // The sticks cell (as the motor-test cell): the reader goes to core 1, the RC port's hooks take the writer.
     let flight_rc = rc::FLIGHT_RC.take_reader();
-    // The shadow estimator (about 16 KB) is built here, on core 0's large stack, into its static.
+    // The steering and shadow estimators (about 16 KB each) are built here, on core 0's large stack, into their statics.
+    let steer = flight::steer();
     let shadow = flight::shadow();
     unsafe extern "C" {
         static __vector_table: u32;
@@ -1327,6 +1329,7 @@ async fn main(spawner: Spawner) {
             #[cfg(not(feature = "esc-off"))]
             esc_test,
             flight_rc,
+            steer,
             shadow,
         )
     });
