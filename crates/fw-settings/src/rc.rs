@@ -151,6 +151,8 @@ pub struct Axes {
 
 /// The four functions normalised: roll, pitch, yaw in -1 to 1, throttle in 0 to 1 (moved to `fw_core::rc`).
 pub use fw_core::rc::Sticks;
+/// The mode switch's three positions (moved to `fw_core::rc`).
+pub use fw_core::rc::Switch3;
 
 fn int(v: Option<ParamValue>, def: &ParamDef) -> i32 {
     match v {
@@ -297,6 +299,27 @@ pub const ARM_SWITCH_HIGH_US: u16 = 1800;
 /// channel) is off.
 pub fn arm_switch(ch5_us: u16) -> bool {
     ch5_us > ARM_SWITCH_HIGH_US
+}
+
+/// The lower band edge of the mode switch, as a share of the normalised channel: thirds (owner, 2026-11-21).
+pub const MODE_BAND_LOW: f32 = 1.0 / 3.0;
+/// The upper band edge of the mode switch: two thirds.
+pub const MODE_BAND_HIGH: f32 = 2.0 / 3.0;
+
+/// Channel 6 (raw us, with its calibration `ch`) as the three-position mode switch
+/// (decision-nav-eskf-20261120, F8): n = [`range`] of the channel; n below one third is `Low`, above two thirds
+/// `High`, otherwise `Middle`. An absent channel (0 us, reversed or not) and RC6_MIN at or above RC6_MAX give n = 0, `Low`. No
+/// hysteresis, no debounce.
+pub fn mode_switch(ch6_us: u16, ch: &Channel) -> Switch3 {
+    // 0 us is "no such channel in the report", Low even when the channel is reversed (`range` would give 1).
+    let n = if ch6_us == 0 { 0.0 } else { range(ch6_us, ch) };
+    if n < MODE_BAND_LOW {
+        Switch3::Low
+    } else if n > MODE_BAND_HIGH {
+        Switch3::High
+    } else {
+        Switch3::Middle
+    }
 }
 
 #[cfg(test)]
@@ -606,5 +629,51 @@ mod tests {
         assert!(arm_switch(1801));
         assert!(!arm_switch(0));
         assert!(arm_switch(2000));
+    }
+
+    /// Channel 6 with the calibration `min`..`max` (trim and dead zone do not matter to a range).
+    fn mode_at(pwm: u16, min: i32, max: i32, reversed: bool) -> Switch3 {
+        mode_switch(pwm, &ch(min, (min + max) / 2, max, i32::from(reversed), 0))
+    }
+
+    #[test]
+    fn the_mode_switch_decodes_thirds_with_edges_in_the_middle() {
+        // A span of 600 us makes both edges whole microseconds: 1100 + 200 = 1300 is exactly 1/3 and 1500 + 100.
+        let (min, max) = (1100, 1700);
+        let at = |pwm: u16| mode_at(pwm, min, max, false);
+        // Exactly one third and exactly two thirds are Middle (n < 1/3 is Low, n > 2/3 is High).
+        assert_eq!(range(1300, &ch(min, 1400, max, 0, 0)), MODE_BAND_LOW);
+        assert_eq!(range(1500, &ch(min, 1400, max, 0, 0)), MODE_BAND_HIGH);
+        assert_eq!(at(1300), Switch3::Middle);
+        assert_eq!(at(1500), Switch3::Middle);
+        // One microsecond either side.
+        assert_eq!(at(1299), Switch3::Low);
+        assert_eq!(at(1301), Switch3::Middle);
+        assert_eq!(at(1499), Switch3::Middle);
+        assert_eq!(at(1501), Switch3::High);
+        // The ends, and beyond them.
+        assert_eq!(at(1100), Switch3::Low);
+        assert_eq!(at(1700), Switch3::High);
+        assert_eq!(at(900), Switch3::Low);
+        assert_eq!(at(2100), Switch3::High);
+        // A reversed channel swaps the ends.
+        assert_eq!(mode_at(1100, min, max, true), Switch3::High);
+        assert_eq!(mode_at(1700, min, max, true), Switch3::Low);
+        assert_eq!(mode_at(1400, min, max, true), Switch3::Middle);
+    }
+
+    #[test]
+    fn an_absent_or_invalid_channel_6_is_low() {
+        // 0 us: the channel is absent in the report.
+        assert_eq!(mode_at(0, 1100, 1900, false), Switch3::Low);
+        assert_eq!(mode_at(0, 1100, 1900, true), Switch3::Low);
+        assert_eq!(mode_switch(0, &DEFAULT_CHANNEL), Switch3::Low);
+        // RC6_MIN at or above RC6_MAX gives n = 0 at every value, reversed or not.
+        for (min, max) in [(1900, 1100), (1500, 1500)] {
+            for pwm in [0, 1100, 1500, 1900, 2100] {
+                assert_eq!(mode_at(pwm, min, max, false), Switch3::Low);
+                assert_eq!(mode_at(pwm, min, max, true), Switch3::Low);
+            }
+        }
     }
 }

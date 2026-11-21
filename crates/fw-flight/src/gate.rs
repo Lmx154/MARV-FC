@@ -161,7 +161,7 @@ impl Gate {
 mod tests {
     use super::*;
     use crate::gnc::Valid;
-    use fw_core::rc::Sticks;
+    use fw_core::rc::{Sticks, Switch3};
 
     static HANDSHAKE: Handshake = Handshake::new();
     const TIMEOUT: u64 = Tuning::DEFAULT.rc_fs_timeout_us;
@@ -173,7 +173,12 @@ mod tests {
             throttle,
             yaw: 0.0,
         };
-        RcSample { sticks, arm, t_us }
+        RcSample {
+            sticks,
+            arm,
+            switch6: Switch3::Low,
+            t_us,
+        }
     }
 
     /// Steps the gate with level nav and these levels; returns the command.

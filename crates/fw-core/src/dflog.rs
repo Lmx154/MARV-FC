@@ -158,7 +158,11 @@ pub const ID_NKF1: u8 = 147;
 pub const ID_NKF2: u8 = 148;
 /// Type number of NKI (one scalar fusion or reset of an estimator).
 pub const ID_NKI: u8 = 149;
-/// Type number of GPV (the velocity of a GNSS sample; 150 and 151 are reserved for other records).
+/// Type number of MODE (the selected and the effective flight mode; decision-nav-eskf-20261120, 8c, F6).
+pub const ID_MODE: u8 = 150;
+/// Type number of SPN (the altitude setpoint; decision-nav-eskf-20261120, 8c, F1).
+pub const ID_SPN: u8 = 151;
+/// Type number of GPV (the velocity of a GNSS sample).
 pub const ID_GPV: u8 = 152;
 
 /// FMT: describes a type (89 bytes).
@@ -273,10 +277,22 @@ pub const NKF2: RecordDef = def(
 /// the new variance), outcome (codes: decision-nav-eskf-20261120, 8c, B5, C8); `TimeUS` as NKF1's.
 pub const NKI: RecordDef = def(ID_NKI, "NKI", "QBBffB", "TimeUS,I,Src,Inn,Var,Ok");
 
+/// MODE: the flight mode the pilot selected and the one in effect, written at the first step and at every change of
+/// either. Codes as MOT's `Mode`: 0 Acro, 1 Angle, 2 Altitude, 3 Position.
+pub const MODE: RecordDef = def(ID_MODE, "MODE", "QBB", "TimeUS,Sel,Eff");
+/// SPN: the altitude-hold setpoint of one flight step: position NED (m), velocity NED (m/s) and heading (rad). In
+/// Altitude only PD (the target height, down positive) and VD (its rate feed-forward) are set; the rest are 0.
+pub const SPN: RecordDef = def(
+    ID_SPN,
+    "SPN",
+    "Qfffffff",
+    "TimeUS,PN,PE,PD,VN,VE,VD,Hdg",
+);
+
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 23] = [
+pub const TYPES: [RecordDef; 25] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV, NKF1, NKF2, NKI,
+    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -870,6 +886,36 @@ pub fn encode_nki(
     w.pos
 }
 
+/// MODE: the selected and the effective mode, codes 0 to 3. 13 bytes.
+pub fn encode_mode(out: &mut [u8], time_us: u64, selected: u8, effective: u8) -> usize {
+    let Some(mut w) = Writer::start(out, &MODE) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(selected);
+    w.u8(effective);
+    w.pos
+}
+
+/// SPN: position NED, velocity NED, heading. 39 bytes.
+pub fn encode_spn(
+    out: &mut [u8],
+    time_us: u64,
+    position_m: [f32; 3],
+    velocity_ms: [f32; 3],
+    heading_rad: f32,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &SPN) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for v in position_m.into_iter().chain(velocity_ms) {
+        w.f32(v);
+    }
+    w.f32(heading_rad);
+    w.pos
+}
+
 /// GPA's `delta_ms`: milliseconds from the previous GNSS sample's `t_us` to this one's, 0 for the first
 /// (`previous_us` `None`) and for a time that went backwards.
 pub fn gpa_delta_ms(previous_us: Option<u64>, t_us: u64) -> u32 {
@@ -1000,6 +1046,10 @@ mod tests {
         out.push((ID_NKF2, b[..n].to_vec()));
         let n = encode_nki(&mut b, 1, 1, 4, 1.0, 2.0, 1);
         out.push((ID_NKI, b[..n].to_vec()));
+        let n = encode_mode(&mut b, 1, 2, 1);
+        out.push((ID_MODE, b[..n].to_vec()));
+        let n = encode_spn(&mut b, 1, [1.0; 3], [2.0; 3], 3.0);
+        out.push((ID_SPN, b[..n].to_vec()));
         out
     }
 
@@ -1070,12 +1120,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_23_fmt_records() {
-        assert_eq!(TYPES.len(), 23);
-        assert_eq!(HEADER_SEQUENCE_LEN, 2047);
-        let mut buf = [0u8; 2057];
-        assert_eq!(write_header(&mut buf), 2047);
-        assert_eq!(write_header(&mut [0u8; 2046]), 0);
+    fn header_sequence_is_25_fmt_records() {
+        assert_eq!(TYPES.len(), 25);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2225);
+        let mut buf = [0u8; 2235];
+        assert_eq!(write_header(&mut buf), 2225);
+        assert_eq!(write_header(&mut [0u8; 2224]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -1108,6 +1158,17 @@ mod tests {
         assert_eq!(nki[9..25], *b"QBBffB\0\0\0\0\0\0\0\0\0\0");
         assert_eq!(nki[25..48], *b"TimeUS,I,Src,Inn,Var,Ok");
         assert!(nki[48..].iter().all(|&c| c == 0));
+        // MODE and SPN by hand: types 150 and 151 = 0x96 and 0x97, lengths 13 and 39.
+        let mode = &buf[23 * 89..24 * 89];
+        assert_eq!(mode[3..9], [0x96, 13, b'M', b'O', b'D', b'E']);
+        assert_eq!(mode[9..25], *b"QBB\0\0\0\0\0\0\0\0\0\0\0\0\0");
+        assert_eq!(mode[25..39], *b"TimeUS,Sel,Eff");
+        assert!(mode[39..].iter().all(|&c| c == 0));
+        let spn = &buf[24 * 89..25 * 89];
+        assert_eq!(spn[3..9], [0x97, 39, b'S', b'P', b'N', 0]);
+        assert_eq!(spn[9..25], *b"Qfffffff\0\0\0\0\0\0\0\0");
+        assert_eq!(spn[25..53], *b"TimeUS,PN,PE,PD,VN,VE,VD,Hdg");
+        assert!(spn[53..].iter().all(|&c| c == 0));
     }
 
     /// The table, as the file announces it (also printed into the report by hand).
@@ -1139,7 +1200,9 @@ mod tests {
                 ("GPV", 34),
                 ("NKF1", 53),
                 ("NKF2", 60),
-                ("NKI", 22)
+                ("NKI", 22),
+                ("MODE", 13),
+                ("SPN", 39)
             ]
         );
     }
@@ -1434,6 +1497,40 @@ mod tests {
         assert_eq!(NKF2.columns, "TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd");
         assert_eq!(ID_NKF2, 148);
         assert_eq!(encode_nkf2(&mut [0u8; 59], 7, 0, [0.0; 3], [0.0; 3], [0.0; 6]), 0);
+    }
+
+    #[test]
+    fn golden_mode_and_spn() {
+        // A3 95 96 | time 7 | Sel 2 | Eff 1
+        let mut b = [0u8; 13];
+        assert_eq!(encode_mode(&mut b, 7, 2, 1), 13);
+        assert_eq!(b, [0xA3, 0x95, 0x96, 7, 0, 0, 0, 0, 0, 0, 0, 2, 1]);
+        assert_eq!(encode_mode(&mut [0u8; 12], 7, 2, 1), 0);
+        // A3 95 97 | time 7 | PN 1.0, PE 2.0, PD -1.5 | VN 0, VE 0, VD 0.5 | Hdg -2.0
+        let mut b = [0u8; 39];
+        assert_eq!(
+            encode_spn(&mut b, 7, [1.0, 2.0, -1.5], [0.0, 0.0, 0.5], -2.0),
+            39
+        );
+        let want = cat(&[
+            &[0xA3, 0x95, 0x97],
+            &[7, 0, 0, 0, 0, 0, 0, 0],
+            &[0x00, 0x00, 0x80, 0x3F],
+            &[0x00, 0x00, 0x00, 0x40],
+            &[0x00, 0x00, 0xC0, 0xBF],
+            &[0x00, 0x00, 0x00, 0x00],
+            &[0x00, 0x00, 0x00, 0x00],
+            &[0x00, 0x00, 0x00, 0x3F],
+            &[0x00, 0x00, 0x00, 0xC0],
+        ]);
+        assert_eq!(b.as_slice(), want);
+        assert_eq!(encode_spn(&mut [0u8; 38], 7, [0.0; 3], [0.0; 3], 0.0), 0);
+        assert_eq!((ID_MODE, ID_SPN), (150, 151));
+        assert_eq!((MODE.format, MODE.columns), ("QBB", "TimeUS,Sel,Eff"));
+        assert_eq!(
+            (SPN.format, SPN.columns),
+            ("Qfffffff", "TimeUS,PN,PE,PD,VN,VE,VD,Hdg")
+        );
     }
 
     #[test]

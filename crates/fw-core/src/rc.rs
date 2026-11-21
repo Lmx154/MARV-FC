@@ -191,6 +191,19 @@ pub struct Sticks {
     pub yaw: f32,
 }
 
+/// The three-position mode switch on channel 6, decoded in thirds of the normalised channel
+/// (`fw_settings::rc::mode_switch`; decision-nav-eskf-20261120, F8). The flight code reads Low as Angle, Middle as
+/// Altitude and High as Position.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Switch3 {
+    /// Lowest third; also an absent channel 6 or an invalid RC6_MIN/RC6_MAX.
+    Low,
+    /// Middle third.
+    Middle,
+    /// Highest third.
+    High,
+}
+
 /// One CRSF stick report as normalised sticks, with the board time it was read, us.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RcSample {
@@ -198,6 +211,8 @@ pub struct RcSample {
     pub sticks: Sticks,
     /// Channel 5 in the arm position, same report.
     pub arm: bool,
+    /// Channel 6, the mode switch, same report.
+    pub switch6: Switch3,
     /// Board time the report was read, us.
     pub t_us: u64,
 }
