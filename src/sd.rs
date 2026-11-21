@@ -45,7 +45,9 @@
 //! (the first open's clean-up is told a volume of the reserve plus the bytes of the logs after the
 //! largest one in ring order, so every log up to and including the largest is deleted).
 
+use core::pin::{Pin, pin};
 use core::sync::atomic::Ordering;
+use core::task::{Context, Poll};
 
 use atomic_waker::AtomicWaker;
 use block_device_adapters::{BufStream, BufStreamError, StreamSlice, StreamSliceError};
@@ -505,7 +507,7 @@ async fn session(parts: &mut Parts, row: &mut Row, w: &mut LogState) {
         register_checks();
     }
     let mut card = SdCard::new(bus, Config::default());
-    let opened = open(&mut card).await;
+    let opened = own_frame(pin!(None), || open(&mut card)).await;
     row.dev.mark();
     let part = match opened {
         Ok(part) => part,
@@ -661,6 +663,35 @@ fn as_str(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).unwrap_or("?")
 }
 
+/// The future `make` builds, awaited with its construction and its `poll` in a frame of their own,
+/// the future itself in `slot` (pass `pin!(None)`: built in place in the task's state): the
+/// temporaries of the card's init, the mount, the directory walks and the un-mounts are on the
+/// stack only while they run, not in the poll frame of `run`, `session` and `mounted`, which is on
+/// core 0's stack at every poll of the task while a log is open (stack S1: each of the five
+/// un-mount futures, 5.8 KB, was built on that frame and copied; 31.9 KB in all).
+async fn own_frame<F: Future>(
+    mut slot: Pin<&mut Option<F>>,
+    make: impl FnOnce() -> F,
+) -> F::Output {
+    let mut make = Some(make);
+    core::future::poll_fn(|cx| poll_apart(&mut make, slot.as_mut(), cx)).await
+}
+
+#[inline(never)]
+fn poll_apart<F: Future>(
+    make: &mut Option<impl FnOnce() -> F>,
+    mut fut: Pin<&mut Option<F>>,
+    cx: &mut Context<'_>,
+) -> Poll<F::Output> {
+    if let Some(make) = make.take() {
+        fut.set(Some(make()));
+    }
+    match fut.as_mut().as_pin_mut() {
+        Some(fut) => fut.poll(cx),
+        None => Poll::Pending,
+    }
+}
+
 /// The mount, the new log, the notice, the service, the log closed, the un-mount.
 async fn mounted(
     volume: &mut Volume<'_>,
@@ -671,7 +702,7 @@ async fn mounted(
     w: &mut LogState,
 ) {
     let t = Instant::now();
-    let fs = match FileSystem::new(volume, FsOptions::new()).await {
+    let fs = match own_frame(pin!(None), || FileSystem::new(volume, FsOptions::new())).await {
         Ok(fs) => fs,
         Err(embedded_fatfs::Error::Io(StreamSliceError::Other(BufStreamError::Io(e)))) => {
             row.dev.mark();
@@ -686,28 +717,28 @@ async fn mounted(
     let mount_us = t.elapsed().as_micros();
     row.dev.mark();
     if fs.fat_type() != FatType::Fat32 {
-        let _ = fs.unmount().await;
+        let _ = own_frame(pin!(None), || fs.unmount()).await;
         row.dev.mark();
         return row.failed(op, Fault::WrongFormat, began);
     }
-    let listed = list(&fs, w.sizes).await;
+    let listed = own_frame(pin!(None), || list(&fs, w.sizes)).await;
     row.dev.mark();
     let listing = match listed {
         Ok(v) => v,
         Err(e) => {
             let kind = fs_kind(&e);
-            let _ = fs.unmount().await;
+            let _ = own_frame(pin!(None), || fs.unmount()).await;
             row.dev.mark();
             return row.failed(op, Fault::Error(kind), began);
         }
     };
-    let lastlog = read_lastlog(&fs).await;
+    let lastlog = own_frame(pin!(None), || read_lastlog(&fs)).await;
     row.dev.mark();
     let lastlog = match lastlog {
         Ok(v) => v,
         Err(e) => {
             let kind = fs_kind(&e);
-            let _ = fs.unmount().await;
+            let _ = own_frame(pin!(None), || fs.unmount()).await;
             row.dev.mark();
             return row.failed(op, Fault::Error(kind), began);
         }
@@ -716,12 +747,12 @@ async fn mounted(
     verify(&fs, lastlog.or(listing.max), row.dev, w.verify_buf).await;
     let logged = logging(&fs, part, row, op, began, mount_us, &listing, lastlog, w).await;
     if let Err(kind) = logged {
-        let _ = fs.unmount().await;
+        let _ = own_frame(pin!(None), || fs.unmount()).await;
         row.dev.mark();
         return row.failed(op, Fault::Error(kind), began);
     }
     let t = Instant::now();
-    let unmounted = fs.unmount().await;
+    let unmounted = own_frame(pin!(None), || fs.unmount()).await;
     row.dev.mark();
     defmt::info!(
         "[INFO] SD: un-mounted in {=u64} us, ok {=bool}",

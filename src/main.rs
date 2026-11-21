@@ -1194,6 +1194,7 @@ async fn main(spawner: Spawner) {
     // MSPLIM := `_stack_end` (memory.x): core 0's stack overflow faults instead of overwriting statics.
     // Core 1's guard is set by `spawn_core1` (embassy-rp `core1_setup`).
     defmt::unwrap!(embassy_rp::install_core0_stack_guard());
+    watchdog::paint_core0();
     let p = embassy_rp::init(Default::default());
     watchdog::RUNNING0.store(task::MAIN, Ordering::Relaxed);
     let mut wd = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
@@ -1320,7 +1321,9 @@ async fn main(spawner: Spawner) {
     unsafe {
         core::ptr::copy_nonoverlapping(vectors, CORE1_VECTOR_TABLE.0.get().cast::<u32>(), words);
     }
-    spawn_core1(p.CORE1, CORE1_STACK.take(), move || {
+    let stack1 = CORE1_STACK.take();
+    watchdog::paint_core1(&mut stack1.mem);
+    spawn_core1(p.CORE1, stack1, move || {
         core1_main(
             imu1_parts,
             imu2_parts,

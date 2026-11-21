@@ -301,13 +301,78 @@ pub fn stat() {
     if cfg!(feature = "quiet-stat") {
         return;
     }
+    let (used0, free0) = stack_use(core0_stack());
+    let (used1, free1) = stack_use((
+        CORE1_STACK_LO.load(Ordering::Relaxed),
+        CORE1_STACK_HI.load(Ordering::Relaxed),
+    ));
     defmt::info!(
-        "[STAT] watchdog: feeds {=u32}, stalls begun {=u32}, ended {=u32}, checks after a save {=u32}",
+        "[STAT] watchdog: feeds {=u32}, stalls begun {=u32}, ended {=u32}, checks after a save {=u32}; stack high-water: core 0 used {=u32} B free {=u32} B, core 1 used {=u32} B free {=u32} B",
         FEEDS.load(Ordering::Relaxed),
         BEGUN.load(Ordering::Relaxed),
         ENDED.load(Ordering::Relaxed),
-        SAVE_CHECKS.load(Ordering::Relaxed)
+        SAVE_CHECKS.load(Ordering::Relaxed),
+        used0,
+        free0,
+        used1,
+        free1
     );
+}
+
+/// The word both stacks are painted with at start-up (stack S1): a word of a stack that still holds
+/// it was, in all likelihood, never written since. The `[STAT] watchdog:` line counts the painted
+/// words from each stack's low end: free = those bytes, used = the rest of the stack.
+const STACK_PAINT: u32 = 0x5354_4B21;
+/// Core 1's stack, `[lo, hi)`, recorded by [`paint_core1`]; 0 until then.
+static CORE1_STACK_LO: AtomicU32 = AtomicU32::new(0);
+static CORE1_STACK_HI: AtomicU32 = AtomicU32::new(0);
+
+/// Core 0's stack, `[_stack_end, _stack_start)` (memory.x).
+fn core0_stack() -> (u32, u32) {
+    unsafe extern "C" {
+        static _stack_end: u32;
+        static _stack_start: u32;
+    }
+    (
+        core::ptr::addr_of!(_stack_end) as u32,
+        core::ptr::addr_of!(_stack_start) as u32,
+    )
+}
+
+/// Paints core 0's stack from `_stack_end` up to 256 B below the stack pointer. Call first thing
+/// in `main`, before any interrupt is enabled: nothing below the stack pointer is live then.
+#[inline(never)]
+pub fn paint_core0() {
+    let (lo, _) = core0_stack();
+    let hi = cortex_m::register::msp::read().saturating_sub(256) & !3;
+    let mut p = lo;
+    while p < hi {
+        // SAFETY: `[_stack_end, hi)` is core 0's stack below the stack pointer, which nothing uses
+        // yet (no interrupt enabled, the only code running is this function, whose frame is above).
+        unsafe { (p as *mut u32).write_volatile(STACK_PAINT) };
+        p += 4;
+    }
+}
+
+/// Paints core 1's stack (all of it) and records where it is. Call on core 0 before `spawn_core1`.
+pub fn paint_core1(mem: &mut [u8]) {
+    for word in mem.chunks_exact_mut(4) {
+        word.copy_from_slice(&STACK_PAINT.to_ne_bytes());
+    }
+    let lo = mem.as_ptr() as u32;
+    CORE1_STACK_LO.store(lo, Ordering::Relaxed);
+    CORE1_STACK_HI.store(lo + (mem.len() as u32 & !3), Ordering::Relaxed);
+}
+
+/// (used, free) bytes of the stack `[lo, hi)`: free = the painted words from `lo` up.
+fn stack_use((lo, hi): (u32, u32)) -> (u32, u32) {
+    let mut p = lo;
+    // SAFETY: word reads of a stack's own memory (core 1's is a static it runs on: a word read
+    // races its writes harmlessly, the value only feeds a count); `lo` and `hi` are word aligned.
+    while p < hi && unsafe { (p as *const u32).read_volatile() } == STACK_PAINT {
+        p += 4;
+    }
+    (hi - p, p - lo)
 }
 
 /// The REBOOT action: writes the REQUESTED record and asks the monitor to reset; the reset comes

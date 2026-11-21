@@ -158,4 +158,14 @@ ASSERT(__siram_text % 4 == 0 && __eram_text % 4 == 0, "ram-code: .ram_text not w
  * it to MSPLIM; ALIGN(8) because MSPLIM bits 2:0 read as zero. */
 _stack_end = ALIGN(__euninit, 8);
 ASSERT(_stack_end >= ORIGIN(RAM) && _stack_end < ORIGIN(RAM) + LENGTH(RAM), "stack guard: _stack_end not in RAM");
-ASSERT(_stack_start - _stack_end >= 32K, "ram-code: under 32 KiB left for core 0's stack");
+/* Core 0's stack budget (stack S1: static call chains of the release ELF, push + sub sp along direct
+ * calls and tail calls, thunks resolved; interrupt priorities as set: SWI_IRQ_0 P3, SWI_IRQ_1 P1,
+ * the hardware interrupts P0; each nesting level adds a 104 B FP exception frame, counted as 108 B).
+ * At boot, before rc::start and the watchdog monitor: the thread base 240 B (main, Executor::run,
+ * poll) + the main task with flight::steer()'s 32 768 B frame 37 664 B + one P0 interrupt
+ * (TIMER0_IRQ_0, 224 + 108 B) = 38 236 B. After start-up: 240 + the deepest other thread task (sd,
+ * 13 088 B) + SWI_IRQ_0 (rc, 11 880 + 24 + 108) + SWI_IRQ_1 (monitor, 400 + 24 + 108) + one P0
+ * interrupt (332) = 26 204 B. The 2 KiB margin is for what the analysis cannot bound (calls through
+ * vtables and wakers, the boot ROM's flash routines). Redo the figures when a frame grows; the
+ * `[STAT] watchdog:` line prints both cores' high-water marks. */
+ASSERT(_stack_start - _stack_end >= 38236 + 2048, "stack: core 0's stack under its budget (38 236 B at boot + 2 KiB)");
