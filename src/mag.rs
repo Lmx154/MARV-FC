@@ -15,7 +15,7 @@ use embassy_rp::{Peri, bind_interrupts};
 use embassy_time::Delay;
 use fw_core::health::{ErrorKind, Limits};
 use fw_core::i2c::Gate;
-use fw_core::sample::{MagReading, MagSample};
+use fw_core::sample::{MagExpected, MagReading, MagSample};
 use fw_core::selftest::Verdict;
 use fw_core::xcore::TripleWriter;
 
@@ -59,6 +59,8 @@ pub struct Bmm350Adapter {
     calls: u32,
     /// The writer of `crate::flight::FLIGHT_MAG` (`None` if it was taken already: nothing is written).
     flight: Option<TripleWriter<'static, MagSample>>,
+    /// The expected field read with the newest sample's calibration (`acquire`), published with it (`to_flight`).
+    expected: Option<MagExpected>,
 }
 
 impl Bmm350Adapter {
@@ -78,6 +80,7 @@ impl Bmm350Adapter {
             config: config(),
             calls: 0,
             flight: crate::flight::FLIGHT_MAG.take_writer(),
+            expected: None,
         };
         adapter.chip = Some(Bmm350::new(adapter.bus(), DEFAULT_ADDRESS));
         defmt::info!(
@@ -195,7 +198,8 @@ impl DeviceAdapter for Bmm350Adapter {
     }
 
     async fn acquire(&mut self) -> Result<Reading, ErrorKind> {
-        let (orientation, calibration) = crate::store::mag_frame();
+        let (orientation, calibration, expected) = crate::store::mag_frame();
+        self.expected = expected;
         let chip = self.chip()?;
         // INT_STATUS is clear-on-read (and in pulsed mode clears itself after 1.25 ms): reading it
         // with every sample keeps the flag that `status` sees after a data-ready timeout fresh.
@@ -301,7 +305,10 @@ impl DeviceAdapter for Bmm350Adapter {
 
     fn to_flight(&mut self, sample: &Sample) {
         if let (Reading::Mag { reading: r, .. }, Some(w)) = (sample.reading, &mut self.flight) {
-            w.write(r.sample(sample.t_us, sample.seq));
+            w.write(MagSample {
+                expected: self.expected,
+                ..r.sample(sample.t_us, sample.seq)
+            });
         }
     }
 }

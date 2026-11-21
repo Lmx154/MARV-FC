@@ -20,6 +20,21 @@ pub struct MagReading {
     pub temperature_c: f32,
 }
 
+/// What the compass should read where this vehicle was calibrated, for the flight core's health test (decision-nav-eskf-20261120,
+/// Amendment C4). Units are converted once, where it is filled: the strength in microtesla, the angles in radians, the
+/// tolerance of the strength as a fraction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MagExpected {
+    /// Expected field strength, microtesla (`MAG_FLD_UT`, > 0).
+    pub strength_ut: f32,
+    /// Expected inclination, radians, positive down (`MAG_FLD_INC`, degrees stored).
+    pub inclination_rad: f32,
+    /// Strength tolerance as a fraction of `strength_ut` (`MAG_HLT_STR`, percent stored).
+    pub tol_strength_frac: f32,
+    /// Inclination tolerance, radians (`MAG_HLT_INC`, degrees stored).
+    pub tol_inclination_rad: f32,
+}
+
 /// One receiver epoch in its integer units (today's `Reading::Gnss`, field for field). Position, speed and course
 /// are `None` without a fix.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +67,10 @@ pub struct GnssReading {
     pub lon_std_mm: Option<u32>,
     /// Standard deviation of the altitude error, mm, 1 sigma; `None` when not available for this epoch.
     pub alt_std_mm: Option<u32>,
+    /// Velocity north, east and down in mm/s (NED) when the receiver gave it for this epoch. `None` in the firmware for
+    /// now: the receiver's velocity message is wired in by a later packet, and nothing in the firmware reads or sends this
+    /// field. The sign of "down" from the receiver is not yet verified (decision-nav-eskf-20261120, C2g).
+    pub vel_ned_mm_s: Option<[i32; 3]>,
 }
 
 /// The deviations to attach to a fix: the accuracy sentence's `[lat, lon, alt]` (mm) when its UTC time
@@ -202,6 +221,7 @@ impl MagReading {
             reading: self,
             t_us,
             seq,
+            expected: None,
         }
     }
 }
@@ -237,6 +257,9 @@ pub struct MagSample {
     pub t_us: u64,
     /// +1 per publish.
     pub seq: u32,
+    /// The field the health test expects, filled by core 0's adapter on every sample from the stored parameters; `None`
+    /// unless `MAG_CAL_TYPE` is 2 and `MAG_FLD_UT` > 0 (`MagReading::sample` leaves it `None`).
+    pub expected: Option<MagExpected>,
 }
 
 /// A GNSS epoch, the board time its read began (us), +1 per publish.
@@ -388,6 +411,7 @@ mod tests {
         lat_std_mm: Some(1200),
         lon_std_mm: Some(900),
         alt_std_mm: Some(2500),
+        vel_ned_mm_s: Some([1_000, -2_000, 3_000]),
     };
 
     #[test]
@@ -396,6 +420,7 @@ mod tests {
         assert_eq!((b.reading, b.t_us, b.seq), (BARO, 1_000_123, 7));
         let m = MAG.sample(2_000_456, u32::MAX);
         assert_eq!((m.reading, m.t_us, m.seq), (MAG, 2_000_456, u32::MAX));
+        assert_eq!(m.expected, None);
         let g = GNSS.sample(u64::MAX, 0);
         assert_eq!((g.reading, g.t_us, g.seq), (GNSS, u64::MAX, 0));
     }

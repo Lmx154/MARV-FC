@@ -64,6 +64,7 @@ pub static FLIGHT_MAG: TripleBuffer<MagSample> = TripleBuffer::new(MagSample {
     },
     t_us: 0,
     seq: 0,
+    expected: None,
 });
 
 /// Core 0 -> flight core: the receiver's newest epoch (one writer, the GNSS adapter as it publishes to the row;
@@ -84,6 +85,7 @@ pub static FLIGHT_GNSS: TripleBuffer<GnssSample> = TripleBuffer::new(GnssSample 
         lat_std_mm: None,
         lon_std_mm: None,
         alt_std_mm: None,
+        vel_ned_mm_s: None,
     },
     t_us: 0,
     seq: 0,

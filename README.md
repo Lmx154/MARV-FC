@@ -90,7 +90,7 @@ newest CRSF stick report and the newest barometer, compass and GNSS samples go i
 The slow sensors (`decision-nav-eskf-20261120.md` section 4, packet F1): core 0's device loop, when it publishes a good
 sample to the row's `Watch` (`device::read`), hands it to the adapter's `DeviceAdapter::to_flight` hook; BARO, MAG and
 GNSS turn the reading into its `fw_core::sample` sample (`BaroSample`, `MagSample` with the calibrated field m, `GnssSample`
-with everything `Reading::Gnss` has, deviations included), each with the core-0 board time and `seq` of the publish, and
+with everything `Reading::Gnss` has, deviations included; its `vel_ned_mm_s` (north, east, down, mm/s) is `None` for now, the receiver's velocity message is not wired in yet and the sign of "down" is unverified), each with the core-0 board time and `seq` of the publish, and
 write it to the triple buffer `flight::FLIGHT_BARO`, `FLIGHT_MAG` or `FLIGHT_GNSS` (the stick path's primitive, wait-free
 on both sides). `Stepper::sample` reads the three once per step and gives `Sensors.baro`, `.mag`, `.gnss` only the
 sample that is new since the previous step (newest only; a gap shows in `seq`). The read copies the three slots every
@@ -213,7 +213,7 @@ wrapper such as fault injection passes it on; BATT does nothing).
 data-ready timeout `status` finds "nothing pending" and a missed edge shows as a timeout, not as a missed edge: accepted, the bench-proven pulsed mode is kept and latched mode is not used), then `read_field`: the
 compensated field in microtesla and the die temperature, rotated by `MAG_ORIENT` (r), then the compass calibration m = S (r - o) in software
 (see Calibrations; the chip's offset registers are not used). `Reading::Mag { reading: MagReading { field_ut, temperature_c }, raw_ut }`: m and the
-temperature (what the flight core gets, as `MagSample` through `flight::FLIGHT_MAG`), and r (core 0 only: the compass calibration reads it). The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
+temperature (what the flight core gets, as `MagSample` through `flight::FLIGHT_MAG`, with `expected: Option<MagExpected>`: the adapter reads the five health-test parameters in the same store access as the calibration and fills it on every sample, `None` unless `MAG_CAL_TYPE` is 2 and `MAG_FLD_UT` > 0), and r (core 0 only: the compass calibration reads it). The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
 `verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and
 rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
 The field at rest on the driver's bench was about 66 to 67 uT.
@@ -271,7 +271,7 @@ nor its bench program does anything with it beyond counting edges, and there is 
   the automatic recovery's second step) is the flush followed by the configuration: a UART has no bus clear
   (noticed: the UART block is not re-initialised). The driver's counts restart at 0 with the new driver; the row's totals add them up.
 - `Reading::Gnss(GnssReading { fix_type, lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used, hdop_x100, vdop_x100, time, date, lat_std_mm,
-  lon_std_mm, alt_std_mm })` (`fw_core::sample`; `time` and `date` are the driver's UTC time and date copied once into `UtcTime` and `UtcDate`), the driver's integer
+  lon_std_mm, alt_std_mm, vel_ned_mm_s })` (`fw_core::sample`; `vel_ned_mm_s` is `None` in the firmware for now, nothing builds, reads or sends it; `time` and `date` are the driver's UTC time and date copied once into `UtcTime` and `UtcDate`), the driver's integer
   units (1e-7 degree, mm, mm/s, 0.01 degree, DOP x 100; no `f64` anywhere: the build has 0 `__aeabi_d` symbols). `fix_type` is MAVLink's
   `GPS_FIX_TYPE`: 1 (NO_FIX) unless the RMC status, the GGA quality and the GSA fix mode all say there is a position, then 2 (2D), 3 (3D) or 4
   (the GGA quality says differential or SBAS-aided, 3D). Position, altitude, speed and course are `None` while `fix_type` is 1.
@@ -492,8 +492,8 @@ through the driver's `Config::validate` before the value is stored); the three o
 | `MAG_CAL_TYPE` | I32 | 0 | 0 to 2 | how the calibration in force was made: 0 none or unknown, 1 quick (best effort), 2 guided (the station's fit). `Live`, calibration. Index 87 |
 | `MAG_FLD_UT` | F32 | 0 | 0 to 95 | expected field strength in microtesla (World Magnetic Model at the calibration site); 0 = not set. `Live`, calibration. Index 88 |
 | `MAG_FLD_INC` | F32 | 0 | -90 to 90 | expected inclination in degrees, positive down; meaningful only when `MAG_FLD_UT` > 0. `Live`, calibration. Index 89 |
-| `MAG_HLT_STR` | F32 | 10 | 1 to 50 | flight health test's strength tolerance in % of `MAG_FLD_UT`; stored only, nothing reads it yet. `Live`, not a calibration. Index 90 |
-| `MAG_HLT_INC` | F32 | 10 | 1 to 45 | flight health test's inclination tolerance in degrees; stored only, nothing reads it yet. `Live`, not a calibration. Index 91 |
+| `MAG_HLT_STR` | F32 | 10 | 1 to 50 | flight health test's strength tolerance in % of `MAG_FLD_UT`; read for every compass sample (`MagSample.expected`, as a fraction). `Live`, not a calibration. Index 90 |
+| `MAG_HLT_INC` | F32 | 10 | 1 to 45 | flight health test's inclination tolerance in degrees; read for every compass sample (`MagSample.expected`, in radians). `Live`, not a calibration. Index 91 |
 
 ### BATT parameters
 
@@ -958,7 +958,7 @@ is m. With S the identity (the defaults) m equals the old `r - o` (bit for bit, 
 -0.0 may come out as +0.0). The parameters (indices 81 to 91, see Parameters): S's six terms, `MAG_CAL_TYPE`
 (0 none or unknown, 1 quick, 2 guided), the expected field `MAG_FLD_UT` and `MAG_FLD_INC` (from the World
 Magnetic Model at the calibration site, 0 = not set), and the flight health test's tolerances `MAG_HLT_STR`
-and `MAG_HLT_INC` (stored only: nothing on the board reads them yet). `param reset-calibration` returns
+and `MAG_HLT_INC`: with the type, the adapter reads these four for every compass sample and publishes them to the flight core as `MagSample.expected` (microtesla, radians, fraction, radians), `None` unless the type is 2 and `MAG_FLD_UT` > 0; the flight core does not use it yet. `param reset-calibration` returns
 `MAG_OFF*` and indices 81 to 89 to their defaults: S the identity, offsets 0, type 0, no expected field. A
 record saved before these parameters existed (offsets only) loads with S the identity and type 0. Changing
 `MAG_ORIENT` invalidates the calibration (S and o are in the body frame after it); nothing on the board warns.

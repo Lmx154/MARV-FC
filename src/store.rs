@@ -132,9 +132,14 @@ pub fn board() -> fw_core::rotation::Rotation {
     )
 }
 
-/// The compass's orientation `MAG_ORIENT` and its calibration (offsets and matrix), read together
-/// for every sample: the rotation comes first, the calibration (body frame) after it.
-pub fn mag_frame() -> (fw_core::rotation::Rotation, fw_settings::mag::Calibration) {
+/// The compass's orientation `MAG_ORIENT`, its calibration (offsets and matrix) and the health test's expected
+/// field, read together in one critical section for every sample: the rotation comes first, the calibration (body
+/// frame) after it, the expected field last (`None` unless `MAG_CAL_TYPE` is 2 and `MAG_FLD_UT` > 0).
+pub fn mag_frame() -> (
+    fw_core::rotation::Rotation,
+    fw_settings::mag::Calibration,
+    Option<fw_core::sample::MagExpected>,
+) {
     with(|params| {
         let orientation = match params.get_named(fw_settings::mag::ORIENT) {
             Some(ParamValue::I32(v)) => Some(v),
@@ -169,11 +174,13 @@ pub fn mag_frame() -> (fw_core::rotation::Rotation, fw_settings::mag::Calibratio
                 diag: [term(0, dx), term(1, dy), term(2, dz)],
                 odiag: [term(3, xy), term(4, xz), term(5, yz)],
             },
+            fw_settings::mag::expected_from_store(params),
         )
     })
     .unwrap_or((
         fw_settings::mag::orientation(None),
         fw_settings::mag::Calibration::NONE,
+        None,
     ))
 }
 

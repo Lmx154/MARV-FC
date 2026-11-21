@@ -9,6 +9,7 @@
 use bmm350::{Averaging, Config, ConfigError, OutputDataRate};
 use fw_core::params::{Apply, Candidate, ParamDef};
 use fw_core::rotation::{self, Rotation};
+use fw_core::sample::MagExpected;
 use mavlink_device::marv::MarvDevice;
 use mavlink_device::{ParamName, ParamStore, ParamValue};
 
@@ -77,9 +78,9 @@ pub const CAL_TYPE: &str = "MAG_CAL_TYPE";
 pub const FLD_UT: &str = "MAG_FLD_UT";
 /// The expected inclination in degrees, positive down; meaningful only when `MAG_FLD_UT` > 0.
 pub const FLD_INC: &str = "MAG_FLD_INC";
-/// The health test's strength tolerance in % of `MAG_FLD_UT` (stored only; nothing reads it yet).
+/// The health test's strength tolerance in % of `MAG_FLD_UT` (read for every compass sample, `expected`).
 pub const HLT_STR: &str = "MAG_HLT_STR";
-/// The health test's inclination tolerance in degrees (stored only; nothing reads it yet).
+/// The health test's inclination tolerance in degrees (read for every compass sample, `expected`).
 pub const HLT_INC: &str = "MAG_HLT_INC";
 
 /// `MAG_CAL_TYPE` of the quick (minimum/maximum) calibration.
@@ -209,6 +210,55 @@ pub fn apply(raw_ut: [f32; 3], cal: &Calibration) -> [f32; 3] {
         (xy * dx + yy * dy) + yz * dz,
         (xz * dx + yz * dy) + zz * dz,
     ]
+}
+
+/// `MAG_CAL_TYPE` of the guided calibration, the only one whose expected field is used.
+pub const CAL_TYPE_GUIDED: i32 = 2;
+
+/// The index of `MAG_CAL_TYPE` in [`CAL_TABLE`]; it, `MAG_FLD_UT`, `MAG_FLD_INC`, `MAG_HLT_STR` and
+/// `MAG_HLT_INC` follow one another (pinned by a test), so [`expected_from_store`] reads them by index.
+const EXPECTED_AT: usize = 6;
+
+/// The health test's expected field from the five stored values, `MAG_CAL_TYPE`, `MAG_FLD_UT` (microtesla),
+/// `MAG_FLD_INC` (degrees, positive down), `MAG_HLT_STR` (percent) and `MAG_HLT_INC` (degrees); `None` unless the type is 2
+/// and the field is above 0 (a value that could not be read is `None` too). The units are converted here, once:
+/// degrees to radians, percent to a fraction.
+pub fn expected(
+    cal_type: Option<i32>,
+    field_ut: Option<f32>,
+    inclination_deg: Option<f32>,
+    tol_strength_pct: Option<f32>,
+    tol_inclination_deg: Option<f32>,
+) -> Option<MagExpected> {
+    let strength_ut = field_ut.filter(|f| *f > 0.0)?;
+    if cal_type? != CAL_TYPE_GUIDED {
+        return None;
+    }
+    Some(MagExpected {
+        strength_ut,
+        inclination_rad: inclination_deg?.to_radians(),
+        tol_strength_frac: tol_strength_pct? / 100.0,
+        tol_inclination_rad: tol_inclination_deg?.to_radians(),
+    })
+}
+
+/// [`expected`] from the store, five lookups by index (no name search: this runs inside the store's critical
+/// section, for every compass sample).
+pub fn expected_from_store<P: ParamStore>(params: &P) -> Option<MagExpected> {
+    let at = |k: usize| {
+        u16::try_from(CAL_OFFSET + EXPECTED_AT + k)
+            .ok()
+            .and_then(|i| params.get(i))
+    };
+    let f = |k: usize| match at(k) {
+        Some(ParamValue::F32(v)) => Some(v),
+        _ => None,
+    };
+    let kind = match at(0) {
+        Some(ParamValue::I32(v)) => Some(v),
+        _ => None,
+    };
+    expected(kind, f(1), f(2), f(3), f(4))
 }
 
 /// The quick calibration's result as one coherent set, written into `params` in one call: `MAG_OFF*`
@@ -492,6 +542,51 @@ mod tests {
         assert!(p.dirty());
         // An offset the store refuses is reported (the pure check keeps them in range).
         assert!(!write_quick_result(&mut p, [250.0, 0.0, 0.0]));
+    }
+
+    /// F1b: the expected field exists only for the guided calibration (type 2) with a field above 0, in the
+    /// converted units; a tolerance written to the store shows in the next read.
+    #[test]
+    fn the_expected_field_is_none_unless_guided_with_a_field() {
+        use crate::{COUNT as ALL, TABLE as FIRMWARE};
+        // The five values are consecutive in the firmware's table, in the order `expected_from_store` reads.
+        for (k, n) in [CAL_TYPE, FLD_UT, FLD_INC, HLT_STR, HLT_INC].into_iter().enumerate() {
+            assert_eq!(FIRMWARE[CAL_OFFSET + EXPECTED_AT + k].name, n);
+        }
+        let mut p = Params::<ALL>::new(&FIRMWARE).unwrap();
+        let mut put = |p: &mut Params<ALL>, n: &str, v: ParamValue| {
+            let i = p.find(&name(n)).unwrap();
+            assert_eq!(p.set(i, v), Ok(v), "{n}");
+        };
+        // The defaults: type 0, field 0.
+        assert_eq!(expected_from_store(&p), None);
+        put(&mut p, FLD_UT, ParamValue::F32(48.5));
+        put(&mut p, FLD_INC, ParamValue::F32(58.0));
+        assert_eq!(expected_from_store(&p), None, "type 0 with a field");
+        put(&mut p, CAL_TYPE, ParamValue::I32(1));
+        assert_eq!(expected_from_store(&p), None, "type 1 with a field");
+        put(&mut p, CAL_TYPE, ParamValue::I32(2));
+        put(&mut p, FLD_UT, ParamValue::F32(0.0));
+        assert_eq!(expected_from_store(&p), None, "type 2 with field 0");
+        put(&mut p, FLD_UT, ParamValue::F32(48.5));
+        let e = expected_from_store(&p).unwrap();
+        assert_eq!(e.strength_ut, 48.5);
+        assert_eq!(e.inclination_rad, 58.0f32.to_radians());
+        assert_eq!(e.tol_strength_frac, 10.0f32 / 100.0);
+        assert_eq!(e.tol_inclination_rad, 10.0f32.to_radians());
+        // A tolerance written now is in the next sample's value; so is a negative inclination.
+        put(&mut p, HLT_STR, ParamValue::F32(25.0));
+        put(&mut p, HLT_INC, ParamValue::F32(5.0));
+        put(&mut p, FLD_INC, ParamValue::F32(-12.5));
+        let e = expected_from_store(&p).unwrap();
+        assert_eq!(e.tol_strength_frac, 0.25);
+        assert_eq!(e.tol_inclination_rad, 5.0f32.to_radians());
+        assert_eq!(e.inclination_rad, (-12.5f32).to_radians());
+        // The pure rule, and a value that could not be read.
+        assert_eq!(expected(Some(2), Some(0.0), Some(1.0), Some(10.0), Some(10.0)), None);
+        assert_eq!(expected(Some(3), Some(50.0), Some(1.0), Some(10.0), Some(10.0)), None);
+        assert_eq!(expected(None, Some(50.0), Some(1.0), Some(10.0), Some(10.0)), None);
+        assert_eq!(expected(Some(2), Some(50.0), Some(1.0), None, Some(10.0)), None);
     }
 
     /// I4: the quick calibration measures the raw field r (what the adapter hands it beside m),

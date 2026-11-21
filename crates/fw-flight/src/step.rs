@@ -549,6 +549,7 @@ mod tests {
                         },
                         t_us: t_us - 300,
                         seq: n / 8,
+                        expected: None,
                     });
                     i.sensors.gnss = (n % 160 == 7).then_some(GnssSample {
                         reading: GnssReading {
@@ -571,6 +572,7 @@ mod tests {
                             lat_std_mm: Some(1_200),
                             lon_std_mm: Some(900),
                             alt_std_mm: Some(2_500),
+                            vel_ned_mm_s: None,
                         },
                         t_us: t_us - 430_000.min(t_us),
                         seq: n / 160,

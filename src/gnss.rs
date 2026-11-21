@@ -467,6 +467,7 @@ fn reading(fix: &Fix, [lat_std_mm, lon_std_mm, alt_std_mm]: [Option<u32>; 3]) ->
         lat_std_mm,
         lon_std_mm,
         alt_std_mm,
+        vel_ned_mm_s: None,
     })
 }
 
