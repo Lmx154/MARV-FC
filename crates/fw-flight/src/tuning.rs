@@ -8,7 +8,7 @@ use marv_card::{K_F, MASS, MAX_ROTOR_SPEED};
 /// The collective at full throttle stick, N: `pilot_thrust_max_g` times the weight m g, or four rotors at full speed
 /// if that is less. Angle's stick map and altitude hold's thrust clamp use this one value.
 pub fn full_thrust_n(pilot_thrust_max_g: f32) -> f32 {
-    (pilot_thrust_max_g * MASS * GRAVITY_MSS).min(4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED)
+    (pilot_thrust_max_g * (MASS * GRAVITY_MSS)).min(4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED)
 }
 
 /// Gains and limits of the flight code. Arrays are [roll, pitch, yaw].
