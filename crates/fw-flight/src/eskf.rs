@@ -33,6 +33,24 @@ pub const RING: usize = 402;
 pub const WGS84_A_M: f32 = 6_378_137.0;
 /// WGS 84 flattening (physical constant, as the simulator's GNSS model).
 pub const WGS84_F: f32 = 1.0 / 298.257_23;
+/// The span of the data the near-zero-speed screen (E3b) was validated on, N0c/N0e at 1 Hz, us: the
+/// position-difference speed is taken between the current epoch and the newest earlier epoch at least this much older.
+/// A derived rule, for the owner's approval.
+pub const SPD_SPAN_US: u64 = 1_000_000;
+/// Fixes kept for that span: 1 s at the receiver's highest rate, 10 Hz (section 4a), the current one, and one for jitter.
+const FIX_HIST: usize = 12;
+/// The barometer's rate, Hz (section 4a: "baro 50"), for the waiting buffer.
+const BARO_RATE_HZ: u64 = 50;
+/// The compass's rate, Hz (section 4a: "compass 100"), for the waiting buffer.
+const MAG_RATE_HZ: u64 = 100;
+/// Barometer samples that can wait for the horizon: nav_buffer_us (the largest delay the constructor accepts) times the
+/// rate, 25.
+pub const BARO_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * BARO_RATE_HZ).div_ceil(1_000_000) as usize;
+/// Compass samples that can wait: the same window times the rate, 50. The once-per-second fusion does not shrink the
+/// worst case: which sample is used is decided at the horizon (the health test needs the horizon tilt, and a refused
+/// sample does not use the slot), so any sample of the window may be the one; samples that arrive before the next
+/// fusion slot while the yaw is aligned are not kept.
+pub const MAG_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * MAG_RATE_HZ).div_ceil(1_000_000) as usize;
 /// 360 degrees in 1e-7 degree.
 const E7_TURN: i64 = 3_600_000_000;
 
@@ -179,6 +197,9 @@ impl<T: Copy + Default, const C: usize> Fifo<T, C> {
     fn full(&self) -> bool {
         self.len == C
     }
+    fn get(&self, i: usize) -> T {
+        self.buf[(self.head + i) % C]
+    }
     fn front(&self) -> Option<T> {
         (self.len > 0).then(|| self.buf[self.head])
     }
@@ -252,8 +273,10 @@ pub struct Eskf {
     t: Tuning,
     noise: Noise,
     ring: Fifo<ImuEntry, RING>,
-    baro_wait: Fifo<BaroWait, RING>,
-    mag_wait: Fifo<MagWait, RING>,
+    baro_wait: Fifo<BaroWait, BARO_WAIT>,
+    mag_wait: Fifo<MagWait, MAG_WAIT>,
+    /// Fixes since arming (t_us, lat, lon), for the position-difference speed over SPD_SPAN_US.
+    fix_hist: Fifo<(u64, i32, i32), FIX_HIST>,
     mag_expected: Option<MagExpected>,
     nom: Nominal,
     p: Cov,
@@ -365,6 +388,7 @@ impl Eskf {
             ring: Fifo::new(),
             baro_wait: Fifo::new(),
             mag_wait: Fifo::new(),
+            fix_hist: Fifo::new(),
             mag_expected: None,
             nom: NOMINAL0,
             p: [[0.0; N]; N],
@@ -782,16 +806,18 @@ impl Eskf {
         let here = GeoPoint { lat_e7: lat, lon_e7: lon, alt_mm: origin.alt_mm };
         let ne3 = ned_from_geo(&origin, &here);
         let ne = [ne3[0], ne3[1]];
-        // The receiver's position-difference speed since the previous fix, and the exact repeat.
-        let (repeat, pd_speed) = match prev {
-            Some((t0, la, lo)) => {
+        // The exact repeat of the previous fix, and the receiver's position-difference speed over at least SPD_SPAN_US
+        // (from the newest fix since arming that is that much older; none yet: no screen decision).
+        let repeat = prev.is_some_and(|(_, la, lo)| la == lat && lo == lon);
+        let pd_speed = (0..self.fix_hist.len)
+            .rev()
+            .map(|i| self.fix_hist.get(i))
+            .find(|&(t0, _, _)| g.t_us.saturating_sub(t0) >= SPD_SPAN_US)
+            .map(|(t0, la, lo)| {
                 let d = ned_from_geo(&GeoPoint { lat_e7: la, lon_e7: lo, alt_mm: origin.alt_mm }, &here);
-                let dt = g.t_us.saturating_sub(t0) as f32 * 1e-6;
-                let sp = if dt > 0.0 { sqrtf(d[0] * d[0] + d[1] * d[1]) / dt } else { 0.0 };
-                (la == lat && lo == lon, sp)
-            }
-            None => (false, 0.0),
-        };
+                sqrtf(d[0] * d[0] + d[1] * d[1]) / (g.t_us.saturating_sub(t0) as f32 * 1e-6)
+            });
+        self.fix_hist.push((g.t_us, lat, lon));
         if !self.yaw_aligned {
             self.stats.gps_prealign = self.stats.gps_prealign.wrapping_add(1);
             return;
@@ -838,8 +864,7 @@ impl Eskf {
         };
         let mut vel = vel;
         if matches!(plan, GpsPlan::Fuse { .. })
-            && pd_speed >= self.t.nav_gps_spd_min_ms
-            && h_speed < self.t.nav_gps_spd_ratio * pd_speed
+            && pd_speed.is_some_and(|pd| pd >= self.t.nav_gps_spd_min_ms && h_speed < self.t.nav_gps_spd_ratio * pd)
         {
             self.stats.gps_e3b = self.stats.gps_e3b.wrapping_add(1);
             self.event(code::VN, 0.0, 0.0, code::SCREENED);
@@ -1033,7 +1058,9 @@ impl Estimator for Eskf {
                 self.mag_expected = m.expected;
             }
             let w = MagWait { t_us: m.t_us, field_ut: m.reading.field_ut, expected: m.expected.is_some() };
-            if self.mag_wait.push(w).is_some() {
+            // Aligned, a sample before the next fusion slot is skipped at the horizon anyway (the slot only moves later).
+            let skipped = self.yaw_aligned && m.t_us < self.next_mag_us;
+            if !skipped && self.mag_wait.push(w).is_some() {
                 self.stats.dropped = self.stats.dropped.wrapping_add(1);
             }
         }
@@ -1086,6 +1113,9 @@ impl Estimator for Eskf {
             self.started = false;
             self.gps_job = None;
             self.rej_since = [None; 2];
+            if armed {
+                self.fix_hist = Fifo::new();
+            }
         }
         self.armed = armed;
     }
@@ -1518,7 +1548,7 @@ mod tests {
     }
 
     #[test]
-    fn c6_a_frozen_fix_armed_is_screened_ne_drops_at_the_timeout_and_the_next_fresh_epoch_resets() {
+    fn c6_a_frozen_fix_armed_is_screened_ne_drops_at_the_timeout_and_returns_after_a_fusion_or_reset() {
         let t = Tuning::DEFAULT;
         let (mut f, mut w) = flying(&t, 20.0, [2.0, 0.0, 0.0]);
         let (from, to) = (w.t_us(), w.t_us() + 10_000_000);
@@ -1534,29 +1564,42 @@ mod tests {
             }
         });
         let s1 = *f.stats();
-        let mut reset_at = None;
-        run(&mut f, &mut w, 1.0, |_| true, |f, nav, _| {
-            if reset_at.is_none() && f.events().any(|e| e.src == code::GPS_RESET) {
-                reset_at = Some(nav.t_us);
+        // R1 (lead, 2026-11-21): C3 governs. After the hold the next fresh epoch is fused if it passes the gate; if it is
+        // gated, the C3 reset follows after the timeout. Either way the flags return only after an accepted position
+        // fusion or a reset.
+        let (mut fused_or_reset, mut outcome, mut back) = (false, None, None);
+        run(&mut f, &mut w, 8.0, |_| true, |f, nav, _| {
+            for e in f.events() {
+                let pos = e.src == code::GPS_N || e.src == code::GPS_E;
+                if outcome.is_none() && (pos || e.src == code::GPS_RESET) && e.ok != code::SCREENED {
+                    outcome = Some(match (e.src, e.ok) {
+                        (code::GPS_RESET, _) => "reset",
+                        (_, code::FUSED) => "fused",
+                        _ => "gated (C3 reset after the timeout)",
+                    });
+                }
+                fused_or_reset |= (pos && e.ok == code::FUSED) || e.src == code::GPS_RESET;
+            }
+            if back.is_none() && nav.valid.position_ne {
+                back = Some((nav.t_us, fused_or_reset));
             }
         });
         let horizon_from = from - t.nav_gps_delay_us;
         println!(
-            "c6: screened {} epochs; NE dropped {:?} s after the hold began (horizon); reset at the next fresh epoch {:?}; stats {:?}",
+            "c6: screened {} epochs; NE dropped {:?} s after the hold began (horizon); the first fresh epoch: {outcome:?}; \
+             NE back {:?} s after the hold began; stats {:?}",
             s1.gps_e1s - s0.gps_e1s,
             drop.map(|d| (d - horizon_from) as f64 * 1e-6),
-            reset_at.map(|r| (r - horizon_from) as f64 * 1e-6),
+            back.map(|b| (b.0 - horizon_from) as f64 * 1e-6),
             f.stats()
         );
         assert_eq!(s1.gps_e1s - s0.gps_e1s, 49, "every frozen epoch but the first (which repeats a moving fix) screened");
         let d = drop.expect("NE dropped") - horizon_from;
         assert!(d >= t.nav_aid_timeout_us - GNSS_EVERY * PERIOD_US && d <= t.nav_aid_timeout_us + GNSS_EVERY * PERIOD_US, "dropped at {d} us");
-        assert!(
-            reset_at.is_some(),
-            "SPECIFICATION: C7 c6 says the next fresh epoch resets, but C3 resets only after {} us of gate rejections \
-             (screened epochs do not count); here the fresh epoch was fused, not reset",
-            t.nav_aid_timeout_us
-        );
+        assert!(last_valid.is_some_and(|v| v < from - t.nav_gps_delay_us + t.nav_aid_timeout_us + GNSS_EVERY * PERIOD_US));
+        let (_, after_fusion) = back.expect("NE returns");
+        assert!(after_fusion, "NE returned without an accepted fusion or a reset");
+        assert!(outcome.is_some());
     }
 
     #[test]
@@ -1612,6 +1655,37 @@ mod tests {
             out += &std::format!(" after {secs} s: yaw sigma {:.3} rad, bg_z sigma {:.4} rad/s, gated {}, resets {};", sig.0, sig.1, f.stats().mag_gated, f.stats().yaw_resets);
         }
         println!("c8:{out}");
+        // I3 (report only): the compass turned 90 deg 10 s after the alignment, followed for 40 s.
+        let (mut f, mut w) = flying(&t, 10.0, [0.0; 3]);
+        w.mag_rot = 90.0_f64.to_radians();
+        let t0 = f.horizon();
+        let (mut follow, mut valid_wrong, mut first_invalid, mut resets_at) = (None, 0.0f64, None, Vec::new());
+        run(&mut f, &mut w, 40.0, |_| true, |f, nav, w| {
+            let truth = w.at(nav.t_us).2;
+            let est = yaw_of(&nav.attitude);
+            let to_compass = wrap((est - truth - 90f64.to_radians()) as f32).abs().to_degrees();
+            let to_truth = wrap((est - truth) as f32).abs().to_degrees();
+            let s = (nav.t_us.saturating_sub(t0)) as f64 * 1e-6;
+            if follow.is_none() && to_compass < 15.0 {
+                follow = Some(s);
+            }
+            if nav.valid.heading && to_truth > 15.0 {
+                valid_wrong += PERIOD_US as f64 * 1e-6;
+            }
+            if first_invalid.is_none() && !nav.valid.heading {
+                first_invalid = Some(s);
+            }
+            if f.events().any(|e| e.src == code::YAW_RESET) {
+                resets_at.push(s);
+            }
+        });
+        println!(
+            "c8/I3: turned 10 s after alignment: yaw within 15 deg of the turned compass after {follow:?} s; yaw resets at \
+             {resets_at:?} s; gated {} fused {}; heading first invalid at {first_invalid:?} s; heading valid while more than 15 deg \
+             from truth {valid_wrong:.2} s (of 40 s)",
+            f.stats().mag_gated,
+            f.stats().mag_fused
+        );
         let (mut f, mut w) = flying(&t, 60.0, [0.0; 3]);
         w.mag_rot = 90.0_f64.to_radians();
         let (mut first_gated, mut reset, mut biases) = (None, None, None);
@@ -1710,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn b6_an_injected_velocity_disarmed_decays_faster_with_the_disarmed_no_aid_noise() {
+    fn b6_an_injected_velocity_disarmed_is_smaller_after_4_s_with_the_disarmed_no_aid_noise() {
         let left = |dis: f32| {
             let t = Tuning { nav_noaid_sigma_dis_m: dis, ..Tuning::DEFAULT };
             let mut f = Eskf::new(&t).unwrap();
@@ -1729,12 +1803,10 @@ mod tests {
         };
         let (a, b) = (left(Tuning::DEFAULT.nav_noaid_sigma_dis_m), left(Tuning::DEFAULT.nav_noaid_sigma_m));
         println!("b6: mean |vN| over 4 s after a 5 m/s injection, vN every 0.5 s, vN sigma at the end: disarmed noise {a:?}; armed noise {b:?}");
-        assert!(
-            a.0 < b.0,
-            "SPECIFICATION (B4 b6 gives no measure of 'decays'): with 0.5 m the velocity swings through about -3.2 m/s \
-             (underdamped) and is near 0 after 4 s; with 10 m it is still about -2.3 m/s after 4 s; but the mean |vN| over \
-             the 4 s is not smaller with 0.5 m (printed above)"
-        );
+        let overshoot = a.1.iter().fold(0.0f32, |m, v| m.min(*v));
+        let (ea, eb) = (a.1.last().unwrap().abs(), b.1.last().unwrap().abs());
+        println!("b6 (R2, judged at the end of the 4 s): |vN| {ea} m/s (0.5 m) against {eb} m/s (10 m); overshoot of the 0.5 m case {overshoot} m/s (reported)");
+        assert!(ea < eb, "the injected velocity is not smaller at the end of the window with the disarmed noise");
     }
 
     #[test]
