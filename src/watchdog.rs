@@ -301,17 +301,23 @@ pub fn stat() {
     if cfg!(feature = "quiet-stat") {
         return;
     }
+    if !CORE0_REPAINTED.swap(true, Ordering::Relaxed) {
+        CORE0_BOOT_USED.store(stack_use(core0_stack()).0, Ordering::Relaxed);
+        repaint_core0();
+    }
+    let boot0 = CORE0_BOOT_USED.load(Ordering::Relaxed);
     let (used0, free0) = stack_use(core0_stack());
     let (used1, free1) = stack_use((
         CORE1_STACK_LO.load(Ordering::Relaxed),
         CORE1_STACK_HI.load(Ordering::Relaxed),
     ));
     defmt::info!(
-        "[STAT] watchdog: feeds {=u32}, stalls begun {=u32}, ended {=u32}, checks after a save {=u32}; stack high-water: core 0 used {=u32} B free {=u32} B, core 1 used {=u32} B free {=u32} B",
+        "[STAT] watchdog: feeds {=u32}, stalls begun {=u32}, ended {=u32}, checks after a save {=u32}; stack high-water: core 0 boot peak {=u32} B, since start-up used {=u32} B free {=u32} B, core 1 used {=u32} B free {=u32} B",
         FEEDS.load(Ordering::Relaxed),
         BEGUN.load(Ordering::Relaxed),
         ENDED.load(Ordering::Relaxed),
         SAVE_CHECKS.load(Ordering::Relaxed),
+        boot0,
         used0,
         free0,
         used1,
@@ -349,6 +355,34 @@ pub fn paint_core0() {
     while p < hi {
         // SAFETY: `[_stack_end, hi)` is core 0's stack below the stack pointer, which nothing uses
         // yet (no interrupt enabled, the only code running is this function, whose frame is above).
+        unsafe { (p as *mut u32).write_volatile(STACK_PAINT) };
+        p += 4;
+    }
+}
+
+/// Core 0's peak since boot (bytes used), scanned just before the re-paint; 0 until then.
+static CORE0_BOOT_USED: AtomicU32 = AtomicU32::new(0);
+/// Set by the one call of [`repaint_core0`] (the first status report): it never runs twice.
+static CORE0_REPAINTED: AtomicBool = AtomicBool::new(false);
+
+/// Re-paints the unused part of core 0's stack once, so the mark shows the depth after start-up
+/// (the boot peak, two 33 KB frames of `flight::steer()`/`flight::shadow()`, hides it otherwise).
+/// Only called from [`stat`], which runs in the supervisor task on core 0's thread-mode executor
+/// (`#[embassy_executor::main]`), never from core 1. It runs with interrupts enabled. That is safe
+/// because the loop writes only below `MSP - 256`: an interrupt that preempts it pushes its
+/// exception frame (8 words, 26 with a lazily stacked FPU frame: at most 104 B) and its handler's
+/// frames below the current stack pointer, which is above `hi`'s 256 B allowance or at worst
+/// inside the region being painted, and all of that is dead once the handler returns, before the
+/// loop's next write; nothing live lies below the stack pointer. The only effect is that a deep
+/// handler's use of the range the loop has not yet reached is overwritten by the paint (an
+/// under-count of the since-start-up peak, bounded by the handler's one-off depth).
+#[inline(never)]
+fn repaint_core0() {
+    let (lo, _) = core0_stack();
+    let hi = cortex_m::register::msp::read().saturating_sub(256) & !3;
+    let mut p = lo;
+    while p < hi {
+        // SAFETY: `[_stack_end, hi)` is core 0's dead stack below the stack pointer (see above).
         unsafe { (p as *mut u32).write_volatile(STACK_PAINT) };
         p += 4;
     }
