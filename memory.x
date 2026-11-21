@@ -95,6 +95,8 @@ SECTIONS {
         *(.text.__aeabi_mem* .text.*17compiler_builtins3mem*)
         /* 64-bit division: dshot's PioDshot::new (core 1's start) divides u64 by u32 in some inlining layouts. */
         *(.text.__aeabi_uldivmod .text.__udivmoddi4 .text.*17compiler_builtins3int19specialized_div_rem*)
+        /* The shadow Eskf (packet E2): signed 64-bit division and i64-to-float; the Stepper's array compare. */
+        *(.text.__aeabi_ldivmod .text.__divmoddi4 .text.__aeabi_l2f .text.memcmp)
         *(.text.*8icm45686* .text.*11lsm6dsk320x* .text.*5dshot*)
         *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness* .text.*9fw_flight3esc*)
         /* The flight step (IMU1's task calls it): fw_flight's step, gnc and gate, and the binary's Stepper; flight::stat (core 0) stays in flash. */
@@ -107,14 +109,16 @@ SECTIONS {
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
         /* The N0 bench (decision-nav-eskf-20261120): fw_flight::eskf_n0 and the bench binary eskf_bench; nothing in the flight image matches. */
         *(.text.*9fw_flight7eskf_n0* .text.*10eskf_bench*)
-        /* MahonyBaro (decision-nav-eskf-20261120, B1): the flight image does not run it until packet E2. */
+        /* MahonyBaro (decision-nav-eskf-20261120, B1): the flight image's steering estimator since packet E2. */
         *(.text.*9fw_flight11mahony_baro*)
-        /* Eskf, the shadow filter (decision-nav-eskf-20261120, E1b): the flight image does not run it until packet E2. */
+        /* Eskf, the shadow filter (decision-nav-eskf-20261120, E1b): the flight image runs it in shadow since packet E2. */
         *(.text.*9fw_flight4eskf*)
         /* The flight log (decision-flight-logging-20261119): the dflog encoders the Stepper calls; core 0's stay in flash. */
         *(.text.*7fw_core5dflog10encode_imu* .text.*7fw_core5dflog10encode_nav* .text.*7fw_core5dflog11encode_setp*)
         *(.text.*7fw_core5dflog10encode_dmd* .text.*7fw_core5dflog10encode_mot* .text.*7fw_core5dflog10encode_esc*)
         *(.text.*7fw_core5dflog10encode_rcs*)
+        /* The navigation records (packet E2). */
+        *(.text.*7fw_core5dflog11encode_nkf1* .text.*7fw_core5dflog11encode_nkf2* .text.*7fw_core5dflog10encode_nki*)
         /* esc: only its core-1 items (the driver's build, the task); its core-0 readers stay in flash. */
         *(.text.*16marv_v2_firmware3esc6driver* .text.*16marv_v2_firmware3esc4task* .text.*16marv_v2_firmware3esc11___task_task*)
         *(.text.*16marv_v2_firmware10imu_inject* .text.*16marv_v2_firmware14flight_latency*)

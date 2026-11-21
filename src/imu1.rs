@@ -312,9 +312,10 @@ pub async fn task(
     adapter: Adapter,
     period_us: u32,
     rc: Option<TripleReader<'static, fw_core::rc::RcSample>>,
+    shadow: Option<&'static mut crate::flight::BoardShadow>,
 ) -> ! {
-    // The flight code is built here, inside the task, on core 1, and owned by it.
-    let task = crate::flight::Stepper::new(rc).and_then(|stepper| {
+    // The flight code is built here, inside the task, on core 1, and owned by it (the shadow estimator by reference).
+    let task = crate::flight::Stepper::new(rc, shadow).and_then(|stepper| {
         ImuTask::new(
             &CELLS,
             adapter,

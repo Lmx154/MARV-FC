@@ -159,15 +159,18 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         &self.estimator
     }
 
-    /// [`Flight::step`], then the shadow estimator (decision-nav-eskf-20261120, 8a): the gate's armed state after the
-    /// step and the same sensors. The step's output is computed before the shadow runs and nothing of the shadow
-    /// reaches the flight code; its state is returned for the log only. `None`: no shadow, the plain step.
+    /// [`Flight::step`], then `publish` with its output (the board sends the command there), then the shadow estimator
+    /// (decision-nav-eskf-20261120, 8a): the gate's armed state after the step and the same sensors. The step's output
+    /// is computed and published before the shadow runs and nothing of the shadow reaches the flight code; its state is
+    /// returned for the log only. `None`: no shadow, the plain step.
     pub fn step_with_shadow<S: Estimator>(
         &mut self,
         inputs: &FlightInputs,
         shadow: Option<&mut S>,
+        publish: impl FnOnce(&StepOut),
     ) -> (StepOut, Option<NavState>) {
         let out = self.step(inputs);
+        publish(&out);
         let nav = shadow.map(|s| {
             s.set_armed(out.armed);
             s.update(&inputs.sensors)
@@ -860,7 +863,7 @@ mod tests {
             let mut navs = std::vec::Vec::new();
             for n in 0..3000u32 {
                 let i = slow_inputs(n, expected);
-                let (out, nav) = flight.step_with_shadow(&i, eskf.as_deref_mut());
+                let (out, nav) = flight.step_with_shadow(&i, eskf.as_deref_mut(), |_| {});
                 let mut records = [0u8; 256];
                 let len = encode_step(&out, &mut records);
                 outs.push((std::format!("{out:?}"), records[..len].to_vec()));
