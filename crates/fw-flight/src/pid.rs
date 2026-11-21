@@ -14,7 +14,15 @@ use marv_card::MASS;
 /// 1 when level, 1/cos to the floor, then up to the gain, and 0 at or past upright-sideways (cos <= 0).
 fn tilt_factor(cos: f32, cos_min: f32, gain: f32) -> f32 {
     let inverted = (gain * cos).clamp(0.0, 1.0);
-    let lift = cos.clamp(cos_min, 1.0);
+    // Not `cos.clamp(cos_min, 1.0)`: with a bound that is not a constant, `f32::clamp` keeps its "min > max" panic and
+    // that panic's float formatting, which lies in flash (tools/check-ram-code.py). Same result for cos_min <= 1.
+    let lift = if cos < cos_min {
+        cos_min
+    } else if cos > 1.0 {
+        1.0
+    } else {
+        cos
+    };
     inverted / lift
 }
 
