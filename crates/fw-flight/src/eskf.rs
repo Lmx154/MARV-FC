@@ -12,6 +12,40 @@
 //!
 //! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to (C8: "for I = 1, TimeUS is
 //! the horizon time"); there is no output predictor in phase 1.
+//!
+//! Where the implementation takes a reading of the specification (checked against the code below, 2026-11-21):
+//! - The Src 9 reset fires at the first accepted, aligned, non-repeated epoch after EVERY arming; any change of the
+//!   armed state drops a queued GNSS job and the reject timers.
+//! - Horizontal aiding = armed AND started (a Src 9 reset since arming) AND a GNSS position fused or reset within
+//!   nav_aid_timeout_us. Otherwise the no-aid hold, at the position captured in the step aiding stops (N = E = 0 at
+//!   the tilt alignment).
+//! - The first fix (fix type >= 3 with a position) only starts the interval rule and is not accepted. Any such fix,
+//!   with or without GST, becomes the interval's and the frozen-fix screen's previous fix.
+//! - The accuracy (GST) part of the acceptance needs the latitude and longitude sigmas only.
+//! - The origin latches at the first accepted epoch, normally the second fix, armed or not, aligned or not; its
+//!   altitude is the fix's plus the filter's D, so that D keeps its datum.
+//! - A waiting compass sample is used only if it carried an `expected` field itself, with the newest value carried.
+//! - No velocity when the speed is at or above nav_gps_course_min_ms but the course is missing (nor when there is no
+//!   speed); then the speed screen (E3b) does not fire.
+//! - Job order: propagation, GNSS, barometer, compass.
+//! - The height reset counts from the last barometer aid (fusion, reset, or the initialisation after a
+//!   re-initialisation). After a re-initialisation the next barometer sample initialises the height at once, as
+//!   `MahonyBaro` re-initialises; it is logged and counted as a height reset.
+//! - No position process noise (Q on attitude, velocity and the biases only).
+//! - The declination is `Tuning::nav_mag_declination_rad`; the simulator sets it from its field model.
+//! - `ned_from_geo` uses the WGS 84 meridian and prime-vertical radii at the origin.
+//! - A Src 9 or C3 reset counts as "a GNSS position fused" for the flags and the aiding timeout.
+//! - velocity_ne and position_ne are one flag; it needs the yaw aligned, not the heading flag.
+//! - The first epoch after arming (a Src 9 reset) takes the receiver's velocity unscreened, its variance
+//!   nav_gps_vel_sigma_ms^2 also on the low-speed path; the C3 reset likewise.
+//! - Armed at rest, exactly repeated fixes are screened, the first epoch after arming included: GNSS is neither reset
+//!   nor fused until the fix changes.
+//! - C1b's H row is the exact Jacobian of the innovation in use (review ruling 1, [`yaw_h`]); a compass sample whose
+//!   NED field has no usable horizontal component is a refusal.
+//! - Compass refusals (Ok 2) are all counted; one NKI record per nav_mag_fuse_us at most.
+//! - A barometer, compass or GNSS sample whose time (validity time, sample time, arrival time minus
+//!   nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us, is dropped and counted
+//!   ([`EskfStats::stale`]).
 // Fixed-size arrays only; every index is a loop bound or a constant below the array length.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
@@ -392,7 +426,8 @@ pub fn yaw_innov(q: &[f32; 4], m_b: &[f32; 3], dec: f32) -> f32 {
 pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
     let m = mag_ned(q, m_b);
     let c = m[0] * m[0] + m[1] * m[1];
-    if !(c > f32::EPSILON * (c + m[2] * m[2])) {
+    let norm2 = c + m[2] * m[2];
+    if !norm2.is_finite() || c <= f32::EPSILON * norm2 {
         return None;
     }
     Some([-m[0] * m[2] / c, -m[1] * m[2] / c, 1.0])
