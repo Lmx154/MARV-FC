@@ -152,7 +152,13 @@ pub const ID_RCS: u8 = 144;
 pub const ID_FDS: u8 = 145;
 /// Type number of GPA (the accuracy of a GNSS sample).
 pub const ID_GPA: u8 = 146;
-/// Type number of GPV (the velocity of a GNSS sample; 147 to 151 are reserved for other records).
+/// Type number of NKF1 (an estimator's state; decision-nav-eskf-20261120, 8c).
+pub const ID_NKF1: u8 = 147;
+/// Type number of NKF2 (an estimator's biases and sigmas).
+pub const ID_NKF2: u8 = 148;
+/// Type number of NKI (one scalar fusion or reset of an estimator).
+pub const ID_NKI: u8 = 149;
+/// Type number of GPV (the velocity of a GNSS sample; 150 and 151 are reserved for other records).
 pub const ID_GPV: u8 = 152;
 
 /// FMT: describes a type (89 bytes).
@@ -246,10 +252,31 @@ pub const GPV: RecordDef = def(
     "TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg",
 );
 
+/// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the
+/// shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's. For I = 1 `TimeUS` is the
+/// horizon time, the time the state refers to.
+pub const NKF1: RecordDef = def(
+    ID_NKF1,
+    "NKF1",
+    "QBffffffffffB",
+    "TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld",
+);
+/// NKF2: an estimator's gyro bias (rad/s) and accelerometer bias (m/s^2), and the sigmas of tilt, heading (rad),
+/// velocity NE and D (m/s), position NE and D (m); `TimeUS` as NKF1's.
+pub const NKF2: RecordDef = def(
+    ID_NKF2,
+    "NKF2",
+    "QBffffffffffff",
+    "TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd",
+);
+/// NKI: one scalar fusion or reset of an estimator: source, innovation (or the applied change), its variance (or
+/// the new variance), outcome (codes: decision-nav-eskf-20261120, 8c, B5, C8); `TimeUS` as NKF1's.
+pub const NKI: RecordDef = def(ID_NKI, "NKI", "QBBffB", "TimeUS,I,Src,Inn,Var,Ok");
+
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 20] = [
+pub const TYPES: [RecordDef; 23] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV,
+    GPA, GPV, NKF1, NKF2, NKI,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -778,6 +805,71 @@ pub fn encode_gpv(
     w.pos
 }
 
+/// NKF1: instance, attitude quaternion (w, x, y, z), velocity and position NED, valid bits. 53 bytes.
+pub fn encode_nkf1(
+    out: &mut [u8],
+    time_us: u64,
+    inst: u8,
+    attitude: [f32; 4],
+    velocity_ms: [f32; 3],
+    position_m: [f32; 3],
+    valid: u8,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &NKF1) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    for v in attitude.into_iter().chain(velocity_ms).chain(position_m) {
+        w.f32(v);
+    }
+    w.u8(valid);
+    w.pos
+}
+
+/// NKF2: instance, gyro bias, accelerometer bias, then the sigmas tilt, heading, velocity NE, velocity D,
+/// position NE, position D. 60 bytes.
+pub fn encode_nkf2(
+    out: &mut [u8],
+    time_us: u64,
+    inst: u8,
+    gyro_bias_rads: [f32; 3],
+    accel_bias_ms2: [f32; 3],
+    sigmas: [f32; 6],
+) -> usize {
+    let Some(mut w) = Writer::start(out, &NKF2) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    for v in gyro_bias_rads.into_iter().chain(accel_bias_ms2).chain(sigmas) {
+        w.f32(v);
+    }
+    w.pos
+}
+
+/// NKI: instance, source code, innovation, variance, outcome code. 22 bytes.
+pub fn encode_nki(
+    out: &mut [u8],
+    time_us: u64,
+    inst: u8,
+    src: u8,
+    inn: f32,
+    var: f32,
+    ok: u8,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &NKI) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(inst);
+    w.u8(src);
+    w.f32(inn);
+    w.f32(var);
+    w.u8(ok);
+    w.pos
+}
+
 /// GPA's `delta_ms`: milliseconds from the previous GNSS sample's `t_us` to this one's, 0 for the first
 /// (`previous_us` `None`) and for a time that went backwards.
 pub fn gpa_delta_ms(previous_us: Option<u64>, t_us: u64) -> u32 {
@@ -902,6 +994,12 @@ mod tests {
         out.push((ID_GPA, b[..n].to_vec()));
         let n = encode_gpv(&mut b, 1, [1, -2, 3], 4, 5, 6);
         out.push((ID_GPV, b[..n].to_vec()));
+        let n = encode_nkf1(&mut b, 1, 1, [1.0; 4], [2.0; 3], [3.0; 3], 4);
+        out.push((ID_NKF1, b[..n].to_vec()));
+        let n = encode_nkf2(&mut b, 1, 1, [1.0; 3], [2.0; 3], [3.0; 6]);
+        out.push((ID_NKF2, b[..n].to_vec()));
+        let n = encode_nki(&mut b, 1, 1, 4, 1.0, 2.0, 1);
+        out.push((ID_NKI, b[..n].to_vec()));
         out
     }
 
@@ -972,12 +1070,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_20_fmt_records() {
-        assert_eq!(TYPES.len(), 20);
-        assert_eq!(HEADER_SEQUENCE_LEN, 1780);
-        let mut buf = [0u8; 1790];
-        assert_eq!(write_header(&mut buf), 1780);
-        assert_eq!(write_header(&mut [0u8; 1779]), 0);
+    fn header_sequence_is_23_fmt_records() {
+        assert_eq!(TYPES.len(), 23);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2047);
+        let mut buf = [0u8; 2057];
+        assert_eq!(write_header(&mut buf), 2047);
+        assert_eq!(write_header(&mut [0u8; 2046]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -994,6 +1092,22 @@ mod tests {
         assert_eq!(gpv[9..25], *b"QBiiiIIH\0\0\0\0\0\0\0\0");
         assert_eq!(gpv[25..60], *b"TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg");
         assert!(gpv[60..].iter().all(|&c| c == 0));
+        // The FMTs of NKF1, NKF2, NKI by hand: types 147-149 = 0x93-0x95, lengths 53, 60, 22.
+        let nkf1 = &buf[20 * 89..21 * 89];
+        assert_eq!(nkf1[3..9], [0x93, 53, b'N', b'K', b'F', b'1']);
+        assert_eq!(nkf1[9..25], *b"QBffffffffffB\0\0\0");
+        assert_eq!(nkf1[25..67], *b"TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld");
+        assert!(nkf1[67..].iter().all(|&c| c == 0));
+        let nkf2 = &buf[21 * 89..22 * 89];
+        assert_eq!(nkf2[3..9], [0x94, 60, b'N', b'K', b'F', b'2']);
+        assert_eq!(nkf2[9..25], *b"QBffffffffffff\0\0");
+        assert_eq!(nkf2[25..85], *b"TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd");
+        assert!(nkf2[85..].iter().all(|&c| c == 0));
+        let nki = &buf[22 * 89..23 * 89];
+        assert_eq!(nki[3..9], [0x95, 22, b'N', b'K', b'I', 0]);
+        assert_eq!(nki[9..25], *b"QBBffB\0\0\0\0\0\0\0\0\0\0");
+        assert_eq!(nki[25..48], *b"TimeUS,I,Src,Inn,Var,Ok");
+        assert!(nki[48..].iter().all(|&c| c == 0));
     }
 
     /// The table, as the file announces it (also printed into the report by hand).
@@ -1022,7 +1136,10 @@ mod tests {
                 ("RCS", 28),
                 ("FDS", 19),
                 ("GPA", 24),
-                ("GPV", 34)
+                ("GPV", 34),
+                ("NKF1", 53),
+                ("NKF2", 60),
+                ("NKI", 22)
             ]
         );
     }
@@ -1273,6 +1390,71 @@ mod tests {
         assert_eq!(GPV.columns, "TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg");
         assert_eq!(ID_GPV, 152);
         assert_eq!(encode_gpv(&mut [0u8; 33], 7, [0; 3], 0, 0, 0), 0);
+    }
+
+    #[test]
+    fn golden_nkf1() {
+        // A3 95 93 | time 7 | I 1 | Q 1 0 0 -0.5 | V 0.25 -2 0 | P 3 -4 1.5 | Vld 0x55
+        let mut b = [0xEEu8; 60];
+        let n = encode_nkf1(&mut b, 7, 1, [1.0, 0.0, 0.0, -0.5], [0.25, -2.0, 0.0], [3.0, -4.0, 1.5], 0x55);
+        assert_eq!(n, 53);
+        let floats: [f32; 10] = [1.0, 0.0, 0.0, -0.5, 0.25, -2.0, 0.0, 3.0, -4.0, 1.5];
+        let mut want = cat(&[&[0xA3, 0x95, 0x93], &7u64.to_le_bytes(), &[1]]);
+        for f in floats {
+            want.extend_from_slice(&f.to_le_bytes());
+        }
+        want.push(0x55);
+        assert_eq!(b[..53], want[..]);
+        assert_eq!(b[53..], [0xEE; 7], "nothing beyond the record is touched");
+        // -0.5 = 0xBF000000 at Q4.
+        assert_eq!(b[24..28], [0x00, 0x00, 0x00, 0xBF]);
+        assert_eq!(NKF1.format, "QBffffffffffB");
+        assert_eq!(NKF1.columns, "TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld");
+        assert_eq!(ID_NKF1, 147);
+        assert_eq!(encode_nkf1(&mut [0u8; 52], 7, 1, [0.0; 4], [0.0; 3], [0.0; 3], 0), 0);
+    }
+
+    #[test]
+    fn golden_nkf2() {
+        // A3 95 94 | time 7 | I 0 | GB 0 0 0 | AB 0 0 0.125 | S inf inf inf 0.5 inf 2
+        let mut b = [0xEEu8; 64];
+        let inf = f32::INFINITY;
+        let n = encode_nkf2(&mut b, 7, 0, [0.0; 3], [0.0, 0.0, 0.125], [inf, inf, inf, 0.5, inf, 2.0]);
+        assert_eq!(n, 60);
+        let floats: [f32; 12] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.125, inf, inf, inf, 0.5, inf, 2.0];
+        let mut want = cat(&[&[0xA3, 0x95, 0x94], &7u64.to_le_bytes(), &[0]]);
+        for f in floats {
+            want.extend_from_slice(&f.to_le_bytes());
+        }
+        assert_eq!(b[..60], want[..]);
+        assert_eq!(b[60..], [0xEE; 4], "nothing beyond the record is touched");
+        // +inf = 0x7F800000 at STlt.
+        assert_eq!(b[36..40], [0x00, 0x00, 0x80, 0x7F]);
+        assert_eq!(NKF2.format, "QBffffffffffff");
+        assert_eq!(NKF2.columns, "TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd");
+        assert_eq!(ID_NKF2, 148);
+        assert_eq!(encode_nkf2(&mut [0u8; 59], 7, 0, [0.0; 3], [0.0; 3], [0.0; 6]), 0);
+    }
+
+    #[test]
+    fn golden_nki() {
+        // A3 95 95 | time 7 | I 1 | Src 6 | Inn -1 | Var 0.25 | Ok 1
+        let mut b = [0xEEu8; 30];
+        assert_eq!(encode_nki(&mut b, 7, 1, 6, -1.0, 0.25, 1), 22);
+        let want = cat(&[
+            &[0xA3, 0x95, 0x95],
+            &7u64.to_le_bytes(),
+            &[1, 6],
+            &[0x00, 0x00, 0x80, 0xBF],
+            &[0x00, 0x00, 0x80, 0x3E],
+            &[1],
+        ]);
+        assert_eq!(b[..22], want[..]);
+        assert_eq!(b[22..], [0xEE; 8], "nothing beyond the record is touched");
+        assert_eq!(NKI.format, "QBBffB");
+        assert_eq!(NKI.columns, "TimeUS,I,Src,Inn,Var,Ok");
+        assert_eq!(ID_NKI, 149);
+        assert_eq!(encode_nki(&mut [0u8; 21], 7, 1, 6, -1.0, 0.25, 1), 0);
     }
 
     #[test]
