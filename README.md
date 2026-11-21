@@ -49,7 +49,7 @@ It has no flight functionality.
   (with `esc-off`: not enabled) and not enabled on core 0.
 
 Not in it yet: IMU2's
-high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and the compass's soft-iron (matrix) fit.
+high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and an on-board fit of the compass's soft-iron matrix (the station fits it and writes it as parameters; see Calibrations).
 
 ## Flight-core device loop
 
