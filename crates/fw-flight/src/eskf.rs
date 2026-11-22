@@ -5,8 +5,11 @@
 //!
 //! D1 (Amendment D): for `ImuBaro` and `Imu`, [`NavState::rates_rads`] is the PT1 of the raw gyro (`Tuning::ins_gyro_lpf_hz`,
 //! Mahony's form: dt from successive sample times capped at `DT_MAX_US`, started at the first sample with its value) minus
-//! the gyro-bias estimate, subtracted when the NavState is built; with the bias at 0 it equals `Mahony`'s rates bit for
-//! bit. `Full` keeps the raw gyro of its horizon sample minus the bias.
+//! the gyro-bias estimates x and y, subtracted when the NavState is built; with those at 0 it equals `Mahony`'s rates bit
+//! for bit. Amendment H (H2): the z gyro bias is NOT subtracted from the rate output, so `rates_rads[2]` is the PT1 value,
+//! `Mahony`'s bit for bit for any z bias estimate (the yaw rate hold reads it: with the stick centred the vehicle turns at
+//! the raw gyro's z offset, not at the estimated bias minus the true one); the attitude still integrates the gyro minus the
+//! full bias. `Full` keeps the raw gyro of its horizon sample minus the full bias.
 //!
 //! D2 (Amendment D): for `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each covariance
 //! propagation closing an interval that was disarmed throughout keeps its mean bias-corrected specific force (the first
@@ -17,12 +20,15 @@
 //! and columns of P are zeroed with every variance kept. It is that step's one heavy job; the queued jobs run later.
 //! Outside the window, or with no stored interval, nothing changes. `Full` never does it.
 //!
-//! Amendment E (E1): for `ImuBaro` the barometer scalar's Kalman gain has its accelerometer-bias x and y entries set to
-//! zero and P is updated in Joseph form with that gain (as the no-aid scalars do for all three), so in `ImuBaro` and `Imu`
-//! b_a,x and b_a,y are exactly 0.0 on every step, from the alignment and after every re-initialisation; b_a,z is still
-//! learned. `Full` and `Imu` are untouched. Without GPS the horizontal accelerometer bias is not estimated: the real one
-//! (about +0.1 to +0.2 m/s^2 in x per ESKF3) remains as a tilt offset of up to about 1 deg, as with Mahony. The mask is
-//! switched off only by test-only fields.
+//! Amendment E (E1) and Amendment H (H1): for `ImuBaro` the barometer scalar's Kalman gain has support on position D,
+//! velocity D and accelerometer-bias z only (a 3-state vertical filter beside the attitude filter): every other entry is
+//! set to zero and P is updated in Joseph form with that gain for every entry (as the no-aid scalars do for the bias
+//! entries), so in `ImuBaro` and `Imu` b_a,x and b_a,y are exactly 0.0 on every step, from the alignment and after every
+//! re-initialisation, and the barometer no longer moves the attitude, the gyro bias or the horizontal velocity and
+//! position; b_a,z is still learned through its covariance with D. `Full` and `Imu` are untouched. Without GPS the
+//! horizontal accelerometer bias is not estimated: the real one (about +0.1 to +0.2 m/s^2 in x per ESKF3) remains as a
+//! tilt offset of up to about 1 deg, as with Mahony. The mask is constant in production; test-only fields restore the
+//! full gain or also mask b_a,z for a test's negative control.
 //!
 //! The arithmetic is the N0 bench's ([`crate::eskf_n0`]): nominal integration on every IMU1 sample (at the horizon),
 //! the structured F P F^T + Q every nav_predict_us, sequential scalar fusions. Work rule I2: each step integrates the
@@ -411,9 +417,10 @@ pub struct Eskf {
     interval_armed: bool,
     /// D2: the arming-edge re-alignment is on; off only in a test's negative control.
     arm_realign: bool,
-    /// E1: the `ImuBaro` barometer scalar leaves b_a,x and b_a,y alone; off only in a test's negative control.
+    /// H1 test control: the `ImuBaro` barometer scalar uses the full gain, every entry (the production gain has support
+    /// on D, v_D and b_a,z only).
     #[cfg(test)]
-    baro_abias_xy_mask: bool,
+    baro_full_gain: bool,
     /// E1 test control: the same scalar also leaves b_a,z alone.
     #[cfg(test)]
     baro_abias_z_mask: bool,
@@ -557,7 +564,7 @@ impl Eskf {
             interval_armed: false,
             arm_realign: true,
             #[cfg(test)]
-            baro_abias_xy_mask: true,
+            baro_full_gain: false,
             #[cfg(test)]
             baro_abias_z_mask: false,
         })
@@ -836,9 +843,10 @@ impl Eskf {
         self.event(code::NOAID, innov, s, code::FUSED);
     }
 
-    /// The `ImuBaro` barometer scalar on D (E1), gated as [`n0::fuse_position`] gates (innovation^2 <= gate^2 s, s = P_DD + var):
-    /// K's accelerometer-bias x and y entries are zeroed and P is updated in Joseph form with that K, as `fuse_noaid` does,
-    /// then mirrored and the diagonal held at or above 0. Returns (accepted, innovation variance); nothing changes when gated out.
+    /// The `ImuBaro` barometer scalar on D (E1, H1), gated as [`n0::fuse_position`] gates (innovation^2 <= gate^2 s, s = P_DD + var):
+    /// K has support on D, v_D and b_a,z only (every other entry zeroed) and P is updated in Joseph form with that K for every
+    /// entry, as `fuse_noaid` does, then mirrored and the diagonal held at or above 0. Returns (accepted, innovation variance);
+    /// nothing changes when gated out.
     fn fuse_baro_masked(&mut self, innov: f32, var: f32) -> (bool, f32) {
         let k = POS + 2;
         let ph = self.p[k];
@@ -850,12 +858,15 @@ impl Eskf {
         let inv = 1.0 / s;
         let mut kg: [f32; N] = core::array::from_fn(|i| ph[i] * inv);
         #[cfg(test)]
-        let (mask_xy, mask_z) = (self.baro_abias_xy_mask, self.baro_abias_z_mask);
+        let (vertical_only, mask_z) = (!self.baro_full_gain, self.baro_abias_z_mask);
         #[cfg(not(test))]
-        let (mask_xy, mask_z) = (true, false);
-        if mask_xy {
-            kg[ACCEL_BIAS] = 0.0;
-            kg[ACCEL_BIAS + 1] = 0.0;
+        let (vertical_only, mask_z) = (true, false);
+        if vertical_only {
+            for i in 0..N {
+                if i != POS + 2 && i != VEL + 2 && i != ACCEL_BIAS + 2 {
+                    kg[i] = 0.0;
+                }
+            }
         }
         if mask_z {
             kg[ACCEL_BIAS + 2] = 0.0;
@@ -1278,7 +1289,7 @@ impl Eskf {
         NavState {
             t_us: horizon,
             attitude: q,
-            rates_rads: [g[0] - n.bg[0], g[1] - n.bg[1], g[2] - n.bg[2]],
+            rates_rads: [g[0] - n.bg[0], g[1] - n.bg[1], if self.aiding_set == Aiding::Full { g[2] - n.bg[2] } else { g[2] }],
             velocity_ms: n.v,
             position_m: n.p,
             valid: Valid {
@@ -2481,7 +2492,9 @@ mod tests {
             s.imu1.reading.gyro_rads = off;
             let (nf, nm) = (f.update(&s), m.update(&s));
             bg = f.biases().0;
-            for i in 0..3 {
+            // H2: the z rate is Mahony's PT1 value bit for bit, whatever the z bias estimate.
+            assert_eq!(nf.rates_rads[2].to_bits(), nm.rates_rads[2].to_bits(), "z rate differs from Mahony's");
+            for i in 0..2 {
                 // nf = fl(x - b) with x Mahony's filtered gyro: |x - nf - b| <= u |x - b|, u = EPSILON / 2; the bound used
                 // is twice that, EPSILON max(|x|, |b|).
                 let d = f64::from(nm.rates_rads[i]) - f64::from(nf.rates_rads[i]) - f64::from(bg[i]);
@@ -2951,7 +2964,7 @@ mod tests {
     /// seen, whether b_a,x and b_a,y were bit-exact 0.0 after every step, and the largest |v_D| over the last half.
     fn held_tilted(t: &Tuning, tilt: (f64, f64), off: [f32; 3], secs: f64, arm_s: f64, masked: bool) -> (Eskf, [f32; 2], bool, f32) {
         let mut f = Eskf::with_aiding(t, Aiding::ImuBaro).unwrap();
-        f.baro_abias_xy_mask = masked;
+        f.baro_full_gain = !masked;
         let mut w = World::new(t);
         let (mut worst, mut exact, mut vd) = ([0.0f32; 2], true, 0.0f32);
         for _ in 0..(secs * 1e6) as u64 / PERIOD_US {
@@ -3030,7 +3043,7 @@ mod tests {
         let tilt = (10.0_f64.to_radians(), 20.0_f64.to_radians());
         let fixture = |masked: bool| {
             let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
-            f.baro_abias_xy_mask = masked;
+            f.baro_full_gain = !masked;
             let mut w = World::new(&t);
             while w.t_us() < 64_000_000 {
                 let mut s = w.step();
@@ -3182,10 +3195,13 @@ mod tests {
         let k = POS + 2;
         let p: Vec<Vec<f64>> = f.p.iter().map(|row| row.iter().map(|&x| f64::from(x)).collect()).collect();
         let s = p[k][k] + r;
-        // K = P H^T / s with the two horizontal accelerometer-bias entries zeroed; (I - K H) P (I - K H)^T + K R K^T.
+        // K = P H^T / s with every entry but D, v_D and b_a,z zeroed (H1); (I - K H) P (I - K H)^T + K R K^T.
         let mut kg: Vec<f64> = (0..N).map(|i| p[i][k] / s).collect();
-        kg[ACCEL_BIAS] = 0.0;
-        kg[ACCEL_BIAS + 1] = 0.0;
+        for (i, v) in kg.iter_mut().enumerate() {
+            if i != POS + 2 && i != VEL + 2 && i != ACCEL_BIAS + 2 {
+                *v = 0.0;
+            }
+        }
         let imkh = |i: usize, j: usize| f64::from(u8::from(i == j)) - kg[i] * f64::from(u8::from(j == k));
         let reference: Vec<Vec<f64>> = (0..N)
             .map(|i| {
@@ -3227,7 +3243,7 @@ mod tests {
         let t = Tuning::DEFAULT;
         for aiding in [Aiding::Full, Aiding::Imu] {
             let (mut a, mut b) = (Eskf::with_aiding(&t, aiding).unwrap(), Eskf::with_aiding(&t, aiding).unwrap());
-            b.baro_abias_xy_mask = false;
+            b.baro_full_gain = true;
             let mut w = World::new(&t);
             w.v = [1.0, 0.5, 0.0];
             let mut ba_moved = false;
@@ -3247,6 +3263,230 @@ mod tests {
                 assert!(a.stats().gps_pos_fused > 0 && a.stats().mag_fused > 0 && a.stats().baro_fused > 0);
             } else {
                 assert!(a.stats().noaid > 0 && a.stats().baro_fused == 0);
+            }
+        }
+    }
+
+    // ---- Amendment H, packet H-1: the ImuBaro barometer scalar has support on D, v_D and b_a,z only; the z rate is the PT1 ----
+
+    /// One sample of the warm-up and gusty runs: the World moving (accelerations changing every 7 s, a yaw rate), the body
+    /// tilted by slow rolls and pitches, a constant accelerometer offset and a gyro x and y wobble.
+    fn moving_sample(w: &mut World, sec: f64) -> Sensors {
+        let phase = (sec / 7.0) as u32;
+        w.a = [[0.0, 1.5, -1.0, 0.5][phase as usize % 4], [0.5, 0.0, 1.0, -2.0][phase as usize % 4], [0.3, -0.4, 0.0, 0.8][phase as usize % 4]];
+        w.yaw_rate = 0.3 * ((phase % 3) as f64 - 1.0);
+        let mut s = w.step();
+        let tilt = (0.3 * (sec * 0.7).sin(), 0.4 * (sec * 0.45).cos());
+        s.imu1.reading.accel_ms2 = {
+            let a = rest_force(tilt.0, tilt.1, [0.15, -0.1, 0.1]);
+            [a[0] + 0.2 * s.imu1.reading.accel_ms2[0], a[1] + 0.2 * s.imu1.reading.accel_ms2[1], a[2] + 0.2 * (s.imu1.reading.accel_ms2[2] + GRAVITY_MSS)]
+        };
+        s.imu1.reading.gyro_rads = [(0.2 * (sec * 1.3).sin()) as f32, (0.15 * (sec * 0.9).cos()) as f32, s.imu1.reading.gyro_rads[2]];
+        s
+    }
+
+    /// A warm `ImuBaro` filter: `secs` of `moving_sample`, armed from 10 s.
+    fn warm_imu_baro(t: &Tuning, secs: u64) -> Eskf {
+        let mut f = Eskf::with_aiding(t, Aiding::ImuBaro).unwrap();
+        let mut w = World::new(t);
+        for _ in 0..secs * 1_000_000 / PERIOD_US {
+            let sec = w.t_us() as f64 * 1e-6;
+            let s = moving_sample(&mut w, sec);
+            f.set_armed(sec >= 10.0);
+            f.update(&s);
+        }
+        f
+    }
+
+    #[test]
+    fn h_t1_one_imu_baro_barometer_fusion_changes_only_d_vd_and_ba_z() {
+        let t = Tuning::DEFAULT;
+        let f = warm_imu_baro(&t, 40);
+        let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
+        let outside = |i: usize| i != d && i != vd && i != bz;
+        // Precondition: P has non-zero cross terms between D / v_D and the attitude, the horizontal velocity and the gyro bias.
+        for k in [d, vd] {
+            for j in (ATT..ATT + 3).chain(VEL..VEL + 2).chain(GYRO_BIAS..GYRO_BIAS + 3) {
+                assert!(f.p[k][j] != 0.0 && f.p[k][j].is_finite(), "P[{k}][{j}] = {}", f.p[k][j]);
+            }
+        }
+        let r = f.t.nav_baro_sigma_m * f.t.nav_baro_sigma_m;
+        let innov = 0.3f32;
+        assert!(innov * innov <= f.t.nav_gate_sigma * f.t.nav_gate_sigma * (f.p[d][d] + r), "the innovation is outside the gate");
+        let mut a = f.clone();
+        assert!(a.fuse_baro_masked(innov, r).0, "the fusion was not accepted");
+        let q_bits = |e: &Eskf| e.nom.q.map(f32::to_bits);
+        assert_eq!(q_bits(&a), q_bits(&f), "attitude");
+        assert_eq!(a.nom.bg.map(f32::to_bits), f.nom.bg.map(f32::to_bits), "gyro bias");
+        assert_eq!([a.nom.v[0].to_bits(), a.nom.v[1].to_bits()], [f.nom.v[0].to_bits(), f.nom.v[1].to_bits()], "v_N, v_E");
+        assert_eq!([a.nom.p[0].to_bits(), a.nom.p[1].to_bits()], [f.nom.p[0].to_bits(), f.nom.p[1].to_bits()], "p_N, p_E");
+        assert_eq!([a.nom.ba[0].to_bits(), a.nom.ba[1].to_bits()], [f.nom.ba[0].to_bits(), f.nom.ba[1].to_bits()], "b_a,x, b_a,y");
+        for i in (0..N).filter(|&i| outside(i)) {
+            for j in (0..N).filter(|&j| outside(j)) {
+                assert_eq!(a.p[i][j].to_bits(), f.p[i][j].to_bits(), "P[{i}][{j}]");
+            }
+        }
+        let moved = [a.nom.p[2] != f.nom.p[2], a.nom.v[2] != f.nom.v[2], a.nom.ba[2] != f.nom.ba[2]];
+        assert!(moved.iter().all(|m| *m), "D, v_D, b_a,z moved: {moved:?}");
+        let inside_changed = (0..N).filter(|&i| !outside(i)).any(|i| (0..N).any(|j| a.p[i][j].to_bits() != f.p[i][j].to_bits()));
+        assert!(inside_changed, "P did not change inside the vertical rows");
+        // Control: the full gain (the test-only switch) on the same filter and innovation moves the attitude and the gyro bias.
+        // Tolerance: 100 x f32 round-off (EPSILON) of the magnitude of the quantity (the largest |component|).
+        let mut c = f.clone();
+        c.baro_full_gain = true;
+        assert!(c.fuse_baro_masked(innov, r).0);
+        let dq = (0..4).fold(0.0f32, |m, i| m.max(fabsf(c.nom.q[i] - f.nom.q[i])));
+        let tol_q = 100.0 * f32::EPSILON * f.nom.q.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+        let dbg = (0..3).fold(0.0f32, |m, i| m.max(fabsf(c.nom.bg[i] - f.nom.bg[i])));
+        let tol_bg = 100.0 * f32::EPSILON * f.nom.bg.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+        println!(
+            "h t1: masked: D {:e} -> {:e}, vD {:e} -> {:e}, ba_z {:e} -> {:e}, attitude/bg/vNE/pNE/ba_xy bit-identical; full gain: max |dq| {dq:e} (tolerance {tol_q:e}), max |dbg| {dbg:e} rad/s (tolerance {tol_bg:e}), dv_N {:e}",
+            f.nom.p[2], a.nom.p[2], f.nom.v[2], a.nom.v[2], f.nom.ba[2], a.nom.ba[2], c.nom.v[0] - f.nom.v[0]
+        );
+        assert!(dq > tol_q && dbg > tol_bg, "the control did not move: {dq:e} vs {tol_q:e}, {dbg:e} vs {tol_bg:e}");
+    }
+
+    #[test]
+    fn h_t2_a_long_gusty_run_keeps_p_a_covariance() {
+        let t = Tuning::DEFAULT;
+        // The checker: symmetric (bit-equal [i][j] and [j][i]), finite, a non-negative diagonal.
+        let covariance = |f: &Eskf| (0..N).all(|i| (0..N).all(|j| f.p[i][j].to_bits() == f.p[j][i].to_bits())) && f.finite() && (0..N).all(|i| f.p[i][i] >= 0.0);
+        let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        let mut w = World::new(&t);
+        let mut bad = 0u32;
+        let mut baro_off = 0.0f64;
+        for _ in 0..120_000_000 / PERIOD_US {
+            let sec = w.t_us() as f64 * 1e-6;
+            let mut s = moving_sample(&mut w, sec);
+            // Barometer steps of 1 to 2 m (gusts), held for several seconds.
+            baro_off = if (20.0..28.0).contains(&sec) {
+                1.5
+            } else if (40.0..46.0).contains(&sec) {
+                -2.0
+            } else if (60.0..64.0).contains(&sec) || (70.0..71.0).contains(&sec) {
+                1.0
+            } else if (85.0..95.0).contains(&sec) {
+                -1.5
+            } else if (100.0..101.0).contains(&sec) {
+                2.0
+            } else {
+                0.0
+            };
+            if baro_off != 0.0 {
+                if let Some(b) = s.baro.as_mut() {
+                    b.reading.pressure_pa = pressure_at(-w.p[2] + baro_off);
+                }
+            }
+            f.set_armed(sec >= 10.0 && (sec < 50.0 || (sec >= 55.0 && sec < 80.0) || sec >= 90.0));
+            f.update(&s);
+            bad += u32::from(!covariance(&f));
+        }
+        let st = f.stats();
+        println!("h t2: 120 s gusty, steps with P not symmetric/finite/non-negative {bad}, baro fused {} gated {} resets {} reinits {} (last offset {baro_off})", st.baro_fused, st.baro_gated, st.height_resets, st.reinits);
+        assert_eq!(bad, 0);
+        assert!(st.baro_fused > 1000 && st.baro_gated + st.height_resets > 0, "the gusts did not reach the gate or the reset");
+        // Control: the checker flags an asymmetry of one ulp, a negative diagonal and a NaN.
+        let mut c = f.clone();
+        c.p[3][7] = f32::from_bits(c.p[3][7].to_bits() ^ 1);
+        assert!(!covariance(&c));
+        let mut c = f.clone();
+        c.p[4][4] = -1e-9;
+        assert!(!covariance(&c));
+        let mut c = f.clone();
+        c.p[POS + 2][POS + 2] = f32::NAN;
+        assert!(!covariance(&c));
+    }
+
+    #[test]
+    fn h_t3_ba_z_still_converges_while_held_tilted_about_20_deg() {
+        let t = Tuning::DEFAULT;
+        let off = [0.0f32, 0.0, 0.2];
+        // 20 deg of pitch (inside angle_max_rad): the offset on the body z axis has a vertical component cos 20 deg.
+        let tilt = (0.0_f64, 20.0_f64.to_radians());
+        let run = |z_masked: bool| {
+            let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
+            f.baro_abias_z_mask = z_masked;
+            let mut w = World::new(&t);
+            let (mut sq, mut n, mut vmax) = (0.0f64, 0u32, 0.0f64);
+            for _ in 0..60_000_000 / PERIOD_US {
+                let mut s = w.step();
+                s.imu1.reading.accel_ms2 = rest_force(tilt.0, tilt.1, off);
+                f.set_armed(w.t_us() >= 20_000_000);
+                let nav = f.update(&s);
+                if w.t_us() >= 30_000_000 {
+                    // Truth: at rest, v_D = 0.
+                    let e = f64::from(nav.velocity_ms[2]);
+                    sq += e * e;
+                    vmax = vmax.max(e.abs());
+                    n += 1;
+                }
+            }
+            (f.biases().1, (sq / f64::from(n)).sqrt(), vmax)
+        };
+        let (ba, rms, vmax) = run(false);
+        let (ba_m, rms_m, vmax_m) = run(true);
+        println!("h t3: tilt 20 deg, offset {off:?}; ba_z after 60 s {:e} (offset {}); v_D error over the last 30 s rms {rms:e} max {vmax:e}; z masked: ba_z {:e}, rms {rms_m:e} max {vmax_m:e}", ba[2], off[2], ba_m[2]);
+        assert_eq!((ba[0].to_bits(), ba[1].to_bits()), (0, 0));
+        assert!(ba[2] > 0.0 && fabsf(ba[2] - off[2]) < off[2], "ba_z {} does not move toward {}", ba[2], off[2]);
+        assert_eq!((ba_m[0].to_bits(), ba_m[1].to_bits(), ba_m[2].to_bits()), (0, 0, 0));
+        assert!(rms_m > rms, "z masked rms {rms_m} not larger than {rms}");
+    }
+
+    #[test]
+    fn h_t5_imu_baro_and_imu_rates_z_is_mahonys_for_any_z_bias_and_full_is_unchanged() {
+        let t = Tuning::DEFAULT;
+        for aiding in [Aiding::ImuBaro, Aiding::Imu, Aiding::Full] {
+            let mut f = Eskf::with_aiding(&t, aiding).unwrap();
+            let mut m = Mahony::new(&t);
+            let mut w = World::new(&t);
+            let (mut worst_ctl, mut ctl_differs, mut bg_min, mut aligned, mut nonzero) = (0.0f64, 0u32, f32::INFINITY, false, 0u32);
+            for k in 0..20_000_000 / PERIOD_US {
+                let mut s = w.step();
+                let ph = k as f32 * PERIOD_US as f32 * 1e-6;
+                s.imu1.reading.gyro_rads = [0.3 * sinf(2.0 * PI * 1.7 * ph), 0.2 * cosf(2.0 * PI * 0.6 * ph), 0.1 * sinf(2.0 * PI * 3.1 * ph) + 0.03];
+                let armed = w.t_us() >= 4_000_000;
+                f.set_armed(armed);
+                m.set_armed(armed);
+                // The z bias estimate is set directly before every step (the alignment and the filter's own learning would
+                // otherwise leave it at or near 0 here).
+                f.nom.bg[2] = 0.05;
+                let (nf, nm) = (f.update(&s), m.update(&s));
+                // The step that aligns the tilt resets the bias; the next one is the first checked.
+                let checked = aligned;
+                aligned = nf.valid.tilt;
+                if !checked {
+                    continue;
+                }
+                let bg = f.biases().0;
+                bg_min = bg_min.min(fabsf(bg[2]));
+                if aiding == Aiding::Full {
+                    // The compass alignment resets b_g,z once; the identity is checked on every step, the bias non-zero on most.
+                    nonzero += u32::from(bg[2] != 0.0);
+                    // Unchanged: the raw gyro of the horizon sample minus the full bias.
+                    for i in 0..3 {
+                        assert_eq!(nf.rates_rads[i].to_bits(), (f.horizon_gyro[i] - bg[i]).to_bits(), "Full step {k} axis {i}");
+                    }
+                    continue;
+                }
+                assert!(bg[2] != 0.0, "{aiding:?} step {k}: the z bias is 0");
+                assert_eq!(nf.rates_rads[2].to_bits(), nm.rates_rads[2].to_bits(), "{aiding:?} step {k}: z differs from Mahony's");
+                for i in 0..2 {
+                    assert_eq!(nf.rates_rads[i].to_bits(), (nm.rates_rads[i] - bg[i]).to_bits(), "{aiding:?} step {k} axis {i}");
+                }
+                // Control: the D1 form for z, PT1 - bg_z (in f64, the difference of two f32 values is exact up to its own
+                // rounding, 2 EPSILON_64 |bg_z|), differs from the output by bg_z.
+                let d1 = f64::from(nm.rates_rads[2]) - f64::from(bg[2]);
+                let diff = f64::from(nf.rates_rads[2]) - d1;
+                worst_ctl = worst_ctl.max((diff - f64::from(bg[2])).abs() / f64::from(bg[2]).abs());
+                ctl_differs += u32::from((nm.rates_rads[2] - bg[2]).to_bits() != nf.rates_rads[2].to_bits());
+                assert!((diff - f64::from(bg[2])).abs() <= 2.0 * f64::EPSILON * f64::from(bg[2]).abs(), "{aiding:?} step {k}: D1 form minus output {diff:e}, bg_z {}", bg[2]);
+            }
+            if aiding == Aiding::Full {
+                println!("h t5 Full: rates = horizon gyro - full bias bit for bit on every step; b_g,z non-zero on {nonzero} steps");
+                assert!(nonzero > 10_000);
+            } else {
+                println!("h t5 {aiding:?}: smallest |bg_z| over the run {bg_min:e}; D1 form differs from the output by bg_z (worst relative departure {worst_ctl:e}); f32 D1 form differs in bits on {ctl_differs} steps");
+                assert!(ctl_differs > 0);
             }
         }
     }
