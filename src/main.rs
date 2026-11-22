@@ -62,6 +62,7 @@ mod logdl;
 #[cfg(not(feature = "sd-fat-probe"))]
 mod logger;
 mod mag;
+mod psram;
 mod ram;
 mod rc;
 #[cfg(not(feature = "sd-fat-probe"))]
@@ -263,6 +264,8 @@ const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": fligh
     inline(never)
 )]
 fn now_us() -> u64 {
+    #[cfg(feature = "psram-negative")]
+    let _ = psram::negative_touch();
     Instant::now().as_micros()
 }
 
@@ -1013,9 +1016,10 @@ async fn supervise() -> ! {
             first_ping_at.get_or_insert(now);
         }
         if tick.is_multiple_of(1000) && tick > 0 {
+            psram::periodic();
             if !cfg!(feature = "quiet-stat") {
                 defmt::info!(
-                    "[STAT] uptime {=u64} s, PONG age max {=u64} us, PING {=u32} PONG {=u32}, usb wrote {=u32} B {=u32} frames, read {=u32} B, link {=str}; log download: {=u32} transfers, {=u32} B sent, SD step max {=u32} us, piece or flush late max {=u32} us",
+                    "[STAT] uptime {=u64} s, PONG age max {=u64} us, PING {=u32} PONG {=u32}, usb wrote {=u32} B {=u32} frames, read {=u32} B, link {=str}; log download: {=u32} transfers, {=u32} B sent, SD step max {=u32} us, piece or flush late max {=u32} us; psram {=str}, canary checks {=u32} failed {=u32}, remaps {=u32}, context violations {=u32}",
                     now.as_secs(),
                     max_age_us,
                     PING.load(Ordering::Relaxed),
@@ -1031,7 +1035,12 @@ async fn supervise() -> ! {
                     logdl::TRANSFERS.load(Ordering::Relaxed),
                     logdl::BYTES_SENT.load(Ordering::Relaxed),
                     logdl::STEP_MAX_US.load(Ordering::Relaxed),
-                    logdl::LATE_MAX_US.load(Ordering::Relaxed)
+                    logdl::LATE_MAX_US.load(Ordering::Relaxed),
+                    psram::status_text(),
+                    psram::checks(),
+                    psram::check_fails(),
+                    psram::remaps(),
+                    psram::violations()
                 );
             }
             devices.stat(now);
@@ -1264,6 +1273,10 @@ async fn main(spawner: Spawner) {
     let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
     settings::fake_arm();
+    // The PSRAM (decision-psram-offload-20261121, D3): after every boot-time flash write (the settings read above)
+    // and before `spawn_core1`, because the driver talks to the chip while nothing else may run from flash. A missing
+    // or failing chip is a logged FAULT, not a stop.
+    psram::init(p.QMI_CS1, p.PIN_0);
     let imu1_parts = imu1::Parts {
         spi: p.SPI0,
         sck: p.PIN_18,

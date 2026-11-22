@@ -1229,7 +1229,7 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | rc-port | <https://github.com/Lmx154/rc-port> | the ELRS receiver's UART: CRSF and MAVLink, with its `crsf-codec` |
 | ws2812c | <https://github.com/Lmx154/ws2812c-rs> | the WS2812C status LED on GPIO43, PIO transport (feature `embassy-rp`; pinned at faf1eb5) |
 
-The `qmi-psram` (PSRAM) driver exists in its own repository but is not a dependency of the firmware: it does not use the PSRAM yet. The `ws2812c` driver (status LED) is a dependency: see Status LED.
+The `qmi-psram` (PSRAM) driver is a dependency (pinned at 82f8dbb, features `rp2350` and `defmt`): `src/psram.rs` starts the chip at boot, keeps a 64-byte canary in it and re-maps it after every settings save; no log buffer lives in it yet (see the PSRAM paragraph in Flash layout and memory map). The `ws2812c` driver (status LED) is a dependency: see Status LED.
 
 For what each driver offers and how to use it, read the README in its own repository. What was proven
 on the board, what the firmware has to respect, and what is still open: the Measured section of each driver's README.
@@ -1341,6 +1341,9 @@ What each cargo feature does under the watchdog:
 | `inject-late` | with an IMU injection feature, the injection starts 60 s (not 5 s) after the first good sample; no other effect |
 | `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
 | `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; with `NO_CATCH_HARDFAULT=1` the core locks up and the watchdog resets it: "TimedOut, record false", measured), without it `[FAIL] ... no fault` and the statics below are overwritten |
+| `psram-skip-remap` | the hook after a settings flash erase or program does not re-map the PSRAM: its canary must FAIL after the first save (`[FAIL] psram: canary read back wrong ...`, the `[STAT]` line reads `FAULT canary after flash op`; if it passes, the re-map is not needed, record that) |
+| `psram-absent` | the PSRAM's init is treated as failed without touching the chip: `[FAIL] psram: init treated as failed`, the `[STAT]` line reads `FAULT init`, the board boots normally and nothing panics |
+| `psram-negative` | NEGATIVE CONTROL: core 1's `now_us` reads the PSRAM canary, so `tools/check-ram-code.py` must FAIL naming `psram::negative_touch` and the 0x15000000 object (a static check; never flashed: `tools/run.sh` refuses it because the checker does not pass) |
 | `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
 | `esc-off` | the ESC task is not built or spawned: nothing touches PIO2, DMA channel 5 or GPIO36-39 (the IMU baseline of the ESC board checks); the ESC row reads FAILED, stuck; not for a release |
 | `esc-no-edt` | no EDT burst starts (`edt_bursts` stays 0); Stop, the motor test and flight throttles go out as without it (the negative control of extended telemetry); not for a release |
@@ -1586,8 +1589,8 @@ longer shares the XIP cache with core 0, whose misses under card work slowed it 
   then all `.rodata`. `src/ram.rs` copies it from its load image in flash to 0x20000000, in assembly, before
   anything else runs: embassy-rp already defines `__pre_init`, so the link wraps it (`--wrap=__pre_init`,
   `build.rs`); the copy, `__wrap___pre_init`, runs first and then continues into embassy-rp's. Link ASSERTs:
-  the three handlers lie in RAM, `.rodata` is empty, `.ram_text` is word-aligned, at least 32 KiB of RAM stay
-  free above the statics for core 0's stack.
+  the three handlers lie in RAM, `.rodata` is empty, `.ram_text` is word-aligned, at least 28 252 B (26 204 B of
+  static call chain plus 2 KiB) of RAM stay free above the statics for core 0's stack.
 - Stack guards: `memory.x` defines `_stack_end = ALIGN(__euninit, 8)` (cortex-m-rt's own default would be a
   flash address, because `.end_block` is inserted after `.uninit`), and `main` calls
   `embassy_rp::install_core0_stack_guard()` before anything else: MSPLIM = `_stack_end`, so a push below the
@@ -1649,9 +1652,21 @@ from `arm-none-eabi-size -A` and the linker symbols):
 | SRAM | `.data` | 4 548 |
 | SRAM | `.bss` (core 1's 512-byte vector table, at 0x2002b600, among it) | 103 972 |
 | SRAM | `.uninit` | 1 024 |
-| SRAM, up to 0x20080000 | free; core 0's stack grows down from the top (link ASSERT: at least 32 KiB) | 303 068 |
+| SRAM, up to 0x20080000 | free; core 0's stack grows down from the top (link ASSERT: at least 28 252 B) | 303 068 |
+| PSRAM 0x15000000 | `.psram` (NOLOAD, uncached alias, region `PSRAM` 16 MiB in `memory.x`): the 64-byte canary of `src/psram.rs`; no flash image, nothing initialised | 64 |
 
-Program in flash 505 436 B of 2040 KiB; static SRAM 221 220 B of 512 KiB.
+Program in flash 505 436 B of 2040 KiB; static SRAM 221 220 B of 512 KiB. (This table is older than the
+ESKF image; the figures of the `.psram` row and of the stack ASSERT are current.)
+
+PSRAM (`src/psram.rs`, decision-psram-offload-20261121, foundation only): `psram::init` runs in `main` after the
+settings are read and before core 1 starts (QMI CS1 and GPIO0 are taken from embassy-rp's peripherals), starts
+the 16 MiB chip, writes and verifies the canary and logs one `[PASS] psram: ID ..., 16384 KiB ...` line (or
+`[FAIL] psram: ...`, and the board boots on without it: the state reads FAULT, nothing panics). The `[STAT] uptime` line
+ends with `psram <state>, canary checks, failed, remaps, context violations`; the canary is read every 10 s from
+that tick (core 0, thread mode) and after every settings flash erase or program, where `psram::after_flash_op`
+(called from `settings::guarded`) first re-maps the window (the boot ROM's flash routines reset it). Core 1 never
+touches the PSRAM: `tools/check-ram-code.py` fails on any core-1-reachable code or data in 0x10000000-0x1FFFFFFF,
+and with the feature `psram-negative` it must fail. Row 10 of the device table is not served yet.
 
 ## Board documentation
 

@@ -33,7 +33,7 @@ other device, PIO block or DMA channel of this plan has run in it yet.
 | ESC signal (DShot, passthrough) | 36-39 (M4..M1) | PIO | `dshot` (BUILT, `src/esc.rs`, core 1: driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1), `esc-passthrough` (not in the firmware) |
 | Battery voltage, current | 40, 41, 42 (ADC0-2) | ADC | `adc-battery` |
 | Status LED | 43 | PIO | `ws2812c` (BUILT, `src/led.rs`, core 0: PIO1 SM1) |
-| PSRAM | CS on 0 | QMI CS1 | `qmi-psram` |
+| PSRAM | CS on 0 | QMI CS1 | `qmi-psram` (BUILT, `src/psram.rs`, core 0: init at boot, canary, re-map after a settings save; no buffer in it yet) |
 | USB | | USB | `usb-cdc`, `mavlink-device` |
 | Servo pads | 2-5 | PWM slices 1 and 2 | (none yet; 4 and 5 are used as inputs on the bench) |
 
@@ -197,8 +197,9 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    it runs no device is sampled, no DShot frame is sent, and the watchdog is not fed. Measured (2026-11-15,
    100 saves of one 4 KB sector: erase, then program of one 256-byte page): 30.6 to 44.8 ms, mean 40.2 ms,
    almost all of it the erase. Today the save runs inside the `245` command's action on the link task
-   (`src/settings.rs`, ONLY on an explicit save), not in a separate `flash_saver` task; no PSRAM is mapped
-   yet, so no `remap()`.
+   (`src/settings.rs`, ONLY on an explicit save), not in a separate `flash_saver` task; the PSRAM is mapped since
+   decision-psram-offload-20261121 (W2, W3), so `settings::guarded` calls `psram::after_flash_op()` (`remap()`, then a canary
+   check) right after each flash erase and program.
 2. A bus call of a sensor driver is never cancelled (embassy-rp 0.10): the timeout goes around the data-ready
    wait, then the driver's `recover()` is called. Exception since 2026-11-15 (the owner's "Yes just do what
    PX4 and ardupilot do", amending I1.1): an I2C transaction of BARO or MAG that misses its deadline
@@ -268,7 +269,7 @@ SRAM8 and SRAM9 (4 KB each) are unused.
    core 0 parked, 2026-11-16; again with the DShot task running, 2026-11-18, 0d25909: 0 accesses, log
    `20261118-194106`, control 184 035, log `20261118-194357`); run it again when the control loop lands. R2: core 1's VTOR points at
    its vector table in SRAM (start-up check). R3: no constants in flash (link ASSERT
-   `__erodata == __srodata`). R4: at least 32 KiB of SRAM above the statics for core 0's stack (link ASSERT on
+   `__erodata == __srodata`). R4: at least 28 252 B (26 204 B of static call chain plus 2 KiB; memory.x's ASSERT) of SRAM above the statics for core 0's stack (link ASSERT on
    `_stack_end`, defined in `memory.x` as `__euninit` rounded up to 8; an overflow of RAM fails the link; at run
    time MSPLIM = `_stack_end` on core 0 and the bottom of `CORE1_STACK` on core 1, so an overflow of either stack
    is a HardFault, not a silent write into the statics). R5: the copy runs before anything uses SRAM code
