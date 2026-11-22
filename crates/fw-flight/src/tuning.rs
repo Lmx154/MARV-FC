@@ -131,6 +131,18 @@ pub struct Tuning {
     pub nav_gps_spd_min_ms: f32,
     /// Magnetic declination, east positive, rad: 3.195 deg E, the owner's field, WMM2025 (C4, C6; compiled for now).
     pub nav_mag_declination_rad: f32,
+    /// `EskfSteer` output predictor: time constant of the velocity tracking, s (Amendment G, G1; owner-approved
+    /// 2026-11-22). PX4 EKF2_TAU_VEL default, `output_predictor.cpp:326`; ArduPilot EK3_TAU_OUTPUT 25 cs.
+    pub nav_out_tau_vel_s: f32,
+    /// `EskfSteer` output predictor: time constant of the position tracking, s (Amendment G, G1; owner-approved
+    /// 2026-11-22). PX4 EKF2_TAU_POS, `output_predictor.cpp:327`.
+    pub nav_out_tau_pos_s: f32,
+    /// `EskfSteer` output predictor: the share of the attitude error taken out per delay time (Amendment G, G1;
+    /// owner-approved 2026-11-22). PX4 `output_predictor.cpp:311`; ArduPilot `AP_NavEKF3_core.cpp:938`.
+    pub nav_out_att_gain: f32,
+    /// `EskfSteer` output predictor: gain of the integral term of the velocity and position tracking (Amendment G, G1;
+    /// owner-approved 2026-11-22). PX4 `output_predictor.cpp:350`, `:354`; ArduPilot `AP_NavEKF3_core.cpp:970-973`.
+    pub nav_out_int_gain: f32,
 }
 
 impl Tuning {
@@ -188,5 +200,9 @@ impl Tuning {
         pilot_alt_lead_s: 1.0,
         thr_tilt_cos_min: 0.1,
         thr_inverted_gain: 10.0,
+        nav_out_tau_vel_s: 0.25,
+        nav_out_tau_pos_s: 0.25,
+        nav_out_att_gain: 0.5,
+        nav_out_int_gain: 0.1,
     };
 }

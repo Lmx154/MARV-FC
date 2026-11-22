@@ -94,3 +94,4 @@ mod tests {
 pub mod eskf_n0;
 pub mod mahony_baro;
 pub mod eskf;
+pub mod eskf_out;

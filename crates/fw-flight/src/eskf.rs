@@ -1514,7 +1514,7 @@ impl<const R: usize> Estimator for EskfN<R> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     extern crate std;
     use super::*;
     use crate::imu::{ImuReading, ImuSample};
@@ -1525,20 +1525,20 @@ mod tests {
     use std::vec::Vec;
 
     /// IMU period, us: 800 Hz (decision-sim-conventions 6).
-    const PERIOD_US: u64 = 1_250;
+    pub(crate) const PERIOD_US: u64 = 1_250;
     /// Barometer 50 Hz, compass 100 Hz, GNSS 5 Hz (section 3b, 4a; the board's GPS_RATE_MS 200).
     const BARO_EVERY: u64 = 16;
     const MAG_EVERY: u64 = 8;
     const GNSS_EVERY: u64 = 160;
     /// A synthetic site, not anyone's place: next to the 180 deg meridian so east motion crosses the wrap.
-    const ORIGIN: GeoPoint = GeoPoint { lat_e7: 100_000_000, lon_e7: 1_799_999_000, alt_mm: 100_000 };
+    pub(crate) const ORIGIN: GeoPoint = GeoPoint { lat_e7: 100_000_000, lon_e7: 1_799_999_000, alt_mm: 100_000 };
     /// The synthetic field: 50 uT, 60 deg down; tolerances of the stored defaults MAG_HLT_STR 10 %, MAG_HLT_INC 10 deg.
     const STRENGTH_UT: f64 = 50.0;
     const INC_DEG: f64 = 60.0;
     /// B3: the test-only sigma honesty check.
     const SIGMAS: f32 = 3.0;
 
-    fn expected() -> MagExpected {
+    pub(crate) fn expected() -> MagExpected {
         MagExpected {
             strength_ut: STRENGTH_UT as f32,
             inclination_rad: (INC_DEG as f32).to_radians(),
@@ -1547,14 +1547,14 @@ mod tests {
         }
     }
 
-    fn pressure_at(height_m: f64) -> f32 {
+    pub(crate) fn pressure_at(height_m: f64) -> f32 {
         let e = f64::from(GRAVITY_MSS) / (f64::from(ISA_LAPSE_K_M) * f64::from(ISA_GAS_CONSTANT));
         let t0 = f64::from(ISA_T0_K);
         (f64::from(ISA_P0_PA) * ((t0 - f64::from(ISA_LAPSE_K_M) * height_m) / t0).powf(e)) as f32
     }
 
     #[derive(Clone, Copy, Debug, PartialEq)]
-    enum Fault {
+    pub(crate) enum Fault {
         None,
         /// From this arrival time to the next, the fix repeats the last one and speed reads 0 (the receiver's hold).
         Freeze(u64, u64),
@@ -1563,29 +1563,29 @@ mod tests {
     }
 
     /// A level vehicle with a yaw, flying a constant NED acceleration; perfect sensors at the delays of `Tuning`.
-    struct World {
-        k: u64,
-        t: Tuning,
-        p: [f64; 3],
-        v: [f64; 3],
-        a: [f64; 3],
-        yaw: f64,
-        yaw_rate: f64,
-        hist: VecDeque<(u64, [f64; 3], [f64; 3], f64)>,
-        expected: Option<MagExpected>,
+    pub(crate) struct World {
+        pub(crate) k: u64,
+        pub(crate) t: Tuning,
+        pub(crate) p: [f64; 3],
+        pub(crate) v: [f64; 3],
+        pub(crate) a: [f64; 3],
+        pub(crate) yaw: f64,
+        pub(crate) yaw_rate: f64,
+        pub(crate) hist: VecDeque<(u64, [f64; 3], [f64; 3], f64)>,
+        pub(crate) expected: Option<MagExpected>,
         /// Compass turned about body z by this, rad (passes the health test).
-        mag_rot: f64,
+        pub(crate) mag_rot: f64,
         /// A disturbed field: strength factor and inclination, deg.
-        mag_field: (f64, f64),
-        gps_every: u64,
-        gps_vel: bool,
-        std_mm: u32,
-        fault: Fault,
-        last_fix: Option<GnssReading>,
+        pub(crate) mag_field: (f64, f64),
+        pub(crate) gps_every: u64,
+        pub(crate) gps_vel: bool,
+        pub(crate) std_mm: u32,
+        pub(crate) fault: Fault,
+        pub(crate) last_fix: Option<GnssReading>,
     }
 
     impl World {
-        fn new(t: &Tuning) -> World {
+        pub(crate) fn new(t: &Tuning) -> World {
             World {
                 k: 0,
                 t: *t,
@@ -1606,17 +1606,17 @@ mod tests {
             }
         }
 
-        fn t_us(&self) -> u64 {
+        pub(crate) fn t_us(&self) -> u64 {
             self.k * PERIOD_US
         }
 
         /// Truth (p, v, yaw) at `t_us` (nearest kept step).
-        fn at(&self, t_us: u64) -> ([f64; 3], [f64; 3], f64) {
+        pub(crate) fn at(&self, t_us: u64) -> ([f64; 3], [f64; 3], f64) {
             let e = self.hist.iter().rev().find(|h| h.0 <= t_us).or(self.hist.front()).copied().unwrap();
             (e.1, e.2, e.3)
         }
 
-        fn step(&mut self) -> Sensors {
+        pub(crate) fn step(&mut self) -> Sensors {
             self.k += 1;
             let dt = PERIOD_US as f64 * 1e-6;
             for i in 0..3 {
@@ -1698,7 +1698,7 @@ mod tests {
     }
 
     /// Lat, lon (1e-7 deg) of NED `p` from ORIGIN: the inverse of `ned_from_geo`, f64.
-    fn geo(p: [f64; 3]) -> (i32, i32) {
+    pub(crate) fn geo(p: [f64; 3]) -> (i32, i32) {
         let f = f64::from(WGS84_F);
         let a = f64::from(WGS84_A_M);
         let e2 = f * (2.0 - f);
@@ -1718,6 +1718,11 @@ mod tests {
             let nav = e.update(&s);
             each(e, &nav, w);
         }
+    }
+
+    /// G2 tests: a non-finite velocity in the core's state, as `b7` makes it.
+    pub(crate) fn poison(e: &mut Eskf) {
+        e.nom.v[1] = f32::NAN;
     }
 
     fn yaw_of(q: &[f32; 4]) -> f64 {
