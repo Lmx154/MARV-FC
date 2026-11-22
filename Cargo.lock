@@ -1546,6 +1546,7 @@ checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 [[package]]
 name = "sam-m10q"
 version = "0.1.0"
+source = "git+https://github.com/Lmx154/sam-m10q.git?rev=26c4ec5c22b9b6949adcce31881b4fdb199d98ee#26c4ec5c22b9b6949adcce31881b4fdb199d98ee"
 dependencies = [
  "defmt",
  "embedded-hal 1.0.0",
