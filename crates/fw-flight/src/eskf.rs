@@ -78,6 +78,8 @@
 //! - Compass refusals (Ok 2) are all counted; one NKI record per nav_mag_fuse_us at most.
 //! - G5: the reported `NavSigma::position_ne_m` is sqrt(P_N + P_E + s_N^2 + s_E^2), s the floored GST sigmas of the latest GNSS
 //!   epoch that became a job (a reset or the scalars); before any such epoch sqrt(P_N + P_E). The filter's dynamics do not use it.
+//! - G8: `Aiding::Full`'s barometer scalar takes the vertical-only gain of `ImuBaro` (D, v_D, b_a,z; Joseph update with that gain)
+//!   while horizontal aiding is not running, the full gain while it runs.
 //! - G6-B: armed, when every healthy compass sample has been gated for nav_aid_timeout_us the yaw is not reset: `global_off`
 //!   is set (NKI Src 8, Ok 0, Inn = the innovation, once), `started` goes false, GNSS epochs are counted in `gps_disarmed` and not
 //!   fused, the heading flag is false, until the disarm edge. Disarmed, the yaw is reset to the compass (C1c).
@@ -460,6 +462,10 @@ pub struct EskfN<const R: usize> {
     /// E1 test control: the same scalar also leaves b_a,z alone.
     #[cfg(test)]
     baro_abias_z_mask: bool,
+    /// G8 test switch for [`Aiding::Full`]'s barometer scalar: `Some(false)` never masks (the rule before G8), `Some(true)` always
+    /// masks (the negative control); `None` is the production rule.
+    #[cfg(test)]
+    full_baro_mask: Option<bool>,
 }
 
 /// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
@@ -622,6 +628,8 @@ impl<const R: usize> EskfN<R> {
             baro_full_gain: false,
             #[cfg(test)]
             baro_abias_z_mask: false,
+            #[cfg(test)]
+            full_baro_mask: None,
         })
     }
 
@@ -997,7 +1005,18 @@ impl<const R: usize> EskfN<R> {
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
                 // h = -D: fused as D = -h_b on the position's down error.
                 let innov = -job.h_b - self.nom.p[2];
-                let (ok, s) = if self.aiding_set == Aiding::ImuBaro {
+                // G8: the vertical-only gain in ImuBaro, and in Full while horizontal aiding is not running.
+                let masked = match self.aiding_set {
+                    Aiding::ImuBaro => true,
+                    Aiding::Full => !self.horizontal_aiding(),
+                    Aiding::Imu => false,
+                };
+                #[cfg(test)]
+                let masked = match self.full_baro_mask {
+                    Some(m) if self.aiding_set == Aiding::Full => m,
+                    _ => masked,
+                };
+                let (ok, s) = if masked {
                     self.fuse_baro_masked(innov, r)
                 } else {
                     self.fuse_unit(POS + 2, innov, r)
@@ -3546,12 +3565,14 @@ pub(crate) mod tests {
         let t = Tuning::DEFAULT;
         for aiding in [Aiding::Full, Aiding::Imu] {
             let (mut a, mut b) = (Eskf::with_aiding(&t, aiding).unwrap(), Eskf::with_aiding(&t, aiding).unwrap());
-            b.baro_full_gain = true;
             let mut w = World::new(&t);
             w.v = [1.0, 0.5, 0.0];
             let mut ba_moved = false;
             for _ in 0..30_000_000 / PERIOD_US {
                 let s = w.step();
+                // G8: Full's barometer scalar is vertical-only while horizontal aiding is not running, so the switch is turned
+                // on for Full once aiding runs (and the rows must stay identical, aided).
+                b.baro_full_gain = aiding == Aiding::Imu || a.horizontal_aiding();
                 let armed = w.t_us() >= 5_000_000;
                 a.set_armed(armed);
                 b.set_armed(armed);
@@ -3647,6 +3668,100 @@ pub(crate) mod tests {
             f.nom.p[2], a.nom.p[2], f.nom.v[2], a.nom.v[2], f.nom.ba[2], a.nom.ba[2], c.nom.v[0] - f.nom.v[0]
         );
         assert!(dq > tol_q && dbg > tol_bg, "the control did not move: {dq:e} vs {tol_q:e}, {dbg:e} vs {tol_bg:e}");
+    }
+
+    #[test]
+    fn g8_full_barometer_scalar_is_vertical_only_while_unaided_and_unchanged_while_aided() {
+        let t = Tuning::DEFAULT;
+        // Unaided: no GNSS, no compass; warm on the H tests' moving sample, armed from 10 s.
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        w.gps_every = u64::MAX;
+        w.expected = None;
+        for _ in 0..40_000_000 / PERIOD_US {
+            let sec = w.t_us() as f64 * 1e-6;
+            let s = moving_sample(&mut w, sec);
+            f.set_armed(sec >= 10.0);
+            f.update(&s);
+        }
+        assert!(!f.horizontal_aiding() && f.tilt_aligned);
+        let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
+        let outside = |i: usize| i != d && i != vd && i != bz;
+        for k in [d, vd] {
+            for j in (ATT..ATT + 2).chain(VEL..VEL + 2).chain(GYRO_BIAS..GYRO_BIAS + 2) {
+                assert!(f.p[k][j] != 0.0 && f.p[k][j].is_finite(), "P[{k}][{j}] = {}", f.p[k][j]);
+            }
+        }
+        let innov = 0.3f32;
+        let job = BaroJob { h_b: -f.nom.p[2] - innov, stage: 0 };
+        let fire = |f: &Eskf, ctl: Option<bool>| {
+            let mut g = f.clone();
+            g.full_baro_mask = ctl;
+            let n = g.stats().baro_fused;
+            g.baro_job(job);
+            assert_eq!(g.stats().baro_fused, n + 1, "the fusion was not accepted");
+            g
+        };
+        let a = fire(&f, None);
+        assert_eq!(a.nom.q.map(f32::to_bits), f.nom.q.map(f32::to_bits), "attitude");
+        assert_eq!(a.nom.bg.map(f32::to_bits), f.nom.bg.map(f32::to_bits), "gyro bias");
+        assert_eq!([a.nom.v[0].to_bits(), a.nom.v[1].to_bits(), a.nom.p[0].to_bits(), a.nom.p[1].to_bits()], [f.nom.v[0].to_bits(), f.nom.v[1].to_bits(), f.nom.p[0].to_bits(), f.nom.p[1].to_bits()]);
+        assert_eq!([a.nom.ba[0].to_bits(), a.nom.ba[1].to_bits()], [f.nom.ba[0].to_bits(), f.nom.ba[1].to_bits()]);
+        for i in (0..N).filter(|&i| outside(i)) {
+            for j in (0..N).filter(|&j| outside(j)) {
+                assert_eq!(a.p[i][j].to_bits(), f.p[i][j].to_bits(), "P[{i}][{j}]");
+            }
+        }
+        assert!(a.nom.p[2] != f.nom.p[2] && a.nom.v[2] != f.nom.v[2] && a.nom.ba[2] != f.nom.ba[2]);
+        // Control: the rule before G8 (full gain) moves the attitude and the gyro bias beyond 100 x f32 round-off.
+        let c = fire(&f, Some(false));
+        let dq = (0..4).fold(0.0f32, |m, i| m.max(fabsf(c.nom.q[i] - f.nom.q[i])));
+        let dbg = (0..3).fold(0.0f32, |m, i| m.max(fabsf(c.nom.bg[i] - f.nom.bg[i])));
+        let tol_q = 100.0 * f32::EPSILON * f.nom.q.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+        let tol_bg = 100.0 * f32::EPSILON * f.nom.bg.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+        println!("g8 unaided: masked leaves attitude, gyro bias, NE and the non-vertical P block bit-identical; full gain: max |dq| {dq:e} (tolerance {tol_q:e}), max |dbg| {dbg:e} (tolerance {tol_bg:e})");
+        assert!(dq > tol_q && dbg > tol_bg, "the control did not move: {dq:e} {dbg:e}");
+
+        // Aided: a World with accelerations changing every 7 s and GNSS velocity; once aiding runs, three copies of the
+        // filter see the same samples: A production, B the rule before G8 (never masked), C always masked (control).
+        let mut w = World::new(&t);
+        w.gps_vel = true;
+        let mut next = |w: &mut World| {
+            let phase = (w.t_us() as f64 * 1e-6 / 7.0) as usize;
+            w.a = [[0.0, 1.5, -1.0, 0.5][phase % 4], [0.5, 0.0, 1.0, -2.0][phase % 4], [0.3, -0.4, 0.0, 0.8][phase % 4]];
+            w.yaw_rate = 0.3 * ((phase % 3) as f64 - 1.0);
+            w.step()
+        };
+        let mut a = Eskf::new(&t).unwrap();
+        while !(a.horizontal_aiding() && a.horizon() > 30_000_000) {
+            let s = next(&mut w);
+            a.set_armed(true);
+            a.update(&s);
+            assert!(w.t_us() < 120_000_000, "aiding never ran");
+        }
+        let mut b = a.clone();
+        b.full_baro_mask = Some(false);
+        let mut c = a.clone();
+        c.full_baro_mask = Some(true);
+        let fused0 = a.stats().baro_fused;
+        for _ in 0..30_000_000 / PERIOD_US {
+            let s = next(&mut w);
+            for e in [&mut a, &mut b, &mut c] {
+                e.set_armed(true);
+            }
+            let na = a.update(&s);
+            let nb = b.update(&s);
+            c.update(&s);
+            assert!(a.horizontal_aiding(), "the stretch is aided throughout");
+            assert_eq!(core_bits_all(&a), core_bits_all(&b));
+            assert!(a.events().eq(b.events()));
+            assert_eq!((na.attitude.map(f32::to_bits), na.valid), (nb.attitude.map(f32::to_bits), nb.valid));
+        }
+        let fused = a.stats().baro_fused - fused0;
+        let dq = (0..4).fold(0.0f32, |m, i| m.max(fabsf(c.nom.q[i] - a.nom.q[i])));
+        println!("g8 aided: {fused} barometer fusions, A and B bit-identical at every step; the always-masked control: max |dq| {dq:e}");
+        assert!(fused > 1_000);
+        assert!(core_bits_all(&a) != core_bits_all(&c), "the control did not change the aided state");
     }
 
     #[test]
