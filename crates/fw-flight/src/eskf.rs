@@ -236,6 +236,9 @@ pub struct EskfStats {
     pub gps_resets: u32,
     /// Re-initialisations on a non-finite state.
     pub reinits: u32,
+    /// Barometer sets whose no-aid N/E stages were dropped because horizontal aiding had started (a GNSS reset between
+    /// the stages).
+    pub noaid_dropped: u32,
     /// Heavy jobs in the step that had the most (the I2 check: never above 1).
     pub max_jobs_per_step: u32,
     /// Queued jobs replaced by a newer set of the same kind before they ran.
@@ -1012,6 +1015,14 @@ impl<const R: usize> EskfN<R> {
                 }
             }
             axis => {
+                // The no-aid scalars are for the time horizontal aiding is not running: a GNSS reset may have started it
+                // since stage 0 (the reset job runs between a barometer set's stages), and the hold position would then
+                // pull the position back toward the old fix by the whole offset. The rest of the job is dropped.
+                if self.horizontal_aiding() {
+                    self.stats.noaid_dropped = self.stats.noaid_dropped.wrapping_add(1);
+                    self.baro_job = None;
+                    return;
+                }
                 let axis = usize::from(axis - 1);
                 let sg = if self.armed { self.t.nav_noaid_sigma_m } else { self.t.nav_noaid_sigma_dis_m };
                 let held = if axis < 2 { self.hold_ne[axis] } else { 0.0 };

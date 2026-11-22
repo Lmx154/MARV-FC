@@ -92,12 +92,15 @@ impl OutRing {
         self.len -= 1;
         Some(e)
     }
-    fn push(&mut self, e: OutEntry) {
-        if self.len == OUT {
+    /// True when the ring was full and the oldest entry was dropped.
+    fn push(&mut self, e: OutEntry) -> bool {
+        let full = self.len == OUT;
+        if full {
             self.pop();
         }
         self.buf[(self.head + self.len) % OUT] = e;
         self.len += 1;
+        full
     }
     fn for_each(&mut self, mut f: impl FnMut(&mut OutEntry)) {
         for i in 0..self.len {
@@ -156,6 +159,7 @@ struct Predictor {
     pushed: u32,
     corrected: u32,
     reset_older: u32,
+    ring_dropped: u32,
     track: Tracking,
     g: Gains,
 }
@@ -219,6 +223,7 @@ impl Predictor {
             pushed: 0,
             corrected: 0,
             reset_older: 0,
+            ring_dropped: 0,
             track: Tracking::default(),
             g: Gains {
                 tau_vel_s: t.nav_out_tau_vel_s,
@@ -415,7 +420,9 @@ impl Predictor {
         self.t_us = now;
         self.since_push_us += dt_us;
         if self.since_push_us >= self.g.predict_us {
-            self.buf.push(OutEntry { t_us: now, q: self.nom.q, v: self.nom.v, p: self.nom.p });
+            if self.buf.push(OutEntry { t_us: now, q: self.nom.q, v: self.nom.v, p: self.nom.p }) {
+                self.ring_dropped = self.ring_dropped.wrapping_add(1);
+            }
             self.pushed = self.pushed.wrapping_add(1);
             self.since_push_us = 0;
         }
@@ -463,6 +470,12 @@ impl<'a> EskfSteer<'a> {
     /// Ring entries older than a reset's horizon time when the reset was applied (0 in every run).
     pub fn reset_older(&self) -> u32 {
         self.out.reset_older
+    }
+
+    /// Oldest entries dropped because the ring was full when a new one was pushed (0 in every run: the core's snapshot
+    /// pops them first).
+    pub fn ring_dropped(&self) -> u32 {
+        self.out.ring_dropped
     }
 
     /// Corrections applied.
@@ -569,6 +582,15 @@ mod tests {
     use libm::{cosf, fabsf, sinf};
     use std::println;
     use std::vec::Vec;
+
+    #[test]
+    fn the_ring_reports_the_oldest_entry_it_drops_when_full() {
+        let (mut r, e) = (OutRing::new(), OutEntry::default());
+        for i in 0..OUT {
+            assert!(!r.push(OutEntry { t_us: i as u64, ..e }));
+        }
+        assert!(r.push(OutEntry { t_us: OUT as u64, ..e }) && r.front().unwrap().t_us == 1);
+    }
 
     #[test]
     fn sizes_and_the_ring_capacity_rule() {
@@ -1425,8 +1447,9 @@ mod tests {
     }
 
     /// The GNSS reset at arming (`arm_from_us`) on the moving stream: its step and delta, the no-aid scalars the core
-    /// fused in the 90 steps after it, and the largest e_v and e_p of the next 10 corrections.
-    fn vel_reset_case(t: &Tuning, st: &[Sensors], arm_from_us: u64) -> (usize, crate::eskf::Reset, u32, f32, f32, u32) {
+    /// dropped (its `noaid_dropped`) and fused in the 90 steps after it, and the largest e_v and e_p of the next 10
+    /// corrections.
+    fn vel_reset_case(t: &Tuning, st: &[Sensors], arm_from_us: u64) -> (usize, crate::eskf::Reset, u32, u32, f32, f32, u32) {
         let mut core = Eskf::new(t).unwrap();
         let mut steer = EskfSteer::new(&mut core, t).unwrap();
         let (mut at, mut noaid0, mut noaid1) = (None, 0, 0);
@@ -1452,51 +1475,159 @@ mod tests {
             }
         }
         let (k0, r) = at.expect("a GNSS reset");
-        (k0, r, noaid1 - noaid0, ev, ep, steer.reset_older())
+        (k0, r, noaid1 - noaid0, steer.core().stats().noaid_dropped, ev, ep, steer.reset_older())
     }
 
     #[test]
     fn t5_reset_exactness_with_a_velocity_part_the_position_follows_dv_times_the_time_since_the_reset() {
-        // P-G2b. A moving vehicle (2, 0.5 m/s): the GNSS reset at arming sets the velocity too, dv = (2, 0.5). The core's
-        // position after the reset is then dp + dv (t - t_r) from the old one, so the ring entries (and the current state)
-        // must be moved by that, or the next corrections see about |dv| x the entry's age in position.
-        // The core itself may fuse a queued no-aid scalar right after the reset (a barometer set's N stage, toward the old
-        // hold position, which moves p_N by about 8 mm and is a core fusion, not a reset error); the epoch phase is
-        // stepped until the next 90 steps hold none, as the C3 and height cases have none.
+        // P-G2b/c. A moving vehicle (2, 0.5 m/s), the default stream: the GNSS reset at arming sets the velocity too,
+        // dv = (2, 0.5). The core's position after the reset is then dp + dv (t - t_r) from the old one, so the ring
+        // entries (and the current state) must be moved by that, or the next corrections see about |dv| x the entry's age.
+        // On this stream a barometer set's no-aid N stage is queued when the reset runs; the core drops it (P-G2c), where
+        // it used to fuse it toward the old hold position (-9 m, K 9e-4: p_N moved by 8 mm).
         let t = Tuning::DEFAULT;
-        let moving = |every: u64| {
-            let mut w = World::new(&t);
-            w.yaw = 0.4;
-            w.v = [2.0, 0.5, 0.0];
-            w.gps_vel = true;
-            w.gps_every = every;
-            (0..12_000_000 / PERIOD_US).map(|_| w.step()).collect::<Vec<Sensors>>()
-        };
-        // The arming reset falls at the first epoch after 5 s; the epoch period (in IMU steps, 160 by default) is stepped
-        // so that the epoch meets the barometer sets (every 16 steps) at each phase.
-        let mut chosen = None;
-        for every in 150..=170u64 {
-            let st = moving(every);
-            let c = vel_reset_case(&t, &st, 5_000_000);
-            if c.2 == 0 {
-                chosen = Some((every, st, c));
-                break;
-            }
-        }
-        let (every, st, (k0, r, _, ev, ep, older)) = chosen.expect("an epoch phase with no queued no-aid scalar");
+        let st = stream(&t, 12);
+        let (k0, r, fused_after, dropped, ev, ep, older) = vel_reset_case(&t, &st, 5_000_000);
         let (ev_twin, ep_twin, _) = errors_after(&t, &st, |_| false, k0, 10);
         let (dv, dp) = (norm3(&r.dv), norm3(&r.dp));
         // Round-off: positions here are up to about 30 m, dv (t - t_r) up to 1 m: 16 eps of the larger of 30 and the delta.
         let tol = 16.0 * f32::EPSILON * dp.max(30.0);
-        println!("t5 GNSS reset with velocity (epoch every {every} steps): step {k0}, dv {dv:.3} m/s, dp {dp:.3} m; next 10 corrections: e_v {ev:.3e} (twin {ev_twin:.3e}), e_p {ep:.3e} (twin {ep_twin:.3e}); tolerance {tol:.2e} over the twin; ring entries older than the reset {older}");
-        assert!(dv > 1.5 && older == 0);
+        println!("t5 GNSS reset with velocity: step {k0}, dv {dv:.3} m/s, dp {dp:.3} m; no-aid scalars dropped {dropped}, fused in the next 90 steps {fused_after}; next 10 corrections: e_v {ev:.3e} (twin {ev_twin:.3e}), e_p {ep:.3e} (twin {ep_twin:.3e}); tolerance {tol:.2e} over the twin; ring entries older than the reset {older}");
+        assert!(dv > 1.5 && older == 0 && dropped == 1 && fused_after == 0);
         assert!(ev <= ev_twin + tol && ep <= ep_twin + tol);
         // Control: the old rule, without the velocity step's effect on the position: about |dv| times the entry's age.
         RESET_NO_DV_TERM.set(true);
-        let (_, _, _, evo, epo, _) = vel_reset_case(&t, &st, 5_000_000);
+        let (_, _, _, _, evo, epo, _) = vel_reset_case(&t, &st, 5_000_000);
         RESET_NO_DV_TERM.set(false);
         println!("t5 GNSS reset with velocity, control (old rule): e_v {evo:.3e}, e_p {epo:.3} m (|dv| x D = {:.3} m)", dv * t.nav_gps_delay_us as f32 * 1e-6);
         assert!(epo > 0.1 && epo > 1000.0 * tol && evo <= ev_twin + tol);
+    }
+
+    /// The output (position, velocity) after every step of `st`, with the step and delta of the first GNSS reset.
+    fn outputs(t: &Tuning, st: &[Sensors], arm_from_us: u64) -> (Vec<([f32; 3], [f32; 3])>, Option<(usize, crate::eskf::Reset, u64, u64)>) {
+        let mut core = Eskf::new(t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, t).unwrap();
+        let (mut out, mut at) = (Vec::new(), None);
+        for (k, s) in st.iter().enumerate() {
+            steer.set_armed(s.imu1.t_us >= arm_from_us);
+            let t_prev = steer.out.t_us;
+            let n = steer.update(s);
+            out.push((n.position_m, n.velocity_ms));
+            if at.is_none() && steer.core().stats().gps_resets == 1 {
+                at = Some((k, steer.core().last_reset().unwrap(), steer.core().horizon_us().unwrap(), t_prev));
+            }
+        }
+        (out, at)
+    }
+
+    #[test]
+    fn t5c_the_output_steps_by_the_exact_delta_at_the_reset_step_and_follows_the_twin_plus_the_delta_trajectory() {
+        // P-G2c. In the step of a GNSS reset with a velocity part the output's current position moves by the ordinary
+        // motion of the step plus dp + dv (t_prev - t_r) (the state's own time to the core's reset time) and the velocity by
+        // dv; afterwards it equals the run without the reset (disarmed, same samples) plus dp + dv (t - t_r), the core's
+        // own trajectory shift, until the next epoch's fusion.
+        let t = Tuning::DEFAULT;
+        let st = stream(&t, 12);
+        let (a, at) = outputs(&t, &st, 5_000_000);
+        let (twin, _) = outputs(&t, &st, u64::MAX);
+        let (k0, r, t_r, t_prev) = at.expect("a GNSS reset");
+        assert!(norm3(&r.dv) > 1.5);
+        let now = st[k0].imu1.t_us;
+        let dt = (now - t_prev) as f32 * 1e-6;
+        let (p0, v0) = a[k0 - 1];
+        let before = (t_prev as i64 - t_r as i64) as f32 * 1e-6;
+        // Expected: the delta on the state at its own time, then the step's trapezoid with the new velocity (the
+        // acceleration of the step, about 1e-6 m/s^2 here, is far below the tolerance).
+        let step_p: [f32; 3] = core::array::from_fn(|i| r.dp[i] + r.dv[i] * before + (v0[i] + r.dv[i]) * dt);
+        let step_v: [f32; 3] = core::array::from_fn(|i| r.dv[i]);
+        let tol_p = 16.0 * f32::EPSILON * 30.0;
+        let tol_v = 16.0 * f32::EPSILON * 3.0;
+        let (mut ep, mut ev) = (0.0f32, 0.0f32);
+        for i in 0..3 {
+            ep = ep.max(fabsf(a[k0].0[i] - p0[i] - step_p[i]));
+            ev = ev.max(fabsf(a[k0].1[i] - v0[i] - step_v[i]));
+        }
+        println!("t5c: step {k0}: position step {:?} expected {:?} (worst difference {ep:.2e}, tolerance {tol_p:.2e}); velocity worst difference {ev:.2e} (tolerance {tol_v:.2e})", [0, 1, 2].map(|i| a[k0].0[i] - p0[i]), step_p);
+        assert!(ep <= tol_p && ev <= tol_v);
+        // The trajectory over the next 150 steps (before the next epoch, 160 steps later): the run without the reset
+        // plus the core's shift. Round-off 64 eps of 30 m on each of two outputs.
+        let tol_w = 64.0 * f32::EPSILON * 30.0;
+        let mut worst = (0.0f32, 0.0f32);
+        for k in k0..k0 + 150 {
+            let age = (st[k].imu1.t_us as i64 - t_r as i64) as f32 * 1e-6;
+            for i in 0..3 {
+                let want_p = twin[k].0[i] + r.dp[i] + r.dv[i] * age;
+                let want_v = twin[k].1[i] + r.dv[i];
+                worst.0 = worst.0.max(fabsf(a[k].0[i] - want_p));
+                worst.1 = worst.1.max(fabsf(a[k].1[i] - want_v));
+            }
+        }
+        println!("t5c: next 150 steps: worst |output - (twin + delta trajectory)| position {:.2e} m (tolerance {tol_w:.2e}), velocity {:.2e} m/s", worst.0, worst.1);
+        assert!(worst.0 <= tol_w && worst.1 <= tol_w);
+    }
+
+    /// The earth-frame attitude error vector of every correction in steps `from..to` (`step`, the vector the correction
+    /// measured: core snapshot against the popped entry), with a tilt offset of `inject` rad about north put into the
+    /// output at step `at` (0: none).
+    fn att_errors(t: &Tuning, st: &[Sensors], inject: f32, at: usize, from: usize, to: usize) -> (Vec<(usize, [f64; 3])>, Option<crate::eskf::Reset>) {
+        let mut core = Eskf::new(t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, t).unwrap();
+        let (mut v, mut reset) = (Vec::new(), None);
+        for (k, s) in st.iter().enumerate().take(to) {
+            steer.set_armed(s.imu1.t_us >= 5_000_000);
+            if k == at && inject != 0.0 {
+                steer.inject_tilt(inject);
+            }
+            let front = steer.out.buf.front();
+            steer.update(s);
+            if let (Some(sn), Some(f)) = (steer.core().snapshot(), front) {
+                if k >= from {
+                    v.push((k, err_vec(sn.1, f.q)));
+                }
+            }
+            if k >= from && steer.core().stats().yaw_resets > 0 && reset.is_none() {
+                reset = steer.core().last_reset();
+            }
+        }
+        (v, reset)
+    }
+
+    #[test]
+    fn t5d_the_rate_correction_is_rotated_by_a_yaw_reset_and_the_tracking_continues_on_the_new_axis() {
+        // P-G2c. The rocker world, the compass turned 90 deg from 20 s: the armed yaw reset about 5 s later. A 0.05 rad
+        // tilt offset about north is put into the output 800 steps (1 s) before the reset step (the correction sees it one delay,
+        // 344 steps, later; at the reset it has been correcting for 456 steps: the earth-frame error vector is about
+        // north, the rate correction too). The reset rotates both about down by the reset yaw; the
+        // correction measured from the first entry made after the reset (one delay later) is the old one's, rotated and
+        // reduced by the slews in between (along the vector), not turned. With the rate correction left unrotated the
+        // slew of the 10 ms up to the next correction is about north on an error about east: the vector's direction
+        // moves by g x 10 ms / T_d = 0.66 deg and stays moved.
+        let t = Tuning::DEFAULT;
+        let st = rocking_stream(&t, 40.0);
+        let recs = watch_all(&t, &st, |s| s.imu1.t_us >= 5_000_000);
+        let rr = recs.iter().find(|r| r.src == 8 && r.t_us > 20_000_000).expect("a yaw reset while rocking");
+        let k_r = rr.k;
+        let theta = 0.05f32;
+        let (x, reset) = att_errors(&t, &st, theta, k_r - 800, k_r - 20, k_r + 400);
+        let (y, _) = att_errors(&t, &st, 0.0, 0, k_r - 20, k_r + 400);
+        let r = reset.expect("the reset");
+        // The offset's effect at each correction: X minus Y.
+        let d: Vec<(usize, [f64; 3])> = x.iter().zip(&y).map(|(a, b)| (a.0, [a.1[0] - b.1[0], a.1[1] - b.1[1], a.1[2] - b.1[2]])).collect();
+        assert!(x.iter().zip(&y).all(|(a, b)| a.0 == b.0));
+        let pre = d.iter().rev().find(|(k, _)| *k <= k_r).unwrap();
+        // A correction measures the entry one delay (344 steps) old: the first entry made after the reset step is measured
+        // 344 steps later, so the stale slew of the first 8 steps shows from k_r + 352 on.
+        let post = d.iter().find(|(k, _)| *k > k_r + 360).unwrap();
+        let m = rotation(&r.dq);
+        let rot = |v: [f64; 3]| -> [f64; 3] { core::array::from_fn(|i| (0..3).map(|j| f64::from(m[i][j]) * v[j]).sum()) };
+        let n = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        let ang = |a: [f64; 3], b: [f64; 3]| ((a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (n(a) * n(b))).clamp(-1.0, 1.0).acos().to_degrees();
+        let want = rot(pre.1);
+        let (a_rot, a_raw) = (ang(post.1, want), ang(post.1, pre.1));
+        println!("t5d: yaw reset at step {k_r} (dpsi {:+.1} deg); offset's error vector before |{:.4}| after |{:.4}| rad; direction against the rotated one {a_rot:.3} deg, against the unrotated one {a_raw:.1} deg", rr.dpsi.to_degrees(), n(pre.1), n(post.1));
+        assert!(n(pre.1) > 0.04 && n(post.1) < n(pre.1));
+        assert!(a_raw > 60.0, "the reset must turn the error vector: {a_raw}");
+        assert!(a_rot < 0.15, "rotated direction {a_rot} deg");
     }
 
     #[test]
