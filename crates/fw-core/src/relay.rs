@@ -35,7 +35,17 @@ pub struct Relayed {
 /// Moves the records readable in `src` into `dst`; see the module documentation.
 pub fn relay<const S: usize, const D: usize>(
     src: &mut LogConsumer<'_, S>,
-    mut dst: Option<&mut LogProducer<'_, D>>,
+    dst: Option<&mut LogProducer<'_, D>>,
+) -> Relayed {
+    relay_with(src, dst.map(|ring| |record: &[u8]| ring.push(record)))
+}
+
+/// [`relay`] into any destination: `push` takes one whole record and says whether it fitted
+/// (`false`: dropped, and the destination counts it). The board's collector relays into an
+/// [`ExtLogRing`](crate::extring::ExtLogRing) with it; `None` consumes and discards.
+pub fn relay_with<const S: usize, F: FnMut(&[u8]) -> bool>(
+    src: &mut LogConsumer<'_, S>,
+    mut push: Option<F>,
 ) -> Relayed {
     let mut out = Relayed::default();
     let mut left = src.readable();
@@ -68,9 +78,9 @@ pub fn relay<const S: usize, const D: usize>(
         if let (Some(to), Some(from)) = (scratch.get_mut(first..len), b.get(..len - first)) {
             to.copy_from_slice(from);
         }
-        match dst.as_deref_mut() {
+        match push.as_mut() {
             None => out.discarded += 1,
-            Some(ring) => match scratch.get(..len).is_some_and(|rec| ring.push(rec)) {
+            Some(push) => match scratch.get(..len).is_some_and(push) {
                 true => out.copied += 1,
                 false => out.dropped += 1,
             },
@@ -222,5 +232,41 @@ mod tests {
         assert_eq!(got.skipped, 3 + 3 + 10);
         assert_eq!(sc.readable(), 0);
         assert_eq!(drain(&mut dc), good);
+    }
+
+    /// The board's collector relays into an `ExtLogRing` (PSRAM): same records, same order, the
+    /// destination counts what does not fit, and the source is consumed all the same.
+    #[test]
+    #[allow(unsafe_code)] // `PsramReady::new`: a host test has no PSRAM to wait for.
+    fn relay_with_an_external_ring_destination_copies_whole_records_and_counts_drops() {
+        use crate::extring::{ExtLogRing, PsramBuf, PsramReady};
+        let src_ring: LogRing<256> = LogRing::new();
+        let dst_ring: ExtLogRing<64> = ExtLogRing::new();
+        let buf: &'static mut PsramBuf<64> =
+            std::boxed::Box::leak(std::boxed::Box::new(PsramBuf::new()));
+        // SAFETY: a host test, there is no PSRAM to wait for.
+        let ready = unsafe { PsramReady::new() };
+        dst_ring.bind(buf, &ready).unwrap();
+        let (mut sp, mut sc) = (
+            src_ring.take_producer().unwrap(),
+            src_ring.take_consumer().unwrap(),
+        );
+        let (mut dp, dc) = (
+            dst_ring.take_producer().unwrap(),
+            dst_ring.take_consumer().unwrap(),
+        );
+        let recs = mix(3);
+        for r in &recs {
+            assert!(sp.push(r));
+        }
+        let got = relay_with(&mut sc, Some(|rec: &[u8]| dp.push(rec)));
+        // ESC 40 B fits in 64, RCS 28 B does not (24 left), FDS 19 B does.
+        assert_eq!((got.copied, got.dropped), (2, 1));
+        assert_eq!(dst_ring.dropped(), 1);
+        assert_eq!(sc.readable(), 0);
+        let (a, b) = dc.peek();
+        assert_eq!([a, b].concat(), [recs[0].clone(), recs[2].clone()].concat());
+        let got = relay_with::<256, fn(&[u8]) -> bool>(&mut sc, None);
+        assert_eq!((got.copied, got.discarded), (0, 0));
     }
 }

@@ -4,7 +4,7 @@
 //! The USB task takes the requests from its node (`Usb::message`, through the accept list and
 //! `receive_with`), publishes each with a new generation number in `REQUEST` and wakes the SD task
 //! (`WAKE`). The SD task, the only code that touches the card, answers through `HANDOVER`, a
-//! `LogRing` of whole records each tagged with the generation it answers; the USB task sends them
+//! `ExtLogRing` (in the PSRAM) of whole records each tagged with the generation it answers; the USB task sends them
 //! through its LOG_DATA stream slot, at most 4 frames per sample (`Usb::sample`), and drops every
 //! record of an older generation, so a replaced or ended transfer's bytes are never sent.
 
@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
-use fw_core::xcore::{LogConsumer, LogProducer, LogRing};
+use fw_core::extring::{ExtLogRing, LogConsumer, LogProducer};
 use mavlink_device::dialect::{
     LOG_DATA_DATA, LOG_ENTRY_DATA, LOG_REQUEST_DATA_DATA, LOG_REQUEST_END_DATA,
     LOG_REQUEST_LIST_DATA,
@@ -40,8 +40,10 @@ pub const GCS_TIMEOUT_US: u64 = 3_000_000;
 
 /// The hand-over ring's size.
 pub const HANDOVER_BYTES: usize = 4096;
-/// SD task -> USB task: whole records (`push_data`, `push_entry`).
-pub static HANDOVER: LogRing<HANDOVER_BYTES> = LogRing::new();
+/// SD task -> USB task: whole records (`push_data`, `push_entry`). Its storage is in the PSRAM
+/// (`psram::HANDOVER_BUF`), bound by `psram::init`; unbound without a working PSRAM, and then the download is
+/// refused (`Usb::message`).
+pub static HANDOVER: ExtLogRing<HANDOVER_BYTES> = ExtLogRing::new();
 /// USB task -> SD task: the latest request and its generation.
 static REQUEST: Mutex<CriticalSectionRawMutex, Cell<(u32, Request)>> =
     Mutex::new(Cell::new((0, Request::Stop)));
@@ -165,12 +167,15 @@ impl Usb {
     /// A listed message from `receive_with`; a request not addressed to this node (its target
     /// system or component neither the node's nor 0) is dropped.
     pub fn message(&mut self, m: Incoming<'_>) {
+        // No PSRAM (the ring is unbound), or a FAULT since: a listing or a download cannot be answered, so it is
+        // refused here (no generation, no wake of the SD task). A request to end is still taken.
+        let usable = self.consumer.is_some() && crate::psram::ready();
         let for_us = |system: u8, component: u8| {
             (system == 0 || system == self.system_id)
                 && (component == 0 || component == self.component_id)
         };
         match m.message_id {
-            LOG_REQUEST_LIST_ID => {
+            LOG_REQUEST_LIST_ID if usable => {
                 if let Some(r) = m.decode::<LOG_REQUEST_LIST_DATA>()
                     && for_us(r.target_system, r.target_component)
                 {
@@ -180,7 +185,7 @@ impl Usb {
                     });
                 }
             }
-            LOG_REQUEST_DATA_ID => {
+            LOG_REQUEST_DATA_ID if usable => {
                 if let Some(r) = m.decode::<LOG_REQUEST_DATA_DATA>()
                     && for_us(r.target_system, r.target_component)
                 {
@@ -222,6 +227,10 @@ impl Usb {
     /// The LOG_DATA slot's sample: up to `MAX_BATCH` LOG_DATA or LOG_ENTRY frames of the current
     /// generation; records of older generations are dropped on the way.
     pub fn sample(&mut self, out: &mut Outgoing<'_>) -> bool {
+        // Once per sample, before the first PSRAM read: not after a FAULT.
+        if !crate::psram::ready() {
+            return false;
+        }
         let Some(consumer) = self.consumer.as_mut() else {
             return false;
         };

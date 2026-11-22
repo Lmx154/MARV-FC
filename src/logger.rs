@@ -32,12 +32,13 @@ use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Ticker};
 use fw_core::dflog::{self, Dev, Dsf, Gps};
+use fw_core::extring::{ExtLogRing, LogProducer};
 use fw_core::health::State;
-use fw_core::relay::relay;
+use fw_core::relay::relay_with;
 use fw_core::sample::{BaroReading, GnssReading, MagReading};
 use fw_core::sys_status::{StatusInput, device_status};
 use fw_core::watchdog::task;
-use fw_core::xcore::{LogConsumer, LogProducer, LogRing};
+use fw_core::xcore::LogConsumer;
 use fw_flight::tagged;
 use mavlink_device::marv::MARV_DEVICE_STATUS_DATA;
 use mavlink_device::{ParamStore, ParamValue};
@@ -49,8 +50,10 @@ use crate::{LINK_LOG, ROWS};
 pub const RING_BYTES: usize = 64 * 1024;
 /// The writer's piece: the SD task writes whole pieces of this size in place.
 pub const PIECE: usize = 4096;
-/// The log ring: the collector's records, the SD task's bytes.
-pub static RING: LogRing<RING_BYTES> = LogRing::new();
+/// The log ring: the collector's records, the SD task's bytes. Its storage is in the PSRAM (`psram::LOG_BUF`),
+/// bound by `psram::init`; without a working PSRAM it stays unbound, `take_producer` and `take_consumer` give
+/// `None`, and nothing is logged (decision-psram-offload-20261121, D3).
+pub static RING: ExtLogRing<RING_BYTES> = ExtLogRing::new();
 /// Collector -> SD task: at least one piece waits in the ring.
 pub static DATA: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// SD task -> collector: the open log's number, 0 while no log is open.
@@ -79,9 +82,14 @@ pub async fn task() -> ! {
 }
 
 async fn collect() -> ! {
-    let Some(mut producer) = RING.take_producer() else {
-        defmt::panic!("[FAIL] log ring: producer taken twice");
-    };
+    // `None` when the ring is unbound (no PSRAM: `psram::init` bound nothing). The tasks start after `psram::init`,
+    // so the ring is bound by now or never; there is no retry.
+    let mut producer = RING.take_producer();
+    if producer.is_none() && !RING.is_bound() {
+        defmt::info!(
+            "[INFO] log: no PSRAM, the log ring is not bound: nothing is logged, the flight ring is drained into nothing"
+        );
+    }
     let Some(flight) = crate::flight::LOG.take_consumer() else {
         defmt::panic!("[FAIL] flight log ring: consumer taken twice");
     };
@@ -101,7 +109,12 @@ async fn collect() -> ! {
     };
     loop {
         ticker.next().await;
-        c.tick(&mut producer, Instant::now().as_micros());
+        match producer.as_mut() {
+            // `psram::ready()` once per tick: after a FAULT at run time (the canary failed after a flash
+            // operation) the ring's bytes are not touched any more (the tick's pushes are the PSRAM batch).
+            Some(p) if crate::psram::ready() => c.tick(p, Instant::now().as_micros()),
+            _ => c.drain_flight(),
+        }
     }
 }
 
@@ -129,6 +142,12 @@ struct Collector {
 }
 
 impl Collector {
+    /// No ring to fill (no PSRAM, or a FAULT since): the flight ring is still drained, into nothing, so that it
+    /// never backs up into core 1 (`flight::LOG` drops stay 0).
+    fn drain_flight(&mut self) {
+        relay_with(&mut self.flight, None::<fn(&[u8]) -> bool>);
+    }
+
     fn tick(&mut self, p: &mut Producer, now: u64) {
         let tick = self.tick;
         self.tick = tick.wrapping_add(1);
@@ -143,7 +162,10 @@ impl Collector {
             }
         }
         // Every tick: the flight ring is drained whether a log is open or not.
-        relay(&mut self.flight, (self.open != 0).then_some(&mut *p));
+        relay_with(
+            &mut self.flight,
+            (self.open != 0).then(|| |record: &[u8]| p.push(record)),
+        );
         if self.open == 0 {
             return;
         }

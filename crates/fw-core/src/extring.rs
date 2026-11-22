@@ -17,8 +17,9 @@
 //!   stores (through the slices of [`Grant::slices`] and [`LogConsumer::peek`]); a load/store
 //!   exclusive loop outside SRAM never completes on the RP2350, so every atomic (the indices, the
 //!   drop counter, the statistics, the taken flags, the bound pointer) is in the control block.
-//!   [`PsramBuf`] holds `MaybeUninit` bytes (nothing is programmed or zeroed into `.psram`), and
-//!   the ring reads only `[tail, head)`, which the producer wrote after the bind.
+//!   [`PsramBuf`] holds `MaybeUninit` bytes (nothing is programmed into `.psram`: the image carries
+//!   no initial value), [`ExtLogRing::bind`] zeroes the `N` bytes once, at run time, and the ring
+//!   reads only `[tail, head)`, which the producer wrote after the bind.
 //! - P4: no access before the bind. [`ExtLogRing::take_producer`] and
 //!   [`ExtLogRing::take_consumer`] return `None` until [`ExtLogRing::bind`] has succeeded, and
 //!   `bind` needs a [`PsramReady`], which the board makes only after the PSRAM is initialised and
@@ -39,10 +40,13 @@
 //! so the RAM-code selector `*7fw_core5xcore*` places that small instance in SRAM on core 0's
 //! behalf; the ring's own code stays in flash.
 //!
-//! One caveat of the byte slices: [`Grant::slices`] and [`LogProducer::push_with`]'s `encode` get
-//! `&mut [u8]` over bytes with no defined contents (they are not initialised before the first
-//! write), where `LogRing`'s are zeroed. Callers must treat them as write-only, as `LogRing`'s
-//! documentation already says ("not defined until written"); the encoders in `dflog` do.
+//! The byte slices: [`Grant::slices`] and [`LogProducer::push_with`]'s `encode` get `&mut [u8]`
+//! over the buffer, which must never cover uninitialised memory (a `&mut [u8]` over it is
+//! undefined behaviour in Rust, whatever the bytes are used for). [`ExtLogRing::bind`] therefore
+//! writes zeroes over all `N` bytes before it publishes the buffer (64 KiB of PSRAM, about 3 ms
+//! once at boot), as `LogRing`'s storage is zeroed. The contents of a grant are still not defined
+//! until written (stale bytes of an earlier lap): callers treat them as write-only, as
+//! `LogRing`'s documentation says; the encoders in `dflog` do.
 #![allow(unsafe_code)]
 
 use core::cell::UnsafeCell;
@@ -198,11 +202,21 @@ impl<const N: usize> ExtLogRing<N> {
     }
 
     /// Binds the ring to its external buffer, once: after `Ok` the handles can be taken. A second
-    /// call, with any buffer, is refused and changes nothing. `ready` is the proof that the
-    /// memory is usable (see [`PsramReady`]).
+    /// call, with any buffer, is refused and changes nothing (the second buffer is not written).
+    /// `ready` is the proof that the memory is usable (see [`PsramReady`]).
+    ///
+    /// The `N` bytes are zeroed before the ring publishes the buffer, so that the `&mut [u8]` the
+    /// grants hand out never cover uninitialised memory: this writes the whole buffer once (64 KiB
+    /// of PSRAM is about 3 ms), in the caller's thread, before any handle exists.
     pub fn bind(&self, buf: &'static mut PsramBuf<N>, ready: &PsramReady) -> Result<(), BindError> {
         let _ = ready;
+        if self.is_bound() {
+            return Err(BindError::AlreadyBound);
+        }
         let base = buf.0.get().cast::<u8>();
+        // SAFETY: `buf` is a `&'static mut`, so nothing else accesses its `N` bytes; `base` is
+        // valid for `N` writes of `u8`.
+        unsafe { base.write_bytes(0, N) };
         match self
             .buf
             .compare_exchange(ptr::null_mut(), base, Ordering::AcqRel, Ordering::Acquire)
@@ -654,10 +668,41 @@ mod tests {
         assert_eq!(ring.dropped(), u32::MAX);
     }
 
-    /// The buffer starts as a sentinel and holds no initial value the ring may rely on: whatever
+    /// `bind` writes zeroes over all `N` bytes of a buffer that held anything, before the ring
+    /// publishes it (so no `&mut [u8]` of a grant covers uninitialised bytes), and a refused
+    /// second bind writes nothing.
+    #[test]
+    fn bind_zeroes_the_whole_buffer_and_a_refused_bind_writes_nothing() {
+        const N: usize = 4096;
+        let ring = ExtLogRing::<N>::new();
+        let (first, first_ptr) = filled::<N>(0xA5);
+        let (second, second_ptr) = filled::<N>(0x5A);
+        assert_eq!(ring.bind(first, &ready()), Ok(()));
+        assert_eq!(ring.bind(second, &ready()), Err(BindError::AlreadyBound));
+        // SAFETY: both pointers are to leaked buffers of `N` bytes; no handle exists to write.
+        unsafe {
+            assert!(
+                core::slice::from_raw_parts(first_ptr, N)
+                    .iter()
+                    .all(|&b| b == 0),
+                "the bound buffer is all zero"
+            );
+            assert!(
+                core::slice::from_raw_parts(second_ptr, N)
+                    .iter()
+                    .all(|&b| b == 0x5A),
+                "the refused buffer is untouched"
+            );
+        }
+    }
+
+    /// The buffer holds no initial value the ring may rely on: after the bind (which zeroes it) the
+    /// test fills it with a sentinel again, as stale bytes of an earlier lap would be, and whatever
     /// the consumer is given, over many laps and wraps, is only bytes the producer wrote (a
     /// sentinel byte never appears in the output, the output equals the input), and the producer
     /// writes nothing outside its grants (the untouched tail of a fresh buffer stays sentinel).
+    /// Before the zeroing in `bind` the sentinel was the buffer's whole initial content; it now
+    /// stays a regression for the read side.
     #[test]
     fn consumer_reads_only_what_the_producer_wrote_never_the_sentinel() {
         const SENTINEL: u8 = 0xA5;
@@ -665,6 +710,8 @@ mod tests {
         let ring = ExtLogRing::<N>::new();
         let (buf, base) = filled::<N>(SENTINEL);
         ring.bind(buf, &ready()).unwrap();
+        // SAFETY: `base` is the bound buffer's first byte, `N` bytes; no handle exists yet.
+        unsafe { base.cast_mut().write_bytes(SENTINEL, N) };
         let mut producer = ring.take_producer().unwrap();
         let mut consumer = ring.take_consumer().unwrap();
         assert_eq!(

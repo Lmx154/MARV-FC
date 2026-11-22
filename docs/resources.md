@@ -33,7 +33,7 @@ other device, PIO block or DMA channel of this plan has run in it yet.
 | ESC signal (DShot, passthrough) | 36-39 (M4..M1) | PIO | `dshot` (BUILT, `src/esc.rs`, core 1: driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1), `esc-passthrough` (not in the firmware) |
 | Battery voltage, current | 40, 41, 42 (ADC0-2) | ADC | `adc-battery` |
 | Status LED | 43 | PIO | `ws2812c` (BUILT, `src/led.rs`, core 0: PIO1 SM1) |
-| PSRAM | CS on 0 | QMI CS1 | `qmi-psram` (BUILT, `src/psram.rs`, core 0: init at boot, canary, re-map after a settings save; no buffer in it yet) |
+| PSRAM | CS on 0 | QMI CS1 | `qmi-psram` (BUILT, `src/psram.rs`, core 0: init at boot, canary, re-map after a settings save; holds `logger::RING` and `logdl::HANDOVER`) |
 | USB | | USB | `usb-cdc`, `mavlink-device` |
 | Servo pads | 2-5 | PWM slices 1 and 2 | (none yet; 4 and 5 are used as inputs on the bench) |
 

@@ -63,6 +63,7 @@ use embedded_fatfs::{
 };
 use embedded_io_async::{Read, Seek, SeekFrom, Write};
 use fw_core::dflog::{Dsf, HEADER_SEQUENCE_LEN, write_header};
+use fw_core::extring::{LogConsumer, LogProducer};
 use fw_core::health::{Action, Counters, ErrorKind, Event, Health, Limits, Report, State};
 use fw_core::logfile::{
     CleanUp, LASTLOG_NAME, LOG_DIR, MAX_LOG_NUMBER, RESERVE_BYTES, file_name, format_lastlog,
@@ -70,7 +71,6 @@ use fw_core::logfile::{
 };
 use fw_core::mbr::{Partition, partition1};
 use fw_core::watchdog::task;
-use fw_core::xcore::{LogConsumer, LogProducer};
 use fw_flight::tagged;
 use mavlink_device::ParamValue;
 use mavlink_device::dialect::MavSeverity;
@@ -81,6 +81,7 @@ use static_cell::ConstStaticCell;
 use crate::device::{self, Device, DeviceStatus, REQ_RESTART, SD, error_name, state_name};
 use crate::logdl::{self, CHUNK, DATA_HEADER, ENTRY_LEN, HANDOVER, HANDOVER_BYTES, Request};
 use crate::logger::{DATA, DSF_FIGURES, OPEN, PAD, PIECE, RING, RING_BYTES};
+use crate::psram;
 
 /// The row's nominal period P: the service's 1 s (the flush, the longest wait).
 pub const PERIOD_US: u32 = 1_000_000;
@@ -385,7 +386,13 @@ async fn run(mut parts: Parts) -> ! {
     })
     .flatten();
     if !fw_settings::sd::file_backend(backend) {
-        off(dev).await
+        off(dev, "LOG_BACKEND_TYPE 0", "SD: logging off").await
+    }
+    // Without a working PSRAM the rings are unbound (`psram::init` bound nothing): no log, the card is not touched.
+    // The task starts after `psram::init`, so this is final for the boot; the same check at the top of the loop
+    // below catches a FAULT at run time.
+    if !psram::ready() {
+        off(dev, "no PSRAM", NO_PSRAM_TEXT).await
     }
     let Some(consumer) = RING.take_consumer() else {
         defmt::panic!("[FAIL] log ring: consumer taken twice");
@@ -424,6 +431,11 @@ async fn run(mut parts: Parts) -> ! {
     };
     row.feed(Event::Tick);
     loop {
+        // A FAULT of the PSRAM at run time (its canary failed after a flash operation): `serve` has ended the log
+        // (closed in the file system, nothing more read from the ring), the card is un-mounted; log off from here.
+        if !psram::ready() {
+            off(dev, "no PSRAM", NO_PSRAM_TEXT).await
+        }
         row.take_restart();
         if row.full {
             // No card traffic; a RESTART request arrives through `wake`.
@@ -456,18 +468,23 @@ async fn run(mut parts: Parts) -> ! {
     }
 }
 
-/// `LOG_BACKEND_TYPE` = 0 at boot: Absent, NONE, one text; the card is never touched. A RESTART
-/// request ends at once, not Ok (the parameter takes effect at the next boot).
-async fn off(dev: &'static Device) -> ! {
+/// The text when the log ring has no PSRAM.
+const NO_PSRAM_TEXT: &str = "SD: logging off, no PSRAM";
+
+/// `LOG_BACKEND_TYPE` = 0 at boot, or no (working) PSRAM, `why`: Absent, NONE, one text; the card is never
+/// touched from here on. A RESTART request ends at once, not Ok (the parameter takes effect at the next boot; the
+/// PSRAM is not tried again before the next boot either).
+async fn off(dev: &'static Device, why: &'static str, line: &'static str) -> ! {
     let mut status = dev.status();
     status.state = State::Absent;
     dev.set_status(status);
     device::STATE_CHANGES.fetch_add(1, Ordering::Relaxed);
     defmt::info!(
-        "[INFO] SD: LOG_BACKEND_TYPE 0: Starting -> Absent at {=u64} ms (last error none), the card is not touched",
+        "[INFO] SD: {=str}: Starting -> Absent at {=u64} ms (last error none), the card is not touched",
+        why,
         now_ms()
     );
-    text(MavSeverity::MAV_SEVERITY_INFO, "SD: logging off");
+    text(MavSeverity::MAV_SEVERITY_INFO, line);
     loop {
         let _ = select(Timer::after(SLICE), dev.wake.wait()).await;
         dev.mark();
@@ -842,7 +859,7 @@ async fn logging(
     };
     let end = serve(fs, &mut file, &mut log, row, w).await;
     OPEN.store(0, Ordering::Release);
-    if end == End::Restart {
+    if end == End::Restart && psram::ready() {
         // What waits in the ring goes into this log first (the collector has stopped).
         for _ in 0..RING_BYTES / PIECE + 1 {
             if w.pad_left > 0 {
@@ -1103,6 +1120,12 @@ async fn serve<'f, 'v, 'a>(
     // When the last download step began, until the loop has looked at what is due after it.
     let mut step_began: Option<Instant> = None;
     loop {
+        // Once per turn of the loop, before any read of the ring or write of the hand-over ring (the PSRAM batch of
+        // this turn: the piece, the download step): a FAULT ends the log here, `run` then goes off.
+        if !psram::ready() {
+            download.close().await;
+            return End::Machine;
+        }
         if dev.requested(REQ_RESTART) {
             download.close().await;
             return End::Restart;

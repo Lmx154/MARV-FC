@@ -1229,7 +1229,7 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | rc-port | <https://github.com/Lmx154/rc-port> | the ELRS receiver's UART: CRSF and MAVLink, with its `crsf-codec` |
 | ws2812c | <https://github.com/Lmx154/ws2812c-rs> | the WS2812C status LED on GPIO43, PIO transport (feature `embassy-rp`; pinned at faf1eb5) |
 
-The `qmi-psram` (PSRAM) driver is a dependency (pinned at 82f8dbb, features `rp2350` and `defmt`): `src/psram.rs` starts the chip at boot, keeps a 64-byte canary in it and re-maps it after every settings save; no log buffer lives in it yet (see the PSRAM paragraph in Flash layout and memory map). The `ws2812c` driver (status LED) is a dependency: see Status LED.
+The `qmi-psram` (PSRAM) driver is a dependency (pinned at 82f8dbb, features `rp2350` and `defmt`): `src/psram.rs` starts the chip at boot, keeps a 64-byte canary in it, re-maps it after every settings save, and holds the storage of the two log rings, `logger::RING` (64 KiB) and `logdl::HANDOVER` (4 KiB) (see the PSRAM paragraph in Flash layout and memory map). The `ws2812c` driver (status LED) is a dependency: see Status LED.
 
 For what each driver offers and how to use it, read the README in its own repository. What was proven
 on the board, what the firmware has to respect, and what is still open: the Measured section of each driver's README.
@@ -1653,12 +1653,12 @@ from `arm-none-eabi-size -A` and the linker symbols):
 | SRAM | `.bss` (core 1's 512-byte vector table, at 0x2002b600, among it) | 103 972 |
 | SRAM | `.uninit` | 1 024 |
 | SRAM, up to 0x20080000 | free; core 0's stack grows down from the top (link ASSERT: at least 28 252 B) | 303 068 |
-| PSRAM 0x15000000 | `.psram` (NOLOAD, uncached alias, region `PSRAM` 16 MiB in `memory.x`): the 64-byte canary of `src/psram.rs`; no flash image, nothing initialised | 64 |
+| PSRAM 0x15000000 | `.psram` (NOLOAD, uncached alias, region `PSRAM` 16 MiB in `memory.x`): the 64-byte canary of `src/psram.rs`, `logger::RING`'s 65 536 bytes and `logdl::HANDOVER`'s 4 096; no flash image, nothing initialised (the rings zero their buffer when bound) | 69 696 |
 
 Program in flash 505 436 B of 2040 KiB; static SRAM 221 220 B of 512 KiB. (This table is older than the
 ESKF image; the figures of the `.psram` row and of the stack ASSERT are current.)
 
-PSRAM (`src/psram.rs`, decision-psram-offload-20261121, foundation only): `psram::init` runs in `main` after the
+PSRAM (`src/psram.rs`, decision-psram-offload-20261121): `psram::init` runs in `main` after the
 settings are read and before core 1 starts (QMI CS1 and GPIO0 are taken from embassy-rp's peripherals), starts
 the 16 MiB chip, writes and verifies the canary and logs one `[PASS] psram: ID ..., 16384 KiB ...` line (or
 `[FAIL] psram: ...`, and the board boots on without it: the state reads FAULT, nothing panics). The `[STAT] uptime` line
@@ -1666,7 +1666,7 @@ ends with `psram <state>, canary checks, failed, remaps, context violations`; th
 that tick (core 0, thread mode) and after every settings flash erase or program, where `psram::after_flash_op`
 (called from `settings::guarded`) first re-maps the window (the boot ROM's flash routines reset it). Core 1 never
 touches the PSRAM: `tools/check-ram-code.py` fails on any core-1-reachable code or data in 0x10000000-0x1FFFFFFF,
-and with the feature `psram-negative` it must fail. Row 10 of the device table is not served yet.
+and with the feature `psram-negative` it must fail. After the canary passes, `init` binds `logger::RING` and `logdl::HANDOVER` to their storage in the PSRAM and zeroes it (an `ExtLogRing`, `fw_core::extring`; the boot line ends with the time that took). Without a working PSRAM the rings stay unbound: the collector goes on draining the flight ring into nothing (its drops stay 0), the SD task goes off (`SD: logging off, no PSRAM`, row Absent), a log download is not answered, arming is not blocked, and there is no SRAM fallback ring. A FAULT at run time (the canary fails after a flash operation) stops the collector, the SD task and the download at their next PSRAM batch. Row 10 of the device table is not served yet.
 
 ## Board documentation
 
