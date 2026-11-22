@@ -345,9 +345,22 @@ struct GpsJob {
     vel: Option<([f32; 2], f32)>,
 }
 
+/// EXPERIMENT (branch exp-eskf2-variants, not for merge): runtime switches of the zero-delay variants ([`Aiding::ImuBaro`],
+/// [`Aiding::Imu`]); all false is the default filter, bit for bit. Ignored by [`Aiding::Full`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Experiment {
+    /// `ImuBaro`: the barometer scalar updates only position D, velocity D and accel-bias z (every other gain entry zeroed).
+    pub baro_vertical_only: bool,
+    /// `ImuBaro`, `Imu`: no scalar fusion (barometer or hold) updates gyro-bias z (its gain entry is zeroed).
+    pub no_gyro_bias_z: bool,
+    /// `ImuBaro`, `Imu`: the no-aid hold scalars update no gyro-bias state (x, y, z gain entries zeroed).
+    pub hold_no_gyro_bias: bool,
+}
+
 /// The 15-state shadow filter. See the module text.
 #[derive(Clone, Debug)]
 pub struct Eskf {
+    exp: Experiment,
     t: Tuning,
     aiding_set: Aiding,
     noise: Noise,
@@ -505,6 +518,7 @@ impl Eskf {
         }
         let t = *tuning;
         Ok(Eskf {
+            exp: Experiment::default(),
             aiding_set: aiding,
             noise: Noise {
                 gyro: t.nav_arw * t.nav_arw,
@@ -561,6 +575,11 @@ impl Eskf {
             #[cfg(test)]
             baro_abias_z_mask: false,
         })
+    }
+
+    /// EXPERIMENT: sets the switches (after construction).
+    pub fn set_experiment(&mut self, exp: Experiment) {
+        self.exp = exp;
     }
 
     /// The aiding set.
@@ -820,6 +839,15 @@ impl Eskf {
             kg[ACCEL_BIAS + 1] = 0.0;
             kg[ACCEL_BIAS + 2] = 0.0;
         }
+        if self.aiding_set != Aiding::Full {
+            if self.exp.hold_no_gyro_bias {
+                kg[GYRO_BIAS] = 0.0;
+                kg[GYRO_BIAS + 1] = 0.0;
+                kg[GYRO_BIAS + 2] = 0.0;
+            } else if self.exp.no_gyro_bias_z {
+                kg[GYRO_BIAS + 2] = 0.0;
+            }
+        }
         for i in 0..N {
             for j in i..N {
                 let v = self.p[i][j] - kg[i] * ph[j] - ph[i] * kg[j] + kg[i] * kg[j] * s;
@@ -859,6 +887,16 @@ impl Eskf {
         }
         if mask_z {
             kg[ACCEL_BIAS + 2] = 0.0;
+        }
+        if self.exp.baro_vertical_only {
+            for i in 0..N {
+                if i != POS + 2 && i != VEL + 2 && i != ACCEL_BIAS + 2 {
+                    kg[i] = 0.0;
+                }
+            }
+        }
+        if self.exp.no_gyro_bias_z && self.aiding_set != Aiding::Full {
+            kg[GYRO_BIAS + 2] = 0.0;
         }
         for i in 0..N {
             for j in i..N {
