@@ -689,4 +689,477 @@ mod tests {
         println!("t10: gyro offset {off:?}, bias estimate after 60 s {bg:?}, worst |difference - bias| {worst:e}");
         assert!(bg.iter().all(|b| fabsf(*b) > 1e-4), "every axis must have learned: {bg:?}");
     }
+
+    // ---- Stage 2: the correction ----
+
+    fn qmul64(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
+        [
+            a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+            a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+            a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+            a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+        ]
+    }
+
+    /// Earth-frame error vector 2 vec(a x conj(b)) (small-angle rotation vector taking b to a), sign-normalised.
+    fn err_vec(a: [f32; 4], b: [f32; 4]) -> [f64; 3] {
+        let (a, b) = (a.map(f64::from), b.map(f64::from));
+        let d = qmul64(a, [b[0], -b[1], -b[2], -b[3]]);
+        let s = if d[0] < 0.0 { -2.0 } else { 2.0 };
+        [s * d[1], s * d[2], s * d[3]]
+    }
+
+    /// The rotation angle between two attitudes, rad.
+    fn angle(a: [f32; 4], b: [f32; 4]) -> f64 {
+        let (a, b) = (a.map(f64::from), b.map(f64::from));
+        let d = qmul64(a, [b[0], -b[1], -b[2], -b[3]]);
+        2.0 * (d[1] * d[1] + d[2] * d[2] + d[3] * d[3]).sqrt().atan2(d[0].abs())
+    }
+
+    /// The angle between the two down-in-body vectors (the tilt difference), rad.
+    fn tilt_diff(a: [f32; 4], b: [f32; 4]) -> f64 {
+        let (x, y) = (crate::quat::down_in_body(a).map(f64::from), crate::quat::down_in_body(b).map(f64::from));
+        let c = (x[0] * y[0] + x[1] * y[1] + x[2] * y[2]).clamp(-1.0, 1.0);
+        c.acos()
+    }
+
+    fn yaw_q(yaw: f64) -> [f32; 4] {
+        [(0.5 * yaw).cos() as f32, 0.0, 0.0, (0.5 * yaw).sin() as f32]
+    }
+
+    #[derive(Default)]
+    struct Stat {
+        n: usize,
+        s: f64,
+        m: f64,
+    }
+    impl Stat {
+        fn add(&mut self, x: f64) {
+            self.n += 1;
+            self.s += x * x;
+            self.m = self.m.max(x);
+        }
+        fn rms(&self) -> f64 {
+            (self.s / self.n.max(1) as f64).sqrt()
+        }
+    }
+
+    /// Errors against the truth at the CURRENT time over a window: the output's and the horizon state's.
+    #[derive(Default)]
+    struct Errs {
+        att: Stat,
+        tilt: Stat,
+        v: Stat,
+        p: Stat,
+        h_att: Stat,
+        h_tilt: Stat,
+        h_v: Stat,
+        h_p: Stat,
+    }
+
+    fn report(name: &str, e: &Errs) {
+        let d = |x: f64| x.to_degrees();
+        println!(
+            "{name}: n {} | output att rms/max {:.3}/{:.3} deg, tilt {:.3}/{:.3} deg, v {:.3}/{:.3} m/s, p {:.3}/{:.3} m | horizon passed through: att {:.2}/{:.2} deg, tilt {:.2}/{:.2} deg, v {:.3}/{:.3} m/s, p {:.3}/{:.3} m",
+            e.att.n, d(e.att.rms()), d(e.att.m), d(e.tilt.rms()), d(e.tilt.m), e.v.rms(), e.v.m, e.p.rms(), e.p.m,
+            d(e.h_att.rms()), d(e.h_att.m), d(e.h_tilt.rms()), d(e.h_tilt.m), e.h_v.rms(), e.h_v.m, e.h_p.rms(), e.h_p.m
+        );
+    }
+
+    fn add_errs(e: &mut Errs, steer: &EskfSteer, nav: &NavState, q_true: [f32; 4], v_true: [f64; 3], p_true: [f64; 3]) {
+        let n3 = |a: [f32; 3], b: [f64; 3]| (0..3).map(|i| (f64::from(a[i]) - b[i]).powi(2)).sum::<f64>().sqrt();
+        e.att.add(angle(nav.attitude, q_true));
+        e.tilt.add(tilt_diff(nav.attitude, q_true));
+        e.v.add(n3(nav.velocity_ms, v_true));
+        e.p.add(n3(nav.position_m, p_true));
+        let (qh, vh, ph) = steer.core().nominal();
+        e.h_att.add(angle(qh, q_true));
+        e.h_tilt.add(tilt_diff(qh, q_true));
+        e.h_v.add(n3(vh, v_true));
+        e.h_p.add(n3(ph, p_true));
+    }
+
+    /// NE of the truth in the core's frame: the world's NED minus the origin's offset from the world's ORIGIN.
+    fn truth_p(steer: &EskfSteer, w: &World) -> [f64; 3] {
+        let off = steer.origin().map_or([0.0; 3], |o| crate::eskf::ned_from_geo(&crate::eskf::tests::ORIGIN, &o).map(f64::from));
+        [w.p[0] - off[0], w.p[1] - off[1], w.p[2]]
+    }
+
+    #[test]
+    fn t3_truth_the_output_tracks_the_truth_at_the_current_time_through_turns_and_accelerations() {
+        let t = Tuning::DEFAULT;
+        let mut core = Eskf::new(&t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, &t).unwrap();
+        let mut w = World::new(&t);
+        w.yaw = 0.4;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        let (mut all, mut turn) = (Errs::default(), Errs::default());
+        while w.t_us() < 70_000_000 {
+            let secs = w.t_us() as f64 * 1e-6;
+            w.yaw_rate = if (20.0..25.0).contains(&secs) || (50.0..53.0).contains(&secs) { 100.0_f64.to_radians() } else { 0.0 };
+            w.a = if (30.0..35.0).contains(&secs) {
+                [1.5, -1.0, 0.0]
+            } else if (40.0..45.0).contains(&secs) {
+                [-1.5, 1.0, 0.0]
+            } else {
+                [0.0; 3]
+            };
+            let s = w.step();
+            steer.set_armed(s.imu1.t_us >= 5_000_000);
+            let nav = steer.update(&s);
+            let secs = w.t_us() as f64 * 1e-6;
+            if secs >= 15.0 {
+                let (qt, vt, pt) = (yaw_q(w.yaw), w.v, truth_p(&steer, &w));
+                add_errs(&mut all, &steer, &nav, qt, vt, pt);
+                // Mid-turn: the filter has had 1 s of the steady rate and the core's delay is in the whole error.
+                if (21.0..25.0).contains(&secs) || (51.0..53.0).contains(&secs) {
+                    add_errs(&mut turn, &steer, &nav, qt, vt, pt);
+                }
+            }
+        }
+        report("t3 all", &all);
+        report("t3 turns at 100 deg/s", &turn);
+        let order = 100.0_f64.to_radians() * 0.43;
+        println!("t3: rate x delay = {:.1} deg", order.to_degrees());
+        // Control: the horizon state passed through as "current" is off by about rate x delay (43 deg) in the turn.
+        assert!(turn.h_att.m > 0.5 * order && turn.h_att.m < 1.5 * order, "horizon error {}", turn.h_att.m);
+        // The output is two orders of magnitude better.
+        assert!(turn.att.m < 0.03 * turn.h_att.m, "output attitude error {} rad", turn.att.m);
+        assert!(turn.att.m < 0.1_f64.to_radians());
+        // During the accelerations the horizon is off by acceleration x delay in velocity; the output is not.
+        assert!(all.h_v.m > 0.5, "the manoeuvres must cost the horizon something: {}", all.h_v.m);
+        assert!(all.v.m < 0.05 && all.p.m < 0.1, "v {} p {}", all.v.m, all.p.m);
+        assert!(all.v.m < 0.35 * all.h_v.m && all.p.m < 0.35 * all.h_p.m);
+    }
+
+    /// A vehicle rocking in roll in place, 30 deg at 0.6 Hz (peak rate 113 deg/s) from 15 s: the World's stationary
+    /// sensors with the IMU and the compass replaced by those of the rolled body.
+    fn rock(w: &mut World, steer: &mut EskfSteer, secs: f64, e: &mut Errs) {
+        let (amp, f) = (30.0_f64.to_radians(), 0.6);
+        let g = f64::from(fw_core::calib::GRAVITY_MSS);
+        while (w.t_us() as f64) < secs * 1e6 {
+            let mut s = w.step();
+            let ts = w.t_us() as f64 * 1e-6;
+            let (phi, rate) = if ts >= 15.0 {
+                let ph = 2.0 * core::f64::consts::PI * f * (ts - 15.0);
+                (amp * ph.sin(), amp * 2.0 * core::f64::consts::PI * f * ph.cos())
+            } else {
+                (0.0, 0.0)
+            };
+            let (c, sn) = (phi.cos(), phi.sin());
+            s.imu1.reading.gyro_rads = [rate as f32, 0.0, 0.0];
+            s.imu1.reading.accel_ms2 = [0.0, (-g * sn) as f32, (-g * c) as f32];
+            if let Some(m) = s.mag.as_mut() {
+                let f = m.reading.field_ut.map(f64::from);
+                m.reading.field_ut = [f[0] as f32, (c * f[1] + sn * f[2]) as f32, (-sn * f[1] + c * f[2]) as f32];
+            }
+            steer.set_armed(s.imu1.t_us >= 5_000_000);
+            let nav = steer.update(&s);
+            if ts >= 20.0 {
+                let qt = [(0.5 * phi).cos() as f32, (0.5 * phi).sin() as f32, 0.0, 0.0];
+                let pt = truth_p(steer, w);
+                add_errs(e, steer, &nav, qt, [0.0; 3], pt);
+            }
+        }
+    }
+
+    #[test]
+    fn t3b_a_roll_rocking_at_113_deg_s_has_a_small_tilt_error_in_the_output_and_a_large_one_in_the_horizon() {
+        let t = Tuning::DEFAULT;
+        let mut core = Eskf::new(&t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, &t).unwrap();
+        let mut w = World::new(&t);
+        let mut e = Errs::default();
+        rock(&mut w, &mut steer, 50.0, &mut e);
+        report("t3b rocking", &e);
+        // The horizon is one delay behind a 30 deg swing at up to 113 deg/s: tens of degrees of tilt.
+        assert!(e.h_tilt.m > 15.0_f64.to_radians(), "horizon tilt error {}", e.h_tilt.m);
+        assert!(e.tilt.m < 0.1 * e.h_tilt.m, "output tilt error {} against the horizon's {}", e.tilt.m, e.h_tilt.m);
+        assert!(e.att.m < 5.0_f64.to_radians(), "output attitude error {}", e.att.m);
+        assert_eq!(steer.skipped(), 0);
+    }
+
+    // ---- T7: the tracking law with the core frozen ----
+
+    /// A resting vehicle whose slow sensors are withheld: after alignment the core only integrates the IMU, so its state
+    /// stays where it is. 3 s of settling, then `each(wrapper, true)` (the injection), then `secs` of steps with
+    /// `each(wrapper, false)` after every step.
+    fn frozen(t: &Tuning, secs: f64, mut each: impl FnMut(&mut EskfSteer, bool)) {
+        let mut core = Eskf::new(t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, t).unwrap();
+        let mut w = World::new(t);
+        let step = |steer: &mut EskfSteer, w: &mut World| {
+            let mut s = w.step();
+            (s.baro, s.mag, s.gnss) = (None, None, None);
+            steer.update(&s);
+        };
+        while w.t_us() < 3_000_000 {
+            step(&mut steer, &mut w);
+        }
+        assert!(steer.out.live && steer.corrected() > 100);
+        each(&mut steer, true);
+        for _ in 0..(secs * 1e6) as u64 / PERIOD_US {
+            step(&mut steer, &mut w);
+            each(&mut steer, false);
+        }
+    }
+
+    /// Dominant root x of x + g exp(-x) = 0 (the loop e'(t) = -(g/D) e(t - D) in x = s D), by complex Newton.
+    fn dominant_pole(g: f64) -> (f64, f64) {
+        let (mut re, mut im) = (-0.3f64, 0.6f64);
+        for _ in 0..100 {
+            let (er, ei) = ((-re).exp() * im.cos(), -(-re).exp() * im.sin());
+            let (fr, fi) = (re + g * er, im + g * ei);
+            // f' = 1 - g exp(-x)
+            let (dr, di) = (1.0 - g * er, -g * ei);
+            let den = dr * dr + di * di;
+            let (nr, ni) = ((fr * dr + fi * di) / den, (fi * dr - fr * di) / den);
+            re -= nr;
+            im -= ni;
+        }
+        (re, im)
+    }
+
+    /// The same loop in continuous time, e(0) = 1, entries older than the injection 0, by small Euler steps: the first
+    /// time e <= 1/e, and the series at 0.1 ms.
+    fn dde(k: f64, d: f64, secs: f64) -> (f64, Vec<f64>) {
+        let h = 1e-4;
+        let (nd, n) = ((d / h).round() as usize, (secs / h) as usize);
+        let mut e = std::vec![0.0; n + 1];
+        e[0] = 1.0;
+        let mut t63 = f64::NAN;
+        for i in 0..n {
+            let delayed = if i >= nd { e[i - nd] } else { 0.0 };
+            e[i + 1] = e[i] - h * k * delayed;
+            if t63.is_nan() && e[i + 1] <= (-1.0f64).exp() {
+                t63 = (i + 1) as f64 * h;
+            }
+        }
+        (t63, e)
+    }
+
+    /// The attitude offset of `theta` rad about north, put into the output's current state at the end of settling
+    /// (not into the ring: the entries before the injection are right, the later ones carry it). Returns the signed
+    /// error along north after every step, the model's value (the f64 law driven by the wrapper's push and correction
+    /// events) and the step times.
+    fn att_series(t: &Tuning, theta: f64, secs: f64) -> (Vec<f64>, Vec<f64>) {
+        use std::collections::VecDeque;
+        let (mut meas, mut model) = (Vec::new(), Vec::new());
+        let d = t.nav_gps_delay_us as f64 * 1e-6;
+        let dt = PERIOD_US as f64 * 1e-6;
+        let (mut m_eps, mut rate, mut hist, mut counts) = (0.0f64, 0.0f64, VecDeque::<f64>::new(), (0, 0));
+        frozen(t, secs, |st, inject| {
+            if inject {
+                let inj = [(0.5 * theta).cos() as f32, (0.5 * theta).sin() as f32, 0.0, 0.0];
+                st.out.nom.q = normalise(mul(inj, st.out.nom.q));
+                let h = st.core().nominal().0;
+                m_eps = err_vec(st.out.nom.q, h)[0];
+                hist.extend(std::iter::repeat_n(0.0, st.out.buf.len));
+                counts = (st.pushed(), st.corrected());
+                return;
+            }
+            // The wrapper's order in a step: correction (a new rate), slew, push.
+            if st.corrected() > counts.1 {
+                rate = (st.out.g.att_gain as f64 / d) * hist.pop_front().unwrap();
+                counts.1 = st.corrected();
+            }
+            m_eps -= dt * rate;
+            if st.pushed() > counts.0 {
+                hist.push_back(m_eps);
+                counts.0 = st.pushed();
+            }
+            let h = st.core().nominal().0;
+            meas.push(err_vec(st.out.nom.q, h)[0]);
+            model.push(m_eps);
+        });
+        (meas, model)
+    }
+
+    #[test]
+    fn t7_attitude_offset_decays_by_the_delayed_first_order_loop_and_never_with_gain_zero() {
+        // Derivation. The output integrates the same gyro as the core, so the earth-frame error eps between them changes
+        // only by the slew: eps'(t) = -rate_corr(t). A correction measures the error of the ring entry at the core's time
+        // t - D (D = T_d = now - t_e = nav_gps_delay_us once the delay is above the step) and sets rate_corr = g eps(t - D) / D,
+        // g = nav_out_att_gain. Entries older than the injection hold no error. So eps'(t) = -k eps(t - D), k = g / D, with
+        // eps = theta for 0 <= t < D (nothing is measured yet), a delayed first-order loop. Its roots: x = s D with
+        // x + g exp(-x) = 0; for g = 0.5 they are complex (monotone only for g <= 1/e), so the decay is a damped
+        // oscillation: the envelope falls monotonically, with a small undershoot.
+        let t = Tuning::DEFAULT;
+        let theta = 5.0_f64.to_radians();
+        let secs = 12.0;
+        let d = t.nav_gps_delay_us as f64 * 1e-6;
+        let (meas, model) = att_series(&t, theta, secs);
+        let dt = PERIOD_US as f64 * 1e-6;
+        // 1. The f64 law, driven by the wrapper's own events, matches the measured error at every step.
+        let worst = meas.iter().zip(&model).fold(0.0f64, |a, (m, e)| a.max((m - e).abs()));
+        println!("t7 attitude: worst |measured - model| {:.3e} rad ({:.2e} of theta)", worst, worst / theta);
+        assert!(worst < 2e-3 * theta, "worst {worst}");
+        // 2. The continuous loop gives the 63 % time and the dominant pole.
+        let th0 = meas[0];
+        let (t63_cont, _) = dde(t.nav_out_att_gain as f64 / d, d, secs);
+        let t63 = (meas.iter().position(|x| *x <= th0 * (-1.0f64).exp()).unwrap() + 1) as f64 * dt;
+        let (xr, xi) = dominant_pole(t.nav_out_att_gain as f64);
+        println!("t7 attitude: 63 % at {t63:.3} s (continuous loop {t63_cont:.3} s); dominant pole x = {xr:.4} {xi:+.4}i, sigma {:.3} /s, damping {:.2}", xr / d, -xr / (xr * xr + xi * xi).sqrt());
+        // Tolerance 3 %: the correction is held for nav_predict_us and sampled on the 1.25 ms grid: about 5 ms of extra
+        // delay on a 0.55 s rise, 1 %.
+        assert!(fabsf(((t63 - t63_cont) / t63_cont) as f32) < 0.03);
+        // 3. Envelope: successive extrema of the signed error shrink, the error never exceeds theta, undershoot below 10 %.
+        let mut ext: Vec<f64> = Vec::new();
+        for i in 1..meas.len() - 1 {
+            if (meas[i] - meas[i - 1]) * (meas[i + 1] - meas[i]) < 0.0 && fabsf((meas[i] / th0) as f32) > 1e-3 {
+                ext.push(meas[i]);
+            }
+        }
+        println!("t7 attitude: extrema / theta {:?}", ext.iter().map(|x| (x / th0 * 1e4).round() / 1e4).collect::<Vec<_>>());
+        assert!(ext.len() >= 2);
+        assert!(ext.windows(2).all(|w| fabsf(w[1] as f32) < fabsf(w[0] as f32)), "{ext:?}");
+        assert!(meas.iter().all(|x| *x <= th0 * 1.001 && *x >= -0.1 * th0));
+        // The ratio of successive extrema is the dominant pole's: -exp(sigma * half period), half period = pi D / Im(x).
+        let ratio = ext[1] / ext[0];
+        let want = (xr / d * (core::f64::consts::PI / (xi / d))).exp();
+        println!("t7 attitude: successive-extrema ratio {ratio:.4}, pole prediction {:.4}", -want);
+        assert!(fabsf(((-ratio - want) / want) as f32) < 0.15);
+        assert!(fabsf((*meas.last().unwrap() / th0) as f32) < 1e-3);
+        // Control: gain 0 never converges.
+        let zero = Tuning { nav_out_att_gain: 0.0, ..t };
+        let (m0, _) = att_series(&zero, theta, secs);
+        println!("t7 attitude control (gain 0): error after {secs} s is {:.4} of theta", m0.last().unwrap() / m0[0]);
+        assert!(m0.iter().all(|x| fabsf((x / m0[0] - 1.0) as f32) < 1e-3));
+    }
+
+    /// An offset of 1 (m/s or m, north) in the output's velocity (`pos` false) or position, put into the current state
+    /// AND every ring entry (a constant error in the history, as an accumulated drift is). Returns, after every
+    /// correction, the measured offset (output minus core) and the model's: each correction measures e = -E, then
+    /// I += e, dE = e g + I g^2 k_i with g = nav_predict_us / tau.
+    fn pi_series(t: &Tuning, pos: bool, secs: f64) -> (Vec<f64>, Vec<f64>) {
+        let (mut meas, mut model) = (Vec::new(), Vec::new());
+        let tau = if pos { t.nav_out_tau_pos_s } else { t.nav_out_tau_vel_s } as f64;
+        let g = t.nav_predict_us as f64 * 1e-6 / tau;
+        let (mut e_model, mut integ, mut seen) = (1.0f64, 0.0f64, 0);
+        frozen(t, secs, |st, inject| {
+            let core = st.core().nominal();
+            if inject {
+                st.out.nom.v[0] += if pos { 0.0 } else { 1.0 };
+                st.out.nom.p[0] += if pos { 1.0 } else { 0.0 };
+                st.out.buf.for_each(|x| {
+                    x.v[0] += if pos { 0.0 } else { 1.0 };
+                    x.p[0] += if pos { 1.0 } else { 0.0 };
+                });
+                seen = st.corrected();
+                return;
+            }
+            if st.corrected() > seen {
+                assert_eq!(st.corrected(), seen + 1, "one correction per step");
+                seen = st.corrected();
+                let e = -e_model;
+                integ += e;
+                e_model += e * g + integ * g * g * f64::from(t.nav_out_int_gain);
+                meas.push(f64::from(if pos { st.out.nom.p[0] - core.2[0] } else { st.out.nom.v[0] - core.1[0] }));
+                model.push(e_model);
+            }
+        });
+        (meas, model)
+    }
+
+    /// The offset's continuous-time law: e'' + e'/tau + k_i e / tau^2 = 0, e(0) = 1, e'(0) = -1/tau (the proportional
+    /// term alone starts at the slope -1/tau). Returns the first time e <= 1/e.
+    fn pi_t63(tau: f64, ki: f64) -> f64 {
+        let disc = (1.0 / (tau * tau) - 4.0 * ki / (tau * tau)).sqrt();
+        let (s1, s2) = ((-1.0 / tau + disc) / 2.0, (-1.0 / tau - disc) / 2.0);
+        let a = (s2 + 1.0 / tau) / (s2 - s1);
+        let e = |t: f64| a * (s1 * t).exp() + (1.0 - a) * (s2 * t).exp();
+        (0..100_000).map(|i| i as f64 * 1e-4).find(|t| e(*t) <= (-1.0f64).exp()).unwrap()
+    }
+
+    #[test]
+    fn t7_velocity_and_position_offsets_follow_the_tau_and_integral_gain_law_and_a_slow_tau_does_not_converge() {
+        let t = Tuning::DEFAULT;
+        let secs = 6.0;
+        for pos in [false, true] {
+            let name = if pos { "position 1 m" } else { "velocity 1 m/s" };
+            let (meas, model) = pi_series(&t, pos, secs);
+            let worst = meas.iter().zip(&model).fold(0.0f64, |a, (m, e)| a.max((m - e).abs()));
+            let tau = if pos { t.nav_out_tau_pos_s } else { t.nav_out_tau_vel_s } as f64;
+            // The offset measured after n corrections: the first is after the first one.
+            let dtc = t.nav_predict_us as f64 * 1e-6;
+            let t63 = (meas.iter().position(|x| *x <= (-1.0f64).exp()).unwrap() + 1) as f64 * dtc;
+            let t63_cont = pi_t63(tau, f64::from(t.nav_out_int_gain));
+            let min = meas.iter().cloned().fold(f64::MAX, f64::min);
+            println!("t7 {name}: worst |measured - recursion| {worst:.2e}; 63 % at {t63:.3} s (continuous law {t63_cont:.3} s); undershoot {min:.4}; after {secs} s {:.4}", meas.last().unwrap());
+            assert!(worst < 1e-3, "{name}: {worst}");
+            // The recursion is forward Euler with step nav_predict_us / tau = 4 % of the time constant, so the time
+            // differs from the continuous law by that order: tolerance 8 %.
+            assert!(fabsf(((t63 - t63_cont) / t63_cont) as f32) < 0.08, "{name}: {t63} against {t63_cont}");
+            // The integral term makes the tail slow and overshoot past zero (overdamped pair, roots -0.45 and -3.55 /s).
+            assert!(min < 0.0 && min > -0.2 && fabsf(*meas.last().unwrap() as f32) < 0.05);
+            // Control: tau at its upper clamp and no integral term: after 2 s the offset has not fallen to 1/e.
+            let slow = if pos {
+                Tuning { nav_out_tau_pos_s: TAU_MAX_S, nav_out_int_gain: 0.0, ..t }
+            } else {
+                Tuning { nav_out_tau_vel_s: TAU_MAX_S, nav_out_int_gain: 0.0, ..t }
+            };
+            let (m, _) = pi_series(&slow, pos, 2.0);
+            println!("t7 {name} control (tau 10 s, no integral): offset after 2 s {:.3}", m.last().unwrap());
+            assert!(*m.last().unwrap() > 0.75);
+        }
+    }
+
+    // ---- T12: exact time ----
+
+    /// The World's samples re-timed: spacing varying +-30 % of 1250 us (a fixed pseudo-random sequence), every 500th
+    /// sample double-spaced, a NaN gyro at two samples.
+    fn jittered(t: &Tuning, secs: u64) -> Vec<Sensors> {
+        let mut w = World::new(t);
+        w.yaw = 0.4;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        let (mut out, mut now, mut lcg) = (Vec::new(), 0u64, 12345u32);
+        while w.t_us() < secs * 1_000_000 {
+            let mut s = w.step();
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let u = f64::from(lcg >> 8) / f64::from(1u32 << 24) * 2.0 - 1.0;
+            let gap = if out.len() % 500 == 499 { 2.0 * 1250.0 } else { 1250.0 * (1.0 + 0.3 * u) };
+            now += gap.round() as u64;
+            s.imu1.t_us = now;
+            if out.len() == 20_000 || out.len() == 30_001 {
+                s.imu1.reading.gyro_rads[0] = f32::NAN;
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    fn jitter_run(t: &Tuning, control: bool) -> (u32, u32, u32, usize, usize) {
+        let st = jittered(t, 60);
+        let mut core = Eskf::new(t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, t).unwrap();
+        MATCH_HORIZON.set(control);
+        let (mut exact, mut snaps) = (0usize, 0usize);
+        for s in &st {
+            steer.set_armed(s.imu1.t_us >= 5_000_000);
+            let front = steer.out.buf.front();
+            steer.update(s);
+            if let Some((t_e, ..)) = steer.core().snapshot() {
+                snaps += 1;
+                // The snapshot is of the entry that was the oldest: its time is exactly that entry's.
+                exact += usize::from(Some(t_e) == front.map(|e| e.t_us));
+            }
+        }
+        MATCH_HORIZON.set(false);
+        (steer.skipped(), steer.corrected(), steer.pushed(), exact, snaps)
+    }
+
+    #[test]
+    fn t12_exact_time_every_correction_uses_the_snapshot_of_the_popped_entry_on_a_jittered_stream() {
+        let t = Tuning::DEFAULT;
+        let (skipped, corrected, pushed, exact, snaps) = jitter_run(&t, false);
+        println!("t12: pushed {pushed}, corrected {corrected}, skipped {skipped}; snapshots {snaps}, equal to the popped entry's time {exact}");
+        assert_eq!(skipped, 0);
+        assert!(corrected > 4_000 && exact == snaps && snaps as u32 == corrected);
+        // Control: matching on the final horizon time loses entries.
+        let (cskipped, ccorrected, _, _, _) = jitter_run(&t, true);
+        println!("t12 control (match on the horizon time): skipped {cskipped}, corrected {ccorrected}");
+        assert!(cskipped > 100);
+    }
 }
