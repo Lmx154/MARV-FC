@@ -46,8 +46,10 @@ use mavlink_device::{ParamStore, ParamValue};
 use crate::device::{BARO, BATT, DEVICE_COUNT, DEVICES, Device, GNSS, MAG, Reading, Sample};
 use crate::{LINK_LOG, ROWS};
 
-/// The ring's size (decision-flight-logging-20261119, section 2: 64 KiB).
-pub const RING_BYTES: usize = 64 * 1024;
+/// The ring's size: 1 MiB in the PSRAM (owner, 2026-11-22: "make the buffer 1mb so when we're logging like crazy we
+/// won't drop anything"; was 64 KiB, decision-flight-logging-20261119 section 2). At log 268's average 75 KB/s it holds
+/// about 13 s of SD-card stall.
+pub const RING_BYTES: usize = 1024 * 1024;
 /// The writer's piece: the SD task writes whole pieces of this size in place.
 pub const PIECE: usize = 4096;
 /// The log ring: the collector's records, the SD task's bytes. Its storage is in the PSRAM (`psram::LOG_BUF`),

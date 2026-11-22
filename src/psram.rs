@@ -1,6 +1,6 @@
 //! The 16 MiB PSRAM in socket U24 (decision-psram-offload-20261121 in MARV-V2-drivers, D2/D3, work units
 //! W2, W3 and W4). It starts the chip at boot, keeps a 64-byte canary in the memory, re-maps the window after
-//! every flash erase or program, and holds the storage of the two log rings, `logger::RING` (64 KiB) and
+//! every flash erase or program, and holds the storage of the two log rings, `logger::RING` (1 MiB) and
 //! `logdl::HANDOVER` (4 KiB), which [`init`] binds once the canary has passed. Without a working chip the rings
 //! stay unbound: the collector drains the flight ring into nothing, the SD task is off ("no PSRAM") and the log
 //! download is refused; arming is not blocked, and there is no SRAM fallback ring.
