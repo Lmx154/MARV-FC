@@ -24,6 +24,7 @@ extern crate std;
 pub mod baro;
 pub mod batt;
 pub mod esc;
+pub mod flight;
 pub mod gnss;
 pub mod imu;
 pub mod led;
@@ -48,11 +49,12 @@ pub const COUNT: usize = baro::COUNT
     + led::COUNT
     + gnss::COUNT
     + mag::CAL_COUNT
-    + gnss::SET_COUNT;
+    + gnss::SET_COUNT
+    + flight::COUNT;
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
 /// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's
-/// soft-iron matrix and calibration record (`mag::CAL_TABLE`) and `GPS_GNSS` (appended, so the first 81 indices did not change).
+/// soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS` and `PILOT_SPEED_XY` (appended, so the first 81 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
@@ -161,6 +163,12 @@ const fn concat() -> [ParamDef; COUNT] {
         n += 1;
         i += 1;
     }
+    i = 0;
+    while i < flight::COUNT {
+        out[n] = flight::TABLE[i];
+        n += 1;
+        i += 1;
+    }
     out
 }
 
@@ -176,7 +184,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 93);
+        assert_eq!(COUNT, 94);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -191,7 +199,8 @@ mod tests {
             .chain(led::TABLE.iter())
             .chain(gnss::TABLE.iter())
             .chain(mag::CAL_TABLE.iter())
-            .chain(gnss::SET_TABLE.iter());
+            .chain(gnss::SET_TABLE.iter())
+            .chain(flight::TABLE.iter());
         for def in &TABLE {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
@@ -301,6 +310,7 @@ mod tests {
             "MAG_HLT_STR",
             "MAG_HLT_INC",
             "GPS_GNSS",
+            "PILOT_SPEED_XY",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
@@ -315,7 +325,7 @@ mod tests {
     fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
         use mavlink_device::{ParamError, ParamValue};
         use ParamValue::{F32, I32};
-        assert_eq!(COUNT, 93);
+        assert_eq!(COUNT, 94);
         assert_eq!(mag::CAL_OFFSET, 81);
         let expected = [
             ("MAG_DIAGX", F32(1.0), F32(0.2), F32(5.0), true),
@@ -401,7 +411,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 93);
+        assert_eq!(COUNT, 94);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [

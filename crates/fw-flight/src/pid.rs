@@ -1,5 +1,7 @@
 //! The controller: an attitude P loop feeding a PID rate loop per axis (decision-first-pair-20261119, section 3),
-//! and, for `Setpoint::Altitude`, a vertical loop that makes the collective (decision-nav-eskf-20261120, 7b, F4, F5).
+//! and, for `Setpoint::Altitude` and `Setpoint::Position`, a vertical loop that makes the collective
+//! (decision-nav-eskf-20261120, 7b, F4, F5); for `Setpoint::Position` also a horizontal position P, velocity PI loop whose
+//! acceleration is turned into a tilt (Amendment P, P2).
 //! Torques in N.m about FRD, rates in rad/s, collective thrust in N. No feed-forward in the attitude and rate loops.
 
 use crate::gnc::{Controller, NavState, Refused, Saturation, Setpoint, ThrustTorque};
@@ -94,7 +96,19 @@ impl Axis {
     }
 }
 
-/// The cascaded PID. Accepts `Setpoint::Rates`, `Setpoint::Attitude` and `Setpoint::Altitude`; refuses the rest.
+/// `v` scaled to length `limit` if it is longer; true when it was.
+fn limit_length(v: [f32; 2], limit: f32) -> ([f32; 2], bool) {
+    let n = libm::sqrtf(v[0] * v[0] + v[1] * v[1]);
+    if n > limit {
+        let k = limit / n;
+        ([v[0] * k, v[1] * k], true)
+    } else {
+        (v, false)
+    }
+}
+
+/// The cascaded PID. Accepts `Setpoint::Rates`, `Setpoint::Attitude`, `Setpoint::Altitude` and `Setpoint::Position`;
+/// refuses the rest.
 #[derive(Clone, Copy, Debug)]
 pub struct CascadedPid {
     /// Angle P for roll and pitch, 1/s.
@@ -129,12 +143,41 @@ pub struct CascadedPid {
     thrust_full_n: f32,
     /// The vertical integrator, m/s^2, down positive (NED), like the acceleration it adds to.
     alt_i: f32,
-    /// The previous setpoint was `Altitude`: the integrator is live. False after `reset` and after any other
-    /// setpoint, so the first `Altitude` setpoint starts the integrator at 0.
+    /// The previous setpoint was `Altitude` or `Position`: the integrator is live. False after `reset` and after any
+    /// other setpoint, so the first `Altitude` or `Position` setpoint starts the integrator at 0 and a change between
+    /// those two does not.
     alt_active: bool,
+    /// Position error to velocity setpoint, 1/s.
+    posxy_p: f32,
+    /// Velocity error to horizontal acceleration, (m/s^2)/(m/s).
+    velxy_p: f32,
+    /// Velocity error integral to horizontal acceleration, (m/s^2)/m.
+    velxy_i: f32,
+    /// The largest horizontal velocity setpoint, m/s (`Controller::set_speed_limit_xy`).
+    speed_xy_ms: f32,
+    /// The largest tilt, rad (`angle_max_rad`).
+    angle_max_rad: f32,
+    /// The largest horizontal acceleration and the limit of the horizontal integrator, m/s^2: g tan(angle_max_rad).
+    a_max: f32,
+    /// The horizontal integrator, m/s^2, north and east.
+    xy_i: [f32; 2],
+    /// The previous setpoint was `Position`: the horizontal integrator is live. False after `reset` and after any other
+    /// setpoint.
+    pos_active: bool,
+    /// The attitude setpoint of the latest `Position` update, [0; 4] after any other update.
+    q_sp_pos: [f32; 4],
     /// Tests only: the anti-windup rule is off.
     #[cfg(test)]
-    antiwindup_off: bool,
+    pub(crate) antiwindup_off: bool,
+    /// Tests only: a `Position` setpoint clears the vertical integrator's live flag, as any other setpoint does.
+    #[cfg(test)]
+    pub(crate) position_clears_alt_active: bool,
+    /// Tests only: the rotation from north-east to the heading frame has the opposite sign.
+    #[cfg(test)]
+    pub(crate) rotation_flipped: bool,
+    /// Tests only: the horizontal integrator is not zeroed at the entry.
+    #[cfg(test)]
+    pub(crate) entry_keeps_integrator: bool,
 }
 
 impl CascadedPid {
@@ -166,8 +209,23 @@ impl CascadedPid {
             thrust_full_n: full_thrust_n(tuning.pilot_thrust_max_g),
             alt_i: 0.0,
             alt_active: false,
+            posxy_p: tuning.psc_posxy_p,
+            velxy_p: tuning.psc_velxy_p,
+            velxy_i: tuning.psc_velxy_i,
+            speed_xy_ms: tuning.pilot_speed_xy_ms,
+            angle_max_rad: tuning.angle_max_rad,
+            a_max: GRAVITY_MSS * libm::tanf(tuning.angle_max_rad),
+            xy_i: [0.0; 2],
+            pos_active: false,
+            q_sp_pos: [0.0; 4],
             #[cfg(test)]
             antiwindup_off: false,
+            #[cfg(test)]
+            position_clears_alt_active: false,
+            #[cfg(test)]
+            rotation_flipped: false,
+            #[cfg(test)]
+            entry_keeps_integrator: false,
         }
     }
 
@@ -221,6 +279,84 @@ impl CascadedPid {
         self.alt_i
     }
 
+    /// Tests only: the largest horizontal velocity setpoint in force, m/s.
+    #[cfg(test)]
+    pub(crate) fn speed_limit_xy(&self) -> f32 {
+        self.speed_xy_ms
+    }
+
+    /// Tests only: the horizontal integrator, m/s^2, north and east.
+    #[cfg(test)]
+    pub(crate) fn horizontal_integrator(&self) -> [f32; 2] {
+        self.xy_i
+    }
+
+    /// The attitude setpoint of position hold (Amendment P, P2): `target` and `v_ff` the setpoint's NED position and
+    /// velocity feed-forward, `heading_rad` its heading. v_sp = posxy_p (target - p) + v_ff limited to the speed;
+    /// e_v = v_sp - v; a = velxy_p e_v + I limited to `a_max`; the integrator adds velxy_i e_v dt unless the acceleration
+    /// was clipped and it would grow, and stays within `a_max`. `entry`: the first `Position` setpoint, the integrator is
+    /// 0 and does not advance. The tilt is atan(|a_h|/g) about (a_y, -a_x, 0) / |a_h|, a_h = a in the heading frame.
+    fn horizontal(
+        &mut self,
+        nav: &NavState,
+        target: [f32; 3],
+        v_ff: [f32; 3],
+        heading_rad: f32,
+        dt_s: f32,
+        entry: bool,
+    ) -> [f32; 4] {
+        #[cfg(test)]
+        let keep = self.entry_keeps_integrator;
+        #[cfg(not(test))]
+        let keep = false;
+        if entry && !keep {
+            self.xy_i = [0.0; 2];
+        }
+        let [pn, pe, _] = nav.position_m;
+        let [vn, ve, _] = nav.velocity_ms;
+        let (v_sp, _) = limit_length(
+            [
+                self.posxy_p * (target[0] - pn) + v_ff[0],
+                self.posxy_p * (target[1] - pe) + v_ff[1],
+            ],
+            self.speed_xy_ms,
+        );
+        let e_v = [v_sp[0] - vn, v_sp[1] - ve];
+        let [i_n, i_e] = self.xy_i;
+        let (a, clipped) = limit_length(
+            [self.velxy_p * e_v[0] + i_n, self.velxy_p * e_v[1] + i_e],
+            self.a_max,
+        );
+        #[cfg(test)]
+        let clipped = clipped && !self.antiwindup_off;
+        // Conditional integration, Axis::step's rule: keep I' unless the acceleration was clipped and I' is longer.
+        let next = [
+            i_n + self.velxy_i * e_v[0] * dt_s,
+            i_e + self.velxy_i * e_v[1] * dt_s,
+        ];
+        let longer = next[0] * next[0] + next[1] * next[1] > i_n * i_n + i_e * i_e;
+        if !entry && !(clipped && longer) {
+            self.xy_i = next;
+        }
+        self.xy_i = limit_length(self.xy_i, self.a_max).0;
+        // a in the heading frame: Rz(-heading) a.
+        let (s, c) = (libm::sinf(heading_rad), libm::cosf(heading_rad));
+        #[cfg(test)]
+        let s = if self.rotation_flipped { -s } else { s };
+        let (ax, ay) = (c * a[0] + s * a[1], -s * a[0] + c * a[1]);
+        let n = libm::sqrtf(ax * ax + ay * ay);
+        let tilt = if n > 0.0 {
+            let theta = libm::atanf(n / GRAVITY_MSS);
+            let half = (if theta > self.angle_max_rad { self.angle_max_rad } else { theta }) / 2.0;
+            let k = libm::sinf(half) / n;
+            [libm::cosf(half), k * ay, -k * ax, 0.0]
+        } else {
+            [1.0, 0.0, 0.0, 0.0]
+        };
+        let h = heading_rad / 2.0;
+        mul([libm::cosf(h), 0.0, 0.0, libm::sinf(h)], tilt)
+    }
+
     /// Body rate setpoint, rad/s, from an attitude setpoint (decision 3b): q_e = conj(q) (x) q_sp with w >= 0,
     /// e = 2 [x, y, z], rate = [K_rp e_x, K_rp e_y, K_y e_z] + heading_rate * (NED down in the body).
     fn attitude_to_rates(&self, q: [f32; 4], q_sp: [f32; 4], heading_rate_rads: f32) -> [f32; 3] {
@@ -245,8 +381,18 @@ impl Controller for CascadedPid {
         sp: &Setpoint,
         limited: &Saturation,
     ) -> Result<ThrustTorque, Refused> {
-        // The rate setpoint, the stick collective (None for Altitude: the vertical loop makes it) and the Altitude
-        // target (down_m, velocity feed-forward).
+        let is_position = matches!(*sp, Setpoint::Position { .. });
+        let entry_xy = is_position && !self.pos_active;
+        self.pos_active = is_position;
+        self.q_sp_pos = [0.0; 4];
+        // dt in s from successive nav.t_us, capped; 0 on the first step after reset (decision 3d).
+        let first = self.t_prev_us.is_none();
+        let dt = match self.t_prev_us {
+            Some(prev) => nav.t_us.saturating_sub(prev).min(DT_MAX_US) as f32 * 1e-6,
+            None => 0.0,
+        };
+        // The rate setpoint, the stick collective (None for Altitude and Position: the vertical loop makes it) and the
+        // target height (down_m, velocity feed-forward).
         let (rate_sp, thrust_n, alt) = match *sp {
             Setpoint::Rates {
                 rates_rads,
@@ -271,16 +417,29 @@ impl Controller for CascadedPid {
                 None,
                 Some((down_m, velocity_d_ms)),
             ),
-            Setpoint::Position { .. } | Setpoint::Waypoint { .. } => {
+            Setpoint::Position {
+                position_m,
+                velocity_ms,
+                heading_rad,
+                heading_rate_rads,
+            } => {
+                // The vertical integrator stays live across Altitude and Position (P2).
+                #[cfg(test)]
+                if self.position_clears_alt_active {
+                    self.alt_active = false;
+                }
+                let q_sp = self.horizontal(nav, position_m, velocity_ms, heading_rad, dt, entry_xy);
+                self.q_sp_pos = q_sp;
+                (
+                    self.attitude_to_rates(nav.attitude, q_sp, heading_rate_rads),
+                    None,
+                    Some((position_m[2], velocity_ms[2])),
+                )
+            }
+            Setpoint::Waypoint { .. } => {
                 self.alt_active = false;
                 return Err(Refused);
             }
-        };
-        // dt in s from successive nav.t_us, capped; 0 on the first step after reset (decision 3d).
-        let first = self.t_prev_us.is_none();
-        let dt = match self.t_prev_us {
-            Some(prev) => nav.t_us.saturating_sub(prev).min(DT_MAX_US) as f32 * 1e-6,
-            None => 0.0,
         };
         self.t_prev_us = Some(nav.t_us);
         let thrust_n = match (thrust_n, alt) {
@@ -316,11 +475,23 @@ impl Controller for CascadedPid {
         self.t_prev_us = None;
         self.alt_i = 0.0;
         self.alt_active = false;
+        self.xy_i = [0.0; 2];
+        self.pos_active = false;
+        self.q_sp_pos = [0.0; 4];
+    }
+
+    fn set_speed_limit_xy(&mut self, ms: f32) {
+        self.speed_xy_ms = ms;
+    }
+
+    fn attitude_setpoint(&self) -> [f32; 4] {
+        self.q_sp_pos
     }
 }
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use crate::gnc::Valid;
 
@@ -402,14 +573,12 @@ mod tests {
         assert_eq!(pid.axes[0].i, 0.0);
         assert_eq!(step(&mut pid, 1.0, false), 0.0);
         // A setpoint the controller does not track.
-        let position = Setpoint::Position {
+        let waypoint = Setpoint::Waypoint {
             position_m: [0.0; 3],
-            velocity_ms: [0.0; 3],
             heading_rad: 0.0,
-            heading_rate_rads: 0.0,
         };
         assert_eq!(
-            pid.update(&nav(t), &position, &limited(false)),
+            pid.update(&nav(t), &waypoint, &limited(false)),
             Err(Refused)
         );
     }
@@ -668,5 +837,329 @@ mod tests {
             pid.update(&alt_nav(k * PERIOD_US, 0.0, 0.0), &tilted(0.0), &limited(false)).unwrap();
         }
         assert!(pid.axes[0].i > 0.0);
+    }
+    // ---- Position hold: the horizontal loop (Amendment P, P2; N2 to N5) ----
+
+    /// The linear rotor drag of the real vehicle, N/(m/s) (Amendment P-1: "drag 0.197"; the simulator card's air axis).
+    const DRAG_N_PER_MS: f32 = 0.197;
+
+    /// All fields valid, level at heading `yaw`, at `p` (NED, m) with velocity `v` (NED, m/s).
+    fn pnav(t_us: u64, p: [f32; 3], v: [f32; 3], yaw: f32) -> NavState {
+        let mut n = nav(t_us);
+        n.attitude = [libm::cosf(yaw / 2.0), 0.0, 0.0, libm::sinf(yaw / 2.0)];
+        n.position_m = p;
+        n.velocity_ms = v;
+        n.valid = Valid {
+            tilt: true,
+            heading: true,
+            rates: true,
+            velocity_ne: true,
+            velocity_d: true,
+            position_ne: true,
+            position_d: true,
+        };
+        n
+    }
+
+    fn pos(target: [f32; 3], v_ff: [f32; 3], heading_rad: f32) -> Setpoint {
+        Setpoint::Position {
+            position_m: target,
+            velocity_ms: v_ff,
+            heading_rad,
+            heading_rate_rads: 0.0,
+        }
+    }
+
+    /// The horizontal acceleration (north, east) m/s^2 of a point mass held at the weight's vertical share by an
+    /// attitude exactly `q`: g tan(tilt) along the thrust vector's horizontal part, from R(q)'s third column only.
+    fn accel_ne(q: [f32; 4]) -> [f32; 2] {
+        let [w, x, y, z] = q;
+        let col = [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), w * w - x * x - y * y + z * z];
+        [-GRAVITY_MSS * col[0] / col[2], -GRAVITY_MSS * col[1] / col[2]]
+    }
+
+    fn tilt_of(q: [f32; 4]) -> f32 {
+        let [w, x, y, z] = q;
+        libm::acosf((w * w - x * x - y * y + z * z).min(1.0))
+    }
+
+    /// A point mass on a plane under the controller: ideal attitude (the vehicle takes the attitude setpoint at once),
+    /// the vertical axis held, plus `extra(v)` the acceleration of the air on the mass. Starts at `p0` at rest, heading
+    /// `yaw`, target the origin. Returns (position, the controller) after `seconds`.
+    fn point_mass(
+        pid: &mut CascadedPid,
+        yaw: f32,
+        p0: [f32; 2],
+        seconds: f32,
+        extra: impl Fn([f32; 2]) -> [f32; 2],
+    ) -> [f32; 2] {
+        let dt = PERIOD_US as f32 * 1e-6;
+        let (mut p, mut v) = (p0, [0.0_f32; 2]);
+        for k in 0..(seconds / dt) as u64 {
+            let t = k * PERIOD_US;
+            pid.update(
+                &pnav(t, [p[0], p[1], 0.0], [v[0], v[1], 0.0], yaw),
+                &pos([0.0; 3], [0.0; 3], yaw),
+                &limited(false),
+            )
+            .unwrap();
+            let a = accel_ne(pid.attitude_setpoint());
+            let e = extra(v);
+            v = [v[0] + (a[0] + e[0]) * dt, v[1] + (a[1] + e[1]) * dt];
+            p = [p[0] + v[0] * dt, p[1] + v[1] * dt];
+        }
+        p
+    }
+
+    const YAWS: [f32; 4] = [
+        0.0,
+        core::f32::consts::FRAC_PI_2,
+        core::f32::consts::PI,
+        3.0 * core::f32::consts::FRAC_PI_2,
+    ];
+
+    /// N5: the frames. The acceleration from the tilt is the commanded one for every heading and every direction of the
+    /// command, and the sign of each tilt component is the Angle stick's (forward lowers the nose, right lowers the right
+    /// side).
+    #[test]
+    fn n5_the_tilt_gives_the_commanded_acceleration_at_every_heading() {
+        let t = Tuning::DEFAULT;
+        // Commands as velocity feed-forward at the heading's frame, with the vehicle at rest at the target: a = velxy_p v_ff
+        // (within the limits), in NED.
+        let cmds: [[f32; 2]; 4] = [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]];
+        for yaw in YAWS {
+            for c in cmds {
+                let mut pid = CascadedPid::new(&t);
+                pid.update(&pnav(0, [0.0; 3], [0.0; 3], yaw), &pos([0.0; 3], [c[0], c[1], 0.0], yaw), &limited(false)).unwrap();
+                let a = accel_ne(pid.attitude_setpoint());
+                let want = [t.psc_velxy_p * c[0], t.psc_velxy_p * c[1]];
+                near_f(a[0], want[0], 1e-3);
+                near_f(a[1], want[1], 1e-3);
+                // The body-frame tilt: the heading-frame command Rz(-yaw) c.
+                let (s, co) = (libm::sinf(yaw), libm::cosf(yaw));
+                let (fwd, right) = (co * c[0] + s * c[1], -s * c[0] + co * c[1]);
+                let q = pid.attitude_setpoint();
+                let body = down_in_body(q);
+                // The down vector in the body: x > 0 is the nose down (forward), y > 0 the right side down.
+                if libm::fabsf(fwd) > 0.5 {
+                    assert!(body[0] * fwd > 0.0, "yaw {yaw} cmd {c:?}: nose {body:?}");
+                }
+                if libm::fabsf(right) > 0.5 {
+                    assert!(body[1] * right > 0.0, "yaw {yaw} cmd {c:?}: right side {body:?}");
+                }
+            }
+        }
+    }
+
+    /// N5: a point mass 2 m from the target at each of the four headings converges; with the rotation's sign flipped it
+    /// diverges at 90 and 270 degrees.
+    #[test]
+    fn n5_a_point_mass_converges_from_2_m_at_every_heading_and_the_flipped_rotation_diverges() {
+        let t = Tuning::DEFAULT;
+        let norm = |p: [f32; 2]| libm::sqrtf(p[0] * p[0] + p[1] * p[1]);
+        for (n, yaw) in YAWS.into_iter().enumerate() {
+            let mut pid = CascadedPid::new(&t);
+            let end = point_mass(&mut pid, yaw, [1.2, 1.6], 40.0, |_| [0.0; 2]);
+            std::println!("yaw {} deg: 2 m -> {:.5} m after 40 s", n * 90, norm(end));
+            assert!(norm(end) < 0.01, "yaw {yaw}: {end:?}");
+            // Control.
+            let mut flipped = CascadedPid::new(&t);
+            flipped.rotation_flipped = true;
+            let end = point_mass(&mut flipped, yaw, [1.2, 1.6], 10.0, |_| [0.0; 2]);
+            std::println!("  control, rotation sign flipped: {:.3} m after 10 s", norm(end));
+            if n % 2 == 1 {
+                assert!(norm(end) > 2.0, "flipped at yaw {yaw} should diverge: {end:?}");
+            } else {
+                assert!(norm(end) < 2.0, "flipped at yaw {yaw} is the same rotation: {end:?}");
+            }
+        }
+    }
+
+    /// N5 (Addendum P-1): a point mass with the vehicle's linear drag in a steady wind. Without the integrator the offset
+    /// settles at a_w / (posxy_p velxy_p), a_w the drag acceleration at rest in the wind; with it the offset goes to 0.
+    #[test]
+    fn n5_p1_drag_and_steady_wind_the_offset_without_the_integrator_and_zero_with_it() {
+        let t = Tuning::DEFAULT;
+        let c = DRAG_N_PER_MS / MASS;
+        let norm = |p: [f32; 2]| libm::sqrtf(p[0] * p[0] + p[1] * p[1]);
+        for (n, yaw) in YAWS.into_iter().enumerate() {
+            for wind in [[5.0_f32, 0.0], [0.0, 5.0]] {
+                let drag = |v: [f32; 2]| [-c * (v[0] - wind[0]), -c * (v[1] - wind[1])];
+                let a_w = c * norm(wind);
+                let want = a_w / (t.psc_posxy_p * t.psc_velxy_p);
+                let mut no_i = t;
+                no_i.psc_velxy_i = 0.0;
+                let mut pid = CascadedPid::new(&no_i);
+                let end = point_mass(&mut pid, yaw, [0.0; 2], 80.0, drag);
+                std::println!("yaw {} wind {wind:?}: no integrator offset {:.4} m (a_w/(kp kv) = {want:.4}); ", n * 90, norm(end));
+                near_f(norm(end), want, 0.02 * want);
+                // The offset is along the wind (downwind).
+                assert!(end[0] * wind[0] + end[1] * wind[1] > 0.0);
+                let mut pid = CascadedPid::new(&t);
+                let end = point_mass(&mut pid, yaw, [0.0; 2], 200.0, drag);
+                std::println!("  with the integrator: {:.5} m after 200 s", norm(end));
+                assert!(norm(end) < 0.01, "{end:?}");
+            }
+        }
+    }
+
+    fn near_f(a: f32, b: f32, tol: f32) {
+        assert!((a - b).abs() <= tol, "{a} vs {b} (tol {tol})");
+    }
+
+    /// N4: the tilt never exceeds `angle_max_rad`, the horizontal integrator never exceeds `a_max`, and it does not grow
+    /// while the acceleration is clipped (control: the rule off lets it grow to the limit).
+    #[test]
+    fn n4_tilt_integrator_limit_and_anti_windup() {
+        let t = Tuning::DEFAULT;
+        let a_max = GRAVITY_MSS * libm::tanf(t.angle_max_rad);
+        // A far target at rest: v_sp at the speed limit, a = velxy_p x speed > a_max, clipped at every step.
+        let run = |off: bool| {
+            let mut pid = CascadedPid::new(&t);
+            pid.antiwindup_off = off;
+            let mut worst_tilt: f32 = 0.0;
+            let mut worst_i: f32 = 0.0;
+            for k in 0..16_000u64 {
+                pid.update(&pnav(k * PERIOD_US, [0.0; 3], [0.0; 3], 0.4), &pos([100.0, -60.0, 0.0], [0.0; 3], 0.4), &limited(false)).unwrap();
+                worst_tilt = worst_tilt.max(tilt_of(pid.attitude_setpoint()));
+                let [i_n, i_e] = pid.horizontal_integrator();
+                worst_i = worst_i.max(libm::sqrtf(i_n * i_n + i_e * i_e));
+            }
+            (worst_tilt, worst_i)
+        };
+        let (tilt, i) = run(false);
+        std::println!("clipped for 20 s: peak tilt {:.4} deg (limit {:.4}), peak |I| {i:.4} (limit {a_max:.4})", tilt.to_degrees(), t.angle_max_rad.to_degrees());
+        assert!(tilt <= t.angle_max_rad + 1e-5);
+        assert_eq!(i, 0.0, "the integrator did not grow while clipped");
+        // Control: the rule off. The integrator grows, and stops at the limit.
+        let (tilt, i) = run(true);
+        std::println!("control, anti-windup off: peak tilt {:.4} deg, peak |I| {i:.4}", tilt.to_degrees());
+        assert!(tilt <= t.angle_max_rad + 1e-5);
+        assert!(i > 0.5 * a_max && i <= a_max * (1.0 + 1e-5), "{i}");
+        // It may shrink while clipped: I along north at 4 m/s^2, the vehicle 10 m/s too fast the other way round.
+        let mut pid = CascadedPid::new(&t);
+        pid.update(&pnav(0, [0.0; 3], [10.0, 0.0, 0.0], 0.0), &pos([0.0; 3], [0.0; 3], 0.0), &limited(false)).unwrap();
+        pid.xy_i = [4.0, 0.0];
+        let mut last = 4.0;
+        for k in 1..200u64 {
+            pid.update(&pnav(k * PERIOD_US, [0.0; 3], [10.0, 0.0, 0.0], 0.0), &pos([0.0; 3], [0.0; 3], 0.0), &limited(false)).unwrap();
+            let i = pid.horizontal_integrator()[0];
+            assert!(i < last, "step {k}: {i} did not shrink from {last}");
+            last = i;
+        }
+        // Random-ish grid: the tilt limit holds whatever the errors, at every heading.
+        let mut worst: f32 = 0.0;
+        for yaw in YAWS {
+            for (px, py) in [(50.0, 0.0), (0.0, -50.0), (-3.0, 4.0), (0.0, 0.0)] {
+                for (vx, vy) in [(0.0, 0.0), (15.0, 0.0), (-8.0, 12.0)] {
+                    let mut pid = CascadedPid::new(&t);
+                    for k in 0..3u64 {
+                        pid.update(&pnav(k * PERIOD_US, [0.0; 3], [vx, vy, 0.0], yaw), &pos([px, py, 0.0], [3.0, -2.0, 0.0], yaw), &limited(false)).unwrap();
+                        worst = worst.max(tilt_of(pid.attitude_setpoint()));
+                    }
+                }
+            }
+        }
+        assert!(worst <= t.angle_max_rad + 1e-5, "{worst}");
+    }
+
+    /// The velocity setpoint is limited to the speed in force (`set_speed_limit_xy`); with a far target at rest the
+    /// acceleration is velxy_p x that speed (below the tilt limit for the slow values).
+    #[test]
+    fn the_velocity_setpoint_is_limited_to_the_speed_in_force() {
+        let t = Tuning::DEFAULT;
+        for speed in [3.0_f32, 3.1, t.pilot_speed_xy_ms] {
+            let mut pid = CascadedPid::new(&t);
+            pid.set_speed_limit_xy(speed);
+            pid.update(&pnav(0, [0.0; 3], [0.0; 3], 0.0), &pos([100.0, 0.0, 0.0], [0.0; 3], 0.0), &limited(false)).unwrap();
+            let a = accel_ne(pid.attitude_setpoint());
+            let want = (t.psc_velxy_p * speed).min(GRAVITY_MSS * libm::tanf(t.angle_max_rad));
+            near_f(a[0], want, 1e-3);
+        }
+    }
+
+    /// N2 (controller part): the first Position setpoint after any other one, or a reset, starts the horizontal integrator
+    /// at 0 and does not advance it in that step (control: the integrator kept at the entry).
+    #[test]
+    fn n2_the_entry_zeroes_the_horizontal_integrator_and_does_not_advance_it() {
+        let t = Tuning::DEFAULT;
+        for keep in [false, true] {
+            let mut pid = CascadedPid::new(&t);
+            pid.entry_keeps_integrator = keep;
+            // Wind it: a steady 0.5 m/s velocity error.
+            for k in 0..4_000u64 {
+                pid.update(&pnav(k * PERIOD_US, [0.0; 3], [0.0; 3], 0.0), &pos([0.0; 3], [0.5, 0.0, 0.0], 0.0), &limited(false)).unwrap();
+            }
+            let wound = pid.horizontal_integrator();
+            assert!(wound[0] > 0.5, "{wound:?}");
+            let others: [(&str, Setpoint); 2] = [
+                ("Altitude", alt(0.0, 0.0)),
+                ("Attitude", Setpoint::Attitude { attitude: [1.0, 0.0, 0.0, 0.0], heading_rate_rads: 0.0, thrust_n: MASS * GRAVITY_MSS }),
+            ];
+            for (name, other) in others {
+                // Leave Position for one step, then return with a velocity error (unclipped): the entry step does not advance.
+                let mut pid2 = pid;
+                pid2.update(&pnav(10_000_000, [0.0; 3], [0.0; 3], 0.0), &other, &limited(false)).unwrap();
+                pid2.update(&pnav(10_001_250, [0.0; 3], [0.0; 3], 0.0), &pos([0.0; 3], [1.0, 0.0, 0.0], 0.0), &limited(false)).unwrap();
+                if keep {
+                    assert_eq!(pid2.horizontal_integrator(), wound, "control, {name}: kept");
+                } else {
+                    assert_eq!(pid2.horizontal_integrator(), [0.0, 0.0], "{name}: entry");
+                    // The next step advances it.
+                    pid2.update(&pnav(10_002_500, [0.0; 3], [0.0; 3], 0.0), &pos([0.0; 3], [1.0, 0.0, 0.0], 0.0), &limited(false)).unwrap();
+                    assert!(pid2.horizontal_integrator()[0] > 0.0);
+                }
+            }
+            // reset() is an entry too.
+            if !keep {
+                pid.reset();
+                assert_eq!(pid.horizontal_integrator(), [0.0, 0.0]);
+                pid.update(&pnav(0, [0.0; 3], [0.0; 3], 0.0), &pos([0.0; 3], [1.0, 0.0, 0.0], 0.0), &limited(false)).unwrap();
+                assert_eq!(pid.horizontal_integrator(), [0.0, 0.0]);
+            }
+        }
+    }
+
+    /// N3 (controller part): changing between Altitude and Position, either way, leaves the vertical integrator and the
+    /// thrust bit-identical to staying in Altitude (control: the vertical integrator's live flag cleared in Position).
+    #[test]
+    fn n3_altitude_and_position_share_the_vertical_loop_bit_for_bit() {
+        let t = Tuning::DEFAULT;
+        let run = |clear: bool| {
+            let mut stay = CascadedPid::new(&t);
+            let mut change = CascadedPid::new(&t);
+            change.position_clears_alt_active = clear;
+            let mut same = true;
+            for k in 0..3_000u64 {
+                // Descending slowly at the held target: the vertical integrator winds.
+                let n = pnav(k * PERIOD_US, [0.0, 0.0, -2.0], [0.0, 0.0, 0.5], 0.3);
+                let a = stay.update(&n, &alt(-2.0, 0.1), &flags(false, false)).unwrap();
+                // Position in the blocks of 500 steps from step 500, Altitude otherwise.
+                let in_position = (k / 500) % 2 == 1;
+                let b = if in_position {
+                    change.update(&n, &pos([0.0, 0.0, -2.0], [0.0, 0.0, 0.1], 0.3), &flags(false, false)).unwrap()
+                } else {
+                    change.update(&n, &alt(-2.0, 0.1), &flags(false, false)).unwrap()
+                };
+                same &= a.thrust_n.to_bits() == b.thrust_n.to_bits()
+                    && stay.vertical_integrator().to_bits() == change.vertical_integrator().to_bits();
+            }
+            assert!(stay.vertical_integrator() < 0.0);
+            same
+        };
+        assert!(run(false), "the loops differ");
+        assert!(!run(true), "control: clearing the flag must make them differ");
+    }
+
+    /// The Position setpoint's collective is the vertical loop's, as in Altitude, and the ground rule still applies.
+    #[test]
+    fn position_with_a_far_target_height_asks_the_same_thrust_as_altitude() {
+        let t = Tuning::DEFAULT;
+        let mut a = CascadedPid::new(&t);
+        let mut p = CascadedPid::new(&t);
+        let n = pnav(0, [0.0, 0.0, 0.0], [0.0; 3], 0.0);
+        let ra = a.update(&n, &alt(1.0, 0.0), &limited(false)).unwrap();
+        let rp = p.update(&n, &pos([0.0, 0.0, 1.0], [0.0; 3], 0.0), &limited(false)).unwrap();
+        assert_eq!(ra.thrust_n.to_bits(), rp.thrust_n.to_bits());
     }
 }

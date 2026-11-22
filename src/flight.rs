@@ -18,10 +18,16 @@
 //! flight core's longest wait behind the log (README, Flight-core device loop). The `[STAT] NAV:` line of [`stat`]
 //! (packet E2) prints the estimators' state from [`NAV_STAT`].
 
+use core::cell::RefCell;
+
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::dflog;
 use fw_core::rc::RcSample;
 use fw_core::sample::{BaroReading, BaroSample, GnssReading, GnssSample, MagReading, MagSample};
-use fw_core::xcore::{LogProducer, LogRing, Seqlock, SeqlockWriter, TripleBuffer, TripleReader};
+use fw_core::xcore::{
+    LogProducer, LogRing, Seqlock, SeqlockWriter, TripleBuffer, TripleReader, TripleWriter,
+};
 use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
 use fw_flight::eskf::{Aiding, Eskf, EskfError, EskfStats, RING};
@@ -340,6 +346,46 @@ pub static FLIGHT_GNSS: TripleBuffer<GnssSample> = TripleBuffer::new(GnssSample 
     seq: 0,
 });
 
+/// Core 0 -> flight core: the stored `PILOT_SPEED_XY`, m/s (Amendment P, P9; one writer, core 0, through [`push_speed`];
+/// one reader, IMU1's [`Stepper`]). The flight code takes the value at every disarmed step, so the one in force at the
+/// arming step stays until the next disarm. No flash access on core 1: the value is a copy of the stored one.
+pub static FLIGHT_SPEED_XY: TripleBuffer<f32> = TripleBuffer::new(Tuning::DEFAULT.pilot_speed_xy_ms);
+
+/// Core 0's writer of [`FLIGHT_SPEED_XY`].
+static SPEED_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, f32>>>> =
+    Mutex::new(RefCell::new(None));
+
+/// Takes the writer of [`FLIGHT_SPEED_XY`] and pushes the stored value. Call once, on core 0, after `settings::boot` and
+/// before core 1 starts, so the flight core's first read has it.
+pub fn init_speed() {
+    let Some(writer) = FLIGHT_SPEED_XY.take_writer() else {
+        defmt::panic!("[FAIL] PILOT_SPEED_XY writer taken twice");
+    };
+    SPEED_WRITER.lock(|w| *w.borrow_mut() = Some(writer));
+    push_speed("boot");
+}
+
+/// Pushes the stored `PILOT_SPEED_XY` to the flight core (core 0; call with no store access in progress). A value that
+/// cannot be read or is not an `F32` is the table's default.
+pub fn push_speed(why: &str) {
+    let value = crate::store::with(|p| match p.get_named(fw_settings::flight::SPEED_XY) {
+        Some(mavlink_device::ParamValue::F32(v)) => Some(v),
+        _ => None,
+    })
+    .flatten()
+    .unwrap_or(Tuning::DEFAULT.pilot_speed_xy_ms);
+    SPEED_WRITER.lock(|w| {
+        if let Some(writer) = w.borrow_mut().as_mut() {
+            writer.write(value);
+        }
+    });
+    defmt::info!(
+        "[INFO] PILOT_SPEED_XY {=f32} m/s pushed to the flight core ({=str}); it takes effect at the next arming",
+        value,
+        why
+    );
+}
+
 /// The flight log ring's size (decision-flight-logging-20261119, section 3).
 pub const LOG_BYTES: usize = 16384;
 /// The flight records: producer IMU1's [`Stepper`] (core 1), consumer `logger`'s collector (core 0).
@@ -361,6 +407,7 @@ pub struct Stepper {
     baro: TripleReader<'static, BaroSample>,
     mag: TripleReader<'static, MagSample>,
     gnss: TripleReader<'static, GnssSample>,
+    speed: TripleReader<'static, f32>,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
     step: u32,
@@ -378,7 +425,8 @@ pub struct Stepper {
 
 impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
-    /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`] or [`FLIGHT_GNSS`] or the writer of [`NAV_STAT`] was taken already.
+    /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`] or [`FLIGHT_SPEED_XY`] or the writer of [`NAV_STAT`] was
+    /// taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     pub fn new(
         rc: Option<TripleReader<'static, RcSample>>,
@@ -397,6 +445,7 @@ impl Stepper {
             baro: FLIGHT_BARO.take_reader()?,
             mag: FLIGHT_MAG.take_reader()?,
             gnss: FLIGHT_GNSS.take_reader()?,
+            speed: FLIGHT_SPEED_XY.take_reader()?,
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
@@ -493,6 +542,10 @@ impl SampleSink for Stepper {
         let (baro, baro_fresh) = self.baro.read();
         let (mag, mag_fresh) = self.mag.read();
         let (gnss, gnss_fresh) = self.gnss.read();
+        let (speed, speed_fresh) = self.speed.read();
+        if speed_fresh {
+            self.flight.set_pilot_speed_xy(speed);
+        }
         let out = self.flight.step(&FlightInputs {
             sensors: Sensors {
                 imu1: *sample,
@@ -533,9 +586,9 @@ impl SampleSink for Stepper {
         {
             self.mode_log.done(&out);
         }
-        // SPN: the altitude target, with the step block's cadence (armed: every step; disarmed: every 8th), only while
-        // the setpoint is Altitude, so a flight in Angle logs none (F1).
-        if due.block && matches!(out.setpoint, Setpoint::Altitude { .. }) {
+        // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
+        // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).
+        if due.block && matches!(out.setpoint, Setpoint::Altitude { .. } | Setpoint::Position { .. }) {
             self.log
                 .push_with(dflog::SPN.length.into(), |b| encode_spn(&out, b));
         }

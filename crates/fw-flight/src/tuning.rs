@@ -11,6 +11,13 @@ pub fn full_thrust_n(pilot_thrust_max_g: f32) -> f32 {
     (pilot_thrust_max_g * (MASS * GRAVITY_MSS)).min(4.0 * K_F * MAX_ROTOR_SPEED * MAX_ROTOR_SPEED)
 }
 
+/// Smallest `pilot_speed_xy_ms` the flight code accepts from the parameter `PILOT_SPEED_XY`, m/s: PX4 MPC_VEL_MANUAL's
+/// range (Amendment P, P9, owner's answer 2026-11-22). The parameter table (`fw_settings::flight`) enforces the same range.
+pub const PILOT_SPEED_XY_MIN_MS: f32 = 3.0;
+
+/// Largest `pilot_speed_xy_ms` the flight code accepts, m/s (PX4 MPC_VEL_MANUAL's range, as above).
+pub const PILOT_SPEED_XY_MAX_MS: f32 = 20.0;
+
 /// Gains and limits of the flight code. Arrays are [roll, pitch, yaw].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tuning {
@@ -96,6 +103,23 @@ pub struct Tuning {
     /// Altitude hold: thrust factor clamp(gain x cos(tilt), 0, 1), which takes the thrust to 0 as the vehicle goes past
     /// 90 deg (Amendment F, F4: ArduPilot AC_AttitudeControl_Multi.cpp:398).
     pub thr_inverted_gain: f32,
+    /// Position hold (decision-nav-eskf-20261120, Amendment P, P9; the six numbers owner-approved 2026-11-22): position
+    /// error to velocity setpoint, 1/s. PX4 MPC_XY_P (ArduPilot 1.0).
+    pub psc_posxy_p: f32,
+    /// Velocity error to horizontal acceleration, (m/s^2)/(m/s). PX4 MPC_XY_VEL_P_ACC (ArduPilot 2.0).
+    pub psc_velxy_p: f32,
+    /// Velocity error integral to horizontal acceleration, (m/s^2)/m. PX4 MPC_XY_VEL_I_ACC (ArduPilot 1.0).
+    pub psc_velxy_i: f32,
+    /// Fastest horizontal speed the sticks ask for at full deflection, and the largest horizontal velocity setpoint,
+    /// m/s. The default of the runtime parameter `PILOT_SPEED_XY` (owner, 2026-11-22: a parameter, range 3 to 20): the
+    /// flight code takes the value in force at the arming step. ArduPilot POSCONTROL_SPEED_MS (AC_PosControl.h:25).
+    pub pilot_speed_xy_ms: f32,
+    /// Dead zone of the roll and pitch sticks in position hold, as a share of full travel on each side of the centre.
+    /// PX4 MAN_DEADZONE; equals `pilot_thr_dz`.
+    pub pilot_xy_dz: f32,
+    /// Position hold: with the sticks centred the position is captured once the ground speed is below this, m/s. PX4
+    /// MPC_HOLD_MAX_XY.
+    pub pilot_hold_speed_ms: f32,
     /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
     /// may use, us (section 10).
     pub nav_buffer_us: u64,
@@ -209,5 +233,11 @@ impl Tuning {
         nav_out_tau_pos_s: 0.25,
         nav_out_att_gain: 0.5,
         nav_out_int_gain: 0.1,
+        psc_posxy_p: 0.95,
+        psc_velxy_p: 1.8,
+        psc_velxy_i: 0.4,
+        pilot_speed_xy_ms: 5.0,
+        pilot_xy_dz: 0.10,
+        pilot_hold_speed_ms: 0.8,
     };
 }

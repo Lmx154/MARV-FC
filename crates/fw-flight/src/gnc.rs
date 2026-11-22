@@ -292,6 +292,15 @@ pub trait Controller {
     ) -> Result<ThrustTorque, Refused>;
     /// Clears integrators and filter memory. The step calls it on every step while the vehicle is disarmed.
     fn reset(&mut self);
+    /// The largest horizontal velocity setpoint of `Setpoint::Position`, m/s: the pilot's horizontal speed in force
+    /// (Amendment P, P2, P9). `Flight::step` calls it on every disarmed step, so the value cannot change in flight. The
+    /// default ignores it.
+    fn set_speed_limit_xy(&mut self, _ms: f32) {}
+    /// The attitude setpoint [w, x, y, z] the latest `update` made from a `Setpoint::Position` (the SETP record of kind 3,
+    /// Amendment P, P5); [0; 4] when that update was not one. The default has none.
+    fn attitude_setpoint(&self) -> [f32; 4] {
+        [0.0; 4]
+    }
 }
 
 /// Four DShot levels, 1 to 2000, indexed by DShot line: 0 front right, 1 rear right, 2 front left, 3 rear left

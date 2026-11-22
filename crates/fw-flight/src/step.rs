@@ -9,7 +9,7 @@ use crate::gnc::{
 };
 use crate::mahony::DT_MAX_US;
 use crate::quat;
-use crate::tuning::{Tuning, full_thrust_n};
+use crate::tuning::{PILOT_SPEED_XY_MAX_MS, PILOT_SPEED_XY_MIN_MS, Tuning, full_thrust_n};
 use fw_core::calib::GRAVITY_MSS;
 use fw_core::dflog::{self, FLIGHT_TYPES};
 use fw_core::esc::LINES;
@@ -39,8 +39,10 @@ pub struct StepOut {
     pub armed: bool,
     /// The mode the pilot selected with the switch on channel 6 (Angle until the first stick report).
     pub selected: Mode,
-    /// The mode in effect this step: Altitude if `selected` is Altitude or Position and the estimate covers what
-    /// `Setpoint::Altitude` needs, otherwise Angle (decision-nav-eskf-20261120, 5e, F1). MOT's `Mode`.
+    /// The mode in effect this step (decision-nav-eskf-20261120, 5e, F1; Amendment P, P3): Position if `selected` is
+    /// Position, the estimate covers what `Setpoint::Position` needs and the previous step's collective was at or above
+    /// the ground threshold; else Altitude if `selected` is Altitude or Position and the estimate covers what
+    /// `Setpoint::Altitude` needs; otherwise Angle. MOT's `Mode`.
     pub mode: Mode,
     /// The estimator's state.
     pub nav: NavState,
@@ -50,14 +52,17 @@ pub struct StepOut {
     pub demand: Result<ThrustTorque, Refused>,
     /// `None` when the demand was refused.
     pub allocation: Option<Allocation>,
+    /// The attitude setpoint [w, x, y, z] the controller made from a `Setpoint::Position` this step (SETP kind 3); [0; 4]
+    /// in every other case.
+    pub attitude_sp: [f32; 4],
 }
 
 /// The throttle stick's centre in altitude hold: the dead zone is this plus and minus `pilot_thr_dz`
 /// (ArduPilot `Attitude.cpp:97-112`, the centre fixed at half travel).
 const THROTTLE_CENTRE: f32 = 0.5;
 
-/// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle mode (decision-first-pair-20261119, section 4) and
-/// altitude hold (decision-nav-eskf-20261120, F1, F2).
+/// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle mode (decision-first-pair-20261119, section 4), altitude
+/// hold (decision-nav-eskf-20261120, F1, F2) and position hold (Amendment P, P1).
 struct StickShaper {
     /// The newest sticks; before the first report, throttle 0 and centred (4e).
     sticks: Sticks,
@@ -70,27 +75,45 @@ struct StickShaper {
     /// How far ahead of the vehicle the altitude target may run: seconds of the limit speed of its direction
     /// (`pilot_alt_lead_s`).
     pilot_alt_lead_s: f32,
-    /// The altitude target, m down (positive down); `None` outside Altitude. Captured at the first step whose
-    /// effective mode is Altitude.
+    /// Fastest horizontal speed at full stick, m/s: the runtime parameter `PILOT_SPEED_XY` as latched at the arming
+    /// step (`Flight::step`); `Tuning::pilot_speed_xy_ms` until the first latch.
+    pilot_speed_xy_ms: f32,
+    /// Dead zone of the roll and pitch sticks in Position.
+    pilot_xy_dz: f32,
+    /// Position hold captures the position below this ground speed with the sticks centred, m/s.
+    pilot_hold_speed_ms: f32,
+    /// The altitude target, m down (positive down); `None` outside Altitude and Position. Captured at the first step
+    /// whose effective mode is Altitude or Position, and kept across a change between the two.
     target_d: Option<f32>,
+    /// The position target, m north and east; `None` outside Position and while the sticks move the vehicle.
+    target_ne: Option<[f32; 2]>,
     /// The previous step's time, us; `None` before the first.
     t_prev_us: Option<u64>,
     /// Tests only: the lead cap is off.
     #[cfg(test)]
     lead_cap_off: bool,
+    /// Tests only: the position is captured at any speed.
+    #[cfg(test)]
+    capture_any_speed: bool,
 }
 
 impl StickShaper {
-    /// The setpoint for the effective `mode` at step time `t_us`. Acro and Position are declared only: Angle.
+    /// The setpoint for the effective `mode` at step time `t_us`. Acro is declared only: Angle. The targets live only
+    /// while their mode does: `target_ne` in Position, `target_d` in Altitude and Position.
     fn setpoint(&mut self, mode: Mode, nav: &NavState, t_us: u64) -> Setpoint {
         let dt_s = self
             .t_prev_us
             .map_or(0.0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US) as f32 * 1e-6);
         self.t_prev_us = Some(t_us);
         match mode {
-            Mode::Altitude => self.altitude(nav, dt_s),
-            Mode::Acro | Mode::Angle | Mode::Position => {
+            Mode::Position => self.position(nav, dt_s),
+            Mode::Altitude => {
+                self.target_ne = None;
+                self.altitude(nav, dt_s)
+            }
+            Mode::Acro | Mode::Angle => {
                 self.target_d = None;
+                self.target_ne = None;
                 self.angle(nav)
             }
         }
@@ -118,6 +141,19 @@ impl StickShaper {
     /// within `pilot_alt_lead_s` of the limit speed from it. Down is positive.
     fn altitude(&mut self, nav: &NavState, dt_s: f32) -> Setpoint {
         let (attitude, heading_rate_rads, _) = self.attitude_setpoint(nav);
+        let (down_m, velocity_d_ms) = self.height_target(nav, dt_s);
+        Setpoint::Altitude {
+            attitude,
+            heading_rate_rads,
+            down_m,
+            velocity_d_ms,
+        }
+    }
+
+    /// The vertical part of Altitude and of Position (P1: exactly the same): the target height, captured at the first
+    /// call after any other mode, then integrated at the throttle stick's rate within the lead cap; and that rate.
+    /// Down is positive.
+    fn height_target(&mut self, nav: &NavState, dt_s: f32) -> (f32, f32) {
         let d = nav.position_m[2];
         let v_ff = self.stick_rate_d(self.sticks.throttle);
         let target = match self.target_d {
@@ -136,11 +172,54 @@ impl StickShaper {
             }
         };
         self.target_d = Some(target);
-        Setpoint::Altitude {
-            attitude,
-            heading_rate_rads,
-            down_m: target,
-            velocity_d_ms: v_ff,
+        (target, v_ff)
+    }
+
+    /// One roll or pitch stick through the dead zone: 0 within `pilot_xy_dz`, else (|s| - dz) / (1 - dz) with the sign.
+    fn stick_xy(&self, s: f32) -> f32 {
+        let dz = self.pilot_xy_dz;
+        if libm::fabsf(s) <= dz {
+            0.0
+        } else {
+            libm::copysignf((libm::fabsf(s) - dz) / (1.0 - dz), s)
+        }
+    }
+
+    /// Position hold (P1; PX4 FlightTaskManualPosition.cpp:65-123): the sticks ask for a horizontal velocity in the
+    /// heading frame, the height as Altitude. With the sticks centred and the ground speed below `pilot_hold_speed_ms` the
+    /// position is captured and held; moving the sticks releases it. Unlocked, the position target is this step's
+    /// position, so only the velocity feed-forward acts. `psi` is the yaw of the estimate's twist, as Angle uses it.
+    fn position(&mut self, nav: &NavState, dt_s: f32) -> Setpoint {
+        let (down_m, velocity_d_ms) = self.height_target(nav, dt_s);
+        let [w, _, _, z] = nav.attitude;
+        let psi = 2.0 * libm::atan2f(z, w);
+        // Forward is the stick that tilts the nose down in Angle (pitch > 0), right the one that lowers the right side.
+        let (mut sx, mut sy) = (self.stick_xy(self.sticks.pitch), self.stick_xy(self.sticks.roll));
+        let n = libm::sqrtf(sx * sx + sy * sy);
+        if n > 1.0 {
+            sx /= n;
+            sy /= n;
+        }
+        let (s, c) = (libm::sinf(psi), libm::cosf(psi));
+        let v = self.pilot_speed_xy_ms;
+        let v_ff = [v * (c * sx - s * sy), v * (s * sx + c * sy)];
+        let [pn, pe, _] = nav.position_m;
+        let [vn, ve, _] = nav.velocity_ms;
+        let brake = sx == 0.0 && sy == 0.0;
+        let stopped = libm::sqrtf(vn * vn + ve * ve) < self.pilot_hold_speed_ms;
+        #[cfg(test)]
+        let stopped = stopped || self.capture_any_speed;
+        self.target_ne = match self.target_ne {
+            None if brake && stopped => Some([pn, pe]),
+            Some(_) if !brake => None,
+            other => other,
+        };
+        let [tn, te] = self.target_ne.unwrap_or([pn, pe]);
+        Setpoint::Position {
+            position_m: [tn, te, down_m],
+            velocity_ms: [v_ff[0], v_ff[1], velocity_d_ms],
+            heading_rad: psi,
+            heading_rate_rads: self.sticks.yaw * self.pilot_y_rate_rads,
         }
     }
 
@@ -202,9 +281,26 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The mode the switch selects; the newest report's switch holds until the next report.
     selected: Mode,
     limited: Saturation,
+    /// The previous step's demand was refused or below the ground threshold, or the previous step was disarmed (P3); true at
+    /// construction.
+    grounded: bool,
+    /// The collective below which the vehicle counts as on the ground, N (`ground_thrust_g` x m g).
+    ground_thrust_n: f32,
+    /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
+    /// controller take it at every disarmed step, so the value at the arming step is the one in force until disarm.
+    speed_pending: f32,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
+    /// Tests only: the effective mode ignores the ground rule.
+    #[cfg(test)]
+    ignore_grounded: bool,
+    /// Tests only: the speed is latched at every step, armed or not.
+    #[cfg(test)]
+    latch_off: bool,
+    /// Tests only: a disarmed step does not set `grounded`.
+    #[cfg(test)]
+    disarmed_not_grounded_off: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -236,10 +332,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 pilot_speed_dn_ms: tuning.pilot_speed_dn_ms,
                 pilot_thr_dz: tuning.pilot_thr_dz,
                 pilot_alt_lead_s: tuning.pilot_alt_lead_s,
+                pilot_speed_xy_ms: tuning.pilot_speed_xy_ms,
+                pilot_xy_dz: tuning.pilot_xy_dz,
+                pilot_hold_speed_ms: tuning.pilot_hold_speed_ms,
                 target_d: None,
+                target_ne: None,
                 t_prev_us: None,
                 #[cfg(test)]
                 lead_cap_off: false,
+                #[cfg(test)]
+                capture_any_speed: false,
             },
             selected: Mode::Angle,
             limited: Saturation {
@@ -249,9 +351,30 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 thrust_low: false,
                 thrust_high: false,
             },
+            grounded: true,
+            ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
+            speed_pending: tuning.pilot_speed_xy_ms,
             #[cfg(test)]
             ignore_coverage: false,
+            #[cfg(test)]
+            ignore_grounded: false,
+            #[cfg(test)]
+            latch_off: false,
+            #[cfg(test)]
+            disarmed_not_grounded_off: false,
         }
+    }
+
+    /// The newest value of the runtime parameter `PILOT_SPEED_XY`, m/s (Amendment P, P9). Accepted only if finite and
+    /// within `PILOT_SPEED_XY_MIN_MS` to `PILOT_SPEED_XY_MAX_MS` (the parameter table enforces the same range; this is the
+    /// flight core's own check). It takes effect at the next arming: every disarmed step latches the newest value, no
+    /// armed step does. Returns whether it was accepted.
+    pub fn set_pilot_speed_xy(&mut self, ms: f32) -> bool {
+        let ok = (PILOT_SPEED_XY_MIN_MS..=PILOT_SPEED_XY_MAX_MS).contains(&ms);
+        if ok {
+            self.speed_pending = ms;
+        }
+        ok
     }
 
     /// The estimator, read only (the log of its own counters, packet E2).
@@ -281,6 +404,17 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// One call per IMU1 sample.
     pub fn step(&mut self, inputs: &FlightInputs) -> StepOut {
         let t_us = inputs.sensors.imu1.t_us;
+        // The pilot's horizontal speed is latched while disarmed (the gate's state the previous step left): the step that
+        // arms uses the newest value and no later step changes it until the next disarm.
+        #[cfg(test)]
+        let disarmed = !self.gate.armed() || self.latch_off;
+        #[cfg(not(test))]
+        let disarmed = !self.gate.armed();
+        let was_armed = self.gate.armed();
+        if disarmed {
+            self.shaper.pilot_speed_xy_ms = self.speed_pending;
+            self.controller.set_speed_limit_xy(self.speed_pending);
+        }
         if let Some(rc) = inputs.rc {
             self.shaper.sticks = rc.sticks;
             self.selected = match rc.switch6 {
@@ -311,13 +445,22 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if !self.gate.armed() {
             self.controller.reset();
         }
-        // The effective mode (5e, F1): Altitude if selected (Position until it is built counts as Altitude) and the
-        // estimate covers it, otherwise Angle. Evaluated every step; Acro cannot be selected.
+        // The effective mode (5e, F1; P3): Position if selected, the estimate covers it and the vehicle is not on the
+        // ground; else Altitude if selected (Position or Altitude) and the estimate covers it; otherwise Angle. Evaluated
+        // every step; Acro cannot be selected.
         #[cfg(test)]
-        let covered = self.ignore_coverage || altitude_covered(&nav.valid);
+        let (covered, position_ok) = (
+            self.ignore_coverage || altitude_covered(&nav.valid),
+            (self.ignore_coverage || position_covered(&nav.valid))
+                && (self.ignore_grounded || !self.grounded),
+        );
         #[cfg(not(test))]
-        let covered = altitude_covered(&nav.valid);
+        let (covered, position_ok) = (
+            altitude_covered(&nav.valid),
+            position_covered(&nav.valid) && !self.grounded,
+        );
         let mode = match self.selected {
+            Mode::Position if position_ok => Mode::Position,
             Mode::Altitude | Mode::Position if covered => Mode::Altitude,
             _ => Mode::Angle,
         };
@@ -326,6 +469,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.controller.update(&nav, &setpoint, &self.limited)
         } else {
             Err(Refused)
+        };
+        // Grounded after every disarmed step, so Position is never in effect on the arming step; from the first armed step on
+        // the collective rule clears it.
+        #[cfg(test)]
+        let was_armed = was_armed || self.disarmed_not_grounded_off;
+        self.grounded = !was_armed || demand.map_or(true, |d| d.thrust_n < self.ground_thrust_n);
+        let attitude_sp = if matches!(setpoint, Setpoint::Position { .. }) && demand.is_ok() {
+            self.controller.attitude_setpoint()
+        } else {
+            [0.0; 4]
         };
         let allocation = demand.ok().map(|d| self.allocator.allocate(&d));
         if let Some(a) = allocation {
@@ -343,6 +496,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             setpoint,
             demand,
             allocation,
+            attitude_sp,
         }
     }
 }
@@ -354,6 +508,17 @@ fn altitude_covered(valid: &Valid) -> bool {
         heading_rate_rads: 0.0,
         down_m: 0.0,
         velocity_d_ms: 0.0,
+    };
+    valid.covers(&probe.requires())
+}
+
+/// True when `valid` covers what a Position setpoint needs (`Setpoint::requires`, the single definition).
+fn position_covered(valid: &Valid) -> bool {
+    let probe = Setpoint::Position {
+        position_m: [0.0; 3],
+        velocity_ms: [0.0; 3],
+        heading_rad: 0.0,
+        heading_rate_rads: 0.0,
     };
     valid.covers(&probe.requires())
 }
@@ -409,7 +574,7 @@ pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
             thrust_n,
         } => (1, attitude, [0.0, 0.0, heading_rate_rads], thrust_n),
         Setpoint::Altitude { .. } => (2, [0.0; 4], [0.0; 3], 0.0),
-        Setpoint::Position { .. } => (3, [0.0; 4], [0.0; 3], 0.0),
+        Setpoint::Position { .. } => (3, out.attitude_sp, [0.0; 3], 0.0),
         Setpoint::Waypoint { .. } => (4, [0.0; 4], [0.0; 3], 0.0),
     };
     let demand = out.demand.unwrap_or(ThrustTorque {
@@ -507,10 +672,11 @@ pub fn encode_mode(out: &StepOut, buf: &mut [u8]) -> usize {
     dflog::encode_mode(buf, out.t_us, mode_code(out.selected), mode_code(out.mode))
 }
 
-/// SPN of this step at the start of `buf` (decision-nav-eskf-20261120, 8c, F1): only when the setpoint is Altitude,
-/// `TimeUS` = `out.t_us`, PD the target height (down positive), VD the climb-rate feed-forward (down positive); PN, PE,
-/// VN, VE and Hdg are 0 (Position will fill them). Returns the bytes written (39), or 0 (nothing written) if the
-/// setpoint is not Altitude or `buf` is too small.
+/// SPN of this step at the start of `buf` (decision-nav-eskf-20261120, 8c, F1; Amendment P, P5): only when the setpoint is
+/// Altitude or Position, `TimeUS` = `out.t_us`, PD the target height (down positive), VD the climb-rate feed-forward (down
+/// positive). In Altitude PN, PE, VN, VE and Hdg are 0; in Position PN, PE are the position target (this step's position
+/// while unlocked), VN, VE the velocity feed-forward and Hdg the heading of the setpoint. Returns the bytes written (39),
+/// or 0 (nothing written) if the setpoint is neither or `buf` is too small.
 pub fn encode_spn(out: &StepOut, buf: &mut [u8]) -> usize {
     match out.setpoint {
         Setpoint::Altitude {
@@ -524,6 +690,12 @@ pub fn encode_spn(out: &StepOut, buf: &mut [u8]) -> usize {
             [0.0, 0.0, velocity_d_ms],
             0.0,
         ),
+        Setpoint::Position {
+            position_m,
+            velocity_ms,
+            heading_rad,
+            ..
+        } => dflog::encode_spn(buf, out.t_us, position_m, velocity_ms, heading_rad),
         _ => 0,
     }
 }
@@ -1288,6 +1460,7 @@ mod tests {
                     thrust_high: true,
                 },
             }),
+            attitude_sp: [0.0; 4],
         };
         let mut buf = [0u8; 200];
         assert_eq!(encode_step(&out, &mut buf), 40 + 44 + 29 + 29);
@@ -1616,3 +1789,6 @@ mod tests {
 
 #[cfg(test)]
 mod althold_tests;
+
+#[cfg(test)]
+mod position_tests;

@@ -121,9 +121,14 @@ pub fn init(board: Rotation) {
 }
 
 /// The stored offsets of `mask`'s IMUs are pushed at the next supervisor tick (bits of other
-/// devices are ignored).
+/// devices are ignored, but device 0's: its Live parameters include `PILOT_SPEED_XY`, pushed now by
+/// `flight::push_speed`).
 pub fn raise_push(mask: u32) {
     PENDING.fetch_or(mask & ALL, Ordering::Relaxed);
+    // Device 0's Live parameters: `PILOT_SPEED_XY` goes to the flight core at once (the flight code latches it at arming).
+    if mask & 1 != 0 {
+        crate::flight::push_speed("parameters changed");
+    }
 }
 
 /// A calibration is running (HEARTBEAT `system_status` CALIBRATING).

@@ -1270,6 +1270,7 @@ async fn main(spawner: Spawner) {
     settings::boot();
     let (imu1_setup, imu2_setup, board) = imu_setups();
     calibration::init(board);
+    flight::init_speed();
     let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
     settings::fake_arm();

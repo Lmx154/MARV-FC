@@ -90,7 +90,7 @@ pub const CAL_TYPE_QUICK: i32 = 1;
 pub const CAL_COUNT: usize = 11;
 
 /// The index of [`CAL_TABLE`]'s first entry (`MAG_DIAGX`) in the firmware's table: the block before `GPS_GNSS`.
-pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT - crate::gnss::SET_COUNT;
+pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT - crate::gnss::SET_COUNT - crate::flight::COUNT;
 
 /// Appended to the firmware's table at indices 81 to 91 (decision-compass-cal-20261120, section 1).
 /// All `Live`; 81 to 89 are calibration results (`param reset-calibration` resets them with

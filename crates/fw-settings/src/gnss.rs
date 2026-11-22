@@ -330,7 +330,7 @@ mod tests {
     ];
     /// Index of `GPS_RATE_MS` and `GPS_GNSS` in the firmware's table.
     const RATE_AT: usize = 80;
-    const SET_AT: usize = crate::COUNT - 1;
+    const SET_AT: usize = crate::COUNT - 1 - crate::flight::COUNT;
 
     fn store() -> Params<{ crate::COUNT }> {
         let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
