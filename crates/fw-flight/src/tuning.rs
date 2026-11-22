@@ -120,6 +120,10 @@ pub struct Tuning {
     /// Position hold: with the sticks centred the position is captured once the ground speed is below this, m/s. PX4
     /// MPC_HOLD_MAX_XY.
     pub pilot_hold_speed_ms: f32,
+    /// Position hold's airborne latch (Amendment P, P3 replaced): the time the collective must stay below the ground
+    /// threshold, armed, before the vehicle counts as landed, us. ArduPilot LAND_DETECTOR_TRIGGER_SEC 1.0 s
+    /// (ArduCopter/config.h:359-360; land_detector.cpp:78, :151-156). Owner approval pending.
+    pub land_detect_us: u64,
     /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
     /// may use, us (section 10).
     pub nav_buffer_us: u64,
@@ -239,5 +243,6 @@ impl Tuning {
         pilot_speed_xy_ms: 5.0,
         pilot_xy_dz: 0.10,
         pilot_hold_speed_ms: 0.8,
+        land_detect_us: 1_000_000,
     };
 }

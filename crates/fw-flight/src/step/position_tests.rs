@@ -95,29 +95,25 @@ fn position_of(out: &StepOut) -> ([f32; 3], [f32; 3], f32) {
 /// A flight in the air in Position: two steps with the stick at the hover centre bring it to Position.
 fn airborne<'a>(cell: &'a Cell<NavState>, h: &'static Handshake, tuning: &Tuning, t: &mut u64) -> TestFlight<'a> {
     let mut f = flight(cell, h, tuning);
-    // These flights are disarmed: the disarmed ground rule is off so that the other rules can be tested.
-    f.disarmed_not_grounded_off = true;
+    // These flights are disarmed: the latch is forced so that the other rules can be tested.
+    f.airborne_forced = true;
     *t += DT_US;
     let out = step_sticks(&mut f, *t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-    assert_eq!(out.mode, Mode::Altitude, "grounded at construction");
+    assert_eq!(out.mode, Mode::Altitude, "not airborne at construction");
     *t += DT_US;
     let out = step_sticks(&mut f, *t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
     assert_eq!(out.mode, Mode::Position);
     f
 }
 
-// ---- N1: Position only when covered and not grounded ----
+// ---- N1: Position only when covered and airborne ----
 
-/// The failures found (empty when every part holds). `ignore_cov` and `ignore_gr` are the negative controls.
-fn n1_failures(ignore_cov: bool, ignore_gr: bool) -> Vec<&'static str> {
+/// The coverage part: each flag of `Setpoint::Position.requires()` dropped for one step, in a flight with the latch forced
+/// (disarmed steps, so the flags are the only variable). `ignore_cov` is the negative control. Returns the failures.
+fn n1_failures(ignore_cov: bool) -> Vec<&'static str> {
     static H0: Handshake = Handshake::new();
     static H1: Handshake = Handshake::new();
-    static H2: Handshake = Handshake::new();
-    let h = match (ignore_cov, ignore_gr) {
-        (false, false) => &H0,
-        (true, _) => &H1,
-        (_, true) => &H2,
-    };
+    let h = if ignore_cov { &H1 } else { &H0 };
     let tuning = Tuning::DEFAULT;
     let mut bad = Vec::new();
     let mut check = |ok: bool, what: &'static str| {
@@ -125,124 +121,272 @@ fn n1_failures(ignore_cov: bool, ignore_gr: bool) -> Vec<&'static str> {
             bad.push(what);
         }
     };
-    // Each flag of Setpoint::Position.requires() (gnc.rs) dropped for one step: the effective mode is Altitude if that
-    // still covers Altitude, else Angle; and whether Position returns the very step the flag does (the last field: when
-    // the step in between still had an Ok demand at the weight; with tilt or rates false even Angle is refused, which
-    // grounds the next step).
-    let flags: [(&str, Valid, Mode, bool); 7] = [
-        ("tilt", Valid { tilt: false, ..POSITION }, Mode::Angle, false),
-        ("heading", Valid { heading: false, ..POSITION }, Mode::Altitude, true),
-        ("rates", Valid { rates: false, ..POSITION }, Mode::Angle, false),
-        ("velocity_ne", Valid { velocity_ne: false, ..POSITION }, Mode::Altitude, true),
-        ("velocity_d", Valid { velocity_d: false, ..POSITION }, Mode::Angle, true),
-        ("position_ne", Valid { position_ne: false, ..POSITION }, Mode::Altitude, true),
-        ("position_d", Valid { position_d: false, ..POSITION }, Mode::Angle, true),
+    // (flag, valid, fallback of the ladder, whether Position returns the very step the flag does: when the step between
+    // had an Ok demand at the weight; with tilt or rates false even Angle is refused, which clears no latch but counts as a
+    // low step, and Position returns at once since the latch is still set).
+    let flags: [(&str, Valid, Mode); 7] = [
+        ("tilt", Valid { tilt: false, ..POSITION }, Mode::Angle),
+        ("heading", Valid { heading: false, ..POSITION }, Mode::Altitude),
+        ("rates", Valid { rates: false, ..POSITION }, Mode::Angle),
+        ("velocity_ne", Valid { velocity_ne: false, ..POSITION }, Mode::Altitude),
+        ("velocity_d", Valid { velocity_d: false, ..POSITION }, Mode::Angle),
+        ("position_ne", Valid { position_ne: false, ..POSITION }, Mode::Altitude),
+        ("position_d", Valid { position_d: false, ..POSITION }, Mode::Angle),
     ];
     let mut t = 1_000;
     let cell = Cell::new(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
     let mut f = flight(&cell, h, &tuning);
     f.ignore_coverage = ignore_cov;
-    f.ignore_grounded = ignore_gr;
-    f.disarmed_not_grounded_off = true;
-    // Grounded at construction: the first step is Altitude, the second Position (the first collective is the weight).
+    f.airborne_forced = true;
     t += DT_US;
     let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-    check(ignore_gr || out.mode == Mode::Altitude, "Altitude at the first step: grounded at construction");
+    check(out.mode == Mode::Altitude, "Altitude at the first step: not airborne at construction");
     t += DT_US;
     let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-    check(out.mode == Mode::Position, "Position once covered and the collective is up");
+    check(out.mode == Mode::Position, "Position once covered and airborne");
     check(mot_mode_byte(&out) == 3, "MOT carries code 3");
-    for (name, valid, fallback, instant) in flags {
+    for (_, valid, fallback) in flags {
         cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, valid));
         t += DT_US;
         let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-        let _ = name;
         check(out.mode != Mode::Position, "Position never with a flag false");
         check(out.mode == fallback, "the fallback of the ladder");
         check(f.shaper.target_ne.is_none(), "no position target outside Position");
-        // The flag returns.
         cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
         t += DT_US;
         let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-        if instant {
-            // The Altitude demand was Ok at the weight: not grounded, Position the very step the flag returns.
-            check(out.mode == Mode::Position, "Position the step the flag returns when the step between had an Ok demand");
-        } else {
-            // A refused or uncalled step grounds it: Altitude first, Position one step later.
-            check(out.mode == Mode::Altitude, "Altitude the step the other flags return");
-            t += DT_US;
-            let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-            check(out.mode == Mode::Position, "Position one step later");
-        }
-        if f.shaper.target_ne.is_none() {
-            // Re-captured at once: the sticks are centred and the vehicle is at rest.
-            t += DT_US;
-            step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-        }
-        check(f.shaper.target_ne.is_some(), "a fresh capture on return");
-    }
-    // Grounded: the stick to the floor in Position (the collective falls to 0), then Altitude from the next step.
-    t += DT_US;
-    let out = step_sticks(&mut f, t, false, [0.0, 0.0, 0.0, 0.0], Switch3::High);
-    check(out.mode == Mode::Position, "Position in the step that slams the stick");
-    check(out.demand.is_ok_and(|d| d.thrust_n < f.ground_thrust_n), "the collective is below the ground threshold");
-    for _ in 0..5 {
+        check(out.mode == Mode::Position, "Position the step the flag returns");
         t += DT_US;
-        let out = step_sticks(&mut f, t, false, [0.0, 0.0, 0.0, 0.0], Switch3::High);
-        check(out.mode == Mode::Altitude, "Altitude while the collective is below the threshold");
+        step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+        check(f.shaper.target_ne.is_some(), "a fresh capture on return");
     }
     bad
 }
 
 #[test]
-fn n1_position_only_when_covered_and_not_grounded() {
-    let bad = n1_failures(false, false);
+fn n1_position_only_when_covered() {
+    let bad = n1_failures(false);
     assert!(bad.is_empty(), "{bad:?}");
 }
 
 /// Negative control: coverage ignored.
 #[test]
 fn n1_control_ignoring_coverage_fails() {
-    let bad = n1_failures(true, false);
+    let bad = n1_failures(true);
     std::println!("coverage ignored: {bad:?}");
     assert!(bad.contains(&"Position never with a flag false"));
 }
 
-/// Negative control: the ground rule ignored.
-#[test]
-fn n1_control_ignoring_the_ground_rule_fails() {
-    let bad = n1_failures(false, true);
-    std::println!("ground rule ignored: {bad:?}");
-    assert!(bad.contains(&"Altitude while the collective is below the threshold"));
+/// The latch table (P3 replaced) on an armed flight in Position, estimate covered, with `timer_off` the control.
+/// Returns the failures.
+fn n1_latch_failures(timer_off: bool, ignore_cov: bool) -> Vec<&'static str> {
+    let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
+    h.set_permit(true);
+    let tuning = Tuning::DEFAULT;
+    let land = tuning.land_detect_us / DT_US; // low steps that reach land_detect_us: 800
+    assert_eq!(land * DT_US, tuning.land_detect_us);
+    let mut bad = Vec::new();
+    let mut check = |ok: bool, what: &'static str| {
+        if !ok {
+            bad.push(what);
+        }
+    };
+    let cell = Cell::new(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
+    let mut f = flight(&cell, h, &tuning);
+    f.timer_off = timer_off;
+    f.ignore_coverage = ignore_cov;
+    let mut t = 1_000;
+    // The collective is made by the climb rate the fake estimate reports (the stick is at the hover centre): descending at
+    // 1 m/s asks for m (g + 4) (high), climbing at 1.5 m/s for m (g - 6) (low, below the ground threshold).
+    let follow = |cell: &Cell<NavState>, high: bool| {
+        cell.set(pnav(0.0, 0.0, -2.0, [0.0, 0.0, if high { 1.0 } else { -1.5 }], 0.0, POSITION));
+    };
+    let mut refused = false;
+    check(!f.airborne, "false at construction");
+    // Disarmed: false.
+    for _ in 0..3 {
+        t += DT_US;
+        step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+        check(!f.airborne, "false while disarmed, even with the collective up");
+    }
+    arm(&mut f, &mut t, Switch3::High, 0.0);
+    // Armed, low since arming for 30 s: false, never Position.
+    for _ in 0..(30_000_000 / DT_US) {
+        t += DT_US;
+        let out = { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+        if f.airborne || out.mode == Mode::Position {
+            check(false, "armed and low since arming: false for 30 s");
+            break;
+        }
+    }
+    // The first step at the threshold: true after it, Position the step after.
+    t += DT_US;
+    let out = { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    check(out.mode != Mode::Position && f.airborne, "true after the step that first reaches the threshold");
+    t += DT_US;
+    let out = { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    check(out.mode == Mode::Position, "Position the step after");
+    // One step short of land_detect_us low: still true; one high step restarts the count.
+    for round in 0..2 {
+        for k in 1..land {
+            t += DT_US;
+            let out = { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+            if !(f.airborne && out.mode == Mode::Position) {
+                check(false, "true (Position) one step short of land_detect_us");
+                let _ = (round, k);
+                break;
+            }
+        }
+        if round == 0 {
+            t += DT_US;
+            { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+        }
+    }
+    // The step that reaches land_detect_us clears it; the next step is Altitude.
+    t += DT_US;
+    { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    check(!f.airborne, "false at land_detect_us");
+    t += DT_US;
+    let out = { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    check(out.mode == Mode::Altitude, "Altitude after the latch clears");
+    // Take off again, then a refused demand counts as low.
+    for _ in 0..3 {
+        t += DT_US;
+        { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    }
+    check(f.airborne, "airborne again");
+    cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, Valid::NONE));
+    refused = true;
+    for _ in 0..land {
+        t += DT_US;
+        let out = { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+        check(out.mode != Mode::Position, "never Position while the estimate does not cover it");
+    }
+    check(!f.airborne, "a refused demand counts as low");
+    // Disarm: false at once.
+    refused = false;
+    cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
+    for _ in 0..3 {
+        t += DT_US;
+        { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    }
+    t += DT_US;
+    let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+    check(!out.armed && !f.airborne && f.low_us == 0, "false and the timer 0 after a disarm");
+    bad
 }
 
-// ---- N6: armed in Position on the ground ----
+#[test]
+fn n1_the_airborne_latch_table() {
+    let bad = n1_latch_failures(false, false);
+    assert!(bad.is_empty(), "{bad:?}");
+}
 
-/// Armed in Position at rest on the ground for 30 s with the estimate wandering by 0.5 m: Altitude all along, the horizontal
-/// integrator 0; returns (steps in Position, the largest horizontal integrator).
-fn n6_run(ignore_gr: bool) -> (u32, f32) {
+/// Negative control: the timer ignored.
+#[test]
+fn n1_control_ignoring_the_timer_fails() {
+    let bad = n1_latch_failures(true, false);
+    std::println!("timer ignored: {bad:?}");
+    assert!(bad.contains(&"false at land_detect_us"));
+}
+
+/// Negative control: coverage ignored (the refused demand is not refused any more, so it is not low).
+#[test]
+fn n1_control_ignoring_coverage_fails_the_latch_table() {
+    let bad = n1_latch_failures(false, true);
+    std::println!("coverage ignored: {bad:?}");
+    assert!(!bad.is_empty());
+}
+
+// ---- N1b: no blip ----
+
+/// Armed in Position with a velocity error that winds the horizontal integrator; a forced 0.5 s dip of the collective (the
+/// throttle stick to the floor). Compares every step with a twin that has no dip: the mode, the position target and
+/// the integrator must be bit-identical. Returns whether they are, and the steps of the dip in Position.
+fn n1b_run(per_step_rule: bool) -> (bool, u32) {
+    let mk = |per_step: bool| {
+        let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
+        h.set_permit(true);
+        let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(pnav(
+            0.0, 0.0, -2.0, [0.3, 0.0, 0.0], 0.0, POSITION,
+        ))));
+        let mut f = flight(cell, h, &Tuning::DEFAULT);
+        f.per_step_rule = per_step;
+        f
+    };
+    // `a` has the dip, the twin `b` has the stick at the hover throughout.
+    let (mut a, mut b) = (mk(per_step_rule), mk(false));
+    let (mut ta, mut tb) = (1_000, 1_000);
+    arm(&mut a, &mut ta, Switch3::High, 0.0);
+    arm(&mut b, &mut tb, Switch3::High, 0.0);
+    let (mut same, mut dip_in_position) = (true, 0);
+    let dip = 400; // 0.5 s
+    for k in 0..(200 + dip + 200) {
+        let throttle = if (200..200 + dip).contains(&k) { 0.0 } else { HOVER };
+        ta += DT_US;
+        tb += DT_US;
+        let oa = step_sticks(&mut a, ta, true, [0.0, 0.0, throttle, 0.0], Switch3::High);
+        let ob = step_sticks(&mut b, tb, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+        if k >= 202 && oa.mode == Mode::Position && throttle == 0.0 {
+            dip_in_position += 1;
+        }
+        let (ia, ib) = (a.controller.horizontal_integrator(), b.controller.horizontal_integrator());
+        same &= oa.mode == ob.mode
+            && a.shaper.target_ne == b.shaper.target_ne
+            && ia[0].to_bits() == ib[0].to_bits()
+            && ia[1].to_bits() == ib[1].to_bits();
+        if k == 199 {
+            // The integrator has wound by the time the dip starts.
+            assert!(ia[0].abs() > 0.01, "{ia:?}");
+        }
+    }
+    (same, dip_in_position)
+}
+
+#[test]
+fn n1b_a_half_second_dip_of_the_collective_keeps_position_target_and_integrator() {
+    let (same, in_position) = n1b_run(false);
+    std::println!("N1b: {in_position} dip steps in Position, identical to the twin: {same}");
+    assert!(same && in_position >= 390);
+}
+
+/// Negative control: the old per-step rule drops Position in the dip, with a fresh capture and the integrator at 0.
+#[test]
+fn n1b_control_the_old_per_step_rule_fails() {
+    let (same, _) = n1b_run(true);
+    assert!(!same);
+}
+
+// ---- N6: armed in Position on the ground, and the landing ----
+
+/// (a) Armed in Position at rest on the ground for 30 s with the estimate wandering by 0.5 m: Altitude, the horizontal
+/// integrator 0. (b) Then up (airborne), then low for `land_detect_us`: Altitude from the step after. (c) An aborted
+/// take-off (the collective up for 0.3 s, then the floor): Position for at most `land_detect_us` after the drop, then
+/// Altitude. Returns (a: Position steps, a: peak integrator, b: Position steps after the clear, c: Position steps in the
+/// low phase, c: steps until Altitude).
+fn n6_run(timer_off: bool) -> (u32, f32, u32, u32, u32) {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(pnav(0.0, 0.0, 0.0, [0.0; 3], 0.0, POSITION));
     let mut f = flight(&cell, h, &tuning);
-    f.ignore_grounded = ignore_gr;
+    f.timer_off = timer_off;
     let mut t = 1_000;
     arm(&mut f, &mut t, Switch3::High, 0.0);
     let (mut in_position, mut worst) = (0, 0.0_f32);
     let dt = DT_US as f32 * 1e-6;
-    for k in 0..(30.0 / dt) as u32 {
+    // The estimate wanders 0.5 m north-east.
+    // The collective comes from the climb rate the fake estimate reports (see `n1_latch_failures`).
+    let wander = |cell: &Cell<NavState>, k: u32, high: bool| {
         let s = k as f32 * dt;
-        cell.set(pnav(
-            0.5 * libm::sinf(0.9 * s),
-            0.5 * libm::cosf(0.7 * s),
-            0.0,
-            [0.0; 3],
-            0.0,
-            POSITION,
-        ));
+        let vd = if high { 1.0 } else { -1.5 };
+        cell.set(pnav(0.5 * libm::sinf(0.9 * s), 0.5 * libm::cosf(0.7 * s), -2.0, [0.0, 0.0, vd], 0.0, POSITION));
+    };
+    let a_steps = (30.0 / dt) as u32;
+    for k in 0..a_steps {
+        wander(&cell, k, false);
         t += DT_US;
-        let out = step_sticks(&mut f, t, true, [0.0, 0.0, 0.0, 0.0], Switch3::High);
+        let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         assert!(out.armed);
         if out.mode == Mode::Position {
             in_position += 1;
@@ -250,60 +394,102 @@ fn n6_run(ignore_gr: bool) -> (u32, f32) {
         let [i_n, i_e] = f.controller.horizontal_integrator();
         worst = worst.max(libm::sqrtf(i_n * i_n + i_e * i_e));
     }
-    (in_position, worst)
+    // (b) up, then low.
+    let land = (tuning.land_detect_us / DT_US) as u32;
+    for k in 0..400 {
+        wander(&cell, a_steps + k, true);
+        t += DT_US;
+        step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+    }
+    assert!(f.airborne);
+    let mut after_clear = 0;
+    for k in 0..(2 * land) {
+        wander(&cell, a_steps + 400 + k, false);
+        t += DT_US;
+        let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+        if k >= land + 1 && out.mode == Mode::Position {
+            after_clear += 1;
+        }
+    }
+    // (c) an aborted take-off: up 0.3 s, then the floor.
+    for k in 0..240 {
+        wander(&cell, k, true);
+        t += DT_US;
+        step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+    }
+    let (mut low_in_position, mut until_alt) = (0, 0);
+    for k in 0..(2 * land) {
+        wander(&cell, k, false);
+        t += DT_US;
+        let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+        if out.mode == Mode::Position {
+            low_in_position += 1;
+        } else if until_alt == 0 {
+            until_alt = k + 1;
+        }
+    }
+    (in_position, worst, after_clear, low_in_position, until_alt)
 }
 
 #[test]
-fn n6_armed_in_position_on_the_ground_30_s_with_a_wandering_estimate_is_altitude() {
-    let (in_position, worst) = n6_run(false);
-    std::println!("armed on the ground, 30 s: {in_position} Position steps, peak |I_xy| {worst}");
-    assert_eq!(in_position, 0);
-    assert_eq!(worst, 0.0);
+fn n6_on_the_ground_airborne_then_landing_and_an_aborted_take_off() {
+    let land = (Tuning::DEFAULT.land_detect_us / DT_US) as u32;
+    let (a_pos, a_i, b_after, c_pos, c_until) = n6_run(false);
+    std::println!("N6: (a) {a_pos} Position steps, peak |I| {a_i}; (b) {b_after} Position steps after the clear; (c) {c_pos} Position steps in the low phase, Altitude from step {c_until}");
+    assert_eq!((a_pos, a_i), (0, 0.0));
+    assert_eq!(b_after, 0);
+    assert!(c_pos <= land && c_until > 0 && c_until <= land + 1);
 }
 
-/// Negative control: the ground rule off puts it in Position and the integrator winds.
+/// Negative control: a latch that never clears fails (b) and (c).
 #[test]
-fn n6_control_without_the_ground_rule_it_is_position_and_the_integrator_winds() {
-    let (in_position, worst) = n6_run(true);
-    std::println!("ground rule off, 30 s: {in_position} Position steps, peak |I_xy| {worst} m/s^2");
-    assert!(in_position > 0 && worst > 0.1);
+fn n6_control_a_latch_that_never_clears_fails_the_landing() {
+    let (a_pos, _, b_after, c_pos, c_until) = n6_run(true);
+    std::println!("N6 control: (a) {a_pos}, (b) {b_after} Position steps after the clear, (c) {c_pos}, Altitude from {c_until}");
+    assert_eq!(a_pos, 0, "(a) does not depend on the timer");
+    assert!(b_after > 0, "(b) fails");
+    assert_eq!(c_until, 0, "(c) never reaches Altitude");
 }
 
 // ---- P3: never Position on the arming step ----
 
-/// Disarmed in Position with the collective up (so the collective rule alone would allow Position), then the arming step
-/// with the throttle at the floor. Returns the effective mode of the arming step.
-fn arming_step_mode(control: bool) -> Mode {
+/// Disarmed in Position with the collective up, then the arming step with the throttle at the floor; the latch is false
+/// after every disarmed step. `control`: the latch forced true at every step. Returns (the arming step's mode, the latch
+/// after each disarmed step, the first armed step's mode).
+fn arming_step(control: bool) -> (Mode, bool, Mode) {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
     let mut f = flight(&cell, h, &tuning);
-    f.disarmed_not_grounded_off = control;
+    f.airborne_forced = control;
     let mut t = 1_000;
-    let mut last = None;
+    let mut latch = false;
     for _ in 0..5 {
         t += DT_US;
-        last = Some(step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High));
+        let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
+        latch |= f.airborne;
+        assert!(out.demand.is_ok_and(|d| d.thrust_n >= f.ground_thrust_n));
     }
-    let last = last.unwrap();
-    // The last disarmed demand is above the threshold.
-    assert!(last.demand.is_ok_and(|d| d.thrust_n >= f.ground_thrust_n));
     t += DT_US;
     let out = step_sticks(&mut f, t, true, [0.0, 0.0, 0.0, 0.0], Switch3::High);
     assert!(out.armed, "the arming step");
-    out.mode
+    let arming = out.mode;
+    t += DT_US;
+    let first_armed = step_sticks(&mut f, t, true, [0.0, 0.0, 0.0, 0.0], Switch3::High).mode;
+    (arming, latch, first_armed)
 }
 
 #[test]
-fn position_is_never_in_effect_on_the_arming_step() {
-    assert_ne!(arming_step_mode(false), Mode::Position);
+fn the_first_armed_step_is_never_position_and_the_latch_is_false_after_each_disarm() {
+    let (arming, latch, first) = arming_step(false);
+    assert!(arming != Mode::Position && !latch && first != Mode::Position);
 }
 
-/// Negative control: with the disarmed rule off the arming step is Position.
+/// Negative control: with the latch forced the arming step is Position.
 #[test]
-fn control_without_the_disarmed_rule_the_arming_step_is_position() {
-    assert_eq!(arming_step_mode(true), Mode::Position);
+fn control_with_the_latch_forced_the_arming_step_is_position() {
+    assert_eq!(arming_step(true).0, Mode::Position);
 }
 
 // ---- N2: the capture ----

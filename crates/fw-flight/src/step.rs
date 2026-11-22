@@ -40,8 +40,7 @@ pub struct StepOut {
     /// The mode the pilot selected with the switch on channel 6 (Angle until the first stick report).
     pub selected: Mode,
     /// The mode in effect this step (decision-nav-eskf-20261120, 5e, F1; Amendment P, P3): Position if `selected` is
-    /// Position, the estimate covers what `Setpoint::Position` needs and the previous step's collective was at or above
-    /// the ground threshold; else Altitude if `selected` is Altitude or Position and the estimate covers what
+    /// Position, the estimate covers what `Setpoint::Position` needs and the airborne latch is set; else Altitude if `selected` is Altitude or Position and the estimate covers what
     /// `Setpoint::Altitude` needs; otherwise Angle. MOT's `Mode`.
     pub mode: Mode,
     /// The estimator's state.
@@ -281,9 +280,17 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The mode the switch selects; the newest report's switch holds until the next report.
     selected: Mode,
     limited: Saturation,
-    /// The previous step's demand was refused or below the ground threshold, or the previous step was disarmed (P3); true at
-    /// construction.
-    grounded: bool,
+    /// The airborne latch (Amendment P, P3 replaced): false at construction and after any disarmed step; true once an armed
+    /// step's collective is at or above the ground threshold; false again when the collective has stayed below it (or
+    /// refused) for `land_detect_us`. Position is in effect only while it is true.
+    airborne: bool,
+    /// How long the collective has been below the ground threshold (or refused) in the armed steps since it was last at or
+    /// above it, us.
+    low_us: u64,
+    /// The time the collective must stay low before the latch clears, us (`land_detect_us`).
+    land_detect_us: u64,
+    /// The previous step's time, us; `None` before the first.
+    last_us: Option<u64>,
     /// The collective below which the vehicle counts as on the ground, N (`ground_thrust_g` x m g).
     ground_thrust_n: f32,
     /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
@@ -292,15 +299,18 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
-    /// Tests only: the effective mode ignores the ground rule.
+    /// Tests only: the latch is set at the end of every step, armed or not.
     #[cfg(test)]
-    ignore_grounded: bool,
+    airborne_forced: bool,
+    /// Tests only: the latch never clears by the timer.
+    #[cfg(test)]
+    timer_off: bool,
+    /// Tests only: the old per-step rule: airborne is armed and not low, at every step.
+    #[cfg(test)]
+    per_step_rule: bool,
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
-    /// Tests only: a disarmed step does not set `grounded`.
-    #[cfg(test)]
-    disarmed_not_grounded_off: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -351,17 +361,22 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 thrust_low: false,
                 thrust_high: false,
             },
-            grounded: true,
+            airborne: false,
+            low_us: 0,
+            land_detect_us: tuning.land_detect_us,
+            last_us: None,
             ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
             speed_pending: tuning.pilot_speed_xy_ms,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
-            ignore_grounded: false,
+            airborne_forced: false,
+            #[cfg(test)]
+            timer_off: false,
+            #[cfg(test)]
+            per_step_rule: false,
             #[cfg(test)]
             latch_off: false,
-            #[cfg(test)]
-            disarmed_not_grounded_off: false,
         }
     }
 
@@ -410,7 +425,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let disarmed = !self.gate.armed() || self.latch_off;
         #[cfg(not(test))]
         let disarmed = !self.gate.armed();
-        let was_armed = self.gate.armed();
         if disarmed {
             self.shaper.pilot_speed_xy_ms = self.speed_pending;
             self.controller.set_speed_limit_xy(self.speed_pending);
@@ -445,19 +459,18 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if !self.gate.armed() {
             self.controller.reset();
         }
-        // The effective mode (5e, F1; P3): Position if selected, the estimate covers it and the vehicle is not on the
-        // ground; else Altitude if selected (Position or Altitude) and the estimate covers it; otherwise Angle. Evaluated
+        // The effective mode (5e, F1; P3 replaced): Position if selected, the estimate covers it and the vehicle is
+        // airborne (the latch); else Altitude if selected (Position or Altitude) and the estimate covers it; otherwise Angle. Evaluated
         // every step; Acro cannot be selected.
         #[cfg(test)]
         let (covered, position_ok) = (
             self.ignore_coverage || altitude_covered(&nav.valid),
-            (self.ignore_coverage || position_covered(&nav.valid))
-                && (self.ignore_grounded || !self.grounded),
+            (self.ignore_coverage || position_covered(&nav.valid)) && self.airborne,
         );
         #[cfg(not(test))]
         let (covered, position_ok) = (
             altitude_covered(&nav.valid),
-            position_covered(&nav.valid) && !self.grounded,
+            position_covered(&nav.valid) && self.airborne,
         );
         let mode = match self.selected {
             Mode::Position if position_ok => Mode::Position,
@@ -470,11 +483,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         } else {
             Err(Refused)
         };
-        // Grounded after every disarmed step, so Position is never in effect on the arming step; from the first armed step on
-        // the collective rule clears it.
-        #[cfg(test)]
-        let was_armed = was_armed || self.disarmed_not_grounded_off;
-        self.grounded = !was_armed || demand.map_or(true, |d| d.thrust_n < self.ground_thrust_n);
         let attitude_sp = if matches!(setpoint, Setpoint::Position { .. }) && demand.is_ok() {
             self.controller.attitude_setpoint()
         } else {
@@ -486,6 +494,36 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         }
         let levels = allocation.as_ref().map(|a| &a.levels);
         let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels);
+        // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
+        // arming step.
+        let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
+        self.last_us = Some(t_us);
+        let low = demand.map_or(true, |d| d.thrust_n < self.ground_thrust_n);
+        if !self.gate.armed() {
+            self.airborne = false;
+            self.low_us = 0;
+        } else if !low {
+            self.airborne = true;
+            self.low_us = 0;
+        } else {
+            self.low_us += dt_us;
+            #[cfg(test)]
+            let expired = self.low_us >= self.land_detect_us && !self.timer_off;
+            #[cfg(not(test))]
+            let expired = self.low_us >= self.land_detect_us;
+            if expired {
+                self.airborne = false;
+            }
+        }
+        #[cfg(test)]
+        {
+            if self.per_step_rule {
+                self.airborne = self.gate.armed() && !low;
+            }
+            if self.airborne_forced {
+                self.airborne = true;
+            }
+        }
         StepOut {
             t_us,
             motors,
