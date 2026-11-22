@@ -76,6 +76,9 @@
 //! - C1b's H row is the exact Jacobian of the innovation in use (review ruling 1, [`yaw_h`]); a compass sample whose
 //!   NED field has no usable horizontal component is a refusal.
 //! - Compass refusals (Ok 2) are all counted; one NKI record per nav_mag_fuse_us at most.
+//! - G6-B: armed, when every healthy compass sample has been gated for nav_aid_timeout_us the yaw is not reset: `global_off`
+//!   is set (NKI Src 8, Ok 0, Inn = the innovation, once), `started` goes false, GNSS epochs are counted in `gps_disarmed` and not
+//!   fused, the heading flag is false, until the disarm edge. Disarmed, the yaw is reset to the compass (C1c).
 //! - A barometer, compass or GNSS sample whose time (validity time, sample time, arrival time minus
 //!   nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us, is dropped and counted
 //!   ([`EskfStats::stale`]).
@@ -210,7 +213,7 @@ pub struct EskfStats {
     pub mag_gated: u32,
     /// Yaw alignments (Src 8, the first).
     pub yaw_aligns: u32,
-    /// Yaw resets after the timeout (Src 8).
+    /// Yaw resets after the timeout, disarmed only (Src 8, Ok 1); armed, G6-B sets `global_off` instead (Src 8, Ok 0).
     pub yaw_resets: u32,
     /// GNSS samples seen.
     pub gps_epochs: u32,
@@ -218,7 +221,7 @@ pub struct EskfStats {
     pub gps_unaccepted: u32,
     /// Accepted epochs before the yaw alignment (not fused).
     pub gps_prealign: u32,
-    /// Accepted epochs while disarmed (not fused, C-1).
+    /// Accepted epochs while disarmed (not fused, C-1), and, armed, after the G6-B latch (`global_off`) was set.
     pub gps_disarmed: u32,
     /// Epochs screened whole as a frozen fix (E1s).
     pub gps_e1s: u32,
@@ -404,6 +407,9 @@ pub struct EskfN<const R: usize> {
     gps_prev: Option<(u64, i32, i32)>,
     /// Horizontal aiding is running: an epoch after arming has reset the position (C-1).
     started: bool,
+    /// G6-B: while armed, every healthy compass sample was gated for nav_aid_timeout_us; GNSS is not fused and the heading
+    /// flag stays false until the disarm edge clears this.
+    global_off: bool,
     last_pos_us: u64,
     latest_ok: bool,
     /// Horizon time of the first gate rejection of each position axis in the current run of rejections.
@@ -580,6 +586,7 @@ impl<const R: usize> EskfN<R> {
             origin: None,
             gps_prev: None,
             started: false,
+            global_off: false,
             last_pos_us: 0,
             latest_ok: false,
             rej_since: [None; 2],
@@ -1096,8 +1103,18 @@ impl<const R: usize> EskfN<R> {
                 self.event(code::MAG_YAW, y, s, code::GATED);
             }
             Some(t0) if horizon.saturating_sub(t0) >= self.t.nav_aid_timeout_us => {
-                self.yaw_set(y);
-                self.stats.yaw_resets = self.stats.yaw_resets.wrapping_add(1);
+                if !self.armed {
+                    self.yaw_set(y);
+                    self.stats.yaw_resets = self.stats.yaw_resets.wrapping_add(1);
+                } else if !self.global_off {
+                    // G6-B: armed, a compass that disagrees for the timeout is not trusted over the filter and the filter
+                    // is not trusted over the compass: no yaw reset, GNSS off until the disarm edge.
+                    self.global_off = true;
+                    self.started = false;
+                    self.event(code::YAW_RESET, y, s, code::GATED);
+                } else {
+                    self.event(code::MAG_YAW, y, s, code::GATED);
+                }
             }
             Some(_) => self.event(code::MAG_YAW, y, s, code::GATED),
         }
@@ -1184,7 +1201,7 @@ impl<const R: usize> EskfN<R> {
             self.stats.gps_prealign = self.stats.gps_prealign.wrapping_add(1);
             return;
         }
-        if !self.armed {
+        if !self.armed || self.global_off {
             self.stats.gps_disarmed = self.stats.gps_disarmed.wrapping_add(1);
             return;
         }
@@ -1339,6 +1356,7 @@ impl<const R: usize> EskfN<R> {
         let heading = self.armed
             && al
             && self.yaw_aligned
+            && !self.global_off
             && sqrtf(self.p[ATT + 2][ATT + 2].max(0.0)) <= self.t.nav_heading_valid_sigma_rad
             && horizon.saturating_sub(self.last_mag_acc_us) < aid_to;
         let ne = self.armed
@@ -1518,6 +1536,7 @@ impl<const R: usize> Estimator for EskfN<R> {
             if !armed {
                 self.arm_f = None;
                 self.interval_armed = true;
+                self.global_off = false;
             }
             if armed {
                 self.fix_hist = Fifo::new();
@@ -2078,7 +2097,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn c8_a_compass_turned_90_deg_after_alignment_resets_the_yaw_at_the_timeout_with_the_biases() {
+    fn c8_a_compass_turned_90_deg_after_alignment_while_armed_latches_gnss_off_instead_of_resetting_the_yaw() {
         let t = Tuning::DEFAULT;
         // 10 s after the alignment the yaw sigma still grows by the re-initialised z gyro bias sigma (P0_bg) between the
         // 1 Hz fusions, and the 5-sigma gate reopens after 4 gated samples (measured: 4 gated, then fused). After 60 s
@@ -2123,15 +2142,86 @@ pub(crate) mod tests {
             f.stats().mag_gated,
             f.stats().mag_fused
         );
+        // G6-B: armed, a compass turned 90 deg and gated for the timeout does not reset the yaw: Src 8 with Ok 0, `global_off`,
+        // GNSS not fused, heading and NE flags false, until the disarm edge.
         let (mut f, mut w) = flying(&t, 60.0, [0.0; 3]);
+        assert!(f.stats().gps_pos_fused > 0 && f.nav().valid.position_ne && f.nav().valid.heading);
         w.mag_rot = 90.0_f64.to_radians();
-        let (mut first_gated, mut reset, mut biases) = (None, None, None);
+        let (mut first_gated, mut latch, mut flags_true_after, mut fused_events_after) = (None, None::<(u64, f32)>, 0u32, 0u32);
+        let mut at_latch = None;
         run(&mut f, &mut w, 8.0, |_| true, |f, nav, _| {
             for e in f.events() {
                 if e.src == code::MAG_YAW && e.ok == code::GATED && first_gated.is_none() {
                     first_gated = Some(nav.t_us);
                 }
+                if e.src == code::YAW_RESET {
+                    assert_eq!(e.ok, code::GATED, "no Src 8 record with Ok 1 while armed");
+                    assert!(latch.is_none(), "one Src 8 record for the latch");
+                    latch = Some((nav.t_us, e.inn));
+                    at_latch = Some(*f.stats());
+                }
+            }
+            if latch.is_some() {
+                let v = nav.valid;
+                flags_true_after += u32::from(v.heading || v.velocity_ne || v.position_ne);
+                fused_events_after += f.events().filter(|e| matches!(e.src, code::GPS_N | code::GPS_E | code::VN | code::VE | code::GPS_RESET)).count() as u32;
+            }
+        });
+        let (a, (b, inn)) = (first_gated.expect("gated"), latch.unwrap_or_else(|| panic!("no Src 8 latch record: {:?}", f.stats())));
+        let (s_latch, s_end) = (at_latch.unwrap(), *f.stats());
+        println!(
+            "c8: first gated to latch {} s; innovation {inn:.3} rad; yaw resets {}; gps fused pos/vel/resets {}/{}/{} -> {}/{}/{}; \
+             epochs not fused after the latch {}",
+            (b - a) as f64 * 1e-6,
+            s_end.yaw_resets,
+            s_latch.gps_pos_fused,
+            s_latch.gps_vel_fused,
+            s_latch.gps_resets,
+            s_end.gps_pos_fused,
+            s_end.gps_vel_fused,
+            s_end.gps_resets,
+            s_end.gps_disarmed - s_latch.gps_disarmed
+        );
+        assert!(b - a >= t.nav_aid_timeout_us && b - a <= t.nav_aid_timeout_us + t.nav_mag_fuse_us);
+        assert!(inn.abs() > 1.0, "the innovation is the compass's disagreement: {inn}");
+        assert_eq!(s_end.yaw_resets, 0);
+        assert!(f.global_off && !f.started);
+        assert_eq!((s_end.gps_pos_fused, s_end.gps_vel_fused, s_end.gps_resets), (s_latch.gps_pos_fused, s_latch.gps_vel_fused, s_latch.gps_resets));
+        assert!(s_end.gps_disarmed > s_latch.gps_disarmed, "the epochs after the latch are counted");
+        assert_eq!((flags_true_after, fused_events_after), (0, 0));
+        // The latch holds while armed, whatever the compass does next: turn it back, still no heading and no GNSS.
+        w.mag_rot = 0.0;
+        run(&mut f, &mut w, 8.0, |_| true, |_, nav, _| assert!(!nav.valid.heading && !nav.valid.position_ne && !nav.valid.velocity_ne));
+        assert!(f.global_off && f.stats().yaw_resets == 0 && f.stats().gps_resets == s_end.gps_resets);
+        // The disarm edge clears the latch; the disarmed rule applies (the compass has been gated for more than the timeout).
+        w.mag_rot = 90.0_f64.to_radians();
+        run(&mut f, &mut w, 6.0, |_| true, |_, _, _| {});
+        let before = f.stats().yaw_resets;
+        run(&mut f, &mut w, 3.0, |_| false, |_, _, _| {});
+        assert!(!f.global_off);
+        println!("c8: after the disarm edge, yaw resets {before} -> {}", f.stats().yaw_resets);
+        assert_eq!(f.stats().yaw_resets, before + 1);
+        // Armed again: the first epoch resets the position (Src 9) and GNSS is fused again.
+        let gr = f.stats().gps_resets;
+        run(&mut f, &mut w, 10.0, |_| true, |_, _, _| {});
+        assert!(f.stats().gps_resets > gr && !f.global_off && f.started && f.nav().valid.position_ne);
+    }
+
+    #[test]
+    fn c8b_disarmed_a_compass_turned_90_deg_after_alignment_still_resets_the_yaw_at_the_timeout_with_the_biases() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        run(&mut f, &mut w, 60.0, |_| false, |_, _, _| {});
+        w.mag_rot = 90.0_f64.to_radians();
+        let (mut first_gated, mut reset, mut biases) = (None, None, None);
+        run(&mut f, &mut w, 8.0, |_| false, |f, nav, _| {
+            for e in f.events() {
+                if e.src == code::MAG_YAW && e.ok == code::GATED && first_gated.is_none() {
+                    first_gated = Some(nav.t_us);
+                }
                 if e.src == code::YAW_RESET && reset.is_none() {
+                    assert_eq!(e.ok, code::FUSED);
                     reset = Some(nav.t_us);
                     biases = Some(f.biases());
                 }
@@ -2139,8 +2229,9 @@ pub(crate) mod tests {
         });
         let (a, b) = (first_gated.expect("gated"), reset.unwrap_or_else(|| panic!("no yaw reset: {:?}", f.stats())));
         let (bg, ba) = biases.unwrap();
-        println!("c8: first gated to reset {} s; biases at the reset {bg:?} {ba:?}; resets {}", (b - a) as f64 * 1e-6, f.stats().yaw_resets);
+        println!("c8b: first gated to reset {} s; biases at the reset {bg:?} {ba:?}; resets {}", (b - a) as f64 * 1e-6, f.stats().yaw_resets);
         assert_eq!(f.stats().yaw_resets, 1);
+        assert!(!f.global_off);
         assert!(b - a >= t.nav_aid_timeout_us && b - a <= t.nav_aid_timeout_us + t.nav_mag_fuse_us);
         assert_eq!((bg[2], ba[0], ba[1]), (0.0, 0.0, 0.0));
     }
