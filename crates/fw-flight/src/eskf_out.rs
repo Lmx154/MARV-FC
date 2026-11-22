@@ -30,7 +30,7 @@
 // Fixed-size arrays only; every index is a loop bound or a constant below the array length.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
-use crate::eskf::{Eskf, Reset};
+use crate::eskf::{Eskf, EskfZ, Reset};
 use crate::eskf_n0::{self as n0, Nominal, rotation};
 use crate::gnc::{Estimator, GeoPoint, NavState, Sensors};
 use crate::mahony::DT_MAX_US;
@@ -570,6 +570,76 @@ impl Estimator for EskfSteer<'_> {
 
     fn set_armed(&mut self, armed: bool) {
         self.core.set_armed(armed);
+    }
+}
+
+/// The composite steering estimator (Amendment G-1, G-1b): attitude, rates and the horizontal state from the output
+/// predictor ([`EskfSteer`]), the vertical state (D, v_D, their sigmas and flags) from the zero-delay [`EskfZ`]
+/// (`Aiding::ImuBaro`). Both run on every step with the same sensors and the same armed state. A fixed composition, not
+/// a switch.
+///
+/// Readings of the specification: the sigma is the output predictor's with the two vertical fields from the zero-delay
+/// filter when both estimators give one; if either has none the composite has none (a vertical sigma of the other
+/// filter would break "vertical fields only from the zero-delay filter", and the log reads `None` as infinite).
+#[derive(Debug)]
+pub struct SteerMix<'a> {
+    h: EskfSteer<'a>,
+    v: &'a mut EskfZ,
+}
+
+impl<'a> SteerMix<'a> {
+    /// The composite of the output predictor `h` and the zero-delay filter `v`.
+    pub fn new(h: EskfSteer<'a>, v: &'a mut EskfZ) -> Self {
+        SteerMix { h, v }
+    }
+
+    /// The output predictor (attitude, rates, horizontal state).
+    pub fn steer(&self) -> &EskfSteer<'a> {
+        &self.h
+    }
+
+    /// The zero-delay filter (vertical state).
+    pub fn vert(&self) -> &EskfZ {
+        self.v
+    }
+}
+
+/// Test access for the `Flight` tests M2 and M3 in `step.rs`: the zero-delay filter, to force its state.
+#[cfg(test)]
+impl SteerMix<'_> {
+    pub(crate) fn vert_mut(&mut self) -> &mut EskfZ {
+        self.v
+    }
+}
+
+impl Estimator for SteerMix<'_> {
+    fn update(&mut self, sensors: &Sensors) -> NavState {
+        let mut nav = self.h.update(sensors);
+        let z = self.v.update(sensors);
+        // A step in which the zero-delay filter's reset moved D or v_D: its vertical flags are false for that step.
+        let vmoved = self.v.last_reset().is_some_and(|r| r.dp[2] != 0.0 || r.dv[2] != 0.0);
+        nav.position_m[2] = z.position_m[2];
+        nav.velocity_ms[2] = z.velocity_ms[2];
+        nav.valid.velocity_d = z.valid.velocity_d && !vmoved;
+        nav.valid.position_d = z.valid.position_d && !vmoved;
+        nav.sigma = match (nav.sigma, z.sigma) {
+            (Some(mut s), Some(zs)) => {
+                s.position_d_m = zs.position_d_m;
+                s.velocity_d_ms = zs.velocity_d_ms;
+                Some(s)
+            }
+            _ => None,
+        };
+        nav
+    }
+
+    fn origin(&self) -> Option<GeoPoint> {
+        self.h.origin()
+    }
+
+    fn set_armed(&mut self, armed: bool) {
+        self.h.set_armed(armed);
+        self.v.set_armed(armed);
     }
 }
 
@@ -1792,5 +1862,108 @@ mod tests {
         let jobs = steer.core().stats().max_jobs_per_step;
         println!("t11: max jobs per step {jobs}, max corrections per step {worst}, steps with a correction {steps_with}");
         assert!(jobs <= 1 && worst == 1 && steps_with > 5_000);
+    }
+
+    /// The stream of the SteerMix tests: yawed, moving north-east at constant velocity, a vertical manoeuvre (a climb
+    /// from 10 s, at 2 m/s from 12 s; a reversal 20 s to 24 s to a descent at 2 m/s; the descent ended 30 s to 32 s), the
+    /// first compass alignment, GNSS with a 10-sigma north fault from 25 s (C3 reset), and from 36 s the barometer 40 m
+    /// too high (the height reset about 5 s later, armed).
+    fn mix_stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
+        let mut w = World::new(t);
+        w.yaw = 0.4;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        let sigma = (f64::from(w.std_mm) * 1e-3).max(f64::from(t.nav_gps_pos_sigma_min_m));
+        let mut out = Vec::new();
+        while w.t_us() < secs * 1_000_000 {
+            let ts = w.t_us() as f64 * 1e-6;
+            w.a[2] = if (10.0..12.0).contains(&ts) {
+                -1.0
+            } else if (20.0..24.0).contains(&ts) {
+                1.0
+            } else if (30.0..32.0).contains(&ts) {
+                -1.0
+            } else {
+                0.0
+            };
+            if w.t_us() >= 25_000_000 && w.fault == Fault::None {
+                w.fault = Fault::North(w.t_us(), 10.0 * sigma);
+            }
+            let mut s = w.step();
+            if let Some(b) = s.baro.as_mut().filter(|_| w.t_us() >= 36_000_000) {
+                b.reading.pressure_pa = pressure_at(40.0 - w.p[2]);
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    fn zero_delay(t: &Tuning) -> EskfZ {
+        EskfZ::with_aiding(t, crate::eskf::Aiding::ImuBaro).unwrap()
+    }
+
+    fn nonvertical_bits(n: &NavState) -> Vec<u32> {
+        let mut b: Vec<u32> = std::vec![n.t_us as u32, (n.t_us >> 32) as u32];
+        b.extend(n.attitude.iter().chain(&n.rates_rads).chain(&n.velocity_ms[..2]).chain(&n.position_m[..2]).map(|x| x.to_bits()));
+        let v = n.valid;
+        b.extend([v.tilt, v.heading, v.rates, v.velocity_ne, v.position_ne].map(u32::from));
+        let s = n.sigma.unwrap();
+        b.extend([s.tilt_rad, s.heading_rad, s.velocity_ne_ms, s.position_ne_m].map(f32::to_bits));
+        b
+    }
+
+    #[test]
+    fn m1_the_mix_equals_an_output_predictor_twin_off_the_vertical_and_a_zero_delay_twin_on_it() {
+        let t = Tuning::DEFAULT;
+        let st = mix_stream(&t, 45);
+        let (mut core, mut vz) = (Eskf::new(&t).unwrap(), zero_delay(&t));
+        let mut mix = SteerMix::new(EskfSteer::new(&mut core, &t).unwrap(), &mut vz);
+        let mut core_b = Eskf::new(&t).unwrap();
+        let mut bare_h = EskfSteer::new(&mut core_b, &t).unwrap();
+        let mut bare_z = zero_delay(&t);
+        let (mut h_vs_z, mut moved_steps, mut rule_mattered, mut valid_steps) = (0usize, 0usize, 0usize, 0usize);
+        let (mut vd_min, mut vd_max, mut d_min, mut d_max, mut worst) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN, 0.0f32);
+        for (k, s) in st.iter().enumerate() {
+            let armed = armed_at(s);
+            mix.set_armed(armed);
+            bare_h.set_armed(armed);
+            bare_z.set_armed(armed);
+            let m = mix.update(s);
+            let h = bare_h.update(s);
+            let z = bare_z.update(s);
+            // Everything but D, v_D, their sigmas and their flags is the output predictor's, bit for bit.
+            assert_eq!(nonvertical_bits(&m), nonvertical_bits(&h), "step {k}");
+            // D, v_D and their sigmas are the zero-delay filter's, bit for bit.
+            assert_eq!(m.position_m[2].to_bits(), z.position_m[2].to_bits(), "step {k}: D");
+            assert_eq!(m.velocity_ms[2].to_bits(), z.velocity_ms[2].to_bits(), "step {k}: v_D");
+            let (ms, zs) = (m.sigma.unwrap(), z.sigma.unwrap());
+            assert_eq!(ms.position_d_m.to_bits(), zs.position_d_m.to_bits(), "step {k}: sigma D");
+            assert_eq!(ms.velocity_d_ms.to_bits(), zs.velocity_d_ms.to_bits(), "step {k}: sigma v_D");
+            // Their flags are the zero-delay filter's, except false in a step whose reset moved D or v_D.
+            let vmoved = bare_z.last_reset().is_some_and(|r| r.dp[2] != 0.0 || r.dv[2] != 0.0);
+            assert_eq!(m.valid.position_d, z.valid.position_d && !vmoved, "step {k}: flag D");
+            assert_eq!(m.valid.velocity_d, z.valid.velocity_d && !vmoved, "step {k}: flag v_D");
+            moved_steps += usize::from(vmoved);
+            rule_mattered += usize::from(vmoved && z.valid.position_d && z.valid.velocity_d);
+            valid_steps += usize::from(m.valid.position_d && m.valid.velocity_d);
+            h_vs_z += usize::from(h.position_m[2].to_bits() != z.position_m[2].to_bits());
+            if m.valid.position_d {
+                (vd_min, vd_max) = (vd_min.min(m.velocity_ms[2]), vd_max.max(m.velocity_ms[2]));
+                (d_min, d_max) = (d_min.min(m.position_m[2]), d_max.max(m.position_m[2]));
+                worst = worst.max(fabsf(m.position_m[2] - h.position_m[2]));
+            }
+        }
+        println!(
+            "m1: {} steps; D {d_min:.2} .. {d_max:.2} m, vD {vd_min:.2} .. {vd_max:.2} m/s; flags true in {valid_steps} steps; ESKF2 reset moved D or vD in {moved_steps} step(s), of which {rule_mattered} with ESKF2's own flags true; the output's D differs from ESKF2's in {h_vs_z} steps, by up to {worst:.4} m",
+            st.len()
+        );
+        assert!(vd_min < -1.9 && vd_max > 1.9 && d_max - d_min > 10.0, "the manoeuvre must be flown: {vd_min} {vd_max} {d_min} {d_max}");
+        assert!(moved_steps >= 1 && rule_mattered >= 1, "the vmoved rule must matter in this stream");
+        assert!(h_vs_z > 1_000 && worst > 1e-4, "taking D from the output predictor must be visible: {h_vs_z}, {worst}");
+    }
+
+    #[test]
+    fn size_of_the_mix() {
+        println!("size_of SteerMix {} EskfSteer {} EskfZ {} Eskf {}", size_of::<SteerMix>(), size_of::<EskfSteer>(), size_of::<EskfZ>(), size_of::<Eskf>());
     }
 }
