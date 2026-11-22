@@ -312,12 +312,11 @@ pub async fn task(
     adapter: Adapter,
     period_us: u32,
     rc: Option<TripleReader<'static, fw_core::rc::RcSample>>,
-    steer: Option<&'static mut fw_flight::eskf::Eskf>,
-    shadow: Option<&'static mut crate::flight::BoardShadow>,
+    steer: Option<&'static mut fw_flight::eskf_out::SteerMix<'static>>,
 ) -> ! {
-    // The flight code is built here, inside the task, on core 1, and owned by it (the steering and shadow estimators
-    // by reference).
-    let task = crate::flight::Stepper::new(rc, steer, shadow).and_then(|stepper| {
+    // The flight code is built here, inside the task, on core 1, and owned by it (the steering estimator by
+    // reference).
+    let task = crate::flight::Stepper::new(rc, steer).and_then(|stepper| {
         ImuTask::new(
             &CELLS,
             adapter,

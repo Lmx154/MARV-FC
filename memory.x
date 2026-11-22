@@ -113,6 +113,8 @@ SECTIONS {
         *(.text.*9fw_flight11mahony_baro*)
         /* Eskf, the shadow filter (decision-nav-eskf-20261120, E1b): the flight image runs it in shadow since packet E2. */
         *(.text.*9fw_flight4eskf*)
+        /* EskfSteer and SteerMix (Amendments G and G-1): the steering estimator the flight image runs since packet P-G6. */
+        *(.text.*9fw_flight8eskf_out*)
         /* The flight log (decision-flight-logging-20261119): the dflog encoders the Stepper calls; core 0's stay in flash. */
         *(.text.*7fw_core5dflog10encode_imu* .text.*7fw_core5dflog10encode_nav* .text.*7fw_core5dflog11encode_setp*)
         *(.text.*7fw_core5dflog10encode_dmd* .text.*7fw_core5dflog10encode_mot* .text.*7fw_core5dflog10encode_esc*)

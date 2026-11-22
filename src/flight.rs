@@ -7,12 +7,13 @@
 //! collector touches this module as [`LOG`]'s consumer, and the barometer, compass and GNSS device tasks as the writers
 //! of the three sample cells (decision-nav-eskf-20261120, section 4); core 0 learns "armed" from
 //! `settings::HANDSHAKE` and "flight throttles sent" from `esc::ESC`.
-//! The step runs the steering estimator, `Eskf` with `Aiding::ImuBaro` ("ESKF2", decision-nav-eskf-20261120, D7: the
-//! IMU and the barometer, no compass or GNSS), the cascaded PID and the card's allocator with the constant gains of
-//! `fw_flight::tuning`. After each step the shadow estimator `Eskf` with `Aiding::Full` (8a) gets the same sensors and
-//! the armed state; its state goes to the log (NKF1, NKF2, NKI) and to [`NAV_STAT`] only, never to the flight code.
-//! The steering estimator's state goes to the log the same way (I = 0). `MahonyBaro` stays in `fw_flight` and is not
-//! run on the board.
+//! The step runs the steering estimator `SteerMix` (decision-nav-eskf-20261120, Amendments G and G-1: the ESKF3 core,
+//! `Eskf` with `Aiding::Full`, behind its output predictor `EskfSteer` gives attitude, rates and the horizontal state at
+//! the current time; the zero-delay ESKF2, `EskfZ` with `Aiding::ImuBaro`, gives the vertical state), the cascaded PID
+//! and the card's allocator with the constant gains of `fw_flight::tuning`. No shadow estimator runs on the board. The
+//! composed state that steered goes to the log (NKF1, NKF2: I = 0), ESKF2's own state as I = 1, the ESKF3 core's
+//! nominal state at its horizon as I = 2 (NKF1) and the two estimators' events as NKI (I = 0 the core, I = 1 ESKF2).
+//! `MahonyBaro` stays in `fw_flight` and is not run on the board.
 //! No `[STAT] FLT:` line: one was tried on 2026-11-19 and removed, because that one extra log line lengthened the
 //! flight core's longest wait behind the log (README, Flight-core device loop). The `[STAT] NAV:` line of [`stat`]
 //! (packet E2) prints the estimators' state from [`NAV_STAT`].
@@ -23,7 +24,9 @@ use fw_core::sample::{BaroReading, BaroSample, GnssReading, GnssSample, MagReadi
 use fw_core::xcore::{LogProducer, LogRing, Seqlock, SeqlockWriter, TripleBuffer, TripleReader};
 use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
-use fw_flight::eskf::{Aiding, Eskf, EskfStats};
+use fw_flight::eskf::{Aiding, Eskf, EskfError, EskfStats, EskfZ};
+use fw_flight::eskf_n0::{POS, VEL};
+use fw_flight::eskf_out::{EskfSteer, SteerMix};
 use fw_flight::gate::MotorCommand;
 use fw_flight::gnc::{NavState, Sensors, Setpoint};
 use fw_flight::imu::{ImuSample, SampleSink};
@@ -34,50 +37,72 @@ use fw_flight::step::{
 use fw_flight::tuning::Tuning;
 use static_cell::StaticCell;
 
-/// The flight code this image runs; edit this line to change it (seams decision, section 9). It steers on an `Eskf`
-/// with `Aiding::ImuBaro` that lives in [`STEER`] (decision-nav-eskf-20261120, D7). To go back to `MahonyBaro`: make
-/// this `Flight<MahonyBaro, CascadedPid, CardAllocator>`, pass `MahonyBaro::new(&Tuning::DEFAULT)` to `Flight::new`
-/// in [`Stepper::new`] and give the I = 0 records in `log_nav` their old source (`MahonyBaro::vert()`).
-pub type BoardFlight = Flight<&'static mut Eskf, CascadedPid, CardAllocator>;
+/// The flight code this image runs; edit this line to change it (seams decision, section 9). It steers on a
+/// [`SteerMix`] (Amendment G-1) whose parts live in [`STEER_CORE`], [`VERT`] and [`STEER`]. To go back to `MahonyBaro`:
+/// make this `Flight<MahonyBaro, CascadedPid, CardAllocator>`, pass `MahonyBaro::new(&Tuning::DEFAULT)` to
+/// `Flight::new` in [`Stepper::new`] and give the I = 0 records in `log_nav` their old source (`MahonyBaro::vert()`).
+pub type BoardFlight = Flight<&'static mut SteerMix<'static>, CascadedPid, CardAllocator>;
 
 // `Flight` owns its estimator: by value the `Eskf` (its IMU ring, waiting buffers and P, about 16 KB) would be built
 // on core 1's 16 KB stack. `BoardFlight` must hold the reference only.
 const _: () = assert!(
     core::mem::size_of::<BoardFlight>() < core::mem::size_of::<Eskf>(),
-    "BoardFlight holds an Eskf by value: it must hold the &'static mut into STEER"
+    "BoardFlight holds an estimator by value: it must hold the &'static mut into STEER"
 );
 
-/// The shadow estimator (decision-nav-eskf-20261120, 8a): logged, never steering.
-pub type BoardShadow = Eskf;
-
-// `Eskf::new` refuses only nav_gps_delay_us > nav_buffer_us (C2a): with the compiled tuning it cannot fail.
+// `Eskf::with_aiding` refuses only nav_gps_delay_us > nav_buffer_us (C2a) and `EskfSteer::new` a ring too small for
+// nav_buffer_us / nav_predict_us + 1 entries: with the compiled tuning neither can fail.
 const _: () = assert!(
     Tuning::DEFAULT.nav_gps_delay_us <= Tuning::DEFAULT.nav_buffer_us,
     "Eskf::new(&Tuning::DEFAULT) would refuse the compiled tuning"
 );
+const _: () = assert!(
+    Tuning::DEFAULT.nav_predict_us != 0
+        && Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_predict_us + 1 <= fw_flight::eskf_out::OUT as u64,
+    "EskfSteer::new(&Tuning::DEFAULT) would refuse the compiled tuning"
+);
 
-/// The steering estimator's storage (about 16 KB: the same instance as the shadow's), in `.bss`.
-static STEER: StaticCell<Eskf> = StaticCell::new();
+/// The ESKF3 core's storage (about 16 KB: the IMU ring, the waiting buffers, P), in `.bss`.
+static STEER_CORE: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
-/// Builds the steering estimator into [`STEER`]. Call once, on core 0 before core 1 starts (the value passes through
-/// core 0's stack, not core 1's 16 KB one). `None` if the constructor refused, which the assertion above rules out,
-/// or on a second call; [`Stepper::new`] then returns `None` and the board does not fly.
+/// Builds the ESKF3 core (`Aiding::Full`) into [`STEER_CORE`]. Call once, on core 0 before core 1 starts (the value
+/// passes through core 0's stack, not core 1's 16 KB one). `None` if the constructor refused, which the assertions above
+/// rule out, or on a second call; [`steer`] then returns `None` and the board does not fly.
 // Never inlined: the roughly 16 KB value (and its move into the static) must live in this call's own frame, not in
 // the frame of the caller's `poll`, which core 0 would then carry under everything the main task ever calls.
 #[inline(never)]
-pub fn steer() -> Option<&'static mut Eskf> {
-    STEER.try_init(Eskf::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro).ok()?)
+pub fn steer_core() -> Option<&'static mut Eskf> {
+    STEER_CORE.try_init_with(|| Eskf::new(&Tuning::DEFAULT))?.as_mut().ok()
 }
 
-/// The shadow's storage (about 16 KB: the IMU ring, the waiting buffers, P), in `.bss`.
-static SHADOW: StaticCell<BoardShadow> = StaticCell::new();
+/// The zero-delay ESKF2's storage (the IMU ring of one entry, the waiting buffers, P), in `.bss`.
+static VERT: StaticCell<Result<EskfZ, EskfError>> = StaticCell::new();
 
-/// Builds the shadow into [`SHADOW`]. Call once, on core 0 before core 1 starts (the value passes through core 0's
-/// stack, not core 1's 16 KB one). `None` (no shadow, the board flies without it) if the constructor refused, which
-/// the assertion above rules out, or on a second call.
+/// Builds ESKF2 (`Aiding::ImuBaro`) into [`VERT`]; as [`steer_core`].
 #[inline(never)]
-pub fn shadow() -> Option<&'static mut BoardShadow> {
-    SHADOW.try_init(Eskf::new(&Tuning::DEFAULT).ok()?)
+pub fn vert() -> Option<&'static mut EskfZ> {
+    VERT.try_init_with(|| EskfZ::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro))?.as_mut().ok()
+}
+
+/// The steering estimator's storage (the output predictor's ring and the two references), in `.bss`.
+static STEER: StaticCell<SteerMix<'static>> = StaticCell::new();
+
+/// Builds the steering estimator into [`STEER`] over the two estimators from [`steer_core`] and [`vert`]. Call once, on
+/// core 0 before core 1 starts, after those two (they are separate calls so that their frames do not stack). `None` if
+/// either is `None`, a constructor refused, or on a second call; [`Stepper::new`] then returns `None` and the board
+/// does not fly.
+#[inline(never)]
+pub fn steer(
+    core: Option<&'static mut Eskf>,
+    vert: Option<&'static mut EskfZ>,
+) -> Option<&'static mut SteerMix<'static>> {
+    let h = EskfSteer::new(core?, &Tuning::DEFAULT).ok()?;
+    STEER.try_init(SteerMix::new(h, vert?))
+}
+
+/// The ESKF3 core's alignment as NKF1 valid bits (I = 2) and `EstStat::valid`: tilt aligned 1, yaw aligned 2.
+fn core_valid(core: &Eskf) -> u8 {
+    u8::from(core.tilt_aligned()) | u8::from(core.yaw_aligned()) << 1
 }
 
 /// One estimator's part of [`NavStat`].
@@ -93,6 +118,20 @@ pub struct EstStat {
 }
 
 impl EstStat {
+    /// The ESKF3 core at its horizon (it has no `NavState` of its own on the board): bit 0 tilt aligned, bit 1 yaw
+    /// aligned, the nominal D and v_D, the sigmas of those two error states.
+    fn of_core(core: &Eskf) -> Self {
+        let (_, v, p) = core.nominal();
+        let sig = core.sigmas();
+        EstStat {
+            valid: core_valid(core),
+            d_m: p[2],
+            vd_ms: v[2],
+            sigma_d_m: sig[POS + 2],
+            sigma_vd_ms: sig[VEL + 2],
+        }
+    }
+
     fn of(nav: &NavState) -> Self {
         let (sigma_d_m, sigma_vd_ms) =
             nav.sigma.map_or((f32::INFINITY, f32::INFINITY), |s| (s.position_d_m, s.velocity_d_ms));
@@ -118,11 +157,13 @@ impl EstStat {
 pub struct NavStat {
     /// Steps since the start.
     pub steps: u32,
-    /// The steering estimator (I = 0; named for `MahonyBaro`, which steered before D7) and its barometer counts
-    /// (fused, gated, height resets).
+    /// The composed state that steers (I = 0; the name dates from `MahonyBaro`): its valid bits, D and v_D with their
+    /// sigmas, which are ESKF2's (Amendment G-1), and ESKF2's barometer counts (fused, gated, height resets).
     pub mb: EstStat,
     pub mb_baro: [u32; 3],
-    /// The shadow (I = 1): present, tilt aligned, yaw aligned, its state and counters.
+    /// The ESKF3 core (the name dates from the shadow): present (always true once the board flies), tilt aligned, yaw
+    /// aligned, its state at the horizon (`EstStat::of_core`: valid bits 1 tilt aligned and 2 yaw aligned, nominal D and
+    /// v_D, sigmas of those states) and its counters.
     pub shadow: bool,
     pub tilt_aligned: bool,
     pub yaw_aligned: bool,
@@ -190,7 +231,7 @@ pub fn stat() {
     };
     let (m, e, k) = (&s.mb, &s.ek, &s.ek_stats);
     defmt::info!(
-        "[STAT] NAV: steps {=u32}; steering Eskf valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), baro fused {=u32} gated {=u32} height resets {=u32}; Eskf present {=bool}, tilt aligned {=bool}, yaw aligned {=bool}, valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), predicts {=u32}, baro fused {=u32} gated {=u32}, compass refused {=u32} fused {=u32} gated {=u32}, GPS epochs {=u32} unaccepted {=u32} before yaw {=u32} disarmed {=u32} screened {=u32} scalars fused {=u32} gated {=u32}, resets height {=u32} yaw align {=u32} yaw {=u32} GPS {=u32}, reinits {=u32}, most jobs in a step {=u32}, replaced {=u32}, dropped {=u32}",
+        "[STAT] NAV: steps {=u32}; steering (ESKF3 output + ESKF2 vertical) valid {=u8:#x}, D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), ESKF2 baro fused {=u32} gated {=u32} height resets {=u32}; ESKF3 core present {=bool}, tilt aligned {=bool}, yaw aligned {=bool}, align bits {=u8:#x}, horizon D {=f32} m (sigma {=f32}), vD {=f32} m/s (sigma {=f32}), predicts {=u32}, baro fused {=u32} gated {=u32}, compass refused {=u32} fused {=u32} gated {=u32}, GPS epochs {=u32} unaccepted {=u32} before yaw {=u32} disarmed {=u32} screened {=u32} scalars fused {=u32} gated {=u32}, resets height {=u32} yaw align {=u32} yaw {=u32} GPS {=u32}, reinits {=u32}, most jobs in a step {=u32}, replaced {=u32}, dropped {=u32}",
         s.steps,
         m.valid,
         m.d_m,
@@ -320,10 +361,11 @@ pub struct Stepper {
     step: u32,
     /// `TimeUS` of the previous ESC record.
     esc_since_us: u64,
-    /// The shadow estimator; `None` if it could not be built (see [`shadow`]).
-    shadow: Option<&'static mut BoardShadow>,
-    /// Covariance propagations already seen, I = 0 and I = 1 (the NKF records' rate).
+    /// Covariance propagations already seen, of the ESKF3 core (I = 0 and I = 2) and of ESKF2 (I = 1): the NKF records'
+    /// rate.
     predicts: [u32; 2],
+    /// Corrections of the output predictor already seen (the NKI Src 10 and 11 rate).
+    corrected: u32,
     stat: SeqlockWriter<'static, NavStat>,
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
@@ -333,11 +375,9 @@ impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
     /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`] or [`FLIGHT_GNSS`] or the writer of [`NAV_STAT`] was taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
-    /// `shadow`: from [`shadow`]; `None` runs without the shadow.
     pub fn new(
         rc: Option<TripleReader<'static, RcSample>>,
-        steer: Option<&'static mut Eskf>,
-        shadow: Option<&'static mut BoardShadow>,
+        steer: Option<&'static mut SteerMix<'static>>,
     ) -> Option<Self> {
         Some(Self {
             flight: Flight::new(
@@ -355,61 +395,86 @@ impl Stepper {
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
-            shadow,
             predicts: [0; 2],
+            corrected: 0,
             stat: NAV_STAT.take_writer()?,
             mode_log: ModeLog::new(),
         })
     }
 
-    /// The navigation records (decision-nav-eskf-20261120, 8c, B5, C8): NKF1 and NKF2 at each covariance propagation
-    /// of each estimator, armed, and at every 8th disarmed; NKI at each scalar fusion and reset. Then, every 64th step,
-    /// [`NAV_STAT`]. A record that does not fit is dropped and counted by the ring.
-    fn log_nav(&mut self, out: &StepOut, shadow: Option<&NavState>) {
+    /// The navigation records (decision-nav-eskf-20261120, 8c, B5, C8; Amendments G and G-1): NKF1 and NKF2 at each
+    /// covariance propagation of each estimator, armed, and at every 8th disarmed; NKI at each scalar fusion and reset.
+    /// I = 0: the composed state that steered (`out.nav`, TimeUS the step time) with the ESKF3 core's biases, and the
+    /// core's events (TimeUS the horizon time); I = 1: ESKF2's own state, biases and events; I = 2: NKF1 of the core's
+    /// nominal state at its horizon (TimeUS the horizon time, valid bits as [`core_valid`]), at the core's propagations.
+    /// NKI Src 10 (Inn the attitude tracking error rad, Var the velocity error m/s) and Src 11 (Inn the position error
+    /// m, Var T_d s), I = 0, TimeUS the step time, Ok 1, at every 20th correction of the output predictor. Then, every
+    /// 64th step, [`NAV_STAT`]. A record that does not fit is dropped and counted by the ring.
+    fn log_nav(&mut self, out: &StepOut) {
         const NKF: usize = dflog::NKF1.length as usize + dflog::NKF2.length as usize;
         let armed = out.armed;
-        // I = 0, the steering estimator: its own state (`out.nav`), biases and events, as the shadow's below.
-        let st: &Eskf = self.flight.estimator();
-        let p0 = st.stats().predicts;
+        let mix: &SteerMix<'static> = self.flight.estimator();
+        let core = mix.steer().core();
+        let vert = mix.vert();
+        let p0 = core.stats().predicts;
         if p0 != self.predicts[0] {
             self.predicts[0] = p0;
             if armed || p0 % 8 == 0 {
-                let (bg, ba) = st.biases();
+                let (bg, ba) = core.biases();
                 self.log.push_with(NKF, |b| encode_nkf(b, 0, &out.nav, bg, ba));
+                if let Some(t_us) = core.horizon_us() {
+                    let (q, v, p) = core.nominal();
+                    let valid = core_valid(core);
+                    self.log.push_with(dflog::NKF1.length.into(), |b| {
+                        dflog::encode_nkf1(b, t_us, 2, q, v, p, valid)
+                    });
+                }
             }
         }
-        for ev in st.events() {
+        for ev in core.events() {
             self.log.push_with(dflog::NKI.length.into(), |b| {
                 dflog::encode_nki(b, ev.t_us, 0, ev.src, ev.inn, ev.var, ev.ok)
             });
         }
-        // I = 1, the shadow: TimeUS the horizon time.
-        if let (Some(e), Some(nav)) = (self.shadow.as_deref(), shadow) {
-            let p1 = e.stats().predicts;
+        let c = mix.steer().corrected();
+        if c != self.corrected {
+            self.corrected = c;
+            if c % 20 == 0 {
+                let tr = mix.steer().tracking();
+                let t_us = out.nav.t_us;
+                self.log.push_with(dflog::NKI.length.into(), |b| {
+                    dflog::encode_nki(b, t_us, 0, 10, tr.att_rad, tr.vel_ms, 1)
+                });
+                self.log.push_with(dflog::NKI.length.into(), |b| {
+                    dflog::encode_nki(b, t_us, 0, 11, tr.pos_m, tr.t_d_s, 1)
+                });
+            }
+        }
+        if let Some(nav) = mix.vert_nav() {
+            let p1 = vert.stats().predicts;
             if p1 != self.predicts[1] {
                 self.predicts[1] = p1;
                 if armed || p1 % 8 == 0 {
-                    let (bg, ba) = e.biases();
+                    let (bg, ba) = vert.biases();
                     self.log.push_with(NKF, |b| encode_nkf(b, 1, nav, bg, ba));
                 }
             }
-            for ev in e.events() {
+            for ev in vert.events() {
                 self.log.push_with(dflog::NKI.length.into(), |b| {
                     dflog::encode_nki(b, ev.t_us, 1, ev.src, ev.inn, ev.var, ev.ok)
                 });
             }
         }
         if self.step % 64 == 0 {
-            let e = self.shadow.as_deref();
             self.stat.write(NavStat {
                 steps: self.step,
                 mb: EstStat::of(&out.nav),
-                mb_baro: [st.stats().baro_fused, st.stats().baro_gated, st.stats().height_resets],
-                shadow: e.is_some(),
-                tilt_aligned: e.is_some_and(|e| e.tilt_aligned()),
-                yaw_aligned: e.is_some_and(|e| e.yaw_aligned()),
-                ek: shadow.map(EstStat::of).unwrap_or_default(),
-                ek_stats: e.map(|e| *e.stats()).unwrap_or_default(),
+                mb_baro: [vert.stats().baro_fused, vert.stats().baro_gated, vert.stats().height_resets],
+                shadow: true,
+                tilt_aligned: core.tilt_aligned(),
+                yaw_aligned: core.yaw_aligned(),
+                ek: EstStat::of_core(core),
+                ek_stats: *core.stats(),
             });
         }
     }
@@ -423,8 +488,7 @@ impl SampleSink for Stepper {
         let (baro, baro_fresh) = self.baro.read();
         let (mag, mag_fresh) = self.mag.read();
         let (gnss, gnss_fresh) = self.gnss.read();
-        let (out, shadow) = self.flight.step_with_shadow(
-            &FlightInputs {
+        let out = self.flight.step(&FlightInputs {
             sensors: Sensors {
                 imu1: *sample,
                 imu2: None,
@@ -434,15 +498,11 @@ impl SampleSink for Stepper {
                 external: None,
             },
             rc: fresh.then_some(report),
-            },
-            self.shadow.as_deref_mut(),
-            |out| {
-                self.out.write(FlightOut {
-                    t_us: out.t_us,
-                    motors: out.motors,
-                })
-            },
-        );
+        });
+        self.out.write(FlightOut {
+            t_us: out.t_us,
+            motors: out.motors,
+        });
         // The log, after the command is out. A record that does not fit is dropped and counted by the ring.
         let due = log_due(self.step, out.armed);
         self.step = self.step.wrapping_add(1);
@@ -496,6 +556,6 @@ impl SampleSink for Stepper {
                 )
             });
         }
-        self.log_nav(&out, shadow.as_ref());
+        self.log_nav(&out);
     }
 }
