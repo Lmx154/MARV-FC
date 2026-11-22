@@ -8,8 +8,8 @@ A static may-reach closure over the linked Thumb ELF, from the flight core's roo
   roots      `core1_main` (of the flight image or of the N0 bench `eskf_bench`), `DMA_IRQ_0`, `IO_IRQ_BANK0`, `SIO_IRQ_FIFO`, `PIO2_IRQ_0`, and the park function of the
              feature `xip-park` when present; each must match exactly once.
   edges      direct branches that leave the function (long-branch thunks included); constants formed
-             by movw/movt pairs; pc-relative literal loads; adr; and the code and data pointers inside
-             every constant or data object reached that way.
+             by movw/movt pairs; pc-relative literal loads; adr; and the code and data pointers in every
+             aligned word wholly inside each constant or data object reached that way.
   terminals  the panic machinery (not followed, may stay in flash).
 It FAILS (exit 1) when a non-terminal function, a data object or a constant address formed by
 reached code lies in the XIP window 0x10000000-0x1FFFFFFF, and prints each with its call chain.
@@ -256,7 +256,7 @@ def main():
             if lo in seen_d:
                 continue
             seen_d[lo] = hi - lo
-            for p in range(lo - lo % 4, hi, 4):
+            for p in range((lo + 3) & ~3, hi - 3, 4):
                 w = elf.word(p)
                 if w is None or elf.sec_of(w) is None:
                     continue
