@@ -584,9 +584,13 @@ mod tests {
     /// h_b of the faulted samples).
     fn step_fault(armed: bool, climb_ms: f64) -> (MahonyBaro, Vec<NavState>, u64, f32) {
         // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
-        let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
+        step_fault_with(&Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT }, armed, climb_ms)
+    }
+
+    /// [`step_fault`] with the given tuning.
+    fn step_fault_with(t: &Tuning, armed: bool, climb_ms: f64) -> (MahonyBaro, Vec<NavState>, u64, f32) {
         let step_m = f64::from(4.0 * t.nav_gate_sigma * t.nav_baro_sigma_m);
-        let mut e = MahonyBaro::new(&t);
+        let mut e = MahonyBaro::new(t);
         e.set_armed(armed);
         let k0 = 10_000_000 / PERIOD_US;
         let ok = drive(&mut e, 0, k0, |s| Some(pressure_at(climb_ms * s)));
@@ -624,6 +628,20 @@ mod tests {
         for n in &navs[reset..] {
             assert!((n.position_m[2] + h_b).abs() < 1e-3, "{n:?}");
             assert!(n.valid.position_d && n.valid.velocity_d);
+            check_finite(n);
+        }
+    }
+
+    #[test]
+    fn a6_b_held_step_fault_at_the_default_tuning_is_rejected_then_reset() {
+        // a6 at Tuning::DEFAULT (nav_baro_sigma_m 2.0 since 2026-11-22): the gate, rejection and reset still work.
+        let t = Tuning::DEFAULT;
+        let (e, navs, _, h_b) = step_fault_with(&t, false, 0.0);
+        assert_eq!(e.vert().resets(), 1, "Src 6: one height reset");
+        assert!(e.vert().rejected() as u64 >= t.nav_aid_timeout_us / PERIOD_US / BARO_EVERY);
+        let reset = navs.iter().position(|n| n.position_m[2] == -h_b).expect("D set to the barometer");
+        for n in &navs[reset..] {
+            assert!((n.position_m[2] + h_b).abs() < 1e-3, "{n:?}");
             check_finite(n);
         }
     }
