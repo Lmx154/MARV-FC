@@ -3659,7 +3659,8 @@ pub(crate) mod tests {
 
     #[test]
     fn h_t1_one_imu_baro_barometer_fusion_changes_only_d_vd_and_ba_z() {
-        let t = Tuning::DEFAULT;
+        // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
+        let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
         let f = warm_imu_baro(&t, 40);
         let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
         let outside = |i: usize| i != d && i != vd && i != bz;
@@ -3707,7 +3708,8 @@ pub(crate) mod tests {
 
     #[test]
     fn h_t2_a_long_gusty_run_keeps_p_a_covariance() {
-        let t = Tuning::DEFAULT;
+        // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
+        let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
         // The checker: symmetric (bit-equal [i][j] and [j][i]), finite, a non-negative diagonal.
         let covariance = |f: &Eskf| (0..N).all(|i| (0..N).all(|j| f.p[i][j].to_bits() == f.p[j][i].to_bits())) && f.finite() && (0..N).all(|i| f.p[i][i] >= 0.0);
         let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();

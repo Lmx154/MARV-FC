@@ -583,7 +583,8 @@ mod tests {
     /// 2 s still, then a height step four gates wide held; returns (navs from the step on, the step's first sample k,
     /// h_b of the faulted samples).
     fn step_fault(armed: bool, climb_ms: f64) -> (MahonyBaro, Vec<NavState>, u64, f32) {
-        let t = Tuning::DEFAULT;
+        // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
+        let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
         let step_m = f64::from(4.0 * t.nav_gate_sigma * t.nav_baro_sigma_m);
         let mut e = MahonyBaro::new(&t);
         e.set_armed(armed);

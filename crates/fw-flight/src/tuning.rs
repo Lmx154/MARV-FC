@@ -54,7 +54,9 @@ pub struct Tuning {
     /// The barometer's delay added to the sample's age, us: the BMP581's conversion time, x16 pressure 10.4 ms plus
     /// x2 temperature 1.1 ms (B3; the card's baro.latency).
     pub nav_baro_delay_us: u64,
-    /// The barometer's height noise, 1 sigma, m (B3).
+    /// The barometer's height noise, 1 sigma, m (B3). 2.0, owner 2026-11-22: ArduPilot ALT_M_NSE_DEFAULT 2.0 and PX4
+    /// ekf2_baro_noise 2.0; was 0.5 (rest rms), which made the vertical follow the in-flight baro error (0.09-0.57 m,
+    /// 0.08-0.5 Hz, rising with tilt and speed) of log 281 into a height oscillation (flights/20261122-eskf3-flight2).
     pub nav_baro_sigma_m: f32,
     /// The innovation gate, in sigmas of the scalar innovation (B3).
     pub nav_gate_sigma: f32,
@@ -168,7 +170,7 @@ impl Tuning {
         ground_thrust_g: 0.5 / 0.7,
         nav_predict_us: 10_000,
         nav_baro_delay_us: 11_500,
-        nav_baro_sigma_m: 0.5,
+        nav_baro_sigma_m: 2.0,
         nav_gate_sigma: 5.0,
         nav_aid_timeout_us: 5_000_000,
         nav_vrw: 0.05,
