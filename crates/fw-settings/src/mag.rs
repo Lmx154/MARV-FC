@@ -89,8 +89,8 @@ pub const CAL_TYPE_QUICK: i32 = 1;
 /// The number of soft-iron and calibration-record parameters, appended after `GPS_RATE_MS`.
 pub const CAL_COUNT: usize = 11;
 
-/// The index of [`CAL_TABLE`]'s first entry (`MAG_DIAGX`) in the firmware's table: the last block.
-pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT;
+/// The index of [`CAL_TABLE`]'s first entry (`MAG_DIAGX`) in the firmware's table: the block before `GPS_GNSS`.
+pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT - crate::gnss::SET_COUNT;
 
 /// Appended to the firmware's table at indices 81 to 91 (decision-compass-cal-20261120, section 1).
 /// All `Live`; 81 to 89 are calibration results (`param reset-calibration` resets them with

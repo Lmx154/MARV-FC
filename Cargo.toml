@@ -23,7 +23,7 @@ bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca
 bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac832582f3c67be3332e12baf9970d0d6a", features = ["defmt"] }
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }
 # The GNSS receiver (src/gnss.rs): the u-blox SAM-M10Q, UBX only (decision-gnss-m10-20261122).
-sam-m10q = { git = "https://github.com/Lmx154/sam-m10q.git", rev = "26c4ec5c22b9b6949adcce31881b4fdb199d98ee", features = ["defmt"] }
+sam-m10q = { git = "https://github.com/Lmx154/sam-m10q.git", rev = "d9f6c8858118dc677dfa62b475700c45be46f350", features = ["defmt"] }
 pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "424fd58b4beb7607e426c398494c836b4bfe1fb3", features = ["defmt", "embassy-rp-0-10", "block-device-driver-0-2"] }
 # The four ESCs (src/esc.rs): bidirectional DShot on PIO2 with `PioDshot`; the same commit as in
 # crates/fw-flight/Cargo.toml, so there is one copy of it.

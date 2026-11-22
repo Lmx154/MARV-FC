@@ -21,4 +21,4 @@ mavlink-device = { git = "https://github.com/Lmx154/mavlink-device.git", rev = "
 icm45686 = { git = "https://github.com/Lmx154/icm45686-rs.git", rev = "78b13c709acc2464194c08731434750b85799927" }
 lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "447e881bbfa43ad216563f6ed751c1936b771952" }
 # The GNSS driver's `Config` and `Pvt` types (the same checkout as the binary's, without `defmt`).
-sam-m10q = { git = "https://github.com/Lmx154/sam-m10q.git", rev = "26c4ec5c22b9b6949adcce31881b4fdb199d98ee" }
+sam-m10q = { git = "https://github.com/Lmx154/sam-m10q.git", rev = "d9f6c8858118dc677dfa62b475700c45be46f350" }

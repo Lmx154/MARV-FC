@@ -381,11 +381,11 @@ impl GnssAdapter {
 
     async fn run_configure(&mut self) -> Result<(), ConfigureError> {
         let begun = Instant::now();
-        let ms = crate::store::gnss_rate_ms().map_err(|reason| {
-            defmt::warn!("[INFO] GNSS: stored GPS_RATE_MS refused: {=str}", reason);
+        let (ms, set) = crate::store::gnss_rate_and_set().map_err(|reason| {
+            defmt::warn!("[INFO] GNSS: stored GPS_RATE_MS/GPS_GNSS refused: {=str}", reason);
             ConfigureError::Stored
         })?;
-        let config = fw_settings::gnss::config(ms);
+        let config = fw_settings::gnss::config(ms, set);
         let version = self.rx.configure(&config, &mut Delay).await?;
         defmt::info!(
             "[INFO] GNSS: configured: {=u16} ms, UBX only, NAV-PVT every epoch, volatile (not saved), software {=str}, hardware {=str}, {=u64} ms",

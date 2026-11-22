@@ -8,16 +8,22 @@
 use fw_core::params::{Apply, Candidate, ParamDef};
 use fw_core::sample::{GnssReading, UtcDate, UtcTime};
 use mavlink_device::marv::MarvDevice;
-use sam_m10q::{Config, Pvt};
+use sam_m10q::{Config, Constellations, Pvt};
 
 const DEVICE: u8 = MarvDevice::MARV_DEVICE_GNSS as u8;
 
-/// The position fix interval in milliseconds: one of 200, 500 or 1000 (the periods the SAM-M10Q accepts with the
-/// firmware's constellation set, `sam_m10q::config::MEAS_RATES_MS`).
+/// The position fix interval in milliseconds: one of 100, 200, 500 or 1000 (`sam_m10q::config::MEAS_RATES_MS`), and
+/// not faster than the chosen constellation set allows ([`SET`], `Constellations::min_meas_rate_ms`).
 pub const RATE_MS: &str = "GPS_RATE_MS";
 
-/// The number of GNSS parameters.
+/// The constellation set: 0 = GPS + Galileo + BeiDou B1C + QZSS, 1 = GPS + Galileo, 2 = GPS + Galileo + GLONASS.
+pub const SET: &str = "GPS_GNSS";
+
+/// The number of GNSS parameters in the GNSS block of the table (`GPS_RATE_MS`).
 pub const COUNT: usize = 1;
+
+/// The number of GNSS parameters appended at the end of the table (`GPS_GNSS`).
+pub const SET_COUNT: usize = 1;
 
 /// `GPS_RATE_MS`, appended to the firmware's table at index 80: `I32`, default 200, range 100 to 1000,
 /// `Configure`. Device GNSS (5). The range is wider than the values [`validate`] accepts.
@@ -30,33 +36,78 @@ pub static TABLE: [ParamDef; COUNT] = [ParamDef::i32(
     Apply::Configure,
 )];
 
-const BAD_RATE: &str = "not 200, 500 or 1000";
+/// `GPS_GNSS`, the last parameter of the table: `I32`, default 0, range 0 to 2, `Configure`. Device GNSS (5).
+pub static SET_TABLE: [ParamDef; SET_COUNT] = [ParamDef::i32(SET, DEVICE, 0, 0, 2, Apply::Configure)];
 
-/// The store's validator for the GNSS receiver: 200, 500 or 1000 ms.
-pub fn validate(candidate: &Candidate<'_>) -> Result<(), &'static str> {
-    match candidate.i32(RATE_MS) {
-        Some(200 | 500 | 1000) => Ok(()),
-        _ => Err(BAD_RATE),
+const BAD_RATE: &str = "not 100, 200, 500 or 1000";
+const BAD_SET: &str = "not 0, 1 or 2";
+
+/// The constellation set of a `GPS_GNSS` value; an unknown or missing value is the default, 0. A boot load runs no
+/// validator, so the adapter asks this before it configures.
+pub fn constellations(value: Option<i32>) -> Constellations {
+    match value {
+        Some(1) => Constellations::GpsGal,
+        Some(2) => Constellations::GpsGalGlo,
+        _ => Constellations::GpsGalBdsQzss,
     }
 }
 
-/// The stored `GPS_RATE_MS` as the fix interval to configure: the value when [`validate`] accepts it,
+/// Refuses a fix interval faster than `set` allows, the text naming the period and the `GPS_GNSS` value.
+fn fits(ms: u16, set: Constellations) -> Result<(), &'static str> {
+    if ms >= set.min_meas_rate_ms() {
+        return Ok(());
+    }
+    // Only 100 ms is faster than any set's limit among the allowed periods.
+    Err(match set {
+        Constellations::GpsGalBdsQzss => "100 ms too fast for GPS_GNSS 0",
+        Constellations::GpsGal => "100 ms too fast for GPS_GNSS 1",
+        Constellations::GpsGalGlo => "100 ms too fast for GPS_GNSS 2",
+    })
+}
+
+/// The store's validator for the GNSS receiver: the whole candidate. `GPS_RATE_MS` 100, 200, 500 or 1000 ms, `GPS_GNSS`
+/// 0 to 2, and the period not faster than the set's limit (100 ms only with `GPS_GNSS` 1).
+pub fn validate(candidate: &Candidate<'_>) -> Result<(), &'static str> {
+    let ms = match candidate.i32(RATE_MS) {
+        Some(v @ (100 | 200 | 500 | 1000)) => u16::try_from(v).map_err(|_| BAD_RATE)?,
+        _ => return Err(BAD_RATE),
+    };
+    let set = match candidate.i32(SET) {
+        Some(0) | None => Constellations::GpsGalBdsQzss,
+        Some(1) => Constellations::GpsGal,
+        Some(2) => Constellations::GpsGalGlo,
+        Some(_) => return Err(BAD_SET),
+    };
+    fits(ms, set)
+}
+
+/// The stored `GPS_RATE_MS` as the fix interval to configure: the value when [`validate`] accepts it for a rate,
 /// otherwise its refusal. A boot load runs no validator, so the adapter asks this before it configures.
 pub fn rate_ms(value: Option<i32>) -> Result<u16, &'static str> {
     match value {
-        Some(v @ (200 | 500 | 1000)) => u16::try_from(v).map_err(|_| BAD_RATE),
+        Some(v @ (100 | 200 | 500 | 1000)) => u16::try_from(v).map_err(|_| BAD_RATE),
         _ => Err(BAD_RATE),
     }
 }
 
-/// The driver's configuration for a fix interval: its defaults (UBX only, NMEA off, one NAV-PVT per epoch, dynamic
-/// model 8, static hold off, the constellation set of `sam_m10q::config::SIGNAL_KEYS`) with the measurement period
-/// `ms` and the baud scan starting at 115200, the target: after an FC reset with the receiver powered it already runs
+/// The stored pair as the fix interval and set to configure: [`rate_ms`] and [`constellations`], and the period must fit
+/// the set (a boot load runs no validator).
+pub fn rate_and_set(rate: Option<i32>, set: Option<i32>) -> Result<(u16, Constellations), &'static str> {
+    let ms = rate_ms(rate)?;
+    let set = constellations(set);
+    fits(ms, set)?;
+    Ok((ms, set))
+}
+
+/// The driver's configuration for a fix interval and constellation set: its defaults (UBX only, NMEA off, one NAV-PVT
+/// per epoch, dynamic model 8, static hold off) with the measurement period `ms`, the set `set` and the baud scan
+/// starting at 115200, the target: after an FC reset with the receiver powered it already runs
 /// there, and a scan that starts at 9600 or 38400 would read its 115200 stream at the wrong rate (a framing-error
 /// `warn!` per byte in embassy-rp's UART interrupt). Then 9600 (the u-blox default) and 38400.
-pub fn config(ms: u16) -> Config {
+pub fn config(ms: u16, set: Constellations) -> Config {
     Config {
         meas_rate_ms: ms,
+        constellations: set,
         candidate_bauds: [115_200, 9_600, 38_400],
         ..Config::default()
     }
@@ -188,70 +239,172 @@ mod tests {
     use fw_core::params::Params;
     use mavlink_device::{ParamError, ParamStore, ParamValue};
 
-    const ALLOWED: [u16; 3] = [200, 500, 1000];
+    const ALLOWED: [u16; 4] = [100, 200, 500, 1000];
+    const SETS: [Constellations; 3] = [
+        Constellations::GpsGalBdsQzss,
+        Constellations::GpsGal,
+        Constellations::GpsGalGlo,
+    ];
+    /// Index of `GPS_RATE_MS` and `GPS_GNSS` in the firmware's table.
+    const RATE_AT: usize = 80;
+    const SET_AT: usize = crate::COUNT - 1;
 
-    #[test]
-    fn config_is_the_driver_default_with_the_stored_period_and_the_scan_from_115200_for_every_allowed_rate() {
-        for ms in ALLOWED {
-            let c = config(ms);
-            assert!(c.is_valid(), "{ms}");
-            assert_eq!(c.meas_rate_ms, ms);
-            assert_eq!(c.candidate_bauds, [115_200, 9_600, 38_400]);
-            assert_eq!(c, Config { meas_rate_ms: ms, candidate_bauds: c.candidate_bauds, ..Config::default() });
-            assert!(c.valset().is_some(), "{ms}");
-        }
-        // 100 ms is not a period the receiver accepts with this constellation set.
-        assert!(!config(100).is_valid());
-    }
-
-    #[test]
-    fn the_validator_accepts_the_three_rates_and_refuses_the_rest() {
+    fn store() -> Params<{ crate::COUNT }> {
         let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
         assert!(p.set_validator(DEVICE, validate));
-        let def = &TABLE[0];
-        assert_eq!(def.name, "GPS_RATE_MS");
-        assert_eq!(def.device, 5);
-        assert_eq!(def.default, ParamValue::I32(200));
-        assert_eq!(
-            (def.min, def.max),
-            (ParamValue::I32(100), ParamValue::I32(1000))
-        );
-        assert_eq!(def.apply, Apply::Configure);
-        for ok in [200, 500, 1000] {
-            assert_eq!(p.set(80, ParamValue::I32(ok)), Ok(ParamValue::I32(ok)));
-        }
-        // 100 was allowed with the LC76G; the SAM-M10Q refuses it.
-        assert_eq!(p.set(80, ParamValue::I32(100)), Err(ParamError::Rejected));
-        assert_eq!(p.set(80, ParamValue::I32(300)), Err(ParamError::Rejected));
-        assert_eq!(
-            p.take_notice().unwrap().kind.text(),
-            "not 200, 500 or 1000"
-        );
-        // The STATUSTEXT puts the name before the text: the whole sentence fits its 50 characters once.
-        assert!("GPS_RATE_MS: ".len() + BAD_RATE.len() <= 50);
-        // 50 is below the range: refused before the validator is asked.
-        assert_eq!(p.set(80, ParamValue::I32(50)), Err(ParamError::OutOfRange));
+        p
     }
 
-    /// `rate_ms` accepts exactly what the validator accepts, over the whole range and beyond it.
+    #[test]
+    fn config_is_the_driver_default_with_the_stored_period_set_and_the_scan_from_115200() {
+        for set in SETS {
+            for ms in ALLOWED {
+                let c = config(ms, set);
+                assert!(c.is_valid(), "{ms}");
+                assert_eq!(c.meas_rate_ms, ms);
+                assert_eq!(c.constellations, set);
+                assert_eq!(c.candidate_bauds, [115_200, 9_600, 38_400]);
+                assert_eq!(
+                    c,
+                    Config {
+                        meas_rate_ms: ms,
+                        constellations: set,
+                        candidate_bauds: c.candidate_bauds,
+                        ..Config::default()
+                    }
+                );
+                assert!(c.valset().is_some(), "{ms}");
+            }
+        }
+        assert!(!config(300, Constellations::GpsGal).is_valid());
+    }
+
+    #[test]
+    fn the_parameters_and_their_default() {
+        let def = &TABLE[0];
+        assert_eq!((def.name, def.device, def.default), ("GPS_RATE_MS", 5, ParamValue::I32(200)));
+        assert_eq!((def.min, def.max), (ParamValue::I32(100), ParamValue::I32(1000)));
+        assert_eq!(def.apply, Apply::Configure);
+        let def = &SET_TABLE[0];
+        assert_eq!((def.name, def.device, def.default), ("GPS_GNSS", 5, ParamValue::I32(0)));
+        assert_eq!((def.min, def.max), (ParamValue::I32(0), ParamValue::I32(2)));
+        assert_eq!(def.apply, Apply::Configure);
+        assert_eq!(crate::TABLE[SET_AT].name, "GPS_GNSS");
+        assert_eq!(crate::TABLE[RATE_AT].name, "GPS_RATE_MS");
+        // The defaults configure the driver's default: 200 ms, GPS + Galileo + BeiDou B1C + QZSS.
+        assert_eq!(rate_and_set(Some(200), Some(0)), Ok((200, Constellations::GpsGalBdsQzss)));
+        assert_eq!(config(200, Constellations::GpsGalBdsQzss).constellations, Config::default().constellations);
+    }
+
+    /// Every set against every period: only 100 ms with GPS_GNSS 1 is allowed among the periods the limits cut.
+    #[test]
+    fn the_validator_matrix_set_by_rate() {
+        const NAMES: [&str; 3] = ["GPS_GNSS 0", "GPS_GNSS 1", "GPS_GNSS 2"];
+        for (k, set) in SETS.iter().enumerate() {
+            for ms in ALLOWED {
+                let mut p = store();
+                // The set first (every set is valid with the default 200 ms), then the period.
+                assert_eq!(p.set(SET_AT as u16, ParamValue::I32(k as i32)), Ok(ParamValue::I32(k as i32)));
+                let r = p.set(RATE_AT as u16, ParamValue::I32(ms as i32));
+                if ms >= set.min_meas_rate_ms() {
+                    assert_eq!(r, Ok(ParamValue::I32(ms as i32)), "{k} {ms}");
+                } else {
+                    assert_eq!((ms, r), (100, Err(ParamError::Rejected)), "{k} {ms}");
+                    // The refusal names both values.
+                    let text = p.take_notice().unwrap().kind.text();
+                    assert!(text.contains("100") && text.contains(NAMES[k]), "{text}");
+                    assert!("GPS_RATE_MS: ".len() + text.len() <= 50);
+                }
+            }
+        }
+        // 100 ms with GPS_GNSS 1 is accepted, and GPS_GNSS cannot then go to 0 or 2 (the whole candidate).
+        let mut p = store();
+        assert_eq!(p.set(SET_AT as u16, ParamValue::I32(1)), Ok(ParamValue::I32(1)));
+        assert_eq!(p.set(RATE_AT as u16, ParamValue::I32(100)), Ok(ParamValue::I32(100)));
+        for g in [0, 2] {
+            assert_eq!(p.set(SET_AT as u16, ParamValue::I32(g)), Err(ParamError::Rejected));
+            assert!(p.take_notice().unwrap().kind.text().ends_with(["GPS_GNSS 0", "GPS_GNSS 1", "GPS_GNSS 2"][g as usize]));
+        }
+        assert_eq!(p.set(SET_AT as u16, ParamValue::I32(1)), Ok(ParamValue::I32(1)));
+        // Other periods and out-of-range values.
+        assert_eq!(p.set(RATE_AT as u16, ParamValue::I32(300)), Err(ParamError::Rejected));
+        assert_eq!(p.take_notice().unwrap().kind.text(), "not 100, 200, 500 or 1000");
+        assert!("GPS_RATE_MS: ".len() + BAD_RATE.len() <= 50);
+        assert_eq!(p.set(RATE_AT as u16, ParamValue::I32(50)), Err(ParamError::OutOfRange));
+        assert_eq!(p.set(SET_AT as u16, ParamValue::I32(3)), Err(ParamError::OutOfRange));
+        assert_eq!(p.set(SET_AT as u16, ParamValue::I32(-1)), Err(ParamError::OutOfRange));
+    }
+
+    /// `rate_ms` accepts exactly the periods the validator accepts with some set, over the whole range and beyond it.
     #[test]
     fn rate_ms_agrees_with_the_validator() {
-        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-        assert!(p.set_validator(DEVICE, validate));
         for v in 100..=1000 {
-            let accepted = p.set(80, ParamValue::I32(v)).is_ok();
+            let mut p = store();
+            // GPS_GNSS 1 allows every period.
+            assert!(p.set(SET_AT as u16, ParamValue::I32(1)).is_ok());
+            let accepted = p.set(RATE_AT as u16, ParamValue::I32(v)).is_ok();
             assert_eq!(rate_ms(Some(v)).is_ok(), accepted, "{v}");
             if accepted {
                 assert_eq!(rate_ms(Some(v)), Ok(v as u16));
             }
         }
-        assert_eq!(rate_ms(Some(100)), Err(BAD_RATE));
         assert_eq!(rate_ms(Some(300)), Err(BAD_RATE));
         for v in [None, Some(0), Some(-200), Some(65_736), Some(i32::MAX)] {
             assert_eq!(rate_ms(v), Err(BAD_RATE), "{v:?}");
         }
     }
 
+    /// The boot sanitiser: an unknown or missing `GPS_GNSS` is the default; a stored pair that breaks a limit is refused.
+    #[test]
+    fn the_boot_sanitiser() {
+        assert_eq!(constellations(Some(0)), Constellations::GpsGalBdsQzss);
+        assert_eq!(constellations(Some(1)), Constellations::GpsGal);
+        assert_eq!(constellations(Some(2)), Constellations::GpsGalGlo);
+        for v in [None, Some(3), Some(-1), Some(i32::MAX)] {
+            assert_eq!(constellations(v), Constellations::GpsGalBdsQzss, "{v:?}");
+        }
+        assert_eq!(rate_and_set(Some(100), Some(1)), Ok((100, Constellations::GpsGal)));
+        assert!(rate_and_set(Some(100), Some(0)).is_err());
+        assert!(rate_and_set(Some(100), Some(2)).is_err());
+        assert!(rate_and_set(Some(100), None).is_err());
+        assert_eq!(rate_and_set(Some(200), Some(7)), Ok((200, Constellations::GpsGalBdsQzss)));
+        assert_eq!(rate_and_set(Some(300), Some(1)), Err(BAD_RATE));
+        assert_eq!(rate_and_set(None, Some(1)), Err(BAD_RATE));
+    }
+
+    /// A record saved before `GPS_GNSS` existed (every parameter but the last) loads with `GPS_GNSS` at its default.
+    #[test]
+    fn an_old_record_without_gps_gnss_loads_with_the_default() {
+        use fw_core::record::{self, Boot, Entry, SECTOR_LEN};
+        use mavlink_device::ParamName;
+        let old = &crate::TABLE[..SET_AT];
+        let entries = old.iter().map(|d| Entry {
+            name: ParamName::new(d.name).unwrap(),
+            value: d.default,
+        });
+        let mut a = [0u8; SECTOR_LEN];
+        let b = [0xFFu8; SECTOR_LEN];
+        record::encode(7, entries, &mut a).unwrap();
+        let Boot::Current { record, .. } = record::choose(&a, &b).boot else {
+            panic!("the old record is not current");
+        };
+        assert_eq!(record.declared_count(), SET_AT);
+        let mut p = store();
+        assert_eq!(p.set(SET_AT as u16, ParamValue::I32(2)), Ok(ParamValue::I32(2)));
+        p.reset_all();
+        for entry in record.entries() {
+            assert_eq!(p.load(&entry.name, entry.value), Ok(true));
+        }
+        assert_eq!(p.get_named(SET), Some(ParamValue::I32(0)));
+        let get = |n| match p.get_named(n) {
+            Some(ParamValue::I32(v)) => Some(v),
+            _ => None,
+        };
+        assert_eq!(
+            rate_and_set(get(RATE_MS), get(SET)),
+            Ok((200, Constellations::GpsGalBdsQzss))
+        );
+    }
 
     /// A NAV-PVT of a good 3D fix with distinct values in every field the mapping reads.
     fn pvt() -> Pvt {
