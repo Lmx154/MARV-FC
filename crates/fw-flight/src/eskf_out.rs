@@ -639,6 +639,12 @@ mod tests {
         s.imu1.t_us >= 5_000_000
     }
 
+    /// Armed from 5 s but disarmed from `from_us` to `to_us`: G6-B resets no yaw while armed, so a test that needs a yaw reset
+    /// after its compass turn disarms before the timeout runs out (the disarmed reset, the same `yaw_set` path).
+    fn armed_but(s: &Sensors, from_us: u64, to_us: u64) -> bool {
+        armed_at(s) && !(from_us..to_us).contains(&s.imu1.t_us)
+    }
+
     /// The core's state that no wrapper may touch, as bits: nominal, biases, sigmas (the diagonal of P), horizon.
     fn core_bits(e: &Eskf) -> Vec<u32> {
         let (q, v, p) = e.nominal();
@@ -684,8 +690,9 @@ mod tests {
         let mut steer = EskfSteer::new(&mut core, &t).unwrap();
         let (mut resets, mut nav_sigma_eq) = (0, 0);
         for (k, s) in st.iter().enumerate() {
-            steer.set_armed(armed_at(s));
-            bare.set_armed(armed_at(s));
+            // Disarmed from 61 s to 70 s (the compass turned at 60 s): the disarmed yaw reset.
+            steer.set_armed(armed_but(s, 61_000_000, 70_000_000));
+            bare.set_armed(armed_but(s, 61_000_000, 70_000_000));
             let nav = steer.update(s);
             let b = bare.update(s);
             assert_eq!(core_bits(steer.core()), core_bits(&bare), "step {k}");
@@ -1319,8 +1326,9 @@ mod tests {
     fn t4_no_tilt_step_across_yaw_alignment_resets_src9_c3_and_height_and_the_yaw_moves_by_the_reset() {
         let t = Tuning::DEFAULT;
         // Level, yawed 90 deg from the start: the yaw alignment by about 90 deg; the GPS reset at arming (5 s), the C3
-        // reset (north fault from 20 s), an armed yaw reset (compass turned 90 deg from 60 s), the height reset (85 s).
-        let a = watch_all(&t, &stream_yaw(&t, 100, 90.0_f64.to_radians()), |s| s.imu1.t_us >= 5_000_000);
+        // reset (north fault from 20 s), a yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: G6-B resets
+        // no yaw while armed), the height reset (85 s).
+        let a = watch_all(&t, &stream_yaw(&t, 100, 90.0_f64.to_radians()), |s| armed_but(s, 61_000_000, 70_000_000));
         // Disarmed throughout, compass turned 90 deg from 30 s: the disarmed yaw reset.
         let mut w = World::new(&t);
         w.yaw = 0.4;
@@ -1344,17 +1352,18 @@ mod tests {
             assert!(r.tilt_step <= r.tilt_bound, "{r:?}");
             assert!(fabsf(r.yaw_err as f32) as f64 <= r.yaw_bound, "{r:?}");
         }
-        // Rolling 30 deg at up to 113 deg/s with the compass turned at 20 s: an armed yaw reset while tilted. Here the
-        // left and right products differ, so this is where the control can fail the test.
+        // Rolling 30 deg at up to 113 deg/s with the compass turned at 20 s, disarmed from 21 s to 28 s (G6-B resets no yaw while
+        // armed): a disarmed yaw reset while tilted. Here the left and right products differ, so this is where the control can
+        // fail the test.
         let c_stream = rocking_stream(&t, 40.0);
-        let c = watch_all(&t, &c_stream, |s| s.imu1.t_us >= 5_000_000);
+        let c = watch_all(&t, &c_stream, |s| armed_but(s, 21_000_000, 28_000_000));
         let (tc, yc) = worst_ratio(&c);
         println!("t4 C (rocking): {} reset steps, worst tilt step / bound {tc:.3}, worst yaw error / bound {yc:.3}", c.len());
         assert!(c.iter().any(|r| r.src == 8 && fabsf(r.dpsi.to_degrees() as f32) > 45.0 && r.t_us > 20_000_000), "the yaw reset while rocking");
         assert!(tc <= 1.0 && yc <= 1.0);
         // Control: the delta on the body (right) side.
         RESET_BODY_SIDE.set(true);
-        let c2 = watch_all(&t, &c_stream, |s| s.imu1.t_us >= 5_000_000);
+        let c2 = watch_all(&t, &c_stream, |s| armed_but(s, 21_000_000, 28_000_000));
         RESET_BODY_SIDE.set(false);
         let (tc2, _) = worst_ratio(&c2);
         println!("t4 control (delta on the body side): worst tilt step / bound {tc2:.1}");
@@ -1574,7 +1583,7 @@ mod tests {
         let mut steer = EskfSteer::new(&mut core, t).unwrap();
         let (mut v, mut reset) = (Vec::new(), None);
         for (k, s) in st.iter().enumerate().take(to) {
-            steer.set_armed(s.imu1.t_us >= 5_000_000);
+            steer.set_armed(armed_but(s, 21_000_000, 28_000_000));
             if k == at && inject != 0.0 {
                 steer.inject_tilt(inject);
             }
@@ -1594,7 +1603,7 @@ mod tests {
 
     #[test]
     fn t5d_the_rate_correction_is_rotated_by_a_yaw_reset_and_the_tracking_continues_on_the_new_axis() {
-        // P-G2c. The rocker world, the compass turned 90 deg from 20 s: the armed yaw reset about 5 s later. A 0.05 rad
+        // P-G2c. The rocker world, the compass turned 90 deg from 20 s, disarmed from 21 s to 28 s (G6-B resets no yaw while armed): the disarmed yaw reset about 5 s later. A 0.05 rad
         // tilt offset about north is put into the output 800 steps (1 s) before the reset step (the correction sees it one delay,
         // 344 steps, later; at the reset it has been correcting for 456 steps: the earth-frame error vector is about
         // north, the rate correction too). The reset rotates both about down by the reset yaw; the
@@ -1604,7 +1613,7 @@ mod tests {
         // moves by g x 10 ms / T_d = 0.66 deg and stays moved.
         let t = Tuning::DEFAULT;
         let st = rocking_stream(&t, 40.0);
-        let recs = watch_all(&t, &st, |s| s.imu1.t_us >= 5_000_000);
+        let recs = watch_all(&t, &st, |s| armed_but(s, 21_000_000, 28_000_000));
         let rr = recs.iter().find(|r| r.src == 8 && r.t_us > 20_000_000).expect("a yaw reset while rocking");
         let k_r = rr.k;
         let theta = 0.05f32;
@@ -1639,8 +1648,9 @@ mod tests {
         let mut steer = EskfSteer::new(&mut core, &t).unwrap();
         let (mut differ, mut kinds) = (Vec::new(), [0usize; 3]);
         for (k, s) in st.iter().enumerate() {
-            steer.set_armed(armed_at(s));
-            bare.set_armed(armed_at(s));
+            // Disarmed from 61 s to 70 s (the compass turned at 60 s): the disarmed yaw reset.
+            steer.set_armed(armed_but(s, 61_000_000, 70_000_000));
+            bare.set_armed(armed_but(s, 61_000_000, 70_000_000));
             let live = steer.out.live;
             let (n, b) = (steer.update(s), bare.update(s));
             let r = bare.last_reset().filter(|_| live && steer.out.live);

@@ -460,6 +460,10 @@ pub struct EskfN<const R: usize> {
     /// E1 test control: the same scalar also leaves b_a,z alone.
     #[cfg(test)]
     baro_abias_z_mask: bool,
+    /// Test switch for a `Flight` test that must stay armed: the compass reset after the timeout also while armed (the rule
+    /// before G6-B), through the same `mag_job` -> `yaw_set` path.
+    #[cfg(test)]
+    pub(crate) armed_yaw_reset: bool,
 }
 
 /// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
@@ -622,6 +626,8 @@ impl<const R: usize> EskfN<R> {
             baro_full_gain: false,
             #[cfg(test)]
             baro_abias_z_mask: false,
+            #[cfg(test)]
+            armed_yaw_reset: false,
         })
     }
 
@@ -1109,7 +1115,11 @@ impl<const R: usize> EskfN<R> {
                 self.event(code::MAG_YAW, y, s, code::GATED);
             }
             Some(t0) if horizon.saturating_sub(t0) >= self.t.nav_aid_timeout_us => {
-                if !self.armed {
+                #[cfg(test)]
+                let reset_armed = self.armed_yaw_reset;
+                #[cfg(not(test))]
+                let reset_armed = false;
+                if !self.armed || reset_armed {
                     self.yaw_set(y);
                     self.stats.yaw_resets = self.stats.yaw_resets.wrapping_add(1);
                 } else if !self.global_off {
@@ -4157,8 +4167,9 @@ pub(crate) mod tests {
     fn g1_e_resets_are_reported_exactly_and_ordinary_fusions_are_not() {
         let t = Tuning::DEFAULT;
         // Full: yaw alignment (first compass), GPS reset at arming (5 s), C3 reset (a 10-sigma north fault from 20 s), a
-        // yaw reset (compass turned 90 deg from 60 s), the height reset after the timeout (barometer 40 m too high from
-        // 85 s, armed) and the height initialisation after a re-initialisation (at 100 s).
+        // disarmed yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: while armed G6-B latches GNSS off
+        // instead of resetting; the re-arming at 70 s is a further GPS reset), the height reset after the timeout (barometer
+        // 40 m too high from 85 s, armed) and the height initialisation after a re-initialisation (at 100 s).
         let mut w = World::new(&t);
         w.yaw = 0.4;
         w.v = [2.0, 0.5, 0.0];
@@ -4180,7 +4191,7 @@ pub(crate) mod tests {
         }
         let mut f = Eskf::new(&t).unwrap();
         let reinit_at = stream.iter().position(|s| s.imu1.t_us >= 100_000_000).unwrap();
-        let (kinds, fused) = g1_run_resets(&mut f, &stream, |s| s.imu1.t_us >= 5_000_000, |k, f| {
+        let (kinds, fused) = g1_run_resets(&mut f, &stream, |s| s.imu1.t_us >= 5_000_000 && !(61_000_000..70_000_000).contains(&s.imu1.t_us), |k, f| {
             if k == reinit_at {
                 f.reinitialise();
             }

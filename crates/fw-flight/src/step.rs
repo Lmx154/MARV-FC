@@ -1402,6 +1402,9 @@ mod tests {
         use crate::eskf_out::EskfSteer;
         let tuning = Tuning::DEFAULT;
         let mut core = Eskf::new(&tuning).unwrap();
+        // This run must stay armed (the Angle demand is asserted), and G6-B resets no yaw while armed: the test switch
+        // restores the compass reset after the timeout, through the same `mag_job` -> `yaw_set` path.
+        core.armed_yaw_reset = true;
         let steer = EskfSteer::new(&mut core, &tuning).unwrap();
         let mut flight = Flight::new(steer, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
         handshake.set_permit(true);
