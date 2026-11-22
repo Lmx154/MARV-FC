@@ -812,6 +812,52 @@ fn the_dead_zone_and_the_diagonal_scale() {
     near(n, e, 1e-5);
 }
 
+/// The yaw stick's dead zone is the same in Angle, Altitude and Position: +-0.025 commands exactly zero, full stick the
+/// full rate. `dz` is the control when 0.
+fn yaw_rates(dz: f32, yaw: f32) -> [f32; 3] {
+    static H: Handshake = Handshake::new();
+    let mut tuning = Tuning::DEFAULT;
+    tuning.pilot_y_dz = dz;
+    let nav = pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION);
+    let cell = Cell::new(nav);
+    let mut f = flight(&cell, &H, &tuning);
+    f.shaper.sticks = Sticks { roll: 0.0, pitch: 0.0, throttle: HOVER, yaw };
+    [Mode::Angle, Mode::Altitude, Mode::Position].map(|mode| {
+        match f.shaper.setpoint(mode, &nav, 1_000) {
+            Setpoint::Attitude { heading_rate_rads, .. }
+            | Setpoint::Altitude { heading_rate_rads, .. }
+            | Setpoint::Position { heading_rate_rads, .. } => heading_rate_rads,
+            _ => panic!("unexpected setpoint"),
+        }
+    })
+}
+
+#[test]
+fn the_yaw_dead_zone_is_the_same_in_every_mode() {
+    let full = Tuning::DEFAULT.pilot_y_rate_rads;
+    let dz = Tuning::DEFAULT.pilot_y_dz;
+    for y in [0.025, -0.025, dz, -dz] {
+        assert_eq!(yaw_rates(dz, y), [0.0; 3], "yaw {y}");
+    }
+    for r in yaw_rates(dz, 1.0) {
+        near(r, full, 1e-5);
+    }
+    for r in yaw_rates(dz, -1.0) {
+        near(r, -full, 1e-5);
+    }
+    // Just outside: small and of the stick's sign.
+    for r in yaw_rates(dz, dz + 0.01) {
+        assert!(r > 0.0 && r < 0.02 * full, "{r}");
+    }
+    // The control: no dead zone, the same stick commands the drift.
+    for r in yaw_rates(0.0, 0.025) {
+        near(r, 0.025 * full, 1e-6);
+    }
+    for r in yaw_rates(0.0, -0.025) {
+        assert!(r < 0.0);
+    }
+}
+
 // ---- N9: a step with a reset delta is not Position ----
 
 /// Position steady; the step with the NE flags false (what an NE reset delta gives for exactly that step, eskf_out's

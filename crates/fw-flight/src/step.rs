@@ -79,6 +79,8 @@ struct StickShaper {
     pilot_speed_xy_ms: f32,
     /// Dead zone of the roll and pitch sticks in Position.
     pilot_xy_dz: f32,
+    /// Dead zone of the yaw stick, every mode.
+    pilot_y_dz: f32,
     /// Position hold captures the position below this ground speed with the sticks centred, m/s.
     pilot_hold_speed_ms: f32,
     /// The altitude target, m down (positive down); `None` outside Altitude and Position. Captured at the first step
@@ -176,7 +178,16 @@ impl StickShaper {
 
     /// One roll or pitch stick through the dead zone: 0 within `pilot_xy_dz`, else (|s| - dz) / (1 - dz) with the sign.
     fn stick_xy(&self, s: f32) -> f32 {
-        let dz = self.pilot_xy_dz;
+        Self::dead_zone(s, self.pilot_xy_dz)
+    }
+
+    /// The yaw stick's heading rate, rad/s: the stick through the dead zone `pilot_y_dz`, times `pilot_y_rate_rads`.
+    fn heading_rate(&self, yaw: f32) -> f32 {
+        Self::dead_zone(yaw, self.pilot_y_dz) * self.pilot_y_rate_rads
+    }
+
+    /// 0 within `dz` of the centre, else (|s| - dz) / (1 - dz) with the sign.
+    fn dead_zone(s: f32, dz: f32) -> f32 {
         if libm::fabsf(s) <= dz {
             0.0
         } else {
@@ -218,7 +229,7 @@ impl StickShaper {
             position_m: [tn, te, down_m],
             velocity_ms: [v_ff[0], v_ff[1], velocity_d_ms],
             heading_rad: psi,
-            heading_rate_rads: self.sticks.yaw * self.pilot_y_rate_rads,
+            heading_rate_rads: self.heading_rate(self.sticks.yaw),
         }
     }
 
@@ -256,7 +267,7 @@ impl StickShaper {
         } else {
             hover + (2.0 * throttle - 1.0) * (full - hover)
         };
-        (quat::mul(heading, tilt), yaw * self.pilot_y_rate_rads, thrust_n)
+        (quat::mul(heading, tilt), self.heading_rate(yaw), thrust_n)
     }
 
     /// Angle: [`StickShaper::attitude_setpoint`] as a `Setpoint`.
@@ -346,6 +357,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 pilot_alt_lead_s: tuning.pilot_alt_lead_s,
                 pilot_speed_xy_ms: tuning.pilot_speed_xy_ms,
                 pilot_xy_dz: tuning.pilot_xy_dz,
+                pilot_y_dz: tuning.pilot_y_dz,
                 pilot_hold_speed_ms: tuning.pilot_hold_speed_ms,
                 target_d: None,
                 target_ne: None,

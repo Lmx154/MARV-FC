@@ -117,12 +117,16 @@ pub struct Tuning {
     /// Dead zone of the roll and pitch sticks in position hold, as a share of full travel on each side of the centre.
     /// PX4 MAN_DEADZONE; equals `pilot_thr_dz`.
     pub pilot_xy_dz: f32,
+    /// Dead zone of the yaw stick in every mode, as a share of full travel on each side of the centre. ArduPilot
+    /// `channel_yaw->set_default_dead_zone(15)` (ArduCopter/radio.cpp:13), 15 us of the 400 us half-range of the default
+    /// calibration (RC min 1100, trim 1500, max 1900, `fw_settings::rc`), so 0.0375; owner approved 2026-11-22.
+    pub pilot_y_dz: f32,
     /// Position hold: with the sticks centred the position is captured once the ground speed is below this, m/s. PX4
     /// MPC_HOLD_MAX_XY.
     pub pilot_hold_speed_ms: f32,
     /// Position hold's airborne latch (Amendment P, P3 replaced): the time the collective must stay below the ground
     /// threshold, armed, before the vehicle counts as landed, us. ArduPilot LAND_DETECTOR_TRIGGER_SEC 1.0 s
-    /// (ArduCopter/config.h:359-360; land_detector.cpp:78, :151-156). Owner approval pending.
+    /// (ArduCopter/config.h:359-360; land_detector.cpp:78, :151-156). Owner approved 2026-11-22.
     pub land_detect_us: u64,
     /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
     /// may use, us (section 10).
@@ -242,6 +246,7 @@ impl Tuning {
         psc_velxy_i: 0.4,
         pilot_speed_xy_ms: 5.0,
         pilot_xy_dz: 0.10,
+        pilot_y_dz: 0.0375,
         pilot_hold_speed_ms: 0.8,
         land_detect_us: 1_000_000,
     };
