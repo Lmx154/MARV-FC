@@ -145,7 +145,7 @@ impl defmt::Format for Reading {
     }
 }
 
-/// An epoch's UTC time in the `[STAT]` text, as `lc76g::sentence::Time`'s derived format printed it.
+/// An epoch's UTC time in the `[STAT]` text, in the derived-Debug layout the line has always printed.
 pub(crate) struct Utc(pub Option<UtcTime>);
 
 impl defmt::Format for Utc {
@@ -164,7 +164,7 @@ impl defmt::Format for Utc {
     }
 }
 
-/// An epoch's UTC date in the `[STAT]` text, as `lc76g::sentence::Date`'s derived format printed it.
+/// An epoch's UTC date in the `[STAT]` text, in the derived-Debug layout the line has always printed.
 struct UtcDay(Option<UtcDate>);
 
 impl defmt::Format for UtcDay {

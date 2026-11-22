@@ -1238,7 +1238,7 @@ async fn main(spawner: Spawner) {
     defmt::info!("[INFO] lsm6dsk320x: {}", type_name::<lsm6dsk320x::Info>());
     defmt::info!("[INFO] bmp581: {}", type_name::<bmp581::Info>());
     defmt::info!("[INFO] bmm350: {}", type_name::<bmm350::Info>());
-    defmt::info!("[INFO] lc76g: {}", type_name::<lc76g::Config>());
+    defmt::info!("[INFO] sam-m10q: {}", type_name::<sam_m10q::Config>());
     defmt::info!("[INFO] pio-sdmmc: {}", type_name::<pio_sdmmc::Config>());
 
     let actlr0 = read_actlr();

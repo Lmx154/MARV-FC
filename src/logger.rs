@@ -342,6 +342,8 @@ impl Collector {
                 ..
             }) = sample.reading
             {
+                // With the SAM-M10Q lat_std_mm and lon_std_mm are both its hAcc, so GPA.HAcc (sqrt(lat^2 + lon^2))
+                // now logs sqrt(2) x hAcc.
                 let delta_ms =
                     dflog::gpa_delta_ms(self.gnss_t_us.replace(sample.t_us), sample.t_us);
                 p.push_with(dflog::GPA.length.into(), |b| {
@@ -357,20 +359,22 @@ impl Collector {
                 });
             }
             if let Reading::Gnss(GnssReading {
-                time,
+                speed_mm_s,
+                course_cdeg,
                 vel_ned_mm_s: Some(vel),
                 ..
             }) = sample.reading
             {
-                let pvt = crate::gnss::pvt_log(time);
+                // GMS is the NAV-PVT's iTOW; Spd and Hdg are its gSpeed and headMot as the reading holds them.
+                let tow_ms = crate::gnss::pvt_tow_ms(vel);
                 p.push_with(dflog::GPV.length.into(), |b| {
                     dflog::encode_gpv(
                         b,
                         sample.t_us,
                         vel,
-                        pvt.map_or(0, |x| x.tow_ms),
-                        pvt.and_then(|x| x.speed_mm_s).unwrap_or(u32::MAX),
-                        pvt.and_then(|x| x.heading_cdeg).unwrap_or(u16::MAX),
+                        tow_ms.unwrap_or(0),
+                        speed_mm_s.unwrap_or(u32::MAX),
+                        course_cdeg.unwrap_or(u16::MAX),
                     )
                 });
             }

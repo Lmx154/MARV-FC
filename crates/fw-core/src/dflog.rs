@@ -246,9 +246,9 @@ pub const FDS: RecordDef = def(ID_FDS, "FDS", "QII", "TimeUS,Dp,FMn");
 /// GPA: the accuracy of one GNSS sample (`TimeUS` is the sample's, as in its GPS record): vertical DOP,
 /// horizontal and vertical accuracy in metres, milliseconds since the previous sample.
 pub const GPA: RecordDef = def(ID_GPA, "GPA", "QBcffH", "TimeUS,I,VDop,HAcc,VAcc,Delta");
-/// GPV: the velocity of one GNSS sample from the receiver's `$PQTMPVT` (`TimeUS` is the sample's, as in its GPS
-/// record): velocity north, east and down (mm/s; the sign of down is not verified), the PVT's GPS time of week
-/// (ms), ground speed (mm/s) and heading (0.01 degree). No position.
+/// GPV: the velocity of one GNSS sample from the receiver's NAV-PVT (`TimeUS` is the sample's, as in its GPS
+/// record): velocity north, east and down (mm/s, down positive), the NAV-PVT's iTOW (GPS time of week, ms), ground
+/// speed gSpeed (mm/s) and heading headMot (0.01 degree). No position.
 pub const GPV: RecordDef = def(
     ID_GPV,
     "GPV",
@@ -764,7 +764,8 @@ pub fn encode_fds(out: &mut [u8], time_us: u64, dropped: u32, free_min: u32) -> 
 
 /// GPA: the accuracy of one GNSS sample, instance 0. `vdop_x100` is the vertical DOP x 100 (`u16::MAX` when
 /// unknown, as the GPS record's HDop; values over 327.67 saturate). `HAcc` is sqrt(lat^2 + lon^2) in metres
-/// and needs both deviations; `VAcc` is the altitude deviation in metres; each is NaN when not available.
+/// and needs both deviations. The SAM-M10Q gives lat and lon both its hAcc (`fw_settings::gnss::reading`), so with
+/// it `HAcc` logs sqrt(2) x hAcc, not hAcc; `VAcc` is the altitude deviation in metres; each is NaN when not available.
 /// `delta_ms` is the time since the previous GNSS sample (the caller keeps it; 0 for the first).
 /// 24 bytes.
 pub fn encode_gpa(
@@ -798,7 +799,7 @@ pub fn encode_gpa(
 
 /// GPV: the velocity of one GNSS sample, instance 0: north, east, down in mm/s, the GPS time of week in ms (0 when
 /// not known), ground speed in mm/s (`u32::MAX` when unknown) and heading in 0.01 degree (`u16::MAX` when unknown),
-/// all from the epoch's `$PQTMPVT`. 34 bytes.
+/// all from the epoch's NAV-PVT. 34 bytes.
 pub fn encode_gpv(
     out: &mut [u8],
     time_us: u64,

@@ -55,7 +55,7 @@ fn main() {
         });
     }
     let start_burst = file.len();
-    for (i, text) in ["MARV V2 boot", "IMU1 ready", "GPS lc76g ready"]
+    for (i, text) in ["MARV V2 boot", "IMU1 ready", "GPS SAM-M10Q ready"]
         .iter()
         .enumerate()
     {

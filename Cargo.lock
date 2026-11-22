@@ -829,9 +829,9 @@ dependencies = [
  "bmp581",
  "fw-core",
  "icm45686",
- "lc76g",
  "lsm6dsk320x",
  "mavlink-device",
+ "sam-m10q",
 ]
 
 [[package]]
@@ -977,18 +977,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
-name = "lc76g"
-version = "0.1.0"
-source = "git+https://github.com/Lmx154/lc76g-rs.git?rev=9fbd8bee6e83f6662aa8ba8ed45fd859504b1394#9fbd8bee6e83f6662aa8ba8ed45fd859504b1394"
-dependencies = [
- "defmt",
- "embedded-hal 1.0.0",
- "embedded-hal-async",
- "embedded-io 0.7.1",
- "embedded-io-async 0.7.0",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1094,13 +1082,13 @@ dependencies = [
  "fw-flight",
  "fw-settings",
  "icm45686",
- "lc76g",
  "lsm6dsk320x",
  "mavlink-device",
  "panic-probe",
  "pio-sdmmc",
  "qmi-psram",
  "rc-port",
+ "sam-m10q",
  "semihosting",
  "static_cell",
  "usb-cdc",
@@ -1554,6 +1542,17 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
+
+[[package]]
+name = "sam-m10q"
+version = "0.1.0"
+dependencies = [
+ "defmt",
+ "embedded-hal 1.0.0",
+ "embedded-hal-async",
+ "embedded-io 0.7.1",
+ "embedded-io-async 0.7.0",
+]
 
 [[package]]
 name = "same-file"

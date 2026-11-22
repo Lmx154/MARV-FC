@@ -2061,6 +2061,52 @@ pub(crate) mod tests {
         assert!(old.gps_unaccepted > new.gps_epochs / 3, "the control: the 219 ms half is refused at 215");
     }
 
+    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`, decision-gnss-m10-20261122) every 200 ms: a 3D fix whose
+    /// `lat_std_mm` and `lon_std_mm` are both the receiver's hAcc, `alt_std_mm` its vAcc, no HDOP or VDOP, no UTC time.
+    /// `without_std` is the control: the latitude deviation not given.
+    fn m10_stream(without_std: bool) -> EskfStats {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        w.v = [2.0, 0.0, 0.0];
+        w.gps_every = 160; // 160 x 1.25 ms = 200 ms
+        let mut epochs = 0u32;
+        for _ in 0..40_000_000 / PERIOD_US {
+            let mut s = w.step();
+            if let Some(g) = s.gnss.as_mut() {
+                epochs += 1;
+                let r = &mut g.reading;
+                (r.hdop_x100, r.vdop_x100, r.time, r.date) = (None, None, None, None);
+                (r.lat_std_mm, r.lon_std_mm, r.alt_std_mm) = (Some(1_500), Some(1_500), Some(2_500));
+                if without_std {
+                    r.lat_std_mm = None;
+                }
+            }
+            f.set_armed(true);
+            f.update(&s);
+        }
+        let stats = *f.stats();
+        assert_eq!(stats.gps_epochs, epochs);
+        stats
+    }
+
+    #[test]
+    fn m10_5_hz_epochs_with_lat_and_lon_std_both_hacc_are_accepted_and_without_the_std_refused() {
+        let m10 = m10_stream(false);
+        let control = m10_stream(true);
+        println!(
+            "m10: {} epochs: {} unaccepted ({} fused, {} resets); control without lat_std: {} unaccepted ({} fused)",
+            m10.gps_epochs, m10.gps_unaccepted, m10.gps_pos_fused, m10.gps_resets, control.gps_unaccepted, control.gps_pos_fused
+        );
+        // 200 epochs in 40 s. Only the first is not accepted: it starts the interval rule, as in g4.
+        assert_eq!(m10.gps_epochs, 200);
+        assert_eq!(m10.gps_unaccepted, 1);
+        assert!(m10.gps_pos_fused > 100 && m10.gps_resets == 1);
+        // The control: every epoch is refused, nothing is fused.
+        assert_eq!(control.gps_unaccepted, control.gps_epochs);
+        assert_eq!((control.gps_pos_fused, control.gps_resets), (0, 0));
+    }
+
     /// Armed from the start, moving north at 2 m/s; returns the filter and the world after `secs`.
     fn flying(t: &Tuning, secs: f64, v: [f64; 3]) -> (Eskf, World) {
         let mut f = Eskf::new(t).unwrap();
