@@ -177,14 +177,31 @@ fn n1_control_ignoring_coverage_fails() {
     assert!(bad.contains(&"Position never with a flag false"));
 }
 
-/// The latch table (P3 replaced) on an armed flight in Position, estimate covered, with `timer_off` the control.
-/// Returns the failures.
-fn n1_latch_failures(timer_off: bool, ignore_cov: bool) -> Vec<&'static str> {
+/// Sets the fake estimate so that the vertical loop asks `frac` x m g in the next step (the stick at the hover centre, the
+/// height at the target, tilt 0): the climb rate cancels the integrator's part. `frac` 0 puts the demand on the idle floor.
+/// `ne` is the estimate's north-east position, `vn` its north velocity.
+fn collective(cell: &Cell<NavState>, f: &TestFlight, frac: f32, ne: [f32; 2], vn: f32, valid: Valid) {
+    let i = f.controller.vertical_integrator();
+    let vd = -(GRAVITY_MSS * (1.0 - frac) - i) / Tuning::DEFAULT.psc_velz_p;
+    cell.set(pnav(ne[0], ne[1], -2.0, [vn, 0.0, vd], 0.0, valid));
+}
+
+/// One armed Position-switch step with the collective `frac` x m g.
+fn armed_step(f: &mut TestFlight, cell: &Cell<NavState>, t: &mut u64, frac: f32) -> StepOut {
+    collective(cell, f, frac, [0.0, 0.0], 0.0, POSITION);
+    *t += DT_US;
+    step_sticks(f, *t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High)
+}
+
+/// The latch table (P3 second revision) on an armed flight in Position. The controls: `timer_off`, the previous rule
+/// (`threshold_rule`: low is a collective below the ground threshold) and `ignore_cov`. Returns the failures.
+fn n1_latch_failures(timer_off: bool, threshold_rule: bool, ignore_cov: bool) -> Vec<&'static str> {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
     let land = tuning.land_detect_us / DT_US; // low steps that reach land_detect_us: 800
     assert_eq!(land * DT_US, tuning.land_detect_us);
+    let thirty = 30_000_000 / DT_US;
     let mut bad = Vec::new();
     let mut check = |ok: bool, what: &'static str| {
         if !ok {
@@ -194,82 +211,81 @@ fn n1_latch_failures(timer_off: bool, ignore_cov: bool) -> Vec<&'static str> {
     let cell = Cell::new(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
     let mut f = flight(&cell, h, &tuning);
     f.timer_off = timer_off;
+    f.threshold_rule = threshold_rule;
     f.ignore_coverage = ignore_cov;
     let mut t = 1_000;
-    // The collective is made by the climb rate the fake estimate reports (the stick is at the hover centre): descending at
-    // 1 m/s asks for m (g + 4) (high), climbing at 1.5 m/s for m (g - 6) (low, below the ground threshold).
-    let follow = |cell: &Cell<NavState>, high: bool| {
-        cell.set(pnav(0.0, 0.0, -2.0, [0.0, 0.0, if high { 1.0 } else { -1.5 }], 0.0, POSITION));
-    };
-    let mut refused = false;
     check(!f.airborne, "false at construction");
-    // Disarmed: false.
     for _ in 0..3 {
+        collective(&cell, &f, 1.0, [0.0; 2], 0.0, POSITION);
         t += DT_US;
         step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         check(!f.airborne, "false while disarmed, even with the collective up");
     }
+    collective(&cell, &f, 0.0, [0.0; 2], 0.0, POSITION);
     arm(&mut f, &mut t, Switch3::High, 0.0);
-    // Armed, low since arming for 30 s: false, never Position.
-    for _ in 0..(30_000_000 / DT_US) {
-        t += DT_US;
-        let out = { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
-        if f.airborne || out.mode == Mode::Position {
-            check(false, "armed and low since arming: false for 30 s");
-            break;
+    // The idle floor since arming: false for 30 s, never Position. Then between the floor and the threshold, 30 s.
+    for (frac, what) in [(0.0, "the floor since arming: false for 30 s"), (0.7, "between the floor and the threshold since arming: false for 30 s")] {
+        let mut ok = true;
+        for _ in 0..thirty {
+            let out = armed_step(&mut f, &cell, &mut t, frac);
+            let floor = out.allocation.is_some_and(|a| a.saturation.thrust_low);
+            assert_eq!(floor, frac == 0.0, "frac {frac}: the allocator's floor flag");
+            ok &= !f.airborne && out.mode != Mode::Position;
+        }
+        check(ok, what);
+    }
+    // The step at the threshold: true after it, Position the step after.
+    let out = armed_step(&mut f, &cell, &mut t, 1.0);
+    check(out.mode != Mode::Position && f.airborne, "true after the step that first reaches the threshold");
+    let out = armed_step(&mut f, &cell, &mut t, 1.0);
+    check(out.mode == Mode::Position, "Position the step after");
+    // Once set, 30 s between the floor and the threshold: still true, still Position.
+    let mut ok = true;
+    for _ in 0..thirty {
+        let out = armed_step(&mut f, &cell, &mut t, 0.7);
+        ok &= f.airborne && out.mode == Mode::Position;
+    }
+    check(ok, "once set, 30 s between the floor and the threshold is still true");
+    if !f.airborne {
+        // The control rule cleared it: go on from a set latch.
+        for _ in 0..3 {
+            armed_step(&mut f, &cell, &mut t, 1.0);
         }
     }
-    // The first step at the threshold: true after it, Position the step after.
-    t += DT_US;
-    let out = { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
-    check(out.mode != Mode::Position && f.airborne, "true after the step that first reaches the threshold");
-    t += DT_US;
-    let out = { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
-    check(out.mode == Mode::Position, "Position the step after");
-    // One step short of land_detect_us low: still true; one high step restarts the count.
+    // The floor one step short of land_detect_us: true; one non-low step restarts the count.
     for round in 0..2 {
-        for k in 1..land {
-            t += DT_US;
-            let out = { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
-            if !(f.airborne && out.mode == Mode::Position) {
-                check(false, "true (Position) one step short of land_detect_us");
-                let _ = (round, k);
-                break;
-            }
+        let mut ok = true;
+        for _ in 1..land {
+            let out = armed_step(&mut f, &cell, &mut t, 0.0);
+            ok &= f.airborne && out.mode == Mode::Position;
         }
+        check(ok, "true (Position) one step short of land_detect_us on the floor");
         if round == 0 {
-            t += DT_US;
-            { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+            armed_step(&mut f, &cell, &mut t, 0.7);
         }
     }
     // The step that reaches land_detect_us clears it; the next step is Altitude.
-    t += DT_US;
-    { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    armed_step(&mut f, &cell, &mut t, 0.0);
     check(!f.airborne, "false at land_detect_us");
-    t += DT_US;
-    let out = { if !refused { follow(&cell, false); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+    let out = armed_step(&mut f, &cell, &mut t, 0.0);
     check(out.mode == Mode::Altitude, "Altitude after the latch clears");
     // Take off again, then a refused demand counts as low.
     for _ in 0..3 {
-        t += DT_US;
-        { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+        armed_step(&mut f, &cell, &mut t, 1.0);
     }
     check(f.airborne, "airborne again");
     cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, Valid::NONE));
-    refused = true;
     for _ in 0..land {
         t += DT_US;
-        let out = { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+        let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         check(out.mode != Mode::Position, "never Position while the estimate does not cover it");
     }
     check(!f.airborne, "a refused demand counts as low");
     // Disarm: false at once.
-    refused = false;
-    cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
     for _ in 0..3 {
-        t += DT_US;
-        { if !refused { follow(&cell, true); } step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High) };
+        armed_step(&mut f, &cell, &mut t, 1.0);
     }
+    collective(&cell, &f, 1.0, [0.0; 2], 0.0, POSITION);
     t += DT_US;
     let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::High);
     check(!out.armed && !f.airborne && f.low_us == 0, "false and the timer 0 after a disarm");
@@ -278,33 +294,42 @@ fn n1_latch_failures(timer_off: bool, ignore_cov: bool) -> Vec<&'static str> {
 
 #[test]
 fn n1_the_airborne_latch_table() {
-    let bad = n1_latch_failures(false, false);
+    let bad = n1_latch_failures(false, false, false);
     assert!(bad.is_empty(), "{bad:?}");
 }
 
 /// Negative control: the timer ignored.
 #[test]
 fn n1_control_ignoring_the_timer_fails() {
-    let bad = n1_latch_failures(true, false);
+    let bad = n1_latch_failures(true, false, false);
     std::println!("timer ignored: {bad:?}");
     assert!(bad.contains(&"false at land_detect_us"));
 }
 
-/// Negative control: coverage ignored (the refused demand is not refused any more, so it is not low).
+/// Negative control: the previous rule (low below the ground threshold) fails the 30 s between the floor and the threshold.
+#[test]
+fn n1_control_the_previous_rule_fails() {
+    let bad = n1_latch_failures(false, true, false);
+    std::println!("previous rule: {bad:?}");
+    assert!(bad.contains(&"once set, 30 s between the floor and the threshold is still true"));
+}
+
+/// Negative control: coverage ignored.
 #[test]
 fn n1_control_ignoring_coverage_fails_the_latch_table() {
-    let bad = n1_latch_failures(false, true);
+    let bad = n1_latch_failures(false, false, true);
     std::println!("coverage ignored: {bad:?}");
-    assert!(!bad.is_empty());
+    assert!(bad.contains(&"never Position while the estimate does not cover it"));
 }
 
 // ---- N1b: no blip ----
 
-/// Armed in Position with a velocity error that winds the horizontal integrator; a forced 0.5 s dip of the collective (the
-/// throttle stick to the floor). Compares every step with a twin that has no dip: the mode, the position target and
-/// the integrator must be bit-identical. Returns whether they are, and the steps of the dip in Position.
-fn n1b_run(per_step_rule: bool) -> (bool, u32) {
-    let mk = |per_step: bool| {
+/// Armed in Position with a velocity error that winds the horizontal integrator and a locked target; the collective: the
+/// weight for 0.25 s, a forced 0.5 s dip to the floor, the weight for 0.25 s, then 5 s at 0.70 m g (between the floor and
+/// the threshold). Compares every step with a twin that has the weight throughout: the mode, the position target and the
+/// integrator must be bit-identical. Returns whether they are, and the steps in Position.
+fn n1b_run(per_step_rule: bool, threshold_rule: bool) -> (bool, u32) {
+    let mk = |per_step: bool, threshold: bool| {
         let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
         h.set_permit(true);
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(pnav(
@@ -312,58 +337,67 @@ fn n1b_run(per_step_rule: bool) -> (bool, u32) {
         ))));
         let mut f = flight(cell, h, &Tuning::DEFAULT);
         f.per_step_rule = per_step;
-        f
+        f.threshold_rule = threshold;
+        (cell, f)
     };
-    // `a` has the dip, the twin `b` has the stick at the hover throughout.
-    let (mut a, mut b) = (mk(per_step_rule), mk(false));
+    let ((ca, mut a), (cb, mut b)) = (mk(per_step_rule, threshold_rule), mk(false, false));
     let (mut ta, mut tb) = (1_000, 1_000);
+    collective(ca, &a, 0.0, [0.0; 2], 0.3, POSITION);
+    collective(cb, &b, 0.0, [0.0; 2], 0.3, POSITION);
     arm(&mut a, &mut ta, Switch3::High, 0.0);
     arm(&mut b, &mut tb, Switch3::High, 0.0);
-    let (mut same, mut dip_in_position) = (true, 0);
-    let dip = 400; // 0.5 s
-    for k in 0..(200 + dip + 200) {
-        let throttle = if (200..200 + dip).contains(&k) { 0.0 } else { HOVER };
+    let (mut same, mut in_position) = (true, 0);
+    let (up, dip, five_s) = (200, 400, 4_000);
+    for k in 0..(up + dip + up + five_s) {
+        let frac = if (up..up + dip).contains(&k) {
+            0.0
+        } else if k >= up + dip + up {
+            0.7
+        } else {
+            1.0
+        };
+        collective(ca, &a, frac, [0.0; 2], 0.3, POSITION);
+        collective(cb, &b, 1.0, [0.0; 2], 0.3, POSITION);
         ta += DT_US;
         tb += DT_US;
-        let oa = step_sticks(&mut a, ta, true, [0.0, 0.0, throttle, 0.0], Switch3::High);
+        let oa = step_sticks(&mut a, ta, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         let ob = step_sticks(&mut b, tb, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
-        if k >= 202 && oa.mode == Mode::Position && throttle == 0.0 {
-            dip_in_position += 1;
+        if k >= 2 && oa.mode == Mode::Position {
+            in_position += 1;
         }
         let (ia, ib) = (a.controller.horizontal_integrator(), b.controller.horizontal_integrator());
         same &= oa.mode == ob.mode
             && a.shaper.target_ne == b.shaper.target_ne
             && ia[0].to_bits() == ib[0].to_bits()
             && ia[1].to_bits() == ib[1].to_bits();
-        if k == 199 {
-            // The integrator has wound by the time the dip starts.
+        if k == up - 1 {
             assert!(ia[0].abs() > 0.01, "{ia:?}");
         }
     }
-    (same, dip_in_position)
+    (same, in_position)
 }
 
 #[test]
-fn n1b_a_half_second_dip_of_the_collective_keeps_position_target_and_integrator() {
-    let (same, in_position) = n1b_run(false);
-    std::println!("N1b: {in_position} dip steps in Position, identical to the twin: {same}");
-    assert!(same && in_position >= 390);
+fn n1b_a_dip_to_the_floor_and_5_s_at_0_70_mg_keep_position_target_and_integrator() {
+    let (same, in_position) = n1b_run(false, false);
+    std::println!("N1b: {in_position} steps in Position, identical to the twin: {same}");
+    assert!(same && in_position >= 200 + 400 + 200 + 4_000 - 4);
 }
 
-/// Negative control: the old per-step rule drops Position in the dip, with a fresh capture and the integrator at 0.
+/// Negative controls: the old per-step rule fails in the dip; the previous latch rule fails in the 5 s at 0.70 m g.
 #[test]
-fn n1b_control_the_old_per_step_rule_fails() {
-    let (same, _) = n1b_run(true);
-    assert!(!same);
+fn n1b_controls_the_old_per_step_rule_and_the_previous_rule_fail() {
+    assert!(!n1b_run(true, false).0);
+    assert!(!n1b_run(false, true).0);
 }
 
-// ---- N6: armed in Position on the ground, and the landing ----
+// ---- N6: armed in Position on the ground, the landing and the aborted take-off ----
 
-/// (a) Armed in Position at rest on the ground for 30 s with the estimate wandering by 0.5 m: Altitude, the horizontal
-/// integrator 0. (b) Then up (airborne), then low for `land_detect_us`: Altitude from the step after. (c) An aborted
-/// take-off (the collective up for 0.3 s, then the floor): Position for at most `land_detect_us` after the drop, then
-/// Altitude. Returns (a: Position steps, a: peak integrator, b: Position steps after the clear, c: Position steps in the
-/// low phase, c: steps until Altitude).
+/// (a) Armed in Position at rest on the ground for 30 s with the estimate wandering by 0.5 m, the collective on the floor:
+/// Altitude, the horizontal integrator 0. (b) Then up (airborne), then the floor for `land_detect_us`: Altitude from the
+/// step after. (c) An aborted take-off (the weight for 0.3 s, then the floor): Position for at most `land_detect_us` after
+/// the drop, then Altitude. Returns (a: Position steps, a: peak integrator, b: Position steps after the clear, c: Position
+/// steps in the low phase, c: steps until Altitude).
 fn n6_run(timer_off: bool) -> (u32, f32, u32, u32, u32) {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
@@ -372,19 +406,17 @@ fn n6_run(timer_off: bool) -> (u32, f32, u32, u32, u32) {
     let mut f = flight(&cell, h, &tuning);
     f.timer_off = timer_off;
     let mut t = 1_000;
+    collective(&cell, &f, 0.0, [0.0; 2], 0.0, POSITION);
     arm(&mut f, &mut t, Switch3::High, 0.0);
     let (mut in_position, mut worst) = (0, 0.0_f32);
     let dt = DT_US as f32 * 1e-6;
-    // The estimate wanders 0.5 m north-east.
-    // The collective comes from the climb rate the fake estimate reports (see `n1_latch_failures`).
-    let wander = |cell: &Cell<NavState>, k: u32, high: bool| {
+    let wander = |cell: &Cell<NavState>, f: &TestFlight, k: u32, frac: f32| {
         let s = k as f32 * dt;
-        let vd = if high { 1.0 } else { -1.5 };
-        cell.set(pnav(0.5 * libm::sinf(0.9 * s), 0.5 * libm::cosf(0.7 * s), -2.0, [0.0, 0.0, vd], 0.0, POSITION));
+        collective(cell, f, frac, [0.5 * libm::sinf(0.9 * s), 0.5 * libm::cosf(0.7 * s)], 0.0, POSITION);
     };
     let a_steps = (30.0 / dt) as u32;
     for k in 0..a_steps {
-        wander(&cell, k, false);
+        wander(&cell, &f, k, 0.0);
         t += DT_US;
         let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         assert!(out.armed);
@@ -394,32 +426,30 @@ fn n6_run(timer_off: bool) -> (u32, f32, u32, u32, u32) {
         let [i_n, i_e] = f.controller.horizontal_integrator();
         worst = worst.max(libm::sqrtf(i_n * i_n + i_e * i_e));
     }
-    // (b) up, then low.
     let land = (tuning.land_detect_us / DT_US) as u32;
     for k in 0..400 {
-        wander(&cell, a_steps + k, true);
+        wander(&cell, &f, a_steps + k, 1.0);
         t += DT_US;
         step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
     }
     assert!(f.airborne);
     let mut after_clear = 0;
     for k in 0..(2 * land) {
-        wander(&cell, a_steps + 400 + k, false);
+        wander(&cell, &f, a_steps + 400 + k, 0.0);
         t += DT_US;
         let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         if k >= land + 1 && out.mode == Mode::Position {
             after_clear += 1;
         }
     }
-    // (c) an aborted take-off: up 0.3 s, then the floor.
     for k in 0..240 {
-        wander(&cell, k, true);
+        wander(&cell, &f, k, 1.0);
         t += DT_US;
         step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
     }
     let (mut low_in_position, mut until_alt) = (0, 0);
     for k in 0..(2 * land) {
-        wander(&cell, k, false);
+        wander(&cell, &f, k, 0.0);
         t += DT_US;
         let out = step_sticks(&mut f, t, true, [0.0, 0.0, HOVER, 0.0], Switch3::High);
         if out.mode == Mode::Position {
@@ -449,6 +479,60 @@ fn n6_control_a_latch_that_never_clears_fails_the_landing() {
     assert_eq!(a_pos, 0, "(a) does not depend on the timer");
     assert!(b_after > 0, "(b) fails");
     assert_eq!(c_until, 0, "(c) never reaches Altitude");
+}
+
+/// N6 (d): landed in Angle at part throttle (the latch stays set), then the switch to Position with the stick low: Position,
+/// then the vertical loop (the target descends, the vehicle cannot) takes the collective to the floor and the latch clears
+/// `land_detect_us` later. Returns (steps in Position, the peak tilt setpoint in Position, rad).
+fn n6d_run() -> (u32, f32) {
+    let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
+    h.set_permit(true);
+    let tuning = Tuning::DEFAULT;
+    let cell = Cell::new(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
+    let mut f = flight(&cell, h, &tuning);
+    let mut t = 1_000;
+    collective(&cell, &f, 0.0, [0.0; 2], 0.0, POSITION);
+    arm(&mut f, &mut t, Switch3::High, 0.0);
+    for _ in 0..3 {
+        armed_step(&mut f, &cell, &mut t, 1.0);
+    }
+    assert!(f.airborne);
+    // Landed: Angle, part throttle (0.3 of the stick: 0.6 m g, between the floor and the threshold), the vehicle at rest.
+    cell.set(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
+    for _ in 0..(5_000_000 / DT_US) {
+        t += DT_US;
+        let out = step_sticks(&mut f, t, true, [0.0, 0.0, 0.3, 0.0], Switch3::Low);
+        assert_eq!(out.mode, Mode::Angle);
+        assert!(f.airborne, "the latch stays set in Angle at part throttle");
+    }
+    // The switch to Position, the stick low, the vehicle on the ground (the estimate wanders by 0.5 m).
+    let (mut in_position, mut peak) = (0, 0.0_f32);
+    let dt = DT_US as f32 * 1e-6;
+    for k in 0..(6_000_000 / DT_US) {
+        let s = k as f32 * dt;
+        cell.set(pnav(0.5 * libm::sinf(0.9 * s), 0.5 * libm::cosf(0.7 * s), -2.0, [0.0; 3], 0.0, POSITION));
+        t += DT_US;
+        let out = step_sticks(&mut f, t, true, [0.0, 0.0, 0.0, 0.0], Switch3::High);
+        if k == 0 {
+            assert_eq!(out.mode, Mode::Position, "Position on the switch");
+        }
+        if out.mode == Mode::Position {
+            in_position += 1;
+            let [w, x, y, z] = out.attitude_sp;
+            peak = peak.max(libm::acosf((w * w - x * x - y * y + z * z).min(1.0)));
+        } else {
+            assert!(!f.airborne);
+        }
+    }
+    (in_position, peak)
+}
+
+#[test]
+fn n6d_landed_in_angle_at_part_throttle_then_position_ends_within_3_s() {
+    let (in_position, peak) = n6d_run();
+    let secs = in_position as f32 * DT_US as f32 * 1e-6;
+    std::println!("N6 (d): Position for {secs:.3} s after the switch, peak tilt setpoint {:.3} deg", peak.to_degrees());
+    assert!(in_position >= 1 && secs <= 3.0, "{secs}");
 }
 
 // ---- P3: never Position on the arming step ----

@@ -280,12 +280,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The mode the switch selects; the newest report's switch holds until the next report.
     selected: Mode,
     limited: Saturation,
-    /// The airborne latch (Amendment P, P3 replaced): false at construction and after any disarmed step; true once an armed
-    /// step's collective is at or above the ground threshold; false again when the collective has stayed below it (or
-    /// refused) for `land_detect_us`. Position is in effect only while it is true.
+    /// The airborne latch (Amendment P, P3 second revision): false at construction and after any disarmed step; true once
+    /// an armed step's collective is at or above the ground threshold; false again when the demand has been refused or the
+    /// collective on the allocator's idle floor for `land_detect_us`. Position is in effect only while it is true.
     airborne: bool,
-    /// How long the collective has been below the ground threshold (or refused) in the armed steps since it was last at or
-    /// above it, us.
+    /// How long the demand has been refused or on the idle floor in the armed steps since it was last neither, us.
     low_us: u64,
     /// The time the collective must stay low before the latch clears, us (`land_detect_us`).
     land_detect_us: u64,
@@ -305,9 +304,12 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the latch never clears by the timer.
     #[cfg(test)]
     timer_off: bool,
-    /// Tests only: the old per-step rule: airborne is armed and not low, at every step.
+    /// Tests only: the old per-step rule: airborne is armed and the collective at or above the threshold, at every step.
     #[cfg(test)]
     per_step_rule: bool,
+    /// Tests only: the previous latch rule: low is a collective below the ground threshold, not the idle floor.
+    #[cfg(test)]
+    threshold_rule: bool,
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
@@ -375,6 +377,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             timer_off: false,
             #[cfg(test)]
             per_step_rule: false,
+            #[cfg(test)]
+            threshold_rule: false,
             #[cfg(test)]
             latch_off: false,
         }
@@ -498,12 +502,19 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // arming step.
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
         self.last_us = Some(t_us);
-        let low = demand.map_or(true, |d| d.thrust_n < self.ground_thrust_n);
+        // Low: the demand was refused, or the allocator put the collective on the idle floor (its `thrust_low` flag, the
+        // value DMD logs as Sat bit 3). Start only above the ground threshold, end only after `land_detect_us` low.
+        let thrust_ok = demand.is_ok_and(|d| d.thrust_n >= self.ground_thrust_n);
+        let low = allocation.map_or(true, |a| a.saturation.thrust_low);
+        #[cfg(test)]
+        let low = if self.threshold_rule { !thrust_ok } else { low };
         if !self.gate.armed() {
             self.airborne = false;
             self.low_us = 0;
         } else if !low {
-            self.airborne = true;
+            if thrust_ok {
+                self.airborne = true;
+            }
             self.low_us = 0;
         } else {
             self.low_us += dt_us;
@@ -518,7 +529,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         #[cfg(test)]
         {
             if self.per_step_rule {
-                self.airborne = self.gate.armed() && !low;
+                self.airborne = self.gate.armed() && thrust_ok;
             }
             if self.airborne_forced {
                 self.airborne = true;
