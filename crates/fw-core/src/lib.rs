@@ -28,6 +28,7 @@ pub mod arming;
 pub mod calib;
 pub mod dflog;
 pub mod esc;
+pub mod extring;
 pub mod handshake;
 pub mod health;
 pub mod i2c;
@@ -38,6 +39,8 @@ pub mod params;
 pub mod rc;
 pub mod record;
 pub mod relay;
+#[cfg(test)]
+mod ring_contract;
 pub mod rotation;
 pub mod sample;
 pub mod scratch;
