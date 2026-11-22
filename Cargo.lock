@@ -1099,6 +1099,7 @@ dependencies = [
  "mavlink-device",
  "panic-probe",
  "pio-sdmmc",
+ "qmi-psram",
  "rc-port",
  "semihosting",
  "static_cell",
@@ -1415,6 +1416,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "869675ad2d7541aea90c6d88c81f46a7f4ea9af8cd0395d38f11a95126998a0d"
 dependencies = [
  "defmt",
+]
+
+[[package]]
+name = "qmi-psram"
+version = "0.1.0"
+source = "git+https://github.com/Lmx154/qmi-psram-rs.git?rev=82f8dbb79d2a61a3c0bfceda8f37aa1b2af81217#82f8dbb79d2a61a3c0bfceda8f37aa1b2af81217"
+dependencies = [
+ "critical-section",
+ "defmt",
+ "embedded-hal 1.0.0",
 ]
 
 [[package]]

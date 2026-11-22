@@ -28,6 +28,14 @@ MEMORY {
      */
     SRAM8 : ORIGIN = 0x20080000, LENGTH = 4K
     SRAM9 : ORIGIN = 0x20081000, LENGTH = 4K
+    /*
+     * The 16 MiB PSRAM in socket U24 (QMI chip select 1), through its UNCACHED alias (decision-psram-offload-20261121,
+     * D2/P6): the cached alias 0x11000000 would write 2.6 times slower and put lines in the XIP cache shared with
+     * core 0's flash code. Only src/psram.rs's `PsramBuf` statics go here, core 0's thread-mode tasks only, and
+     * nothing in it is initialised or atomic: the chip may be missing, and an atomic read-modify-write outside
+     * 0x20000000-0x20082000 hangs the core (RP2350 datasheet 2.1.6.2).
+     */
+    PSRAM : ORIGIN = 0x15000000, LENGTH = 16M
 }
 
 SECTIONS {
@@ -78,6 +86,19 @@ SECTIONS {
     } > FLASH
 
 } INSERT AFTER .uninit;
+
+/* The PSRAM statics (src/psram.rs): NOLOAD, so probe-rs never programs 0x15000000 and nothing is copied at start-up;
+ * their contents are undefined until core 0 has written them. */
+SECTIONS {
+    .psram (NOLOAD) : ALIGN(8)
+    {
+        __spsram = .;
+        *(.psram .psram.*);
+        . = ALIGN(8);
+        __epsram = .;
+    } > PSRAM
+} INSERT AFTER .uninit;
+ASSERT(__spsram >= ORIGIN(PSRAM) && __epsram <= ORIGIN(PSRAM) + LENGTH(PSRAM) && ORIGIN(PSRAM) == 0x15000000, "psram: .psram outside the uncached alias 0x15000000-0x16000000");
 
 PROVIDE(start_to_end = __end_block_addr - __start_block_addr);
 PROVIDE(end_to_start = __start_block_addr - __end_block_addr);

@@ -32,6 +32,10 @@ dshot = { git = "https://github.com/Lmx154/dshot-rs.git", rev = "3557eb111097400
 # feature is named `embassy-rp` (it is written for embassy-rp 0.10).
 ws2812c = { git = "https://github.com/Lmx154/ws2812c-rs.git", rev = "faf1eb52a88ddf70f502a4a77d5d8facfbe44a0d", features = ["defmt", "embassy-rp"] }
 
+# The PSRAM (src/psram.rs): the 16 MiB ISSI IS66WVS16M8FBLL in socket U24 on QMI chip select 1 (GPIO0), at the uncached
+# alias 0x15000000. Raw registers, no HAL; the critical-section implementation is embassy-rp's. Core 0 only.
+qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "82f8dbb79d2a61a3c0bfceda8f37aa1b2af81217", features = ["rp2350", "defmt"] }
+
 # The firmware's own crates: the hardware-free logic and the flight-core tasks.
 fw-core = { path = "crates/fw-core" }
 fw-flight = { path = "crates/fw-flight" }
@@ -227,6 +231,15 @@ xip-park = []
 # binary only (`BIN=eskf_bench FEATURES=eskf-bench tools/run.sh 60`); the flight binary is built without it.
 eskf-bench = ["fw-flight/eskf-n0"]
 
+# The PSRAM checks (src/psram.rs), built for the board, run by the lead. psram-skip-remap: the hook after a flash
+# erase or program does not remap, so the canary must FAIL after the first save. psram-absent: the driver's init is
+# treated as failed (no chip access): the board boots, the PSRAM state reads FAULT, nothing panics. NEGATIVE CONTROL
+# psram-negative: core 1's `now_us` reads the PSRAM canary, so tools/check-ram-code.py must FAIL naming it (a static
+# check, never flashed).
+psram-skip-remap = []
+psram-absent = []
+psram-negative = []
+
 [[bin]]
 name = "eskf_bench"
 path = "src/bin/eskf_bench.rs"
@@ -234,6 +247,11 @@ required-features = ["eskf-bench"]
 
 [profile.release]
 debug = true
+
+# qmi-psram must be optimised in debug builds too: unoptimised, its chip-select pulses last up to 13 us against the
+# chip's 4 us limit (the driver's README).
+[profile.dev.package.qmi-psram]
+opt-level = 3
 
 # One `block-device-driver` in the tree: the one of the embedded-fatfs commit above, which
 # block-device-adapters uses, also for pio-sdmmc (its trait text is that of crates.io 0.2.0).

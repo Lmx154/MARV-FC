@@ -150,6 +150,9 @@ fn guarded(flash: &mut Chip, op: Op<'_>) -> Result<(), &'static str> {
         Op::Erase { from, to } => flash.blocking_erase(from, to),
         Op::Program { offset, bytes } => flash.blocking_write(offset, bytes),
     };
+    // The boot ROM's flash routines reset the QMI window of the PSRAM: re-map it and check its canary right
+    // here, success or failure, before anything else runs (the P2 argument is in `psram::after_flash_op`).
+    crate::psram::after_flash_op();
     result.map_err(|e| {
         defmt::error!("[INFO] settings: {=str} failed: {}", what, e);
         "flash error"
