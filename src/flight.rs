@@ -157,6 +157,7 @@ pub static NAV_STAT: Seqlock<NavStat> = Seqlock::new(NavStat {
         baro_gated: 0,
         height_resets: 0,
         noaid: 0,
+        noaid_dropped: 0,
         mag_refused: 0,
         mag_fused: 0,
         mag_gated: 0,
