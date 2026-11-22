@@ -1823,6 +1823,100 @@ mod tests {
         assert!(recs[back..].iter().all(|r| r.mode == Mode::Altitude), "Altitude stays once it is back");
         assert_eq!(recs[recs.len() - 1].z_reinits, 1);
     }
+
+    /// One step of the P-2 run.
+    #[derive(Clone, Copy, Debug)]
+    struct P2Rec {
+        t_us: u64,
+        mode: Mode,
+        ne: bool,
+        target_ne: Option<[f32; 2]>,
+        xy_i: [f32; 2],
+        resets: u32,
+    }
+
+    /// Addendum P-2: `Flight` with `EskfSteer` in Position (selected from 2 s, hover collective), the vehicle moving north at
+    /// 2 m/s, no GNSS epoch from 20 s to 28 s (longer than the 5 s timeout). From 34 s it brakes to rest.
+    /// `keep` is the rule before P-2 (the control).
+    fn p2_run(handshake: &'static Handshake, keep: bool) -> std::vec::Vec<P2Rec> {
+        extern crate std;
+        use crate::eskf::Eskf;
+        use crate::eskf::tests::{Fault, World};
+        use crate::eskf_out::EskfSteer;
+        let tuning = Tuning::DEFAULT;
+        let mut core = Eskf::new(&tuning).unwrap();
+        core.keep_started_at_timeout = keep;
+        let steer = EskfSteer::new(&mut core, &tuning).unwrap();
+        let mut flight = Flight::new(steer, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
+        handshake.set_permit(true);
+        // The latch is not under test (as in position_tests): forced, the vehicle is taken to be in the air.
+        flight.airborne_forced = true;
+        let mut world = World::new(&tuning);
+        world.yaw = 0.4;
+        world.v = [2.0, 0.0, 0.0];
+        world.gps_vel = true;
+        world.fault = Fault::Gone(20_000_000, 28_000_000);
+        let mut recs = std::vec::Vec::new();
+        for k in 0..45_000_000 / 1_250usize {
+            if world.t_us() >= 34_000_000 && world.v[0] > 0.0 {
+                world.a = [-2.0, 0.0, 0.0];
+            } else if world.t_us() >= 34_000_000 {
+                world.a = [0.0; 3];
+                world.v[0] = 0.0;
+            }
+            let sensors = world.step();
+            let t_us = sensors.imu1.t_us;
+            let rc = (k % 10 == 0).then_some(RcSample {
+                sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: if t_us < 3_000_000 { 0.0 } else { 0.5 }, yaw: 0.0 },
+                arm: t_us >= 2_000_000,
+                switch6: Switch3::High,
+                t_us,
+            });
+            let out = flight.step(&FlightInputs { sensors, rc });
+            recs.push(P2Rec {
+                t_us,
+                mode: out.mode,
+                ne: out.nav.valid.position_ne && out.nav.valid.velocity_ne,
+                target_ne: flight.shaper.target_ne,
+                xy_i: flight.controller.horizontal_integrator(),
+                resets: flight.estimator.core().stats().gps_resets,
+            });
+        }
+        recs
+    }
+
+    #[test]
+    fn p2_a_gnss_outage_longer_than_the_timeout_takes_position_to_altitude_and_back_the_step_after_the_reset_with_a_fresh_capture() {
+        static H: [Handshake; 2] = [Handshake::new(), Handshake::new()];
+        let recs = p2_run(&H[0], false);
+        let after = |t: u64| recs.iter().position(|r| r.t_us >= t).unwrap();
+        // Position before the outage (moving: no target yet, the integrator wound).
+        let (k0, k_end) = (after(15_000_000), after(28_000_000));
+        assert!(recs[after(10_000_000)..after(20_000_000)].iter().all(|r| r.mode == Mode::Position && r.ne && r.target_ne.is_none()));
+        let drop = (k0..k_end).find(|&k| recs[k].mode != Mode::Position).expect("Position ends at the timeout");
+        assert_eq!(recs[drop - 1].mode, Mode::Position);
+        assert_eq!(recs[drop].mode, Mode::Altitude, "Eff 3 -> 2 at the drop: {:?}", recs[drop]);
+        assert!(!recs[drop].ne && recs[drop - 1].ne, "the NE flags drop in the same step");
+        assert!(recs[drop - 1].xy_i != [0.0, 0.0], "the integrator was wound before the drop");
+        let reset = (k_end..recs.len()).find(|&k| recs[k].resets > recs[k - 1].resets).expect("a Src 9 reset after the outage");
+        // No flicker: Altitude from the drop to the reset step inclusive, Position the step after, NE flags false in the reset step only.
+        assert!(recs[drop..=reset].iter().all(|r| r.mode == Mode::Altitude && !r.ne), "Altitude and NE false from the drop to the reset");
+        assert!(recs[reset + 1].mode == Mode::Position && recs[reset + 1].ne, "Eff 2 -> 3 the step after the reset");
+        assert!(recs[reset + 1].target_ne.is_none(), "no target while moving");
+        assert_eq!(recs[reset + 1].xy_i, [0.0, 0.0], "a fresh Position entry: the horizontal integrator is 0");
+        // Moving: no capture until the vehicle is stopped.
+        let stop = recs.iter().position(|r| r.t_us > 34_000_000 && r.target_ne.is_some()).expect("captured once stopped");
+        assert!(recs[reset + 1..stop].iter().all(|r| r.mode == Mode::Position && r.target_ne.is_none()));
+        std::println!(
+            "p2: drop at step {drop} ({} us), reset at step {reset} ({} us, {:.3} s after the outage ended), capture at step {stop} ({} us)",
+            recs[drop].t_us, recs[reset].t_us, (recs[reset].t_us - 28_000_000) as f64 * 1e-6, recs[stop].t_us
+        );
+        // The control, the rule before P-2: no reset at the first epoch back.
+        let old = p2_run(&H[1], true);
+        let old_reset = (k_end..old.len()).find(|&k| old[k].resets > old[k - 1].resets);
+        std::println!("p2 control (started kept): reset after the outage {:?}", old_reset.map(|k| old[k].t_us));
+        assert!(old_reset.is_none_or(|k| old[k].t_us > recs[reset].t_us + 1_000_000), "the control resets later or never");
+    }
 }
 
 #[cfg(test)]

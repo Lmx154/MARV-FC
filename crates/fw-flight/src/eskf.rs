@@ -464,6 +464,9 @@ pub struct EskfN<const R: usize> {
     /// before G6-B), through the same `mag_job` -> `yaw_set` path.
     #[cfg(test)]
     pub(crate) armed_yaw_reset: bool,
+    /// P-2 test control: horizontal aiding stopping at the timeout leaves `started` set (the rule before P-2).
+    #[cfg(test)]
+    pub(crate) keep_started_at_timeout: bool,
 }
 
 /// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
@@ -628,6 +631,8 @@ impl<const R: usize> EskfN<R> {
             baro_abias_z_mask: false,
             #[cfg(test)]
             armed_yaw_reset: false,
+            #[cfg(test)]
+            keep_started_at_timeout: false,
         })
     }
 
@@ -1523,6 +1528,14 @@ impl<const R: usize> Estimator for EskfN<R> {
         let aiding = self.horizontal_aiding();
         if self.aiding_prev && !aiding {
             self.hold_ne = [self.nom.p[0], self.nom.p[1]];
+            // P-2: the next accepted, non-repeated epoch after a timeout restarts aiding with a reset (Src 9).
+            #[cfg(test)]
+            let keep = self.keep_started_at_timeout;
+            #[cfg(not(test))]
+            let keep = false;
+            if !keep {
+                self.started = false;
+            }
         }
         self.aiding_prev = aiding;
         let (q_before, v_before, p_before) = (self.nom.q, self.nom.v, self.nom.p);
@@ -1613,6 +1626,8 @@ pub(crate) mod tests {
         Freeze(u64, u64),
         /// From this arrival time on, north is off by this many metres.
         North(u64, f64),
+        /// From this arrival time to the next, no GNSS epoch arrives at all (a receiver outage).
+        Gone(u64, u64),
     }
 
     /// A level vehicle with a yaw, flying a constant NED acceleration; perfect sensors at the delays of `Tuning`.
@@ -1746,6 +1761,7 @@ pub(crate) mod tests {
                 self.last_fix = Some(r);
                 GnssSample { reading: r, t_us, seq }
             });
+            let gnss = gnss.filter(|g| !matches!(self.fault, Fault::Gone(from, to) if g.t_us >= from && g.t_us < to));
             Sensors { imu1, imu2: None, baro, mag, gnss, external: None }
         }
     }
@@ -2126,9 +2142,9 @@ pub(crate) mod tests {
         let mut drop = None;
         let mut last_valid = None;
         run(&mut f, &mut w, 10.0, |_| true, |_, nav, _| {
-            if nav.valid.position_ne {
+            if nav.valid.position_ne && drop.is_none() {
                 last_valid = Some(nav.t_us);
-            } else if drop.is_none() {
+            } else if drop.is_none() && !nav.valid.position_ne {
                 drop = Some(nav.t_us);
             }
         });
@@ -2136,7 +2152,9 @@ pub(crate) mod tests {
         // R1 (lead, 2026-11-21): C3 governs. After the hold the next fresh epoch is fused if it passes the gate; if it is
         // gated, the C3 reset follows after the timeout. Either way the flags return only after an accepted position
         // fusion or a reset.
-        let (mut fused_or_reset, mut outcome, mut back) = (false, None, None);
+        // P-2: the first changed fix after the hold is a reset, and it can fall in the hold's own 10 s window.
+        let early_reset = s1.gps_resets > s0.gps_resets;
+        let (mut fused_or_reset, mut outcome, mut back) = (early_reset, early_reset.then_some("reset"), None);
         run(&mut f, &mut w, 8.0, |_| true, |f, nav, _| {
             for e in f.events() {
                 let pos = e.src == code::GPS_N || e.src == code::GPS_E;
@@ -2424,6 +2442,63 @@ pub(crate) mod tests {
         println!("c9: dropped after {dropped_after_epochs:?} epochs; back with resets {back:?} (before {resets})");
         assert!(dropped_after_epochs.is_some_and(|n| n <= 1));
         assert!(back.is_some_and(|r| r > resets), "NE returned only after a reset");
+    }
+
+    /// P-2: what the first epochs after a GNSS outage or hold do, with `keep` the rule before P-2.
+    /// Returns (steps with NE valid false from the timeout to the first Src 9 after the fault, first Src 9 time after the
+    /// fault ended or None, first epoch event time after the fault ended, NE-valid-lost time, NE flags over the window).
+    fn p2_run(fault: impl Fn(u64) -> Fault, keep: bool) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>, bool) {
+        let t = Tuning::DEFAULT;
+        let (mut f, mut w) = flying(&t, 20.0, [2.0, 0.0, 0.0]);
+        f.keep_started_at_timeout = keep;
+        let from = w.t_us();
+        let to = from + 8_000_000;
+        w.fault = fault(from);
+        let (mut lost, mut reset, mut first_epoch, mut flags_false_until_reset) = (None, None, None, true);
+        run(&mut f, &mut w, 20.0, |_| true, |f, nav, w| {
+            let after = w.t_us() >= to;
+            for e in f.events() {
+                if after && first_epoch.is_none() && (e.src == code::GPS_E || e.src == code::GPS_N || e.src == code::GPS_RESET) {
+                    first_epoch = Some(nav.t_us);
+                }
+                if after && e.src == code::GPS_RESET && reset.is_none() {
+                    reset = Some(nav.t_us);
+                }
+            }
+            if !nav.valid.position_ne && lost.is_none() && w.t_us() > from {
+                lost = Some(nav.t_us);
+            }
+            if lost.is_some() && reset.is_none() && nav.valid.position_ne {
+                flags_false_until_reset = false;
+            }
+        });
+        (lost, reset, first_epoch, Some(to), flags_false_until_reset)
+    }
+
+    #[test]
+    fn c9_an_outage_longer_than_the_timeout_restarts_aiding_with_a_reset_at_the_first_epoch_back() {
+        let (lost, reset, first, to, flags_false) = p2_run(|from| Fault::Gone(from, from + 8_000_000), false);
+        let (c_lost, c_reset, c_first, _, _) = p2_run(|from| Fault::Gone(from, from + 8_000_000), true);
+        println!("c9 P-2: lost {lost:?} reset {reset:?} first epoch {first:?} end {to:?}; control: lost {c_lost:?} reset {c_reset:?} first epoch {c_first:?}");
+        let (lost, reset, first) = (lost.expect("NE lost at the timeout"), reset.expect("a Src 9 reset after the outage"), first.expect("an epoch"));
+        assert_eq!(reset, first, "the first epoch back is the reset");
+        assert!(lost < reset && flags_false, "NE flags false from the timeout to the reset");
+        // The control: the old sequence, no reset at the first epoch back (C3's reset follows only after the timeout, if at all).
+        assert!(c_lost.is_some());
+        assert!(c_reset.is_none_or(|r| r > c_first.unwrap() + 1_000_000), "control resets at its first epoch back");
+    }
+
+    #[test]
+    fn c9b_a_receiver_hold_longer_than_the_timeout_resets_at_the_first_changed_fix() {
+        let (lost, reset, _, to, flags_false) = p2_run(|from| Fault::Freeze(from, from + 8_000_000), false);
+        let (c_lost, c_reset, _, _, _) = p2_run(|from| Fault::Freeze(from, from + 8_000_000), true);
+        let to = to.unwrap();
+        println!("c9b P-2: lost {lost:?} reset {reset:?} end {to}; control: lost {c_lost:?} reset {c_reset:?}");
+        let (lost, reset) = (lost.expect("NE lost"), reset.expect("a reset"));
+        assert!(lost < reset && flags_false);
+        let end_h = to - Tuning::DEFAULT.nav_gps_delay_us;
+        assert!(reset >= end_h && reset <= end_h + 2 * GNSS_EVERY * PERIOD_US, "the first changed fix resets: {reset} (hold ends at {end_h} on the horizon)");
+        assert!(c_reset.is_none_or(|r| r > reset + 1_000_000), "the control fuses (or resets only at C3's timeout)");
     }
 
     #[test]

@@ -1786,6 +1786,76 @@ mod tests {
     }
 
     #[test]
+    fn t5b_p2_after_a_gnss_outage_longer_than_the_timeout_the_reset_step_drops_the_ne_flags_and_the_output_steps_by_the_exact_delta() {
+        // Addendum P-2: the first accepted epoch after the outage is a Src 9 reset (started cleared at the timeout); the output's
+        // NE flags are false for exactly that step and its position steps by the exact delta (t5c's formula).
+        let t = Tuning::DEFAULT;
+        let mut w = World::new(&t);
+        w.yaw = 0.4;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        w.fault = Fault::Gone(25_000_000, 33_000_000);
+        let mut st = Vec::new();
+        while w.t_us() < 45_000_000 {
+            st.push(w.step());
+        }
+        let mut core = Eskf::new(&t).unwrap();
+        let mut bare = Eskf::new(&t).unwrap();
+        let mut steer = EskfSteer::new(&mut core, &t).unwrap();
+        let (mut prev, mut prev2, mut dropped_at, mut at) = (None::<([f32; 3], [f32; 3])>, None::<[f32; 3]>, None, None);
+        let (mut ne_false_steps, mut resets_after) = (0usize, 0usize);
+        for (k, s) in st.iter().enumerate() {
+            steer.set_armed(armed_at(s));
+            bare.set_armed(armed_at(s));
+            let t_prev = steer.out.t_us;
+            let live = steer.out.live;
+            let (n, b) = (steer.update(s), bare.update(s));
+            if s.imu1.t_us > 25_000_000 && dropped_at.is_none() && !b.valid.position_ne {
+                dropped_at = Some(k);
+            }
+            let reset_now = s.imu1.t_us > 30_000_000 && bare.last_reset().is_some() && bare.stats().gps_resets > 1 && at.is_none();
+            if reset_now {
+                let r = bare.last_reset().unwrap();
+                at = Some(k);
+                // Core flags are back, the output's are false for this step only (live: the delta was applied).
+                assert!(live && steer.out.live);
+                assert!(b.valid.position_ne && b.valid.velocity_ne && !n.valid.position_ne && !n.valid.velocity_ne, "step {k}: core {:?} output {:?}", b.valid, n.valid);
+                let (p0, v0) = prev.unwrap();
+                // The ordinary change of the velocity in a step (the output's own tracking correction) is the step before's.
+                let dv_ord: [f32; 3] = core::array::from_fn(|i| v0[i] - prev2.unwrap()[i]);
+                let t_r = steer.core().horizon_us().unwrap();
+                let dt = (s.imu1.t_us - t_prev) as f32 * 1e-6;
+                let before = (t_prev as i64 - t_r as i64) as f32 * 1e-6;
+                let step_p: [f32; 3] = core::array::from_fn(|i| r.dp[i] + r.dv[i] * before + (v0[i] + r.dv[i]) * dt);
+                let tol_p = 16.0 * f32::EPSILON * 30.0;
+                let tol_v = 16.0 * f32::EPSILON * 3.0;
+                let (mut ep, mut ev) = (0.0f32, 0.0f32);
+                for i in 0..3 {
+                    ep = ep.max(fabsf(n.position_m[i] - p0[i] - step_p[i]));
+                    ev = ev.max(fabsf(n.velocity_ms[i] - v0[i] - r.dv[i] - dv_ord[i]));
+                }
+                println!("t5b P-2: outage reset at step {k} (t {} us), dp {:?}, dv {:?}; exact-delta difference position {ep:.2e} (tol {tol_p:.2e}) velocity {ev:.2e} (tol {tol_v:.2e}); core NE flags dropped at step {dropped_at:?}", s.imu1.t_us, r.dp, r.dv);
+                assert!(norm3(&r.dp) > 3.0, "the outage moved the hold position away: {:?}", r.dp);
+                assert!(ep <= tol_p && ev <= tol_v);
+            } else if let Some(kr) = at {
+                if k == kr + 1 {
+                    assert!(n.valid.position_ne && n.valid.velocity_ne, "NE flags back one step after the reset");
+                }
+                if k > kr {
+                    resets_after += usize::from(bare.last_reset().is_some());
+                }
+            } else if s.imu1.t_us > 30_000_000 {
+                ne_false_steps += usize::from(!n.valid.position_ne);
+            }
+            prev2 = prev.map(|p| p.1);
+            prev = Some((n.position_m, n.velocity_ms));
+        }
+        let kr = at.expect("a Src 9 reset after the outage");
+        assert!(dropped_at.is_some_and(|d| d < kr), "NE flags false from the timeout to the reset");
+        assert!(ne_false_steps > 0 && resets_after == 0, "no second reset after it: {resets_after}");
+    }
+
+    #[test]
     fn t8_a_non_finite_core_state_drops_tilt_the_same_step_keeps_the_output_finite_and_the_next_alignment_recopies() {
         let t = Tuning::DEFAULT;
         let st = stream(&t, 20);
