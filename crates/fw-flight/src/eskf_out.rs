@@ -30,7 +30,9 @@
 // Fixed-size arrays only; every index is a loop bound or a constant below the array length.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
-use crate::eskf::{Eskf, EskfZ, Reset};
+use crate::eskf::{Eskf, EskfN, Reset};
+#[cfg(test)]
+use crate::eskf::EskfZ;
 use crate::eskf_n0::{self as n0, Nominal, rotation};
 use crate::gnc::{Estimator, GeoPoint, NavState, Sensors};
 use crate::mahony::DT_MAX_US;
@@ -574,24 +576,24 @@ impl Estimator for EskfSteer<'_> {
 }
 
 /// The composite steering estimator (Amendment G-1, G-1b): attitude, rates and the horizontal state from the output
-/// predictor ([`EskfSteer`]), the vertical state (D, v_D, their sigmas and flags) from the zero-delay [`EskfZ`]
-/// (`Aiding::ImuBaro`). Both run on every step with the same sensors and the same armed state. A fixed composition, not
+/// predictor ([`EskfSteer`]), the vertical state (D, v_D, their sigmas and flags) from the zero-delay filter ([`EskfN`], `Aiding::ImuBaro`, ring
+/// size `RV`: the host tests use `EskfZ`, ring 1; the board `Eskf`, one monomorphisation of the filter in RAM). Both run on every step with the same sensors and the same armed state. A fixed composition, not
 /// a switch.
 ///
 /// Readings of the specification: the sigma is the output predictor's with the two vertical fields from the zero-delay
 /// filter when both estimators give one; if either has none the composite has none (a vertical sigma of the other
 /// filter would break "vertical fields only from the zero-delay filter", and the log reads `None` as infinite).
 #[derive(Debug)]
-pub struct SteerMix<'a> {
+pub struct SteerMix<'a, const RV: usize = 1> {
     h: EskfSteer<'a>,
-    v: &'a mut EskfZ,
+    v: &'a mut EskfN<RV>,
     /// The zero-delay filter's own state of the last `update`, for the log (G-1b: I = 1).
     z: Option<NavState>,
 }
 
-impl<'a> SteerMix<'a> {
+impl<'a, const RV: usize> SteerMix<'a, RV> {
     /// The composite of the output predictor `h` and the zero-delay filter `v`.
-    pub fn new(h: EskfSteer<'a>, v: &'a mut EskfZ) -> Self {
+    pub fn new(h: EskfSteer<'a>, v: &'a mut EskfN<RV>) -> Self {
         SteerMix { h, v, z: None }
     }
 
@@ -601,7 +603,7 @@ impl<'a> SteerMix<'a> {
     }
 
     /// The zero-delay filter (vertical state).
-    pub fn vert(&self) -> &EskfZ {
+    pub fn vert(&self) -> &EskfN<RV> {
         self.v
     }
 
@@ -614,14 +616,16 @@ impl<'a> SteerMix<'a> {
 
 /// Test access for the `Flight` tests M2 and M3 in `step.rs`: the zero-delay filter, to force its state.
 #[cfg(test)]
-impl SteerMix<'_> {
-    pub(crate) fn vert_mut(&mut self) -> &mut EskfZ {
+impl<const RV: usize> SteerMix<'_, RV> {
+    pub(crate) fn vert_mut(&mut self) -> &mut EskfN<RV> {
         self.v
     }
 }
 
-impl Estimator for SteerMix<'_> {
-    fn update(&mut self, sensors: &Sensors) -> NavState {
+impl<const RV: usize> SteerMix<'_, RV> {
+    /// One step of the composition, the body of `Estimator::update`.
+    #[inline]
+    fn compose(&mut self, sensors: &Sensors) -> NavState {
         let mut nav = self.h.update(sensors);
         let z = self.v.update(sensors);
         self.z = Some(z);
@@ -641,16 +645,32 @@ impl Estimator for SteerMix<'_> {
         };
         nav
     }
-
-    fn origin(&self) -> Option<GeoPoint> {
-        self.h.origin()
-    }
-
-    fn set_armed(&mut self, armed: bool) {
-        self.h.set_armed(armed);
-        self.v.set_armed(armed);
-    }
 }
+
+/// The `Estimator` impls are written for the two ring sizes in use, not generically: a generic impl would be
+/// instantiated again in the crate that names `SteerMix<RING>`, and with it a second copy of `EskfN::update` (17 KB in
+/// RAM on the board). The board's `RV` is `RING`; the host tests use 1 (`EskfZ`).
+macro_rules! steer_mix_estimator {
+    ($ring:expr) => {
+        impl Estimator for SteerMix<'_, { $ring }> {
+            fn update(&mut self, sensors: &Sensors) -> NavState {
+                self.compose(sensors)
+            }
+
+            fn origin(&self) -> Option<GeoPoint> {
+                self.h.origin()
+            }
+
+            fn set_armed(&mut self, armed: bool) {
+                self.h.set_armed(armed);
+                self.v.set_armed(armed);
+            }
+        }
+    };
+}
+steer_mix_estimator!(crate::eskf::RING);
+#[cfg(test)]
+steer_mix_estimator!(1);
 
 #[cfg(test)]
 mod tests {

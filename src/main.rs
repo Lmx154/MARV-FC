@@ -304,7 +304,7 @@ fn core1_main(
         fw_core::esc::TestCmd,
     >,
     flight_rc: Option<fw_core::xcore::TripleReader<'static, fw_core::rc::RcSample>>,
-    steer: Option<&'static mut fw_flight::eskf_out::SteerMix<'static>>,
+    steer: Option<&'static mut crate::flight::BoardMix>,
 ) -> ! {
     let table = CORE1_VECTOR_TABLE.0.get() as u32;
     // SAFETY: the executing core's own VTOR; the table is aligned to 512 bytes and was filled by core

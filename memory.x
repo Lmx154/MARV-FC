@@ -163,11 +163,16 @@ ASSERT(_stack_end >= ORIGIN(RAM) && _stack_end < ORIGIN(RAM) + LENGTH(RAM), "sta
 /* Core 0's stack budget (stack S1: static call chains of the release ELF, push + sub sp along direct
  * calls and tail calls, thunks resolved; interrupt priorities as set: SWI_IRQ_0 P3, SWI_IRQ_1 P1,
  * the hardware interrupts P0; each nesting level adds a 104 B FP exception frame, counted as 108 B).
- * At boot, before rc::start and the watchdog monitor: the thread base 240 B (main, Executor::run,
- * poll) + the main task with flight::steer()'s 32 768 B frame 37 664 B + one P0 interrupt
- * (TIMER0_IRQ_0, 224 + 108 B) = 38 236 B. After start-up: 240 + the deepest other thread task (sd,
- * 13 088 B) + SWI_IRQ_0 (rc, 11 880 + 24 + 108) + SWI_IRQ_1 (monitor, 400 + 24 + 108) + one P0
- * interrupt (332) = 26 204 B. The 2 KiB margin is for what the analysis cannot bound (calls through
- * vtables and wakers, the boot ROM's flash routines). Redo the figures when a frame grows; the
- * `[STAT] watchdog:` line prints both cores' high-water marks. */
-ASSERT(_stack_start - _stack_end >= 38236 + 2048, "stack: core 0's stack under its budget (38 236 B at boot + 2 KiB)");
+ * Restated 2026-11-21 for packet P-G6b (the steering estimator SteerMix over STEER_CORE and VERT, three Eskf-sized
+ * builders in src/flight.rs; image of branch p2-g6, 16 668 B frame for each of the two big builders):
+ * At boot, before rc::start and the watchdog monitor: the thread base 240 B (main, Executor::run, poll) + the main
+ * task's poll 4 384 B + the largest builder flight::steer_core()/vert() 16 668 B (they run one after the other, not
+ * nested) + one P0 interrupt (TIMER0_IRQ_0, 224 + 108 B) = 21 624 B. The same count on the previous image (df7e46e,
+ * steer() 33 320 B, poll 3 264 B) gives 37 156 B against the 38 236 B of S1's count, so 1 080 B is added for
+ * the difference between the two counts: 22 704 B. After start-up (S1, unchanged by P-G6b: no core-0 task other than
+ * main's poll and flight::stat changed): 240 + the deepest other thread task (sd, 13 088 B) + SWI_IRQ_0 (rc, 11 880 + 24 + 108) +
+ * SWI_IRQ_1 (monitor, 400 + 24 + 108) + one P0 interrupt (332) = 26 204 B. The budget is the larger chain, 26 204 B,
+ * plus the 2 KiB margin for what the analysis cannot bound (calls through vtables and wakers, the boot ROM's flash
+ * routines). Redo the figures when a frame grows; the `[STAT] watchdog:` line prints both cores' high-water marks.
+ * Measured stack of that image: 31 440 B (_stack_end 0x20078530). */
+ASSERT(_stack_start - _stack_end >= 26204 + 2048, "stack: core 0's stack under its budget (26 204 B after start-up + 2 KiB)");

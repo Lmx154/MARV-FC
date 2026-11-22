@@ -9,7 +9,7 @@
 //! `settings::HANDSHAKE` and "flight throttles sent" from `esc::ESC`.
 //! The step runs the steering estimator `SteerMix` (decision-nav-eskf-20261120, Amendments G and G-1: the ESKF3 core,
 //! `Eskf` with `Aiding::Full`, behind its output predictor `EskfSteer` gives attitude, rates and the horizontal state at
-//! the current time; the zero-delay ESKF2, `EskfZ` with `Aiding::ImuBaro`, gives the vertical state), the cascaded PID
+//! the current time; the zero-delay ESKF2, an `Eskf` with `Aiding::ImuBaro`, gives the vertical state), the cascaded PID
 //! and the card's allocator with the constant gains of `fw_flight::tuning`. No shadow estimator runs on the board. The
 //! composed state that steered goes to the log (NKF1, NKF2: I = 0), ESKF2's own state as I = 1, the ESKF3 core's
 //! nominal state at its horizon as I = 2 (NKF1) and the two estimators' events as NKI (I = 0 the core, I = 1 ESKF2).
@@ -24,7 +24,7 @@ use fw_core::sample::{BaroReading, BaroSample, GnssReading, GnssSample, MagReadi
 use fw_core::xcore::{LogProducer, LogRing, Seqlock, SeqlockWriter, TripleBuffer, TripleReader};
 use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
-use fw_flight::eskf::{Aiding, Eskf, EskfError, EskfStats, EskfZ};
+use fw_flight::eskf::{Aiding, Eskf, EskfError, EskfStats, RING};
 use fw_flight::eskf_n0::{POS, VEL};
 use fw_flight::eskf_out::{EskfSteer, SteerMix};
 use fw_flight::gate::MotorCommand;
@@ -37,11 +37,16 @@ use fw_flight::step::{
 use fw_flight::tuning::Tuning;
 use static_cell::StaticCell;
 
-/// The flight code this image runs; edit this line to change it (seams decision, section 9). It steers on a
-/// [`SteerMix`] (Amendment G-1) whose parts live in [`STEER_CORE`], [`VERT`] and [`STEER`]. To go back to `MahonyBaro`:
-/// make this `Flight<MahonyBaro, CascadedPid, CardAllocator>`, pass `MahonyBaro::new(&Tuning::DEFAULT)` to
-/// `Flight::new` in [`Stepper::new`] and give the I = 0 records in `log_nav` their old source (`MahonyBaro::vert()`).
-pub type BoardFlight = Flight<&'static mut SteerMix<'static>, CascadedPid, CardAllocator>;
+/// The steering estimator: a [`SteerMix`] (Amendment G-1) whose parts live in [`STEER_CORE`], [`VERT`] and [`STEER`].
+/// ESKF2 is a full-ring `Eskf` too (a zero-delay filter does not depend on the ring size, G1-a), so the image carries
+/// one monomorphisation of the filter in RAM.
+pub type BoardMix = SteerMix<'static, RING>;
+
+/// The flight code this image runs; edit this line to change it (seams decision, section 9). To go back to
+/// `MahonyBaro`: make this `Flight<MahonyBaro, CascadedPid, CardAllocator>`, pass `MahonyBaro::new(&Tuning::DEFAULT)`
+/// to `Flight::new` in [`Stepper::new`] and give the I = 0 records in `log_nav` their old source
+/// (`MahonyBaro::vert()`).
+pub type BoardFlight = Flight<&'static mut BoardMix, CascadedPid, CardAllocator>;
 
 // `Flight` owns its estimator: by value the `Eskf` (its IMU ring, waiting buffers and P, about 16 KB) would be built
 // on core 1's 16 KB stack. `BoardFlight` must hold the reference only.
@@ -75,17 +80,17 @@ pub fn steer_core() -> Option<&'static mut Eskf> {
     STEER_CORE.try_init_with(|| Eskf::new(&Tuning::DEFAULT))?.as_mut().ok()
 }
 
-/// The zero-delay ESKF2's storage (the IMU ring of one entry, the waiting buffers, P), in `.bss`.
-static VERT: StaticCell<Result<EskfZ, EskfError>> = StaticCell::new();
+/// The zero-delay ESKF2's storage (a full `Eskf`, about 16 KB; its ring is used as one entry), in `.bss`.
+static VERT: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
 /// Builds ESKF2 (`Aiding::ImuBaro`) into [`VERT`]; as [`steer_core`].
 #[inline(never)]
-pub fn vert() -> Option<&'static mut EskfZ> {
-    VERT.try_init_with(|| EskfZ::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro))?.as_mut().ok()
+pub fn vert() -> Option<&'static mut Eskf> {
+    VERT.try_init_with(|| Eskf::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro))?.as_mut().ok()
 }
 
 /// The steering estimator's storage (the output predictor's ring and the two references), in `.bss`.
-static STEER: StaticCell<SteerMix<'static>> = StaticCell::new();
+static STEER: StaticCell<BoardMix> = StaticCell::new();
 
 /// Builds the steering estimator into [`STEER`] over the two estimators from [`steer_core`] and [`vert`]. Call once, on
 /// core 0 before core 1 starts, after those two (they are separate calls so that their frames do not stack). `None` if
@@ -94,8 +99,8 @@ static STEER: StaticCell<SteerMix<'static>> = StaticCell::new();
 #[inline(never)]
 pub fn steer(
     core: Option<&'static mut Eskf>,
-    vert: Option<&'static mut EskfZ>,
-) -> Option<&'static mut SteerMix<'static>> {
+    vert: Option<&'static mut Eskf>,
+) -> Option<&'static mut BoardMix> {
     let h = EskfSteer::new(core?, &Tuning::DEFAULT).ok()?;
     STEER.try_init(SteerMix::new(h, vert?))
 }
@@ -377,7 +382,7 @@ impl Stepper {
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     pub fn new(
         rc: Option<TripleReader<'static, RcSample>>,
-        steer: Option<&'static mut SteerMix<'static>>,
+        steer: Option<&'static mut BoardMix>,
     ) -> Option<Self> {
         Some(Self {
             flight: Flight::new(
@@ -413,7 +418,7 @@ impl Stepper {
     fn log_nav(&mut self, out: &StepOut) {
         const NKF: usize = dflog::NKF1.length as usize + dflog::NKF2.length as usize;
         let armed = out.armed;
-        let mix: &SteerMix<'static> = self.flight.estimator();
+        let mix: &BoardMix = self.flight.estimator();
         let core = mix.steer().core();
         let vert = mix.vert();
         let p0 = core.stats().predicts;
