@@ -439,6 +439,15 @@ impl<'a> EskfSteer<'a> {
     }
 }
 
+/// Test access for the `Flight` test T6 in `step.rs`: an earth-frame tilt offset put into the output's current state.
+#[cfg(test)]
+impl EskfSteer<'_> {
+    pub(crate) fn inject_tilt(&mut self, rad: f32) {
+        let inj = [libm::cosf(0.5 * rad), libm::sinf(0.5 * rad), 0.0, 0.0];
+        self.out.nom.q = normalise(mul(inj, self.out.nom.q));
+    }
+}
+
 impl Estimator for EskfSteer<'_> {
     fn update(&mut self, sensors: &Sensors) -> NavState {
         let now = sensors.imu1.t_us;

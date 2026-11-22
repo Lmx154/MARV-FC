@@ -1385,6 +1385,92 @@ mod tests {
             assert_eq!(a.esc, k % 4 == 0);
         }
     }
+
+    /// P-G2 T6 (Amendment G, G1 "Resets and the controller"): a yaw reset of the core is invisible to the Angle
+    /// controller. `Flight` with the steering `EskfSteer` over a resting vehicle with the sticks off centre, run three
+    /// times: plain; with the compass turned 90 deg from 20 s, which makes the core reset its yaw about 5 s later; and
+    /// (the control) plain with a 2 deg tilt offset put into the output at that same step.
+    /// Returns every step's demand after 6 s and the step of the core's yaw reset.
+    fn t6_run(
+        handshake: &'static Handshake,
+        mag_turn: bool,
+        tilt_at: Option<usize>,
+    ) -> (std::vec::Vec<ThrustTorque>, Option<usize>) {
+        extern crate std;
+        use crate::eskf::Eskf;
+        use crate::eskf::tests::World;
+        use crate::eskf_out::EskfSteer;
+        let tuning = Tuning::DEFAULT;
+        let mut core = Eskf::new(&tuning).unwrap();
+        let steer = EskfSteer::new(&mut core, &tuning).unwrap();
+        let mut flight = Flight::new(steer, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
+        handshake.set_permit(true);
+        let mut world = World::new(&tuning);
+        world.yaw = 0.4;
+        let (mut demands, mut reset_at) = (std::vec::Vec::new(), None);
+        for k in 0..32_000_000 / 1_250usize {
+            world.mag_rot = if mag_turn && world.t_us() >= 20_000_000 { core::f64::consts::FRAC_PI_2 } else { 0.0 };
+            let sensors = world.step();
+            let t_us = sensors.imu1.t_us;
+            let rc = (k % 10 == 0).then_some(RcSample {
+                sticks: Sticks {
+                    roll: 0.3,
+                    pitch: -0.2,
+                    throttle: if t_us < 3_000_000 { 0.0 } else { 0.5 },
+                    yaw: 0.1,
+                },
+                arm: t_us >= 2_000_000,
+                switch6: Switch3::Low,
+                t_us,
+            });
+            if Some(k) == tilt_at {
+                flight.estimator.inject_tilt(2.0_f32.to_radians());
+            }
+            let before = flight.estimator.core().stats().yaw_resets;
+            let out = flight.step(&FlightInputs { sensors, rc });
+            if flight.estimator.core().stats().yaw_resets > before && t_us > 20_000_000 {
+                reset_at = Some(k);
+            }
+            if t_us > 6_000_000 {
+                assert!(out.armed && out.mode == Mode::Angle, "step {k}");
+                demands.push(out.demand.expect("a demand"));
+            }
+        }
+        (demands, reset_at)
+    }
+
+    #[test]
+    fn t6_a_core_yaw_reset_does_not_change_the_angle_demand_and_a_tilt_offset_does() {
+        static H: [Handshake; 3] = [Handshake::new(), Handshake::new(), Handshake::new()];
+        let first = 6_000_000 / 1_250 + 1;
+        let (plain, none) = t6_run(&H[0], false, None);
+        assert_eq!(none, None);
+        let (turned, reset) = t6_run(&H[1], true, None);
+        let k = reset.expect("the compass turn must make the core reset its yaw");
+        let (offset, _) = t6_run(&H[2], false, Some(k));
+        assert_eq!(plain.len(), turned.len());
+        let diff = |a: &[ThrustTorque], b: &[ThrustTorque]| {
+            a.iter().zip(b).fold((0.0f32, 0.0f32), |(t, q): (f32, f32), (x, y)| {
+                let dq = (0..3).fold(0.0f32, |m, i| m.max((x.torque_nm[i] - y.torque_nm[i]).abs()));
+                (t.max((x.thrust_n - y.thrust_n).abs()), q.max(dq))
+            })
+        };
+        let scale = plain.iter().fold(0.0f32, |m, d| d.torque_nm.iter().fold(m, |m, v| m.max(v.abs())));
+        let at = k - first;
+        let (pre_t, pre_q) = diff(&plain[..at], &turned[..at]);
+        let (post_t, post_q) = diff(&plain[at..], &turned[at..]);
+        let (off_t, off_q) = diff(&plain[at..], &offset[at..]);
+        std::println!(
+            "t6: yaw reset at step {k}; largest torque in the run {scale:.4} N.m; before the reset: thrust {pre_t:.2e} N, torque {pre_q:.2e} N.m; reset step and after: thrust {post_t:.2e} N, torque {post_q:.2e} N.m; control (2 deg tilt offset): thrust {off_t:.2e} N, torque {off_q:.2e} N.m"
+        );
+        assert!(scale > 0.01, "the demand must be non-trivial: {scale}");
+        // Before the reset the runs differ only by a few ulp (the turned compass is gated, which the core notes in its
+        // timers); after it, by rounding: the heading twist is rebuilt from a quaternion the reset rotated by 90 deg,
+        // 1e-4 of the demand's scale (80 ulp of it measured, the control is 600 times that).
+        assert!(pre_t == 0.0 && pre_q <= 1e-6, "before the reset: thrust {pre_t}, torque {pre_q}");
+        assert!(post_q <= 1e-4 * scale && post_t <= 1e-4, "thrust {post_t}, torque {post_q}");
+        assert!(off_q > 100.0 * post_q.max(1e-9) && off_q > 0.01 * scale, "the control must change the demand: {off_q}");
+    }
 }
 
 #[cfg(test)]
