@@ -701,6 +701,11 @@ mod tests {
         }
         println!("t10: gyro offset {off:?}, bias estimate after 60 s {bg:?}, worst |difference - bias| {worst:e}");
         assert!(bg.iter().all(|b| fabsf(*b) > 1e-4), "every axis must have learned: {bg:?}");
+        // The output integrates the gyro minus the core's CURRENT bias: after the bias has converged it tracks the core's
+        // attitude. With the biases not copied it would hold bias x T_d / gain = 0.02 x 0.43 / 0.5, 1 degree, away.
+        let att = steer.tracking().att_rad;
+        println!("t10: attitude tracking error at 60 s {att:.2e} rad");
+        assert!(att < 1e-4, "tracking error {att}");
     }
 
     // ---- Stage 2: the correction ----
@@ -909,6 +914,9 @@ mod tests {
         let mut steer = EskfSteer::new(&mut core, t).unwrap();
         let mut w = World::new(t);
         let step = |steer: &mut EskfSteer, w: &mut World| {
+            // Turned to a yaw of 0.9 rad between 1 and 2 s (0.9 rad/s), so that an earth-frame and a body-frame rotation
+            // about the same vector differ; the compass is withheld, so the core's yaw is its gyro's.
+            w.yaw_rate = if (1_000_000..2_000_000).contains(&w.t_us()) { 0.9 } else { 0.0 };
             let mut s = w.step();
             (s.baro, s.mag, s.gnss) = (None, None, None);
             steer.update(&s);
