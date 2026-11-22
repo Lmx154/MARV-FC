@@ -380,6 +380,11 @@ impl Collector {
                     )
                 });
             }
+            if let Some(pair) = crate::gnss::pps_pair(sample.seq) {
+                p.push_with(dflog::PPS.length.into(), |b| {
+                    dflog::encode_pps(b, sample.t_us, pair.edge_us, pair.latency_us, pair.pulses, pair.unpaired)
+                });
+            }
         }
     }
 

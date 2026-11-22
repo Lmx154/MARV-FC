@@ -36,8 +36,9 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use embassy_futures::yield_now;
 use embassy_rp::Peri;
+use embassy_rp::gpio::{Input, Pull};
 use embassy_rp::bind_interrupts;
-use embassy_rp::peripherals::{PIN_24, PIN_25, UART1};
+use embassy_rp::peripherals::{PIN_5, PIN_24, PIN_25, UART1};
 use embassy_rp::uart::{self, BufferedInterruptHandler, BufferedUart};
 use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
@@ -45,7 +46,7 @@ use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::health::{ErrorKind, Limits};
 use fw_core::sample::{GnssReading, GnssSample, horizontal_std_mm};
 use fw_core::xcore::TripleWriter;
-use fw_settings::gnss::{CONFIGURE_RETRY_MS, Retry, RetryReport};
+use fw_settings::gnss::{CONFIGURE_RETRY_MS, Pps, PpsPair, Retry, RetryReport};
 use mavlink_device::dialect::{GPS_RAW_INT_DATA, GpsFixType, MavSeverity};
 use sam_m10q::{Pvt, Receiver, SetBaud};
 use static_cell::StaticCell;
@@ -264,6 +265,36 @@ pub fn pvt_tow_ms(vel_ned_mm_s: [i32; 3]) -> Option<u32> {
         .map(|p| p.tow_ms)
 }
 
+/// The PPS latency measurement (measure only): the edges of GPIO5 (`pps_task`) and the whole-second fixes
+/// (`to_flight`), both on core 0.
+static PPS: CriticalSectionMutex<Cell<Pps>> = CriticalSectionMutex::new(Cell::new(Pps::ZERO));
+/// The latest pairing with the `seq` of the sample it belongs to, for the logger's PPS record.
+static PPS_PAIR: CriticalSectionMutex<Cell<Option<(u32, PpsPair)>>> = CriticalSectionMutex::new(Cell::new(None));
+
+/// The pairing of the sample with sequence number `seq`, if it paired with a PPS edge: what the log's PPS record takes.
+pub fn pps_pair(seq: u32) -> Option<PpsPair> {
+    PPS_PAIR
+        .lock(Cell::get)
+        .filter(|&(s, _)| s == seq)
+        .map(|(_, pair)| pair)
+}
+
+/// Stamps every rising edge of the receiver's PPS (GPIO5) with the board clock. The stamp is taken when this task
+/// runs after the GPIO interrupt woke it, so its jitter is the interrupt-to-task latency of core 0's executor.
+#[embassy_executor::task]
+pub async fn pps_task(pin: Peri<'static, PIN_5>) -> ! {
+    let mut pps = Input::new(pin, Pull::Down);
+    loop {
+        pps.wait_for_rising_edge().await;
+        let t_us = Instant::now().as_micros();
+        PPS.lock(|cell| {
+            let mut p = cell.get();
+            p.edge(t_us);
+            cell.set(p);
+        });
+    }
+}
+
 pub struct GnssAdapter {
     rx: Receiver<GnssUart>,
     totals: Totals,
@@ -298,7 +329,7 @@ impl GnssAdapter {
             uart::Config::default(),
         );
         defmt::info!(
-            "[INFO] GNSS: SAM-M10Q on UART1, TX GPIO24 RX GPIO25, 115200 8N1 after the configure (baud scan 115200, 9600, 38400), UBX only, configured at every start (never saved), RX buffer {=usize} B, nominal period {=u32} us, deadline {=u32} us, PPS not read",
+            "[INFO] GNSS: SAM-M10Q on UART1, TX GPIO24 RX GPIO25, 115200 8N1 after the configure (baud scan 115200, 9600, 38400), UBX only, configured at every start (never saved), RX buffer {=usize} B, nominal period {=u32} us, deadline {=u32} us, PPS edge timed on GPIO5 (measure only)",
             RX_BUFFER,
             PERIOD_US,
             DEADLINE_US
@@ -483,8 +514,9 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
         })) => (fix_type, sats_used, lat_std_mm, time),
         _ => (0, None, None, None),
     };
+    let pps = PPS.lock(Cell::get);
     defmt::info!(
-        "[STAT] GNSS: frames ok {=u32}, NAV-PVT {=u32} ({=f32}/s over the last 10 s), checksum errors {=u32}, oversize {=u32}, ignored {=u32}, UART errors overrun {=u32} framing {=u32} break {=u32} parity {=u32}, configures done {=u32}, configure failures {=u32} (NAK {=u32}), last configure error \"{=str}\", fix type {=u8}, satellites {}, hAcc {} mm, UTC {}, last PVT {=u64} ms ago{=str}",
+        "[STAT] GNSS: frames ok {=u32}, NAV-PVT {=u32} ({=f32}/s over the last 10 s), checksum errors {=u32}, oversize {=u32}, ignored {=u32}, UART errors overrun {=u32} framing {=u32} break {=u32} parity {=u32}, configures done {=u32}, configure failures {=u32} (NAK {=u32}), last configure error \"{=str}\", fix type {=u8}, satellites {}, hAcc {} mm, UTC {}, PPS pulses {=u32} paired {=u32} unpaired {=u32} latency last {=i32} min {=i32} max {=i32} us, last PVT {=u64} ms ago{=str}",
         t.frames,
         t.pvt,
         rate,
@@ -503,6 +535,12 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
         sats,
         h_acc,
         crate::device::Utc(utc),
+        pps.pulses,
+        pps.paired,
+        pps.unpaired,
+        pps.last_us,
+        pps.min_us,
+        pps.max_us,
         age_ms,
         if t.silenced {
             ", NAV-PVT SWALLOWED (inject)"
@@ -593,6 +631,17 @@ impl DeviceAdapter for GnssAdapter {
     fn to_flight(&mut self, sample: &Sample) {
         if let (Reading::Gnss(r), Some(w)) = (sample.reading, &mut self.flight) {
             w.write(r.sample(sample.t_us, sample.seq));
+        }
+        if let (Reading::Gnss(_), Some(PvtTow { tow_ms, .. })) = (sample.reading, PVT_TOW.lock(Cell::get)) {
+            let pair = PPS.lock(|cell| {
+                let mut p = cell.get();
+                let pair = p.fix(tow_ms, sample.t_us);
+                cell.set(p);
+                pair
+            });
+            if let Some(pair) = pair {
+                PPS_PAIR.lock(|cell| cell.set(Some((sample.seq, pair))));
+            }
         }
     }
 }

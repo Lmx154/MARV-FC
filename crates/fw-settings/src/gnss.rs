@@ -233,6 +233,89 @@ impl Retry {
     }
 }
 
+/// An edge older than this is not the one of a fix's second: 1 s, us.
+pub const PPS_MAX_AGE_US: u64 = 1_000_000;
+
+/// One fix paired with its PPS edge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PpsPair {
+    /// Board time of the PPS edge, us.
+    pub edge_us: u64,
+    /// Board time of the fix (the sample's `t_us`) minus `edge_us`, us.
+    pub latency_us: i32,
+    /// PPS edges seen so far.
+    pub pulses: u32,
+    /// Edges that met no whole-second fix plus whole-second fixes that met no fresh edge, so far.
+    pub unpaired: u32,
+}
+
+/// Pairs the PPS edge of each second with the whole-second NAV-PVT fix (iTOW a multiple of 1000 ms, whose time of
+/// validity is the edge) and keeps the latency figures. Measure only: nothing reads it back into the estimator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pps {
+    /// The latest edge and whether a fix has used it.
+    edge: Option<(u64, bool)>,
+    /// Edges counted.
+    pub pulses: u32,
+    /// Fixes paired.
+    pub paired: u32,
+    /// Unpaired edges plus whole-second fixes without a fresh edge.
+    pub unpaired: u32,
+    /// The latest latency, us (0 before the first pairing).
+    pub last_us: i32,
+    /// The smallest latency, us.
+    pub min_us: i32,
+    /// The largest latency, us.
+    pub max_us: i32,
+}
+
+impl Pps {
+    /// No edge, nothing counted.
+    pub const ZERO: Self = Self {
+        edge: None,
+        pulses: 0,
+        paired: 0,
+        unpaired: 0,
+        last_us: 0,
+        min_us: 0,
+        max_us: 0,
+    };
+
+    /// A PPS edge at board time `t_us`; the previous edge, if no fix used it, is unpaired.
+    pub fn edge(&mut self, t_us: u64) {
+        if matches!(self.edge, Some((_, false))) {
+            self.unpaired = self.unpaired.saturating_add(1);
+        }
+        self.edge = Some((t_us, false));
+        self.pulses = self.pulses.saturating_add(1);
+    }
+
+    /// A fix with GPS time of week `tow_ms`, published at board time `t_us`. Nothing for a fix that is not a whole
+    /// second; a whole-second fix pairs with the latest unused edge when it is less than 1 s old (and not later
+    /// than the fix), else it counts as unpaired.
+    pub fn fix(&mut self, tow_ms: u32, t_us: u64) -> Option<PpsPair> {
+        if tow_ms % 1000 != 0 {
+            return None;
+        }
+        let Some((edge_us, false)) = self.edge.filter(|&(e, _)| e <= t_us && t_us - e < PPS_MAX_AGE_US) else {
+            self.unpaired = self.unpaired.saturating_add(1);
+            return None;
+        };
+        self.edge = Some((edge_us, true));
+        let latency_us = i32::try_from(t_us - edge_us).unwrap_or(i32::MAX);
+        self.last_us = latency_us;
+        self.min_us = if self.paired == 0 { latency_us } else { self.min_us.min(latency_us) };
+        self.max_us = if self.paired == 0 { latency_us } else { self.max_us.max(latency_us) };
+        self.paired = self.paired.saturating_add(1);
+        Some(PpsPair {
+            edge_us,
+            latency_us,
+            pulses: self.pulses,
+            unpaired: self.unpaired,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,6 +629,45 @@ mod tests {
         }
     }
 
+
+    #[test]
+    fn pps_pairs_the_whole_second_fix_with_its_fresh_edge() {
+        let mut p = Pps::ZERO;
+        // Fixes before any edge: whole second is unpaired, others are ignored.
+        assert_eq!(p.fix(200, 10), None);
+        assert_eq!(p.unpaired, 0);
+        assert_eq!(p.fix(1000, 50_000), None);
+        assert_eq!(p.unpaired, 1);
+        p.edge(1_000_000);
+        // A 200 ms epoch is not paired and does not use the edge.
+        assert_eq!(p.fix(1200, 1_250_000), None);
+        assert_eq!(p.unpaired, 1);
+        let pair = p.fix(2000, 1_060_000).unwrap();
+        assert_eq!((pair.edge_us, pair.latency_us, pair.pulses, pair.unpaired), (1_000_000, 60_000, 1, 1));
+        // The edge is used once.
+        assert_eq!(p.fix(3000, 1_070_000), None);
+        assert_eq!(p.unpaired, 2);
+        // An edge 1 s old or older is not paired (the fix is whole-second but the edge was missed).
+        p.edge(2_000_000);
+        assert_eq!(p.fix(4000, 3_000_000), None);
+        assert_eq!(p.unpaired, 3);
+        // An edge later than the fix is not paired.
+        p.edge(5_000_000);
+        // (the unused edge at 2 s is replaced: unpaired too)
+        assert_eq!(p.fix(5000, 4_999_999), None);
+        assert_eq!(p.unpaired, 5);
+        // Figures: 40 ms and 90 ms after 60 ms.
+        p.edge(6_000_000);
+        assert_eq!(p.fix(6000, 6_040_000).unwrap().latency_us, 40_000);
+        p.edge(7_000_000);
+        assert_eq!(p.fix(7000, 7_090_000).unwrap().latency_us, 90_000);
+        assert_eq!((p.paired, p.last_us, p.min_us, p.max_us), (3, 90_000, 40_000, 90_000));
+        // An edge replaced before a fix used it is unpaired.
+        let before = p.unpaired;
+        p.edge(8_000_000);
+        p.edge(9_000_000);
+        assert_eq!((p.unpaired, p.pulses), (before + 1, 7));
+    }
 
     #[test]
     fn the_retry_schedule() {

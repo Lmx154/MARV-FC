@@ -81,7 +81,7 @@ pub struct Summary {
 /// }
 /// let summary = walker.summary();
 /// assert!(summary.began_with_fmt);
-/// assert_eq!((summary.fmt_matched, summary.fmt_mismatched), (25, 0));
+/// assert_eq!((summary.fmt_matched, summary.fmt_mismatched), (26, 0));
 /// assert_eq!((summary.bad_bytes, summary.tail_bytes), (0, 0));
 /// ```
 #[derive(Clone, Debug)]
@@ -370,13 +370,13 @@ mod tests {
         assert_eq!(got.bytes as usize, s.bytes.len());
         assert_eq!((got.bad_bytes, got.tail_bytes), (0, 0));
         assert!(got.began_with_fmt);
-        assert_eq!((got.fmt_matched, got.fmt_mismatched), (25, 0));
+        assert_eq!((got.fmt_matched, got.fmt_mismatched), (26, 0));
     }
 
     #[test]
     fn max_record_is_the_fmt() {
         assert_eq!(MAX_RECORD, 89);
-        assert_eq!(NUM_TYPES, 25);
+        assert_eq!(NUM_TYPES, 26);
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
                 ID_DSF
             ]
             .map(count),
-            [25, 25, 3, 500, 500, 1000, 10, 100, 100, 70, 10]
+            [26, 25, 3, 500, 500, 1000, 10, 100, 100, 70, 10]
         );
         let imu = got.types[index_of(ID_IMU)];
         assert_eq!(
@@ -422,7 +422,7 @@ mod tests {
     #[test]
     fn a_flipped_header_byte_costs_that_record_and_resynchronises() {
         let s = sample();
-        let victim = 25 + 25 + 3 + 100;
+        let victim = 26 + 25 + 3 + 100;
         let (offset, id) = s.records[victim];
         let len = usize::from(TYPES[index_of(id)].length);
         for (byte, value) in [(0, 0xA2), (1, 0x94), (2, 0x77)] {
@@ -440,7 +440,7 @@ mod tests {
                 let mut want = s.expected;
                 want[index_of(id)].count -= 1;
                 assert_eq!(got.types, want, "everything else is read");
-                assert_eq!((got.fmt_matched, got.fmt_mismatched), (25, 0));
+                assert_eq!((got.fmt_matched, got.fmt_mismatched), (26, 0));
             }
         }
     }
@@ -454,14 +454,14 @@ mod tests {
         assert_eq!(got.bad_bytes, 6);
         assert!(!got.began_with_fmt, "the stream did not begin with it");
         assert_eq!(got.types, s.expected);
-        assert_eq!((got.fmt_matched, got.fmt_mismatched), (25, 0));
+        assert_eq!((got.fmt_matched, got.fmt_mismatched), (26, 0));
         assert_eq!(walk(&[7; 100], 9).bad_bytes, 100);
     }
 
     #[test]
     fn a_stream_cut_in_the_middle_of_a_record_reports_the_tail_not_bad_bytes() {
         let s = sample();
-        let mid = 25 + 25 + 3 + 777;
+        let mid = 26 + 25 + 3 + 777;
         let (offset, id) = s.records[mid];
         let len = usize::from(TYPES[index_of(id)].length);
         for tail in 0..len {
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn an_unknown_type_record_is_skipped_as_bad_bytes() {
         let s = sample();
-        let at = s.records[25 + 25 + 3 + 50].0;
+        let at = s.records[26 + 25 + 3 + 50].0;
         let mut data = s.bytes[..at].to_vec();
         data.extend_from_slice(&[0xA3, 0x95, 0x77]);
         data.extend_from_slice(&[0x11; 10]);
@@ -520,12 +520,12 @@ mod tests {
     #[test]
     fn fmt_records_that_differ_from_the_table_are_counted_apart() {
         let s = sample();
-        // One column letter of BARO's FMT changed: matched 24, mismatched 1, nothing skipped.
+        // One column letter of BARO's FMT changed: matched 25, mismatched 1, nothing skipped.
         let (offset, _) = s.records[index_of(ID_BARO)];
         let mut data = s.bytes.clone();
         data[offset + 9] = b'Z';
         let got = walk(&data, 64);
-        assert_eq!((got.fmt_matched, got.fmt_mismatched), (24, 1));
+        assert_eq!((got.fmt_matched, got.fmt_mismatched), (25, 1));
         assert_eq!((got.bad_bytes, got.tail_bytes), (0, 0));
         assert!(got.began_with_fmt);
         assert_eq!(got.types, s.expected);
@@ -538,13 +538,13 @@ mod tests {
         data[9] = b'C';
         let got = walk(&data, 64);
         assert!(!got.began_with_fmt);
-        assert_eq!((got.fmt_matched, got.fmt_mismatched), (24, 1));
+        assert_eq!((got.fmt_matched, got.fmt_mismatched), (25, 1));
     }
 
     #[test]
     fn a_stream_that_starts_with_another_record_did_not_begin_with_the_fmt_of_fmt() {
         let s = sample();
-        let (offset, _) = s.records[25];
+        let (offset, _) = s.records[26];
         let got = walk(&s.bytes[offset..], 512);
         assert!(!got.began_with_fmt);
         assert_eq!(got.bad_bytes, 0);
@@ -554,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    fn one_record_of_each_of_the_25_types_reads_clean() {
+    fn one_record_of_each_of_the_26_types_reads_clean() {
         let mut s = Sample {
             bytes: Vec::new(),
             records: Vec::new(),
@@ -593,12 +593,13 @@ mod tests {
         s.push(ID_NKI, 22, |b| encode_nki(b, 22, 1, 4, 0.5, 0.25, 1));
         s.push(ID_MODE, 23, |b| encode_mode(b, 23, 2, 1));
         s.push(ID_SPN, 24, |b| encode_spn(b, 24, [0.0; 3], [0.0, 0.0, 0.5], 0.0));
+        s.push(ID_PPS, 25, |b| encode_pps(b, 25, 24, 60_000, 3, 1));
         let got = walk(&s.bytes, s.bytes.len());
         expect_clean(&s, &got);
         let counts: Vec<u32> = got.types.iter().map(|t| t.count).collect();
-        let mut want = vec![1u32; 25];
-        want[0] = 25;
+        let mut want = vec![1u32; 26];
+        want[0] = 26;
         assert_eq!(counts, want);
-        assert_eq!(got.records, 49);
+        assert_eq!(got.records, 51);
     }
 }

@@ -1393,6 +1393,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(gnss::task(gnss::adapter(
         p.UART1, p.PIN_24, p.PIN_25
     ))));
+    spawner.spawn(defmt::unwrap!(gnss::pps_task(p.PIN_5)));
     spawner.spawn(defmt::unwrap!(batt::task(batt::adapter(
         p.ADC, p.PIN_41, p.PIN_42
     ))));

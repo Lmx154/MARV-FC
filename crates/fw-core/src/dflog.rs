@@ -164,6 +164,8 @@ pub const ID_MODE: u8 = 150;
 pub const ID_SPN: u8 = 151;
 /// Type number of GPV (the velocity of a GNSS sample).
 pub const ID_GPV: u8 = 152;
+/// Type number of PPS (a whole-second fix paired with its PPS edge: latency measurement).
+pub const ID_PPS: u8 = 153;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -255,6 +257,10 @@ pub const GPV: RecordDef = def(
     "QBiiiIIH",
     "TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg",
 );
+/// PPS: one whole-second GNSS fix paired with the PPS edge of its second (`TimeUS` is the fix's sample time, as in
+/// GPV): the edge's board time (us), the latency from the edge to `TimeUS` (us), the PPS edges counted and the
+/// unpaired ones counted since boot.
+pub const PPS: RecordDef = def(ID_PPS, "PPS", "QQiII", "TimeUS,Edge,Dly,N,Unp");
 
 /// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the
 /// shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's. For I = 1 `TimeUS` is the
@@ -290,9 +296,9 @@ pub const SPN: RecordDef = def(
 );
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 25] = [
+pub const TYPES: [RecordDef; 26] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN,
+    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -822,6 +828,19 @@ pub fn encode_gpv(
     w.pos
 }
 
+/// PPS: the edge's board time, the latency in us, the edge count and the unpaired count. 31 bytes.
+pub fn encode_pps(out: &mut [u8], time_us: u64, edge_us: u64, latency_us: i32, pulses: u32, unpaired: u32) -> usize {
+    let Some(mut w) = Writer::start(out, &PPS) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u64(edge_us);
+    w.i32(latency_us);
+    w.u32(pulses);
+    w.u32(unpaired);
+    w.pos
+}
+
 /// NKF1: instance, attitude quaternion (w, x, y, z), velocity and position NED, valid bits. 53 bytes.
 pub fn encode_nkf1(
     out: &mut [u8],
@@ -1051,6 +1070,8 @@ mod tests {
         out.push((ID_MODE, b[..n].to_vec()));
         let n = encode_spn(&mut b, 1, [1.0; 3], [2.0; 3], 3.0);
         out.push((ID_SPN, b[..n].to_vec()));
+        let n = encode_pps(&mut b, 1, 2, -3, 4, 5);
+        out.push((ID_PPS, b[..n].to_vec()));
         out
     }
 
@@ -1121,12 +1142,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_25_fmt_records() {
-        assert_eq!(TYPES.len(), 25);
-        assert_eq!(HEADER_SEQUENCE_LEN, 2225);
-        let mut buf = [0u8; 2235];
-        assert_eq!(write_header(&mut buf), 2225);
-        assert_eq!(write_header(&mut [0u8; 2224]), 0);
+    fn header_sequence_is_26_fmt_records() {
+        assert_eq!(TYPES.len(), 26);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2314);
+        let mut buf = [0u8; 2324];
+        assert_eq!(write_header(&mut buf), 2314);
+        assert_eq!(write_header(&mut [0u8; 2313]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -1203,7 +1224,8 @@ mod tests {
                 ("NKF2", 60),
                 ("NKI", 22),
                 ("MODE", 13),
-                ("SPN", 39)
+                ("SPN", 39),
+                ("PPS", 31)
             ]
         );
     }
