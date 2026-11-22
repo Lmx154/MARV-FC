@@ -97,7 +97,9 @@ pub struct Tuning {
     /// `Eskf` (decision-nav-eskf-20261120, Amendment C, C6; approved 2026-11-20/21): the IMU history the delayed horizon
     /// may use, us (section 10).
     pub nav_buffer_us: u64,
-    /// The delayed horizon: GNSS delay, us (section 10; measured at 1 Hz, re-measured at 5 Hz in E2).
+    /// The delayed horizon: GNSS delay, us. 120 000 for the SAM-M10Q: ArduPilot `AP_GPS_UBLOX::get_lag()` gives 0.12 s for
+    /// the M10 (UNVERIFIED for this receiver; decision-gnss-m10-20261122 D5, re-approval needed: the owner had approved
+    /// 430 000, measured on the LC76G). To be re-measured by the replay delay scan on the first M10 log.
     pub nav_gps_delay_us: u64,
     /// Lowest GNSS epoch rate accepted, Hz: 1000/245, ArduPilot's per-frame bound of 245 ms (`AP_GPS.cpp:849`; its 215 ms is a bound
     /// on the AVERAGE interval, `:861`; Amendment G, G4, owner-approved 2026-11-22; a parameter).
@@ -174,7 +176,7 @@ impl Tuning {
         nav_p0_vel_ms: 0.5,
         nav_p0_ba_ms2: 0.2,
         nav_buffer_us: 500_000,
-        nav_gps_delay_us: 430_000,
+        nav_gps_delay_us: 120_000,
         nav_gps_min_rate_hz: 1000.0 / 245.0,
         nav_gps_pos_sigma_min_m: 0.3,
         nav_gps_vel_sigma_ms: 0.2,

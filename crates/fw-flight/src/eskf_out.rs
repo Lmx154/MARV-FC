@@ -682,6 +682,9 @@ mod tests {
     use std::println;
     use std::vec::Vec;
 
+    /// The scenario of t3, t3b, t5 (velocity part), t5d and t7 was designed at the LC76G's GNSS delay, 430 ms; they keep it whatever the default.
+    const LC76G_GPS_DELAY_US: u64 = 430_000;
+
     #[test]
     fn the_ring_reports_the_oldest_entry_it_drops_when_full() {
         let (mut r, e) = (OutRing::new(), OutEntry::default());
@@ -965,7 +968,7 @@ mod tests {
 
     #[test]
     fn t3_truth_the_output_tracks_the_truth_at_the_current_time_through_turns_and_accelerations() {
-        let t = Tuning::DEFAULT;
+        let t = Tuning { nav_gps_delay_us: LC76G_GPS_DELAY_US, ..Tuning::DEFAULT };
         let mut core = Eskf::new(&t).unwrap();
         let mut steer = EskfSteer::new(&mut core, &t).unwrap();
         let mut w = World::new(&t);
@@ -1050,7 +1053,7 @@ mod tests {
 
     #[test]
     fn t3b_a_roll_rocking_at_113_deg_s_has_a_small_tilt_error_in_the_output_and_a_large_one_in_the_horizon() {
-        let t = Tuning::DEFAULT;
+        let t = Tuning { nav_gps_delay_us: LC76G_GPS_DELAY_US, ..Tuning::DEFAULT };
         let mut core = Eskf::new(&t).unwrap();
         let mut steer = EskfSteer::new(&mut core, &t).unwrap();
         let mut w = World::new(&t);
@@ -1172,7 +1175,7 @@ mod tests {
         // eps = theta for 0 <= t < D (nothing is measured yet), a delayed first-order loop. Its roots: x = s D with
         // x + g exp(-x) = 0; for g = 0.5 they are complex (monotone only for g <= 1/e), so the decay is a damped
         // oscillation: the envelope falls monotonically, with a small undershoot.
-        let t = Tuning::DEFAULT;
+        let t = Tuning { nav_gps_delay_us: LC76G_GPS_DELAY_US, ..Tuning::DEFAULT };
         let theta = 5.0_f64.to_radians();
         let secs = 12.0;
         let d = t.nav_gps_delay_us as f64 * 1e-6;
@@ -1593,7 +1596,7 @@ mod tests {
         // entries (and the current state) must be moved by that, or the next corrections see about |dv| x the entry's age.
         // On this stream a barometer set's no-aid N stage is queued when the reset runs; the core drops it (P-G2c), where
         // it used to fuse it toward the old hold position (-9 m, K 9e-4: p_N moved by 8 mm).
-        let t = Tuning::DEFAULT;
+        let t = Tuning { nav_gps_delay_us: LC76G_GPS_DELAY_US, ..Tuning::DEFAULT };
         let st = stream(&t, 12);
         let (k0, r, fused_after, dropped, ev, ep, older) = vel_reset_case(&t, &st, 5_000_000);
         let (ev_twin, ep_twin, _) = errors_after(&t, &st, |_| false, k0, 10);
@@ -1710,7 +1713,7 @@ mod tests {
         // reduced by the slews in between (along the vector), not turned. With the rate correction left unrotated the
         // slew of the 10 ms up to the next correction is about north on an error about east: the vector's direction
         // moves by g x 10 ms / T_d = 0.66 deg and stays moved.
-        let t = Tuning::DEFAULT;
+        let t = Tuning { nav_gps_delay_us: LC76G_GPS_DELAY_US, ..Tuning::DEFAULT };
         let st = rocking_stream(&t, 40.0);
         let recs = watch_all(&t, &st, |s| armed_but(s, 21_000_000, 28_000_000));
         let rr = recs.iter().find(|r| r.src == 8 && r.t_us > 20_000_000).expect("a yaw reset while rocking");
