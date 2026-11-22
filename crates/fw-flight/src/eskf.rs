@@ -76,6 +76,8 @@
 //! - C1b's H row is the exact Jacobian of the innovation in use (review ruling 1, [`yaw_h`]); a compass sample whose
 //!   NED field has no usable horizontal component is a refusal.
 //! - Compass refusals (Ok 2) are all counted; one NKI record per nav_mag_fuse_us at most.
+//! - G5: the reported `NavSigma::position_ne_m` is sqrt(P_N + P_E + s_N^2 + s_E^2), s the floored GST sigmas of the latest GNSS
+//!   epoch that became a job (a reset or the scalars); before any such epoch sqrt(P_N + P_E). The filter's dynamics do not use it.
 //! - G6-B: armed, when every healthy compass sample has been gated for nav_aid_timeout_us the yaw is not reset: `global_off`
 //!   is set (NKI Src 8, Ok 0, Inn = the innovation, once), `started` goes false, GNSS epochs are counted in `gps_disarmed` and not
 //!   fused, the heading flag is false, until the disarm edge. Disarmed, the yaw is reset to the compass (C1c).
@@ -410,6 +412,9 @@ pub struct EskfN<const R: usize> {
     /// G6-B: while armed, every healthy compass sample was gated for nav_aid_timeout_us; GNSS is not fused and the heading
     /// flag stays false until the disarm edge clears this.
     global_off: bool,
+    /// G5: the floored GST sigmas (N, E) of the latest GNSS epoch that became a job, m; only the reported position sigma
+    /// reads it (no state or P).
+    last_sigma_ne: Option<[f32; 2]>,
     last_pos_us: u64,
     latest_ok: bool,
     /// Horizon time of the first gate rejection of each position axis in the current run of rejections.
@@ -587,6 +592,7 @@ impl<const R: usize> EskfN<R> {
             gps_prev: None,
             started: false,
             global_off: false,
+            last_sigma_ne: None,
             last_pos_us: 0,
             latest_ok: false,
             rej_since: [None; 2],
@@ -1257,6 +1263,7 @@ impl<const R: usize> EskfN<R> {
 
     fn gps_job(&mut self, job: GpsJob) {
         let horizon = self.horizon();
+        self.last_sigma_ne = Some(job.sigma_ne);
         match job.plan {
             GpsPlan::Reset => {
                 let change = job.ne[0] - self.nom.p[0];
@@ -1375,7 +1382,10 @@ impl<const R: usize> EskfN<R> {
                 heading_rad: sqrtf(v(ATT + 2)),
                 velocity_ne_ms: sqrtf(v(VEL) + v(VEL + 1)),
                 velocity_d_ms: sqrtf(v(VEL + 2)),
-                position_ne_m: sqrtf(v(POS) + v(POS + 1)),
+                position_ne_m: match self.last_sigma_ne {
+                    Some(s) => sqrtf(v(POS) + v(POS + 1) + s[0] * s[0] + s[1] * s[1]),
+                    None => sqrtf(v(POS) + v(POS + 1)),
+                },
                 position_d_m: sqrtf(v(POS + 2)),
             }
         } else {
@@ -1756,6 +1766,16 @@ pub(crate) mod tests {
     /// G2 tests: a non-finite velocity in the core's state, as `b7` makes it.
     pub(crate) fn poison(e: &mut Eskf) {
         e.nom.v[1] = f32::NAN;
+    }
+
+    /// The whole core state as bits: nominal, biases, the full P, horizon, flags that gate aiding.
+    fn core_bits_all(e: &Eskf) -> Vec<u32> {
+        let n = &e.nom;
+        let mut b: Vec<u32> = n.q.iter().chain(&n.v).chain(&n.p).chain(&n.bg).chain(&n.ba).map(|x| x.to_bits()).collect();
+        b.extend(e.p.iter().flatten().map(|x| x.to_bits()));
+        let h = e.horizon_us.unwrap_or(u64::MAX);
+        b.extend([h as u32, (h >> 32) as u32, u32::from(e.tilt_aligned), u32::from(e.yaw_aligned), u32::from(e.started), u32::from(e.global_off), u32::from(e.latest_ok)]);
+        b
     }
 
     fn yaw_of(q: &[f32; 4]) -> f64 {
@@ -2234,6 +2254,59 @@ pub(crate) mod tests {
         assert!(!f.global_off);
         assert!(b - a >= t.nav_aid_timeout_us && b - a <= t.nav_aid_timeout_us + t.nav_mag_fuse_us);
         assert_eq!((bg[2], ba[0], ba[1]), (0.0, 0.0, 0.0));
+    }
+
+    #[test]
+    fn g5_the_reported_ne_position_sigma_adds_the_latest_gst_sigmas_and_the_filter_does_not_read_it() {
+        let t = Tuning::DEFAULT;
+        let mut a = Eskf::new(&t).unwrap();
+        let mut b = Eskf::new(&t).unwrap();
+        let mut w = World::new(&t);
+        w.v = [2.0, 0.0, 0.0];
+        let (mut formula_rows, mut before_rows, mut differ_rows) = (0u32, 0u32, 0u32);
+        // The GST sigma below the floor (0.3 m), above it, and above it again.
+        for std_mm in [100u32, 500, 800] {
+            w.std_mm = std_mm;
+            let floored = (std_mm as f32 * 1e-3).max(t.nav_gps_pos_sigma_min_m);
+            for _ in 0..10_000_000 / PERIOD_US {
+                let s = w.step();
+                a.set_armed(true);
+                b.set_armed(true);
+                let na = a.update(&s);
+                let nb = b.update(&s);
+                // B's stored GST sigmas are corrupted after every step: if the filter read them anywhere else than in
+                // the report, A and B would part.
+                b.last_sigma_ne = Some([100.0, 100.0]);
+                let v = |f: &Eskf, i: usize| f.p[i][i].max(0.0);
+                let (sa, sb) = (na.sigma.unwrap(), nb.sigma.unwrap());
+                match a.last_sigma_ne {
+                    None if !a.tilt_aligned => assert_eq!(sa.position_ne_m, f32::INFINITY),
+                    None => {
+                        before_rows += 1;
+                        assert_eq!(sa.position_ne_m.to_bits(), sqrtf(v(&a, POS) + v(&a, POS + 1)).to_bits());
+                    }
+                    Some(l) => {
+                        formula_rows += 1;
+                        assert_eq!(sa.position_ne_m.to_bits(), sqrtf(v(&a, POS) + v(&a, POS + 1) + l[0] * l[0] + l[1] * l[1]).to_bits());
+                        assert!(sa.position_ne_m > sqrtf(v(&a, POS) + v(&a, POS + 1)));
+                    }
+                }
+                differ_rows += u32::from(sa.position_ne_m.to_bits() != sb.position_ne_m.to_bits());
+                assert_eq!(core_bits_all(&a), core_bits_all(&b));
+                assert_eq!(a.stats(), b.stats());
+                assert!(a.events().eq(b.events()));
+                assert_eq!((na.t_us, na.valid, na.attitude.map(f32::to_bits), na.rates_rads.map(f32::to_bits)), (nb.t_us, nb.valid, nb.attitude.map(f32::to_bits), nb.rates_rads.map(f32::to_bits)));
+                assert_eq!((na.velocity_ms.map(f32::to_bits), na.position_m.map(f32::to_bits)), (nb.velocity_ms.map(f32::to_bits), nb.position_m.map(f32::to_bits)));
+                assert_eq!(
+                    [sa.tilt_rad, sa.heading_rad, sa.velocity_ne_ms, sa.velocity_d_ms, sa.position_d_m].map(f32::to_bits),
+                    [sb.tilt_rad, sb.heading_rad, sb.velocity_ne_ms, sb.velocity_d_ms, sb.position_d_m].map(f32::to_bits)
+                );
+            }
+            // The latest accepted epoch's floored sigmas (a job runs within a few steps of the arrival; 10 s later it has).
+            assert_eq!(a.last_sigma_ne, Some([floored, floored]), "GST {std_mm} mm");
+        }
+        println!("g5: {before_rows} rows before the first accepted epoch (as before), {formula_rows} rows on the formula; {differ_rows} rows where the corrupted copy reports another position sigma; the rest bit-identical");
+        assert!(before_rows > 0 && formula_rows > 20_000 && differ_rows > 1_000);
     }
 
     #[test]
