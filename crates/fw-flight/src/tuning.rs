@@ -99,7 +99,8 @@ pub struct Tuning {
     pub nav_buffer_us: u64,
     /// The delayed horizon: GNSS delay, us (section 10; measured at 1 Hz, re-measured at 5 Hz in E2).
     pub nav_gps_delay_us: u64,
-    /// Lowest GNSS epoch rate accepted, Hz: 1000/215, ArduPilot's is_healthy 215 ms (section 10, C-b7; a parameter).
+    /// Lowest GNSS epoch rate accepted, Hz: 1000/245, ArduPilot's per-frame bound of 245 ms (`AP_GPS.cpp:849`; its 215 ms is a bound
+    /// on the AVERAGE interval, `:861`; Amendment G, G4, owner-approved 2026-11-22; a parameter).
     pub nav_gps_min_rate_hz: f32,
     /// Floor of the GNSS position sigma, m (section 10, recon.py:39).
     pub nav_gps_pos_sigma_min_m: f32,
@@ -174,7 +175,7 @@ impl Tuning {
         nav_p0_ba_ms2: 0.2,
         nav_buffer_us: 500_000,
         nav_gps_delay_us: 430_000,
-        nav_gps_min_rate_hz: 1000.0 / 215.0,
+        nav_gps_min_rate_hz: 1000.0 / 245.0,
         nav_gps_pos_sigma_min_m: 0.3,
         nav_gps_vel_sigma_ms: 0.2,
         nav_gps_course_min_ms: 0.3,

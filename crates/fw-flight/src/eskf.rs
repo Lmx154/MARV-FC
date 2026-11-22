@@ -2014,6 +2014,43 @@ pub(crate) mod tests {
         assert!(low.gps_pos_fused > 0 && low.gps_resets == 1);
     }
 
+    #[test]
+    fn g4_a_stream_alternating_178_and_219_ms_is_accepted_on_every_epoch_and_the_old_bound_refuses_the_long_half() {
+        // 142 and 175 IMU periods: 177.5 and 218.75 ms, this receiver's alternation.
+        let run_stream = |t: &Tuning| {
+            let mut f = Eskf::new(t).unwrap();
+            let mut w = World::new(t);
+            w.v = [2.0, 0.0, 0.0];
+            w.gps_every = 1;
+            let (mut next, mut long) = (142u64, false);
+            let mut epochs = 0u32;
+            for _ in 0..40_000_000 / PERIOD_US {
+                let mut s = w.step();
+                if w.k == next {
+                    next += if long { 175 } else { 142 };
+                    long = !long;
+                    epochs += 1;
+                } else {
+                    s.gnss = None;
+                }
+                f.set_armed(true);
+                f.update(&s);
+            }
+            assert_eq!(f.stats().gps_epochs, epochs);
+            *f.stats()
+        };
+        let new = run_stream(&Tuning::DEFAULT);
+        let old = run_stream(&Tuning { nav_gps_min_rate_hz: 1000.0 / 215.0, ..Tuning::DEFAULT });
+        println!(
+            "g4: {} epochs: default {} unaccepted ({} fused, {} resets); the old 1000/215: {} unaccepted ({} fused)",
+            new.gps_epochs, new.gps_unaccepted, new.gps_pos_fused, new.gps_resets, old.gps_unaccepted, old.gps_pos_fused
+        );
+        // Only the first fix is not accepted (it starts the interval rule).
+        assert_eq!(new.gps_unaccepted, 1);
+        assert!(new.gps_pos_fused > 100 && new.gps_resets == 1);
+        assert!(old.gps_unaccepted > new.gps_epochs / 3, "the control: the 219 ms half is refused at 215");
+    }
+
     /// Armed from the start, moving north at 2 m/s; returns the filter and the world after `secs`.
     fn flying(t: &Tuning, secs: f64, v: [f64; 3]) -> (Eskf, World) {
         let mut f = Eskf::new(t).unwrap();
