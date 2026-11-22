@@ -585,12 +585,14 @@ impl Estimator for EskfSteer<'_> {
 pub struct SteerMix<'a> {
     h: EskfSteer<'a>,
     v: &'a mut EskfZ,
+    /// The zero-delay filter's own state of the last `update`, for the log (G-1b: I = 1).
+    z: Option<NavState>,
 }
 
 impl<'a> SteerMix<'a> {
     /// The composite of the output predictor `h` and the zero-delay filter `v`.
     pub fn new(h: EskfSteer<'a>, v: &'a mut EskfZ) -> Self {
-        SteerMix { h, v }
+        SteerMix { h, v, z: None }
     }
 
     /// The output predictor (attitude, rates, horizontal state).
@@ -601,6 +603,12 @@ impl<'a> SteerMix<'a> {
     /// The zero-delay filter (vertical state).
     pub fn vert(&self) -> &EskfZ {
         self.v
+    }
+
+    /// The zero-delay filter's own `NavState` of the last `update` (what it returned before the composition took its
+    /// vertical part); none before the first.
+    pub fn vert_nav(&self) -> Option<&NavState> {
+        self.z.as_ref()
     }
 }
 
@@ -616,6 +624,7 @@ impl Estimator for SteerMix<'_> {
     fn update(&mut self, sensors: &Sensors) -> NavState {
         let mut nav = self.h.update(sensors);
         let z = self.v.update(sensors);
+        self.z = Some(z);
         // A step in which the zero-delay filter's reset moved D or v_D: its vertical flags are false for that step.
         let vmoved = self.v.last_reset().is_some_and(|r| r.dp[2] != 0.0 || r.dv[2] != 0.0);
         nav.position_m[2] = z.position_m[2];
