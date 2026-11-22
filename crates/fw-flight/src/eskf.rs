@@ -3573,4 +3573,378 @@ mod tests {
             }
         }
     }
+
+    // ---- Packet P-G1: the ring length as a const generic, the snapshot and the reset hooks ----
+
+    /// The 60 s stream of the G1 tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite IMU
+    /// sample (index 20 000), a repeated timestamp (24 000) and one 20 ms gap before index 30 000.
+    fn g1_stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
+        let mut w = World::new(t);
+        w.yaw = 0.4;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        let mut out: Vec<Sensors> = Vec::new();
+        while w.t_us() < secs * 1_000_000 {
+            let mut s = w.step();
+            match out.len() {
+                20_000 => s.imu1.reading.accel_ms2[1] = f32::NAN,
+                24_000 => s.imu1.t_us = out.last().unwrap().imu1.t_us,
+                30_000 => {
+                    for _ in 0..15 {
+                        w.step();
+                    }
+                    s = w.step();
+                }
+                _ => {}
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    fn g1_finite(s: &Sensors) -> bool {
+        let r = &s.imu1.reading;
+        r.gyro_rads.iter().chain(&r.accel_ms2).all(|v| v.is_finite())
+    }
+
+    /// Every output bit of a NavState.
+    fn g1_nav_bits(n: &NavState) -> Vec<u32> {
+        let mut v: Vec<u32> = n.attitude.iter().chain(&n.rates_rads).chain(&n.velocity_ms).chain(&n.position_m).map(|x| x.to_bits()).collect();
+        v.push(n.t_us as u32);
+        v.push((n.t_us >> 32) as u32);
+        let f = n.valid;
+        v.extend([f.tilt, f.heading, f.rates, f.velocity_ne, f.velocity_d, f.position_ne, f.position_d].map(u32::from));
+        match n.sigma {
+            Some(s) => v.extend([s.tilt_rad, s.heading_rad, s.velocity_ne_ms, s.velocity_d_ms, s.position_ne_m, s.position_d_m].map(f32::to_bits)),
+            None => v.push(u32::MAX),
+        }
+        v
+    }
+
+    /// The nominal state, the covariance, the biases and the sigmas of a filter, as bits.
+    fn g1_bits<const R: usize>(e: &EskfN<R>) -> Vec<u32> {
+        let n = &e.nom;
+        let (bg, ba) = e.biases();
+        let mut v: Vec<u32> = n.q.iter().chain(&n.v).chain(&n.p).chain(&n.bg).chain(&n.ba).chain(&n.dvel).chain(&e.hold_ne).chain(&e.rates_lpf).chain(&bg).chain(&ba).map(|x| x.to_bits()).collect();
+        v.extend(e.p.iter().flatten().map(|x| x.to_bits()));
+        v.extend(e.sigmas().map(f32::to_bits));
+        v.push(n.dt_sum.to_bits());
+        v
+    }
+
+    #[test]
+    fn g1_a_a_ring_of_one_equals_the_full_ring_for_every_zero_delay_variant() {
+        let zero = Tuning { nav_gps_delay_us: 0, ..Tuning::DEFAULT };
+        for (aiding, t) in [(Aiding::ImuBaro, Tuning::DEFAULT), (Aiding::Imu, Tuning::DEFAULT), (Aiding::Full, zero)] {
+            let stream = g1_stream(&t, 60);
+            let mut a = EskfN::<1>::with_aiding(&t, aiding).unwrap();
+            let mut b = EskfN::<RING>::with_aiding(&t, aiding).unwrap();
+            for (k, s) in stream.iter().enumerate() {
+                let armed = s.imu1.t_us >= 5_000_000;
+                a.set_armed(armed);
+                b.set_armed(armed);
+                let (na, nb) = (a.update(s), b.update(s));
+                assert_eq!(g1_nav_bits(&na), g1_nav_bits(&nb), "{aiding:?} step {k}: NavState");
+                assert_eq!(g1_bits(&a), g1_bits(&b), "{aiding:?} step {k}: state");
+                assert_eq!(a.stats(), b.stats(), "{aiding:?} step {k}: stats");
+                assert!(a.events().eq(b.events()), "{aiding:?} step {k}: events");
+                assert_eq!((a.ring.len, b.ring.len), (0, 0), "{aiding:?} step {k}: the ring is empty between steps");
+            }
+            let st = a.stats();
+            println!("g1-a: {aiding:?}: predicts {} baro fused {} mag fused {} gps resets {} pos fused {}", st.predicts, st.baro_fused, st.mag_fused, st.gps_resets, st.gps_pos_fused);
+            assert!(st.predicts > 1000);
+            if aiding != Aiding::Imu {
+                assert!(st.baro_fused > 100);
+            }
+            if aiding == Aiding::Full {
+                assert!(st.mag_fused > 10 && st.gps_resets >= 1 && st.gps_pos_fused > 10, "{st:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn g1_b_the_constructor_refuses_a_short_ring_only_with_a_horizon_delay() {
+        assert_eq!(EskfN::<1>::with_aiding(&Tuning::DEFAULT, Aiding::Full).err(), Some(EskfError::RingTooSmall));
+        assert_eq!(EskfN::<1>::new(&Tuning::DEFAULT).err(), Some(EskfError::RingTooSmall));
+        assert_eq!(EskfN::<{ RING - 1 }>::new(&Tuning::DEFAULT).err(), Some(EskfError::RingTooSmall));
+        assert!(EskfN::<RING>::new(&Tuning::DEFAULT).is_ok());
+        let zero = Tuning { nav_gps_delay_us: 0, ..Tuning::DEFAULT };
+        assert!(EskfN::<1>::with_aiding(&zero, Aiding::Full).is_ok());
+        assert!(EskfN::<7>::with_aiding(&zero, Aiding::Full).is_ok());
+        // No delay without GNSS: a ring of one for the zero-delay variants at the default tuning.
+        assert!(EskfN::<1>::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro).is_ok());
+        assert!(EskfN::<1>::with_aiding(&Tuning::DEFAULT, Aiding::Imu).is_ok());
+        // A delay beyond the buffer is still refused first.
+        let far = Tuning { nav_gps_delay_us: Tuning::DEFAULT.nav_buffer_us + 1, ..Tuning::DEFAULT };
+        assert_eq!(EskfN::<1>::new(&far).err(), Some(EskfError::DelayBeyondBuffer));
+    }
+
+    #[test]
+    fn g1_c_the_ring_is_the_whole_size_difference() {
+        let (big, small, entry) = (core::mem::size_of::<Eskf>(), core::mem::size_of::<EskfZ>(), core::mem::size_of::<ImuEntry>());
+        println!("g1-c: size_of Eskf {big} B, EskfZ {small} B, ImuEntry {entry} B, difference {} B, (RING - 1) * ImuEntry {} B", big - small, (RING - 1) * entry);
+        assert_eq!(entry, 32);
+        assert_eq!(big - small, (RING - 1) * entry);
+    }
+
+    /// What `update` does to the nominal state before its job, rebuilt from the filter as it was before the step with
+    /// N0's nominal step only: the state just before the job, the state right after the integration of the sample at `req`
+    /// (the last one in the step with that time), and the number of samples integrated.
+    #[allow(clippy::type_complexity)]
+    fn g1_after_integration<const R: usize>(pre: &EskfN<R>, s: &Sensors, req: Option<u64>) -> (([f32; 4], [f32; 3], [f32; 3]), Option<(u64, [f32; 4], [f32; 3], [f32; 3])>, usize) {
+        let now = s.imu1.t_us;
+        let r = &s.imu1.reading;
+        let mut ring: VecDeque<ImuEntry> = (0..pre.ring.len).map(|i| pre.ring.get(i)).collect();
+        let mut order = Vec::new();
+        if g1_finite(s) {
+            if ring.len() == R {
+                order.push(ring.pop_front().unwrap());
+            }
+            ring.push_back(ImuEntry { t_us: now, gyro: r.gyro_rads, accel: r.accel_ms2 });
+        }
+        while let Some(e) = ring.front().copied() {
+            if e.t_us.saturating_add(pre.delay_us()) > now {
+                break;
+            }
+            ring.pop_front();
+            order.push(e);
+        }
+        let (mut nom, mut h, mut snap) = (pre.nom, pre.horizon_us, None);
+        for e in &order {
+            let dt_us = match h {
+                Some(hh) => e.t_us.saturating_sub(hh).min(DT_MAX_US),
+                None => 0,
+            };
+            h = Some(e.t_us);
+            if pre.tilt_aligned {
+                n0::nominal_step(&mut nom, &e.gyro, &e.accel, dt_us as f32 * 1e-6);
+                if Some(e.t_us) == req {
+                    snap = Some((e.t_us, nom.q, nom.v, nom.p));
+                }
+            }
+        }
+        ((nom.q, nom.v, nom.p), snap, order.len())
+    }
+
+    fn g1_snap_bits(s: Option<(u64, [f32; 4], [f32; 3], [f32; 3])>) -> Option<(u64, Vec<u32>)> {
+        s.map(|(t, q, v, p)| (t, q.iter().chain(&v).chain(&p).map(|x| x.to_bits()).collect()))
+    }
+
+    /// Checks `f`'s snapshot after the step against the rebuilt one; true when there was one.
+    fn g1_check_snap(f: &Eskf, pre: &Eskf, s: &Sensors, req: Option<u64>, k: usize) -> bool {
+        let (_, expected, integrated) = g1_after_integration(pre, s, req);
+        let snap = f.snapshot();
+        assert_eq!(g1_snap_bits(snap), g1_snap_bits(expected), "step {k}: request {req:?}, {integrated} integrated");
+        if let Some((_, q, v, p)) = snap {
+            // One sample integrated and no fusion or reset after it: nominal() is the snapshot.
+            if integrated == 1 && f.events().count() == 0 && f.last_reset().is_none() {
+                assert_eq!(g1_snap_bits(Some((0, q, v, p))), g1_snap_bits(Some((0, f.nominal().0, f.nominal().1, f.nominal().2))), "step {k}");
+            }
+        }
+        snap.is_some()
+    }
+
+    #[test]
+    fn g1_d_the_snapshot_is_the_nominal_state_right_after_the_requested_sample_and_changes_no_output() {
+        let t = Tuning::DEFAULT;
+        let stream = g1_stream(&t, 60);
+        let regular = |i: usize| i >= 1 && i + 1 < stream.len() && g1_finite(&stream[i]) && stream[i].imu1.t_us != stream[i - 1].imu1.t_us && stream[i].imu1.t_us != stream[i + 1].imu1.t_us;
+        let (mut plain, mut sticky, mut front, mut never) = (Eskf::new(&t).unwrap(), Eskf::new(&t).unwrap(), Eskf::new(&t).unwrap(), Eskf::new(&t).unwrap());
+        let mut req: Option<u64> = None;
+        let (mut seen_sticky, mut seen_front, mut same_as_nominal) = (0, 0, 0);
+        let nan_time = stream[20_000].imu1.t_us;
+        assert!(!g1_finite(&stream[20_000]));
+        for (k, s) in stream.iter().enumerate() {
+            let armed = s.imu1.t_us >= 5_000_000;
+            for f in [&mut plain, &mut sticky, &mut front, &mut never] {
+                f.set_armed(armed);
+            }
+            let np = plain.update(s);
+            // Held until the sample is integrated: a sample 10 steps back, still in the ring (the delay is 344 steps).
+            if req.is_none() && k >= 10_000 && k % 503 == 0 && regular(k - 10) {
+                req = Some(stream[k - 10].imu1.t_us);
+                assert!(sticky.ring.len > 10);
+            }
+            let pre = sticky.clone();
+            sticky.set_snap_request(req);
+            let ns = sticky.update(s);
+            if g1_check_snap(&sticky, &pre, s, req, k) {
+                seen_sticky += 1;
+                same_as_nominal += usize::from(sticky.events().count() == 0 && sticky.nominal().0.map(f32::to_bits) == sticky.snapshot().unwrap().1.map(f32::to_bits));
+                req = None;
+            }
+            // The wrapper's own policy: the oldest sample of the ring, every step.
+            let req_f = front.ring.front().map(|e| e.t_us);
+            let pre = front.clone();
+            front.set_snap_request(req_f);
+            let nf = front.update(s);
+            seen_front += usize::from(g1_check_snap(&front, &pre, s, req_f, k));
+            // Times that are never integrated: the non-finite sample, a time before every sample, one after.
+            never.set_snap_request([Some(nan_time), Some(1), Some(u64::MAX)][k % 3]);
+            let nn = never.update(s);
+            assert!(never.snapshot().is_none(), "step {k}: a snapshot for a time never integrated");
+            for (name, n, f) in [("sticky", ns, &sticky), ("front", nf, &front), ("never", nn, &never)] {
+                assert_eq!(g1_nav_bits(&np), g1_nav_bits(&n), "{name} step {k}: NavState");
+                assert_eq!(g1_bits(&plain), g1_bits(f), "{name} step {k}: state");
+                assert_eq!(plain.stats(), f.stats(), "{name} step {k}: stats");
+            }
+            assert!(plain.snapshot().is_none());
+        }
+        println!("g1-d: sticky requests answered {seen_sticky} times ({same_as_nominal} equal to nominal() in the step), front-of-ring requests answered {seen_front} of {} steps", stream.len());
+        assert!(seen_sticky >= 50 && same_as_nominal >= 1, "{seen_sticky} {same_as_nominal}");
+        assert!(seen_front > 40_000);
+    }
+
+    /// Rebuilds every step of `f` over `stream` with `g1_after_integration` and checks `last_reset` against it. `each` runs
+    /// before every step (poking or re-initialising the filter). Returns the steps of each reset kind and the number of
+    /// non-reset steps with a fusion. Tolerances: the quaternion product to 2e-6 per component, v and p to 8 f32 epsilon of
+    /// the larger of the two values and 1.
+    fn g1_run_resets<const R: usize>(f: &mut EskfN<R>, stream: &[Sensors], armed: impl Fn(&Sensors) -> bool, mut each: impl FnMut(usize, &mut EskfN<R>)) -> ([Vec<usize>; 4], usize) {
+        let (mut kinds, mut fusion_steps) = ([Vec::new(), Vec::new(), Vec::new(), Vec::new()], 0);
+        for (k, s) in stream.iter().enumerate() {
+            each(k, f);
+            f.set_armed(armed(s));
+            let pre = f.clone();
+            let st0 = *f.stats();
+            f.update(s);
+            let st1 = *f.stats();
+            let (before, _, _) = g1_after_integration(&pre, s, None);
+            let after = f.nominal();
+            let d = |a: u32, b: u32| a.wrapping_sub(b);
+            let yaw = d(st1.yaw_aligns + st1.yaw_resets, st0.yaw_aligns + st0.yaw_resets);
+            let (gps, height, reinit) = (d(st1.gps_resets, st0.gps_resets), d(st1.height_resets, st0.height_resets), d(st1.reinits, st0.reinits));
+            let realign = pre.arm_edge && pre.arm_realign && pre.tilt_aligned && pre.aiding_set != Aiding::Full && pre.arm_f.is_some();
+            assert!(yaw + gps + height <= 1, "step {k}: two resets in one step");
+            let expect = (yaw + gps + height > 0 || realign) && reinit == 0;
+            assert_eq!(f.last_reset().is_some(), expect, "step {k}: yaw {yaw} gps {gps} height {height} realign {realign} reinit {reinit}");
+            let Some(r) = f.last_reset() else {
+                let fused = d(st1.baro_fused + st1.gps_pos_fused + st1.gps_vel_fused + st1.mag_fused + st1.noaid, st0.baro_fused + st0.gps_pos_fused + st0.gps_vel_fused + st0.mag_fused + st0.noaid);
+                fusion_steps += usize::from(fused > 0);
+                continue;
+            };
+            let pred = normalized(qmul(&r.dq, &before.0));
+            for i in 0..4 {
+                assert!(fabsf(pred[i] - after.0[i]) <= 2e-6, "step {k}: q {pred:?} against {:?}", after.0);
+            }
+            assert!(fabsf(r.dq.iter().map(|x| x * x).sum::<f32>() - 1.0) <= 2e-6);
+            for i in 0..3 {
+                for (b, a, dx) in [(before.1[i], after.1[i], r.dv[i]), (before.2[i], after.2[i], r.dp[i])] {
+                    assert!(fabsf(a - (b + dx)) <= 8.0 * f32::EPSILON * fabsf(a).max(fabsf(b)).max(1.0), "step {k}: axis {i}: {b} + {dx} against {a}");
+                }
+            }
+            let kind = if yaw > 0 {
+                // A rotation about NED down, nothing else moved.
+                assert!(fabsf(r.dq[1]) <= 1e-6 && fabsf(r.dq[2]) <= 1e-6, "step {k}: yaw dq {:?}", r.dq);
+                assert!(r.dq[3] != 0.0 && r.dv == [0.0; 3] && r.dp == [0.0; 3], "step {k}: {r:?}");
+                0
+            } else if gps > 0 {
+                assert!(fabsf(r.dq[1]) + fabsf(r.dq[2]) + fabsf(r.dq[3]) <= 3e-6, "step {k}: GPS reset moved the attitude {:?}", r.dq);
+                assert!(r.dp[2] == 0.0 && r.dv[2] == 0.0, "step {k}: {r:?}");
+                1
+            } else if height > 0 {
+                assert!(fabsf(r.dq[1]) + fabsf(r.dq[2]) + fabsf(r.dq[3]) <= 3e-6 && r.dp[0] == 0.0 && r.dp[1] == 0.0 && r.dv[0] == 0.0 && r.dv[1] == 0.0, "step {k}: {r:?}");
+                assert!(r.dp[2] != 0.0, "step {k}: a height reset that moved nothing");
+                // Disarmed, the timeout branch also sets v_D to 0; armed, v_D is kept.
+                if !pre.armed {
+                    assert!(after.1[2] == 0.0, "step {k}: v_D {} after a disarmed height reset", after.1[2]);
+                } else if pre.armed {
+                    assert!(r.dv[2] == 0.0, "step {k}: {r:?}");
+                }
+                2
+            } else {
+                // The arming-edge re-alignment: the tilt moves, the horizontal velocity goes to 0, nothing else.
+                assert!(r.dq[0] < 0.9999 || r.dq[0] > 1.0001 || fabsf(r.dq[1]) + fabsf(r.dq[2]) > 1e-4, "step {k}: the realignment moved no tilt {:?}", r.dq);
+                assert!(after.1[0] == 0.0 && after.1[1] == 0.0 && r.dv[2] == 0.0 && r.dp == [0.0; 3], "step {k}: {r:?}");
+                3
+            };
+            kinds[kind].push(k);
+        }
+        (kinds, fusion_steps)
+    }
+
+    /// Level at rest with a gyro pulse the vehicle did not make (as `handled`) from 1 to 1.5 s, the barometer `baro_off_m`
+    /// too high from `baro_from_s`; `secs` long.
+    fn g1_zero_delay_stream(t: &Tuning, secs: u64, baro_from_s: u64, baro_off_m: f64) -> Vec<Sensors> {
+        let mut w = World::new(t);
+        let mut out = Vec::new();
+        while w.t_us() < secs * 1_000_000 {
+            let mut s = w.step();
+            if w.t_us() >= 1_000_000 && w.t_us() < 1_500_000 {
+                s.imu1.reading.gyro_rads = [0.2, -0.1, 0.3];
+            }
+            if let Some(b) = s.baro.as_mut().filter(|_| w.t_us() >= baro_from_s * 1_000_000) {
+                b.reading.pressure_pa = pressure_at(baro_off_m - w.p[2]);
+            }
+            out.push(s);
+        }
+        out
+    }
+
+    #[test]
+    fn g1_e_resets_are_reported_exactly_and_ordinary_fusions_are_not() {
+        let t = Tuning::DEFAULT;
+        // Full: yaw alignment (first compass), GPS reset at arming (5 s), C3 reset (a 10-sigma north fault from 20 s), a
+        // yaw reset (compass turned 90 deg from 60 s), the height reset after the timeout (barometer 40 m too high from
+        // 85 s, armed) and the height initialisation after a re-initialisation (at 100 s).
+        let mut w = World::new(&t);
+        w.yaw = 0.4;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        let sigma = (f64::from(w.std_mm) * 1e-3).max(f64::from(t.nav_gps_pos_sigma_min_m));
+        let mut stream = Vec::new();
+        while w.t_us() < 108_000_000 {
+            if w.t_us() >= 20_000_000 && w.fault == Fault::None {
+                w.fault = Fault::North(w.t_us(), 10.0 * sigma);
+            }
+            if w.t_us() >= 60_000_000 {
+                w.mag_rot = 90.0_f64.to_radians();
+            }
+            let mut s = w.step();
+            if let Some(b) = s.baro.as_mut().filter(|_| w.t_us() >= 85_000_000) {
+                b.reading.pressure_pa = pressure_at(40.0 - w.p[2]);
+            }
+            stream.push(s);
+        }
+        let mut f = Eskf::new(&t).unwrap();
+        let reinit_at = stream.iter().position(|s| s.imu1.t_us >= 100_000_000).unwrap();
+        let (kinds, fused) = g1_run_resets(&mut f, &stream, |s| s.imu1.t_us >= 5_000_000, |k, f| {
+            if k == reinit_at {
+                f.reinitialise();
+            }
+        });
+        let st = f.stats();
+        println!("g1-e Full: yaw resets at {:?}, GPS resets at {:?}, height resets at {:?}, realign at {:?}; {fused} non-reset steps with a fusion; {st:?}", kinds[0], kinds[1], kinds[2], kinds[3]);
+        assert_eq!(st.yaw_aligns, 2, "the first alignment and the one after the re-initialisation");
+        assert_eq!((kinds[0].len() as u32, kinds[1].len() as u32, kinds[2].len() as u32), (st.yaw_aligns + st.yaw_resets, st.gps_resets, st.height_resets));
+        assert!(st.yaw_resets >= 1 && st.gps_resets >= 2 && st.height_resets >= 2 && kinds[3].is_empty());
+        assert!(kinds[2].iter().any(|&k| k > reinit_at) && kinds[2].iter().any(|&k| k < reinit_at), "both height-reset branches");
+        assert!(fused > 5_000, "{fused}");
+
+        // The zero-delay variants: the arming-edge re-alignment at 4 s and the height reset 5 s after the barometer's
+        // jump at 12 s (armed), for `ImuBaro` and `Imu` (no barometer, so no height reset).
+        for aiding in [Aiding::ImuBaro, Aiding::Imu] {
+            let stream = g1_zero_delay_stream(&t, 25, 12, 40.0);
+            let mut f = EskfZ::with_aiding(&t, aiding).unwrap();
+            let (kinds, fused) = g1_run_resets(&mut f, &stream, |s| s.imu1.t_us >= 4_000_000, |_, _| {});
+            println!("g1-e {aiding:?}: realign at {:?}, height resets at {:?}; {fused} non-reset steps with a fusion", kinds[3], kinds[2]);
+            assert!(kinds[0].is_empty() && kinds[1].is_empty());
+            assert_eq!(kinds[3].len(), 1, "the arming-edge re-alignment, once");
+            assert_eq!(stream[kinds[3][0]].imu1.t_us, 4_000_000, "at the first armed sample");
+            assert_eq!(kinds[2].len() as u32, f.stats().height_resets);
+            assert_eq!(kinds[2].is_empty(), aiding == Aiding::Imu);
+            assert!(fused > 1_000);
+        }
+        // The disarmed branch of the height reset zeroes v_D: a v_D of 1.5 m/s put in at 14.9 s (the barometer jumps at 15 s).
+        let stream = g1_zero_delay_stream(&t, 25, 15, 40.0);
+        let mut f = EskfZ::with_aiding(&t, Aiding::ImuBaro).unwrap();
+        let poke = stream.iter().position(|s| s.imu1.t_us >= 14_900_000).unwrap();
+        let (kinds, _) = g1_run_resets(&mut f, &stream, |_| false, |k, f| {
+            if k == poke {
+                f.nom.v[2] = 1.5;
+            }
+        });
+        println!("g1-e disarmed ImuBaro: height resets at {:?}", kinds[2]);
+        assert!(kinds[2].len() == 1 && kinds[2][0] > poke);
+        assert!(kinds[3].is_empty() && !kinds[2].is_empty());
+    }
 }
