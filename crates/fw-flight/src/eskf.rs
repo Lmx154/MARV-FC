@@ -1774,7 +1774,7 @@ pub(crate) mod tests {
     }
 
     /// G2 tests: a non-finite velocity in the core's state, as `b7` makes it.
-    pub(crate) fn poison(e: &mut Eskf) {
+    pub(crate) fn poison<const R: usize>(e: &mut EskfN<R>) {
         e.nom.v[1] = f32::NAN;
     }
 

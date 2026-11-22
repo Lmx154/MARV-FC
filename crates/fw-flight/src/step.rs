@@ -1474,6 +1474,144 @@ mod tests {
         assert!(post_q <= 1e-4 * scale && post_t <= 1e-4, "thrust {post_t}, torque {post_q}");
         assert!(off_q > 100.0 * post_q.max(1e-9) && off_q > 0.01 * scale, "the control must change the demand: {off_q}");
     }
+
+    /// One step of a `Flight` steered by `SteerMix` in Altitude, as the tests M2 and M3 record it.
+    #[derive(Clone, Copy, Debug)]
+    struct MixRec {
+        t_us: u64,
+        armed: bool,
+        mode: Mode,
+        tilt: bool,
+        vd: bool,
+        pd: bool,
+        d: f32,
+        target: Option<f32>,
+        integrator: f32,
+        /// ESKF2's reset of this step moved D or v_D.
+        z_moved: bool,
+        /// ESKF2's re-initialisations so far.
+        z_reinits: u32,
+    }
+
+    /// `Flight` steered by `SteerMix` over a vehicle climbing at `climb_ms` (yaw 0.4, level), armed from 2 s, Altitude
+    /// selected, the throttle stick at the centre from 3 s, 32 s. With `baro_off` the barometer reads 40 m too high
+    /// from 20 s; `poison_at` is the step before which ESKF2's nominal velocity is made non-finite.
+    fn mix_run(handshake: &'static Handshake, baro_off: bool, poison_at: Option<usize>, climb_ms: f64) -> std::vec::Vec<MixRec> {
+        extern crate std;
+        use crate::eskf::tests::{World, poison, pressure_at};
+        use crate::eskf::{Aiding, Eskf, EskfZ};
+        use crate::eskf_out::{EskfSteer, SteerMix};
+        let tuning = Tuning::DEFAULT;
+        let (mut core, mut vz) = (Eskf::new(&tuning).unwrap(), EskfZ::with_aiding(&tuning, Aiding::ImuBaro).unwrap());
+        let mix = SteerMix::new(EskfSteer::new(&mut core, &tuning).unwrap(), &mut vz);
+        let mut flight = Flight::new(mix, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
+        handshake.set_permit(true);
+        let mut world = World::new(&tuning);
+        world.yaw = 0.4;
+        world.v[2] = -climb_ms;
+        let mut recs = std::vec::Vec::new();
+        for k in 0..32_000_000 / 1_250usize {
+            let mut sensors = world.step();
+            let t_us = sensors.imu1.t_us;
+            if let Some(b) = sensors.baro.as_mut().filter(|_| baro_off && t_us >= 20_000_000) {
+                b.reading.pressure_pa = pressure_at(40.0 - world.p[2]);
+            }
+            let rc = (k % 10 == 0).then_some(RcSample {
+                sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: if t_us < 3_000_000 { 0.0 } else { 0.5 }, yaw: 0.0 },
+                arm: t_us >= 2_000_000,
+                switch6: Switch3::Middle,
+                t_us,
+            });
+            if Some(k) == poison_at {
+                poison(flight.estimator.vert_mut());
+            }
+            let out = flight.step(&FlightInputs { sensors, rc });
+            let z = flight.estimator.vert();
+            recs.push(MixRec {
+                t_us,
+                armed: out.armed,
+                mode: out.mode,
+                tilt: out.nav.valid.tilt,
+                vd: out.nav.valid.velocity_d,
+                pd: out.nav.valid.position_d,
+                d: out.nav.position_m[2],
+                target: flight.shaper.target_d,
+                integrator: flight.controller.vertical_integrator(),
+                z_moved: z.last_reset().is_some_and(|r| r.dp[2] != 0.0 || r.dv[2] != 0.0),
+                z_reinits: z.stats().reinits,
+            });
+        }
+        recs
+    }
+
+    /// P-G1m M2 (Amendment G-1, V3): the barometer 40 m too high from 20 s, armed. ESKF2's height reset moves D by about
+    /// 40 m in one step: the vertical flags are false in exactly that step, the effective mode is Angle for it, and
+    /// Altitude captures the new D (target = D, integrator 0) on the next step.
+    #[test]
+    fn m2_a_height_reset_of_eskf2_drops_the_vertical_flags_for_that_step_and_altitude_recaptures_the_new_height() {
+        static H: Handshake = Handshake::new();
+        let recs = mix_run(&H, true, None, 0.0);
+        let from = recs.iter().position(|r| r.t_us >= 8_000_000).unwrap();
+        let moved: std::vec::Vec<usize> = (from..recs.len()).filter(|&k| recs[k].z_moved).collect();
+        assert_eq!(moved.len(), 1, "ESKF2's height reset, once: {moved:?}");
+        let k = moved[0];
+        assert!(recs[k].t_us > 20_000_000);
+        std::println!(
+            "m2: ESKF2 height reset at step {k} ({} us); D {:.3} -> {:.3} -> {:.3} m; target before {:?}, at {:?}, after {:?}; integrator before {:.5}, at {:.5}, after {:.5}",
+            recs[k].t_us, recs[k - 1].d, recs[k].d, recs[k + 1].d, recs[k - 1].target, recs[k].target, recs[k + 1].target,
+            recs[k - 1].integrator, recs[k].integrator, recs[k + 1].integrator
+        );
+        for (i, r) in recs.iter().enumerate().skip(from) {
+            assert!(r.armed && r.tilt, "step {i}");
+            // The flags are false in the reset's step and in no other.
+            assert_eq!((r.vd, r.pd), (i != k, i != k), "step {i}: flags");
+            // Altitude in every step but that one, which is Angle.
+            assert_eq!(r.mode, if i == k { Mode::Angle } else { Mode::Altitude }, "step {i}: mode");
+        }
+        // The reset moved D by the barometer's 40 m; Angle holds no target; the next step captures the new D, integrator 0.
+        assert!((recs[k].d - recs[k - 1].d).abs() > 30.0, "D moved by {}", recs[k].d - recs[k - 1].d);
+        assert_eq!(recs[k].target, None);
+        assert_eq!(recs[k + 1].target, Some(recs[k + 1].d));
+        assert_eq!(recs[k + 1].integrator, 0.0);
+        // Before it the target sat at the old height (within the lead cap of D), its integrator was wound, not 0.
+        assert!(recs[k - 1].target.is_some_and(|t| (t - recs[k - 1].d).abs() < 2.0));
+        assert!(recs[k - 1].integrator != 0.0);
+    }
+
+    /// P-G1m M3 (Amendment G-1, I6): ESKF2 forced non-finite at 15 s while armed in Altitude. It re-initialises that
+    /// step (flags false) while the output predictor's tilt stays true: the effective mode goes 2 -> 1, and back to 2
+    /// when ESKF2 has re-aligned and re-initialised its height, with a fresh capture.
+    #[test]
+    fn m3_a_non_finite_eskf2_drops_altitude_to_angle_while_tilt_stays_true_and_it_recaptures_after_the_realignment() {
+        static H: Handshake = Handshake::new();
+        let at = 15_000_000 / 1_250;
+        let recs = mix_run(&H, false, Some(at), 0.5);
+        let from = recs.iter().position(|r| r.t_us >= 8_000_000).unwrap();
+        for (i, r) in recs.iter().enumerate().skip(from) {
+            assert!(r.armed && r.tilt, "step {i}: armed {} tilt {}", r.armed, r.tilt);
+        }
+        assert!(recs[from..at].iter().all(|r| r.mode == Mode::Altitude && r.vd && r.pd));
+        assert_eq!(recs[at - 1].z_reinits, 0);
+        assert_eq!(recs[at].z_reinits, 1, "the poisoned step re-initialises ESKF2");
+        assert!(recs[at].mode == Mode::Angle && recs[at].tilt && !recs[at].vd && !recs[at].pd, "the poisoned step: {:?}", recs[at]);
+        let back = (at..recs.len()).find(|&k| recs[k].mode == Mode::Altitude).expect("Altitude must return");
+        std::println!(
+            "m3: poisoned at step {at} ({} us); Altitude back at step {back} ({} us), {:.3} s later; ESKF2 reinits {}; target at {:?}, D {:.3} m, integrator {:.5}; ESKF2 height reset in step {:?}",
+            recs[at].t_us, recs[back].t_us, (recs[back].t_us - recs[at].t_us) as f64 * 1e-6, recs[back].z_reinits, recs[back].target, recs[back].d, recs[back].integrator,
+            (at..recs.len()).find(|&k| recs[k].z_moved)
+        );
+        // ESKF2's height-init reset (D from its zeroed state to the barometer's height) is in the step before the return.
+        assert_eq!((at..recs.len()).filter(|&k| recs[k].z_moved).collect::<std::vec::Vec<_>>(), [back - 1]);
+        assert!(back > at + 1);
+        for r in &recs[at..back] {
+            assert!(r.mode == Mode::Angle && r.tilt && !(r.vd && r.pd) && r.target.is_none());
+        }
+        assert!(recs[back].vd && recs[back].pd);
+        assert_eq!(recs[back].target, Some(recs[back].d), "a fresh capture");
+        assert_eq!(recs[back].integrator, 0.0);
+        assert!(recs[back..].iter().all(|r| r.mode == Mode::Altitude), "Altitude stays once it is back");
+        assert_eq!(recs[recs.len() - 1].z_reinits, 1);
+    }
 }
 
 #[cfg(test)]
