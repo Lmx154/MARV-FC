@@ -263,6 +263,20 @@ pub enum Aiding {
 pub enum EskfError {
     /// nav_gps_delay_us > nav_buffer_us.
     DelayBeyondBuffer,
+    /// A non-zero horizon delay with an IMU ring shorter than [`RING`].
+    RingTooSmall,
+}
+
+/// The change a reset made to the nominal state in one `update` (G1): `q_after = dq x q_before` (Hamilton, body to NED,
+/// [w, x, y, z]; the rotation is on the earth side), `v_after = v_before + dv`, `p_after = p_before + dp`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reset {
+    /// normalise(q_after x conj(q_before)).
+    pub dq: [f32; 4],
+    /// v_after - v_before, m/s.
+    pub dv: [f32; 3],
+    /// p_after - p_before, m.
+    pub dp: [f32; 3],
 }
 
 /// A first-in first-out buffer of fixed capacity.
@@ -351,13 +365,13 @@ struct GpsJob {
     vel: Option<([f32; 2], f32)>,
 }
 
-/// The 15-state shadow filter. See the module text.
+/// The 15-state shadow filter with an IMU ring of `R` samples. See the module text.
 #[derive(Clone, Debug)]
-pub struct Eskf {
+pub struct EskfN<const R: usize> {
     t: Tuning,
     aiding_set: Aiding,
     noise: Noise,
-    ring: Fifo<ImuEntry, RING>,
+    ring: Fifo<ImuEntry, R>,
     baro_wait: Fifo<BaroWait, BARO_WAIT>,
     mag_wait: Fifo<MagWait, MAG_WAIT>,
     /// Fixes since arming (t_us, lat, lon), for the position-difference speed over SPD_SPAN_US.
@@ -417,6 +431,14 @@ pub struct Eskf {
     interval_armed: bool,
     /// D2: the arming-edge re-alignment is on; off only in a test's negative control.
     arm_realign: bool,
+    /// G1: the time of the sample whose nominal state [`EskfN::snapshot`] is to keep.
+    snap_req: Option<u64>,
+    /// G1: that sample's time and nominal q, v, p right after its integration, in the step it was integrated.
+    snap: Option<(u64, [f32; 4], [f32; 3], [f32; 3])>,
+    /// G1: the reset of this step's job, if it was one.
+    reset: Option<Reset>,
+    /// G1: the job of this step was a reset of the nominal state.
+    reset_job: bool,
     /// H1 test control: the `ImuBaro` barometer scalar uses the full gain, every entry (the production gain has support
     /// on D, v_D and b_a,z only).
     #[cfg(test)]
@@ -425,6 +447,11 @@ pub struct Eskf {
     #[cfg(test)]
     baro_abias_z_mask: bool,
 }
+
+/// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
+pub type Eskf = EskfN<RING>;
+/// The filter for the zero-delay variants, whose ring never holds more than the sample in hand.
+pub type EskfZ = EskfN<1>;
 
 const NOMINAL0: Nominal = Nominal {
     q: [1.0, 0.0, 0.0, 0.0],
@@ -499,19 +526,24 @@ pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
     Some([-m[0] * m[2] / c, -m[1] * m[2] / c, 1.0])
 }
 
-impl Eskf {
+impl<const R: usize> EskfN<R> {
     /// Not aligned, disarmed, no sample seen. Err when nav_gps_delay_us > nav_buffer_us (C2a).
     pub fn new(tuning: &Tuning) -> Result<Self, EskfError> {
         Self::with_aiding(tuning, Aiding::Full)
     }
 
-    /// As [`Eskf::new`] with the aiding set `aiding`.
+    /// As [`EskfN::new`] with the aiding set `aiding`. Err with [`EskfError::RingTooSmall`] when the horizon delay
+    /// (`Full` with nav_gps_delay_us > 0) meets a ring shorter than [`RING`]; with no delay any ring of one or more is
+    /// the same filter (the sample pushed is integrated in the same step).
     pub fn with_aiding(tuning: &Tuning, aiding: Aiding) -> Result<Self, EskfError> {
         if tuning.nav_gps_delay_us > tuning.nav_buffer_us {
             return Err(EskfError::DelayBeyondBuffer);
         }
+        if aiding == Aiding::Full && tuning.nav_gps_delay_us > 0 && R < RING {
+            return Err(EskfError::RingTooSmall);
+        }
         let t = *tuning;
-        Ok(Eskf {
+        Ok(EskfN {
             aiding_set: aiding,
             noise: Noise {
                 gyro: t.nav_arw * t.nav_arw,
@@ -563,6 +595,10 @@ impl Eskf {
             arm_edge: false,
             interval_armed: false,
             arm_realign: true,
+            snap_req: None,
+            snap: None,
+            reset: None,
+            reset_job: false,
             #[cfg(test)]
             baro_full_gain: false,
             #[cfg(test)]
@@ -598,6 +634,33 @@ impl Eskf {
     /// Yaw aligned to a healthy compass (C1a).
     pub fn yaw_aligned(&self) -> bool {
         self.yaw_aligned
+    }
+
+    /// Time of the newest sample integrated at the horizon.
+    pub fn horizon_us(&self) -> Option<u64> {
+        self.horizon_us
+    }
+
+    /// The nominal attitude (body to NED, [w, x, y, z], not sign-normalised), velocity and position at the horizon.
+    pub fn nominal(&self) -> ([f32; 4], [f32; 3], [f32; 3]) {
+        (self.nom.q, self.nom.v, self.nom.p)
+    }
+
+    /// Asks for the nominal state right after the integration of the sample at `t_us`.
+    pub fn set_snap_request(&mut self, t_us: Option<u64>) {
+        self.snap_req = t_us;
+    }
+
+    /// The requested sample's time and nominal q, v, p right after its nominal step, in the `update` that integrated it;
+    /// none in every other step (with a repeated timestamp, the last integrated in the step).
+    pub fn snapshot(&self) -> Option<(u64, [f32; 4], [f32; 3], [f32; 3])> {
+        self.snap
+    }
+
+    /// The reset of the nominal state the job of the last `update` was, if it was one; none after a fusion or a
+    /// re-initialisation.
+    pub fn last_reset(&self) -> Option<Reset> {
+        self.reset
     }
 
     /// Gyro bias, rad/s, and accelerometer bias, m/s^2, body frame.
@@ -667,6 +730,9 @@ impl Eskf {
         let dt = dt_us as f32 * 1e-6;
         if self.tilt_aligned {
             n0::nominal_step(&mut self.nom, &s.gyro, &s.accel, dt);
+            if Some(s.t_us) == self.snap_req {
+                self.snap = Some((s.t_us, self.nom.q, self.nom.v, self.nom.p));
+            }
         } else {
             for i in 0..3 {
                 self.align_dv[i] += s.accel[i] * dt;
@@ -764,6 +830,7 @@ impl Eskf {
         let (cr, sr, cp, sp) = (cosf(0.5 * roll), sinf(0.5 * roll), cosf(0.5 * pitch), sinf(0.5 * pitch));
         let qrp = [cr * cp, sr * cp, cr * sp, -sr * sp];
         self.nom.q = normalized(qmul(&[cosf(0.5 * yaw), 0.0, 0.0, sinf(0.5 * yaw)], &qrp));
+        self.reset_job = true;
         self.nom.v[0] = 0.0;
         self.nom.v[1] = 0.0;
         self.hold_ne = [self.nom.p[0], self.nom.p[1]];
@@ -900,6 +967,7 @@ impl Eskf {
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
                 let change = -job.h_b - self.nom.p[2];
                 self.nom.p[2] = -job.h_b;
+                self.reset_job = true;
                 self.reset_state_var(POS + 2, r);
                 self.last_baro_aid_us = Some(horizon);
                 self.baro_reinit = false;
@@ -927,6 +995,7 @@ impl Eskf {
                         // disarmed, kept armed.
                         let change = -job.h_b - self.nom.p[2];
                         self.nom.p[2] = -job.h_b;
+                        self.reset_job = true;
                         if !self.armed {
                             self.nom.v[2] = 0.0;
                         }
@@ -958,6 +1027,7 @@ impl Eskf {
     fn yaw_set(&mut self, dpsi: f32) {
         let dq = [cosf(0.5 * dpsi), 0.0, 0.0, sinf(0.5 * dpsi)];
         self.nom.q = normalized(qmul(&dq, &self.nom.q));
+        self.reset_job = true;
         let sm = self.t.nav_mag_heading_sigma_rad;
         self.reset_state_var(ATT + 2, sm * sm);
         self.nom.bg[2] = 0.0;
@@ -1159,6 +1229,7 @@ impl Eskf {
         match job.plan {
             GpsPlan::Reset => {
                 let change = job.ne[0] - self.nom.p[0];
+                self.reset_job = true;
                 self.nom.p[0] = job.ne[0];
                 self.nom.p[1] = job.ne[1];
                 self.reset_state_var(POS, job.sigma_ne[0] * job.sigma_ne[0]);
@@ -1306,9 +1377,12 @@ impl Eskf {
     }
 }
 
-impl Estimator for Eskf {
+impl<const R: usize> Estimator for EskfN<R> {
     fn update(&mut self, sensors: &Sensors) -> NavState {
         self.events = [None; EVENTS];
+        self.snap = None;
+        self.reset = None;
+        self.reset_job = false;
         let q_pre = self.nom.q;
         let now = sensors.imu1.t_us;
         let r = &sensors.imu1.reading;
@@ -1399,10 +1473,19 @@ impl Estimator for Eskf {
             self.hold_ne = [self.nom.p[0], self.nom.p[1]];
         }
         self.aiding_prev = aiding;
+        let (q_before, v_before, p_before) = (self.nom.q, self.nom.v, self.nom.p);
         let jobs = if self.realign_at_arming(&q_pre) { 1 } else { self.one_job() };
         self.stats.max_jobs_per_step = self.stats.max_jobs_per_step.max(jobs);
+        if self.reset_job {
+            self.reset = Some(Reset {
+                dq: normalized(qmul(&self.nom.q, &[q_before[0], -q_before[1], -q_before[2], -q_before[3]])),
+                dv: core::array::from_fn(|i| self.nom.v[i] - v_before[i]),
+                dp: core::array::from_fn(|i| self.nom.p[i] - p_before[i]),
+            });
+        }
         if self.tilt_aligned && !self.finite() {
             self.reinitialise();
+            self.reset = None;
         }
         self.nav()
     }
