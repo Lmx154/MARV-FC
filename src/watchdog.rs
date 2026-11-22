@@ -366,7 +366,7 @@ static CORE0_BOOT_USED: AtomicU32 = AtomicU32::new(0);
 static CORE0_REPAINTED: AtomicBool = AtomicBool::new(false);
 
 /// Re-paints the unused part of core 0's stack once, so the mark shows the depth after start-up
-/// (the boot peak, two 33 KB frames of `flight::steer()`/`flight::shadow()`, hides it otherwise).
+/// (the boot peak, one 16.7 KB frame of `flight::steer_core()` or `flight::vert()`, built one after the other, hides it otherwise).
 /// Only called from [`stat`], which runs in the supervisor task on core 0's thread-mode executor
 /// (`#[embassy_executor::main]`), never from core 1. It runs with interrupts enabled. That is safe
 /// because the loop writes only below `MSP - 256`: an interrupt that preempts it pushes its
