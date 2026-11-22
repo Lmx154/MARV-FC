@@ -263,7 +263,7 @@ pub enum Aiding {
 pub enum EskfError {
     /// nav_gps_delay_us > nav_buffer_us.
     DelayBeyondBuffer,
-    /// A non-zero horizon delay with an IMU ring shorter than [`RING`].
+    /// An IMU ring of no samples, or a non-zero horizon delay with a ring shorter than [`RING`].
     RingTooSmall,
 }
 
@@ -532,10 +532,13 @@ impl<const R: usize> EskfN<R> {
         Self::with_aiding(tuning, Aiding::Full)
     }
 
-    /// As [`EskfN::new`] with the aiding set `aiding`. Err with [`EskfError::RingTooSmall`] when the horizon delay
+    /// As [`EskfN::new`] with the aiding set `aiding`. Err with [`EskfError::RingTooSmall`] when `R` is 0, or the horizon delay
     /// (`Full` with nav_gps_delay_us > 0) meets a ring shorter than [`RING`]; with no delay any ring of one or more is
     /// the same filter (the sample pushed is integrated in the same step).
     pub fn with_aiding(tuning: &Tuning, aiding: Aiding) -> Result<Self, EskfError> {
+        if R == 0 {
+            return Err(EskfError::RingTooSmall);
+        }
         if tuning.nav_gps_delay_us > tuning.nav_buffer_us {
             return Err(EskfError::DelayBeyondBuffer);
         }
@@ -3682,6 +3685,59 @@ pub(crate) mod tests {
         // A delay beyond the buffer is still refused first.
         let far = Tuning { nav_gps_delay_us: Tuning::DEFAULT.nav_buffer_us + 1, ..Tuning::DEFAULT };
         assert_eq!(EskfN::<1>::new(&far).err(), Some(EskfError::DelayBeyondBuffer));
+    }
+
+    #[test]
+    fn g1_f_a_ring_of_zero_is_refused_for_every_variant_and_delay() {
+        let zero = Tuning { nav_gps_delay_us: 0, ..Tuning::DEFAULT };
+        for aiding in [Aiding::Full, Aiding::ImuBaro, Aiding::Imu] {
+            for t in [Tuning::DEFAULT, zero] {
+                assert_eq!(EskfN::<0>::with_aiding(&t, aiding).err(), Some(EskfError::RingTooSmall), "{aiding:?}");
+            }
+        }
+        assert_eq!(EskfN::<0>::new(&Tuning::DEFAULT).err(), Some(EskfError::RingTooSmall));
+        // Beyond-buffer delay with R = 0: either refusal is a refusal.
+        let far = Tuning { nav_gps_delay_us: Tuning::DEFAULT.nav_buffer_us + 1, ..Tuning::DEFAULT };
+        assert!(EskfN::<0>::new(&far).is_err());
+    }
+
+    #[test]
+    fn g1_g_a_reset_and_a_reinitialisation_in_one_update_report_no_reset() {
+        // The step of the first GNSS reset (at arming) is found on a dry run; in the real run the gyro-bias x of the
+        // state is made NaN just before that step. The step's job is still the reset (it does not read the bias), and
+        // the state is non-finite afterwards, so the filter re-initialises in the same `update`.
+        let t = Tuning::DEFAULT;
+        let mut w = World::new(&t);
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        let stream: Vec<Sensors> = (0..8_000_000 / PERIOD_US).map(|_| w.step()).collect();
+        let armed = |s: &Sensors| s.imu1.t_us >= 5_000_000;
+        let mut dry = Eskf::new(&t).unwrap();
+        let mut at = None;
+        for (k, s) in stream.iter().enumerate() {
+            dry.set_armed(armed(s));
+            dry.update(s);
+            if at.is_none() && dry.last_reset().is_some() && dry.stats().gps_resets == 1 {
+                at = Some(k);
+            }
+        }
+        let k0 = at.expect("a GNSS reset");
+        let mut f = Eskf::new(&t).unwrap();
+        for (k, s) in stream.iter().enumerate().take(k0 + 3) {
+            f.set_armed(armed(s));
+            if k == k0 {
+                assert_eq!(f.stats().reinits, 0);
+                f.nom.bg[0] = f32::NAN;
+            }
+            let (resets, reinits) = (f.stats().gps_resets, f.stats().reinits);
+            f.update(s);
+            if k == k0 {
+                assert_eq!(f.stats().gps_resets, resets + 1, "the step's job was the GNSS reset");
+                assert_eq!(f.stats().reinits, reinits + 1, "and the state went non-finite");
+                assert!(!f.tilt_aligned());
+                assert_eq!(f.last_reset(), None, "a re-initialisation leaves no reset to apply");
+            }
+        }
     }
 
     #[test]
