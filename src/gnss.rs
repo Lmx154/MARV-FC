@@ -3,12 +3,12 @@
 //! `sam-m10q` driver (decision-gnss-m10-20261122).
 //!
 //! Every configuration (start, restart, recover after the deadline, and apply, which a `GPS_RATE_MS` write raises)
-//! is the driver's whole `configure`: a baud scan (9600, 38400, 115200, a UBX-MON-VER poll at each), the switch to
+//! is the driver's whole `configure`: a baud scan (115200, 9600, 38400, a UBX-MON-VER poll at each), the switch to
 //! 115200, one CFG-VALSET to RAM only (UBX only, NMEA off, the measurement period of `GPS_RATE_MS`, one NAV-PVT per
 //! epoch, dynamic model 8, the constellation set of the driver) whose ACK is required, and 500 ms of settling:
 //! nothing is saved, so the receiver's stored configuration does not change. It takes up to 5.6 s (three 1 s probes,
-//! 100 ms, the 1 s acknowledgement, 500 ms); the scan starts at 9600 whatever the receiver's rate, so a receiver
-//! already at 115200 is found after two silent 1 s probes, about 2.7 s in all. The MON-VER software and hardware
+//! 100 ms, the 1 s acknowledgement, 500 ms); the scan starts at 115200, where the receiver is after an FC reset with it powered,
+//! so it is found at once; a receiver at 9600 or 38400 is found after the silent 1 s probes before it. The MON-VER software and hardware
 //! strings of the receiver are logged once per successful configure (an INFO text and the RTT line); nothing checks
 //! them.
 //!
@@ -298,7 +298,7 @@ impl GnssAdapter {
             uart::Config::default(),
         );
         defmt::info!(
-            "[INFO] GNSS: SAM-M10Q on UART1, TX GPIO24 RX GPIO25, 115200 8N1 after the configure (baud scan 9600, 38400, 115200 first), UBX only, configured at every start (never saved), RX buffer {=usize} B, nominal period {=u32} us, deadline {=u32} us, PPS not read",
+            "[INFO] GNSS: SAM-M10Q on UART1, TX GPIO24 RX GPIO25, 115200 8N1 after the configure (baud scan 115200, 9600, 38400), UBX only, configured at every start (never saved), RX buffer {=usize} B, nominal period {=u32} us, deadline {=u32} us, PPS not read",
             RX_BUFFER,
             PERIOD_US,
             DEADLINE_US

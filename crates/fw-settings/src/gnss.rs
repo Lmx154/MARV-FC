@@ -51,10 +51,13 @@ pub fn rate_ms(value: Option<i32>) -> Result<u16, &'static str> {
 
 /// The driver's configuration for a fix interval: its defaults (UBX only, NMEA off, one NAV-PVT per epoch, dynamic
 /// model 8, static hold off, the constellation set of `sam_m10q::config::SIGNAL_KEYS`) with the measurement period
-/// `ms`.
+/// `ms` and the baud scan starting at 115200, the target: after an FC reset with the receiver powered it already runs
+/// there, and a scan that starts at 9600 or 38400 would read its 115200 stream at the wrong rate (a framing-error
+/// `warn!` per byte in embassy-rp's UART interrupt). Then 9600 (the u-blox default) and 38400.
 pub fn config(ms: u16) -> Config {
     Config {
         meas_rate_ms: ms,
+        candidate_bauds: [115_200, 9_600, 38_400],
         ..Config::default()
     }
 }
@@ -188,12 +191,13 @@ mod tests {
     const ALLOWED: [u16; 3] = [200, 500, 1000];
 
     #[test]
-    fn config_is_the_driver_default_with_the_stored_period_for_every_allowed_rate() {
+    fn config_is_the_driver_default_with_the_stored_period_and_the_scan_from_115200_for_every_allowed_rate() {
         for ms in ALLOWED {
             let c = config(ms);
             assert!(c.is_valid(), "{ms}");
             assert_eq!(c.meas_rate_ms, ms);
-            assert_eq!(c, Config { meas_rate_ms: ms, ..Config::default() });
+            assert_eq!(c.candidate_bauds, [115_200, 9_600, 38_400]);
+            assert_eq!(c, Config { meas_rate_ms: ms, candidate_bauds: c.candidate_bauds, ..Config::default() });
             assert!(c.valset().is_some(), "{ms}");
         }
         // 100 ms is not a period the receiver accepts with this constellation set.
