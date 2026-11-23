@@ -3,6 +3,7 @@
 //! (rulings file, ruling 3). Units: rad, rad/s, us.
 
 use fw_core::calib::GRAVITY_MSS;
+use fw_core::esc::ANSWER_US;
 use marv_card::{K_F, MASS, MAX_ROTOR_SPEED};
 
 /// The collective at full throttle stick, N: `pilot_thrust_max_g` times the weight m g, or four rotors at full speed
@@ -183,6 +184,23 @@ pub struct Tuning {
     /// `EskfSteer` output predictor: gain of the integral term of the velocity and position tracking (Amendment G, G1;
     /// owner-approved 2026-11-22). PX4 `output_predictor.cpp:350`, `:354`; ArduPilot `AP_NavEKF3_core.cpp:970-973`.
     pub nav_out_int_gain: f32,
+    /// RPM notch (decision-rpm-notch-20261123, sections 1 and 2; the numbers owner-approved 2026-11-23): harmonics of each
+    /// rotor's frequency that get a notch, at most 3 (the multiple-angle identities stop there). Betaflight
+    /// pg/rpm_filter.c:33 (rpm_filter_harmonics 3); the best case of t292-notch.out:6.
+    pub notch_harmonics: usize,
+    /// RPM notch: Q of every notch. Betaflight pg/rpm_filter.c:36 (rpm_filter_q 500, shown /100 = 5); the what-if of
+    /// t292-notch.py.
+    pub notch_q: f32,
+    /// RPM notch: lowest centre, Hz, and the frequency where a harmonic's weight starts to rise from 0. Not from a file:
+    /// owner-approved so the notch crosses smoothly near the ground idle (61 Hz, t292-vib.out:4).
+    pub notch_min_hz: f32,
+    /// RPM notch: the width of the weight's rise, Hz: full weight from `notch_min_hz` + this (60 Hz, the minimum of the
+    /// what-if cases of t292-notch.py).
+    pub notch_fade_hz: f32,
+    /// RPM notch: highest centre as a share of the sample rate. Betaflight rpm_filter.c:87, :121 (0.48).
+    pub notch_max_fs: f32,
+    /// RPM notch: a line's eRPM older than this, us, counts as missing: `fw_core::esc::ANSWER_US` (100 ms).
+    pub notch_hold_us: u64,
 }
 
 impl Tuning {
@@ -245,6 +263,12 @@ impl Tuning {
         nav_out_tau_pos_s: 0.25,
         nav_out_att_gain: 0.5,
         nav_out_int_gain: 0.1,
+        notch_harmonics: 3,
+        notch_q: 5.0,
+        notch_min_hz: 50.0,
+        notch_fade_hz: 10.0,
+        notch_max_fs: 0.48,
+        notch_hold_us: ANSWER_US,
         psc_posxy_p: 0.95,
         psc_velxy_p: 1.8,
         psc_velxy_i: 0.4,

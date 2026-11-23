@@ -280,6 +280,40 @@ pub struct Saturation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Refused;
 
+/// The rate loop of the latest `Controller::update`, for the log (PIDT and NTCH records, decision-rpm-notch-20261123, 1B).
+/// Per axis X, Y, Z (roll, pitch, yaw). For an update that made a demand, `p_nm` + `i_nm` + `d_nm` (summed in that order)
+/// is the torque it demanded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RateLog {
+    /// The rate setpoint, rad/s.
+    pub target_rads: [f32; 3],
+    /// The P term, N.m.
+    pub p_nm: [f32; 3],
+    /// The I term after this step's update, N.m.
+    pub i_nm: [f32; 3],
+    /// The D term, N.m.
+    pub d_nm: [f32; 3],
+    /// The measured rate the loop used (after the notch), rad/s.
+    pub rate_rads: [f32; 3],
+    /// The rotor frequency f1, Hz, by DShot line; 0 for a line without a usable eRPM.
+    pub f1_hz: [f32; LINES],
+    /// The notch switch of the latest `Controller::set_rotor_hz`.
+    pub on: bool,
+}
+
+impl RateLog {
+    /// Nothing known: every value 0, the notch off.
+    pub const NONE: RateLog = RateLog {
+        target_rads: [0.0; 3],
+        p_nm: [0.0; 3],
+        i_nm: [0.0; 3],
+        d_nm: [0.0; 3],
+        rate_rads: [0.0; 3],
+        f1_hz: [0.0; LINES],
+        on: false,
+    };
+}
+
 /// The controller seam.
 pub trait Controller {
     /// One step. `limited` is the previous step's `Allocation::saturation`. dt is the difference between successive
@@ -300,6 +334,13 @@ pub trait Controller {
     /// Amendment P, P5); [0; 4] when that update was not one. The default has none.
     fn attitude_setpoint(&self) -> [f32; 4] {
         [0.0; 4]
+    }
+    /// The rotor frequencies f1, Hz, by DShot line (`None`: no usable eRPM), and whether the RPM notch is on. `Flight::step`
+    /// calls it on every step, after `reset` and before `update`. The default ignores it.
+    fn set_rotor_hz(&mut self, _f1_hz: [Option<f32>; LINES], _on: bool) {}
+    /// The rate loop of the latest `update` and the latest `set_rotor_hz`, for the log. The default has none.
+    fn rate_log(&self) -> RateLog {
+        RateLog::NONE
     }
 }
 

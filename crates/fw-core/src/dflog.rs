@@ -166,6 +166,10 @@ pub const ID_SPN: u8 = 151;
 pub const ID_GPV: u8 = 152;
 /// Type number of PPS (a whole-second fix paired with its PPS edge: latency measurement).
 pub const ID_PPS: u8 = 153;
+/// Type number of PIDT (the rate loop's target and P, I, D terms per axis; decision-rpm-notch-20261123, 1B).
+pub const ID_PIDT: u8 = 154;
+/// Type number of NTCH (the rate the loop used, the four rotor frequencies and the notch switch).
+pub const ID_NTCH: u8 = 155;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -262,6 +266,22 @@ pub const GPV: RecordDef = def(
 /// unpaired ones counted since boot.
 pub const PPS: RecordDef = def(ID_PPS, "PPS", "QQiII", "TimeUS,Edge,Dly,N,Unp");
 
+/// PIDT: the rate loop of one flight step: per axis X, Y, Z the rate target (rad/s) and the P, I and D torques (N.m).
+pub const PIDT: RecordDef = def(
+    ID_PIDT,
+    "PIDT",
+    "Qffffffffffff",
+    "TimeUS,TarX,PX,IX,DX,TarY,PY,IY,DY,TarZ,PZ,IZ,DZ",
+);
+/// NTCH: the rate the loop used (rad/s, after the notch) per axis, the rotor frequency f1 (Hz) by DShot line (0: no
+/// valid eRPM) and whether the notch is on.
+pub const NTCH: RecordDef = def(
+    ID_NTCH,
+    "NTCH",
+    "QfffffffB",
+    "TimeUS,GX,GY,GZ,F0,F1,F2,F3,On",
+);
+
 /// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the
 /// shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's. For I = 1 `TimeUS` is the
 /// horizon time, the time the state refers to.
@@ -296,9 +316,9 @@ pub const SPN: RecordDef = def(
 );
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 26] = [
+pub const TYPES: [RecordDef; 28] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS,
+    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -306,7 +326,7 @@ pub const HEADER_SEQUENCE_LEN: usize = TYPES.len() * FMT.length as usize;
 
 /// The flight-step types (decision-first-pair-wiring-20261119, A6), the ones `encode_step` writes.
 /// They are in [`TYPES`], so [`write_header`] writes their FMTs.
-pub const FLIGHT_TYPES: [RecordDef; 4] = [NAV, SETP, DMD, MOT];
+pub const FLIGHT_TYPES: [RecordDef; 6] = [NAV, SETP, DMD, MOT, PIDT, NTCH];
 
 /// Writes one record into the start of a buffer.
 struct Writer<'a> {
@@ -715,6 +735,47 @@ pub fn encode_mot(
     w.pos
 }
 
+/// PIDT: per axis X, Y, Z the rate target (rad/s) and the P, I and D torques (N.m). 59 bytes.
+pub fn encode_pidt(
+    out: &mut [u8],
+    time_us: u64,
+    target_rads: [f32; 3],
+    p_nm: [f32; 3],
+    i_nm: [f32; 3],
+    d_nm: [f32; 3],
+) -> usize {
+    let Some(mut w) = Writer::start(out, &PIDT) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for ((t, p), (i, d)) in target_rads.into_iter().zip(p_nm).zip(i_nm.into_iter().zip(d_nm)) {
+        for v in [t, p, i, d] {
+            w.f32(v);
+        }
+    }
+    w.pos
+}
+
+/// NTCH: the rate the loop used (rad/s) per axis, the rotor frequency f1 (Hz) by DShot line (0: no valid eRPM) and the
+/// notch switch. 40 bytes.
+pub fn encode_ntch(
+    out: &mut [u8],
+    time_us: u64,
+    rate_rads: [f32; 3],
+    f1_hz: [f32; 4],
+    on: bool,
+) -> usize {
+    let Some(mut w) = Writer::start(out, &NTCH) else {
+        return 0;
+    };
+    w.u64(time_us);
+    for v in rate_rads.into_iter().chain(f1_hz) {
+        w.f32(v);
+    }
+    w.u8(u8::from(on));
+    w.pos
+}
+
 /// ESC: raw eRPM, volts in centivolts, temperature in degC, by DShot line, and the flag bits (bit i:
 /// line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight
 /// throttles). 40 bytes.
@@ -1072,6 +1133,10 @@ mod tests {
         out.push((ID_SPN, b[..n].to_vec()));
         let n = encode_pps(&mut b, 1, 2, -3, 4, 5);
         out.push((ID_PPS, b[..n].to_vec()));
+        let n = encode_pidt(&mut b, 1, [1.0; 3], [2.0; 3], [3.0; 3], [4.0; 3]);
+        out.push((ID_PIDT, b[..n].to_vec()));
+        let n = encode_ntch(&mut b, 1, [1.0; 3], [2.0; 4], true);
+        out.push((ID_NTCH, b[..n].to_vec()));
         out
     }
 
@@ -1142,12 +1207,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_26_fmt_records() {
-        assert_eq!(TYPES.len(), 26);
-        assert_eq!(HEADER_SEQUENCE_LEN, 2314);
-        let mut buf = [0u8; 2324];
-        assert_eq!(write_header(&mut buf), 2314);
-        assert_eq!(write_header(&mut [0u8; 2313]), 0);
+    fn header_sequence_is_28_fmt_records() {
+        assert_eq!(TYPES.len(), 28);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2492);
+        let mut buf = [0u8; 2502];
+        assert_eq!(write_header(&mut buf), 2492);
+        assert_eq!(write_header(&mut [0u8; 2491]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -1191,6 +1256,17 @@ mod tests {
         assert_eq!(spn[9..25], *b"Qfffffff\0\0\0\0\0\0\0\0");
         assert_eq!(spn[25..53], *b"TimeUS,PN,PE,PD,VN,VE,VD,Hdg");
         assert!(spn[53..].iter().all(|&c| c == 0));
+        // PIDT and NTCH by hand: types 154 and 155 = 0x9A and 0x9B, lengths 59 and 40.
+        let pidt = &buf[26 * 89..27 * 89];
+        assert_eq!(pidt[3..9], [0x9A, 59, b'P', b'I', b'D', b'T']);
+        assert_eq!(pidt[9..25], *b"Qffffffffffff   ");
+        assert_eq!(pidt[25..73], *b"TimeUS,TarX,PX,IX,DX,TarY,PY,IY,DY,TarZ,PZ,IZ,DZ");
+        assert!(pidt[73..].iter().all(|&c| c == 0));
+        let ntch = &buf[27 * 89..28 * 89];
+        assert_eq!(ntch[3..9], [0x9B, 40, b'N', b'T', b'C', b'H']);
+        assert_eq!(ntch[9..25], *b"QfffffffB       ");
+        assert_eq!(ntch[25..55], *b"TimeUS,GX,GY,GZ,F0,F1,F2,F3,On");
+        assert!(ntch[55..].iter().all(|&c| c == 0));
     }
 
     /// The table, as the file announces it (also printed into the report by hand).
@@ -1225,7 +1301,9 @@ mod tests {
                 ("NKI", 22),
                 ("MODE", 13),
                 ("SPN", 39),
-                ("PPS", 31)
+                ("PPS", 31),
+                ("PIDT", 59),
+                ("NTCH", 40)
             ]
         );
     }
@@ -1554,6 +1632,44 @@ mod tests {
             (SPN.format, SPN.columns),
             ("Qfffffff", "TimeUS,PN,PE,PD,VN,VE,VD,Hdg")
         );
+    }
+
+    #[test]
+    fn golden_pidt_and_ntch() {
+        // A3 95 9A | time 7 | per axis X, Y, Z: Tar, P, I, D (1, 2, 3, 4 | 5, 6, 7, 8 | 9, 10, 11, 12)
+        let mut b = [0xEEu8; 70];
+        assert_eq!(
+            encode_pidt(
+                &mut b,
+                7,
+                [1.0, 5.0, 9.0],
+                [2.0, 6.0, 10.0],
+                [3.0, 7.0, 11.0],
+                [4.0, 8.0, 12.0]
+            ),
+            59
+        );
+        let mut want = cat(&[&[0xA3, 0x95, 0x9A], &7u64.to_le_bytes()]);
+        for v in 1..=12 {
+            want.extend_from_slice(&(v as f32).to_le_bytes());
+        }
+        assert_eq!(b[..59], want[..]);
+        assert_eq!(b[59..], [0xEE; 11], "nothing beyond the record is touched");
+        assert_eq!(encode_pidt(&mut [0u8; 58], 7, [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]), 0);
+        // A3 95 9B | time 7 | GX, GY, GZ = 1, 2, 3 | F0..F3 = 4, 5, 6, 7 | On 1
+        let mut b = [0xEEu8; 50];
+        assert_eq!(encode_ntch(&mut b, 7, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0], true), 40);
+        let mut want = cat(&[&[0xA3, 0x95, 0x9B], &7u64.to_le_bytes()]);
+        for v in 1..=7 {
+            want.extend_from_slice(&(v as f32).to_le_bytes());
+        }
+        want.push(1);
+        assert_eq!(b[..40], want[..]);
+        assert_eq!(b[40..], [0xEE; 10], "nothing beyond the record is touched");
+        assert_eq!(encode_ntch(&mut [0u8; 39], 7, [0.0; 3], [0.0; 4], false), 0);
+        assert_eq!((ID_PIDT, ID_NTCH), (154, 155));
+        assert_eq!(PIDT.format, "Qffffffffffff");
+        assert_eq!(NTCH.format, "QfffffffB");
     }
 
     #[test]

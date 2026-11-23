@@ -4,8 +4,8 @@
 
 use crate::gate::{Gate, MotorCommand};
 use crate::gnc::{
-    Allocation, Allocator, Controller, Estimator, Mode, NavState, Refused, Saturation, Sensors,
-    Setpoint, ThrustTorque, Valid,
+    Allocation, Allocator, Controller, Estimator, Mode, NavState, RateLog, Refused, Saturation,
+    Sensors, Setpoint, ThrustTorque, Valid,
 };
 use crate::mahony::DT_MAX_US;
 use crate::quat;
@@ -26,6 +26,10 @@ pub struct FlightInputs {
     pub sensors: Sensors,
     /// This step's new stick report, if one arrived.
     pub rc: Option<RcSample>,
+    /// The latest eRPM of each ESC and the board time it was captured, us, by DShot line (`EscLine::erpm`); `None` for a
+    /// line without one, and for every line when the ESC status is not available. A value that is `notch_hold_us` or more
+    /// old at the step time counts as missing.
+    pub erpm: [Option<(u32, u64)>; LINES],
 }
 
 /// Everything one step decided, by value: the ESC command plus what the log records (firmware change 5).
@@ -54,7 +58,16 @@ pub struct StepOut {
     /// The attitude setpoint [w, x, y, z] the controller made from a `Setpoint::Position` this step (SETP kind 3); [0; 4]
     /// in every other case.
     pub attitude_sp: [f32; 4],
+    /// The rate loop of this step (PIDT and NTCH records): zero except the rotor frequencies and the notch switch when the
+    /// demand was refused.
+    pub rate: RateLog,
 }
+
+/// The default of the parameter `MOT_POLES`: poles, not pole pairs (`fw_settings::esc`).
+const NOTCH_POLES_DEFAULT: i32 = 14;
+
+/// The range of the parameter `MOT_POLES` (`fw_settings::esc`; the flight code checks it too, as for `PILOT_SPEED_XY`).
+const NOTCH_POLES_RANGE: core::ops::RangeInclusive<i32> = 2..=64;
 
 /// The throttle stick's centre in altitude hold: the dead zone is this plus and minus `pilot_thr_dz`
 /// (ArduPilot `Attitude.cpp:97-112`, the centre fixed at half travel).
@@ -306,6 +319,13 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
     /// controller take it at every disarmed step, so the value at the arming step is the one in force until disarm.
     speed_pending: f32,
+    /// The newest value of the parameter `RPM_NOTCH_EN` and of `MOT_POLES` that `set_notch` accepted; taken at every
+    /// disarmed step like `speed_pending`.
+    notch_pending: (bool, i32),
+    /// The notch switch and the pole count in force: the values of the latest disarmed step.
+    notch: (bool, i32),
+    /// An eRPM this old or older is missing, us (`notch_hold_us`).
+    notch_hold_us: u64,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -381,6 +401,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             last_us: None,
             ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
             speed_pending: tuning.pilot_speed_xy_ms,
+            notch_pending: (false, NOTCH_POLES_DEFAULT),
+            notch: (false, NOTCH_POLES_DEFAULT),
+            notch_hold_us: tuning.notch_hold_us,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -404,6 +427,18 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let ok = (PILOT_SPEED_XY_MIN_MS..=PILOT_SPEED_XY_MAX_MS).contains(&ms);
         if ok {
             self.speed_pending = ms;
+        }
+        ok
+    }
+
+    /// The newest value of the runtime parameter `RPM_NOTCH_EN` (`on`) and of `MOT_POLES` (`poles`, poles and not pole
+    /// pairs). Accepted only if `poles` is within 2 to 64 (the parameter's range; this is the flight core's own check). It
+    /// takes effect at the next arming: every disarmed step latches the newest values, no armed step does. Returns whether
+    /// it was accepted.
+    pub fn set_notch(&mut self, on: bool, poles: i32) -> bool {
+        let ok = NOTCH_POLES_RANGE.contains(&poles);
+        if ok {
+            self.notch_pending = (on, poles);
         }
         ok
     }
@@ -444,6 +479,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if disarmed {
             self.shaper.pilot_speed_xy_ms = self.speed_pending;
             self.controller.set_speed_limit_xy(self.speed_pending);
+            self.notch = self.notch_pending;
         }
         if let Some(rc) = inputs.rc {
             self.shaper.sticks = rc.sticks;
@@ -494,11 +530,27 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             _ => Mode::Angle,
         };
         let setpoint = self.shaper.setpoint(mode, &nav, t_us);
+        // The rotor frequencies, f1 = eRPM x 2 / (poles x 60) Hz by DShot line, for the controller's notch; an eRPM
+        // missing or `notch_hold_us` or more old is `None`.
+        let (notch_on, poles) = self.notch;
+        let f1_hz = inputs.erpm.map(|e| {
+            e.filter(|&(_, t)| t_us.saturating_sub(t) < self.notch_hold_us)
+                .map(|(erpm, _)| erpm as f32 * 2.0 / (poles as f32 * 60.0))
+        });
+        self.controller.set_rotor_hz(f1_hz, notch_on);
         let demand = if nav.valid.covers(&setpoint.requires()) {
             self.controller.update(&nav, &setpoint, &self.limited)
         } else {
             Err(Refused)
         };
+        let mut rate = self.controller.rate_log();
+        if demand.is_err() {
+            rate = RateLog {
+                f1_hz: rate.f1_hz,
+                on: rate.on,
+                ..RateLog::NONE
+            };
+        }
         let attitude_sp = if matches!(setpoint, Setpoint::Position { .. }) && demand.is_ok() {
             self.controller.attitude_setpoint()
         } else {
@@ -558,6 +610,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             demand,
             allocation,
             attitude_sp,
+            rate,
         }
     }
 }
@@ -589,21 +642,21 @@ fn position_covered(valid: &Valid) -> bool {
 pub struct LogDue {
     /// Write the IMU1 sample this step (every step, armed or not).
     pub imu: bool,
-    /// Write the four flight records (NAV, SETP, DMD, MOT) this step.
+    /// Write the six flight records (NAV, SETP, DMD, MOT, PIDT, NTCH) this step.
     pub block: bool,
     /// Write an ESC record this step.
     pub esc: bool,
 }
 
 /// The decimation rule. `step` counts flight steps (the caller adds 1 after each). The IMU1 sample is
-/// logged every step. Armed: the four flight records every step and an ESC record every 4th; disarmed:
-/// the four flight records and the ESC record every 8th step.
+/// logged every step. Armed: the six flight records and an ESC record every step; disarmed:
+/// the six flight records and the ESC record every 8th step.
 pub fn log_due(step: u32, armed: bool) -> LogDue {
     if armed {
         LogDue {
             imu: true,
             block: true,
-            esc: step % 4 == 0,
+            esc: true,
         }
     } else {
         let every_8th = step % 8 == 0;
@@ -615,8 +668,8 @@ pub fn log_due(step: u32, armed: bool) -> LogDue {
     }
 }
 
-/// Writes the four flight records of one step (NAV, SETP, DMD, MOT; decision-first-pair-wiring-20261119,
-/// A6) at the start of `buf`. Returns the bytes written, or 0 (nothing written) if `buf` is too small.
+/// Writes the six flight records of one step (NAV, SETP, DMD, MOT; decision-first-pair-wiring-20261119,
+/// A6; PIDT, NTCH: decision-rpm-notch-20261123) at the start of `buf`. Returns the bytes written, or 0 (nothing written) if `buf` is too small.
 pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
     let need: usize = FLIGHT_TYPES.iter().map(|d| usize::from(d.length)).sum();
     if buf.len() < need {
@@ -687,6 +740,21 @@ pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
         mode,
         levels,
         command,
+    );
+    n += dflog::encode_pidt(
+        buf.get_mut(n..).unwrap_or_default(),
+        t,
+        out.rate.target_rads,
+        out.rate.p_nm,
+        out.rate.i_nm,
+        out.rate.d_nm,
+    );
+    n += dflog::encode_ntch(
+        buf.get_mut(n..).unwrap_or_default(),
+        t,
+        out.rate.rate_rads,
+        out.rate.f1_hz,
+        out.rate.on,
     );
     n
 }
@@ -853,6 +921,7 @@ mod tests {
                 external: None,
             },
             rc: None,
+            erpm: [None; LINES],
         }
     }
 
@@ -878,7 +947,7 @@ mod tests {
             tuning.pilot_thrust_max_g = cap;
             let mut flight = Flight::new(
                 Mahony::new(&tuning),
-                CascadedPid::new(&tuning),
+                CascadedPid::new(&tuning, 800.0),
                 CardAllocator::new(),
                 &tuning,
                 &HANDSHAKE,
@@ -903,7 +972,7 @@ mod tests {
         let tuning = Tuning::DEFAULT;
         let mut flight = Flight::new(
             Mahony::new(&tuning),
-            CascadedPid::new(&tuning),
+            CascadedPid::new(&tuning, 800.0),
             CardAllocator::new(),
             &tuning,
             &HANDSHAKE,
@@ -991,7 +1060,7 @@ mod tests {
             let tuning = Tuning::DEFAULT;
             let mut flight = Flight::new(
                 Mahony::new(&tuning),
-                CascadedPid::new(&tuning),
+                CascadedPid::new(&tuning, 800.0),
                 CardAllocator::new(),
                 &tuning,
                 handshake,
@@ -1228,14 +1297,14 @@ mod tests {
         let tuning = Tuning::DEFAULT;
         let mut mahony = Flight::new(
             Mahony::new(&tuning),
-            CascadedPid::new(&tuning),
+            CascadedPid::new(&tuning, 800.0),
             CardAllocator::new(),
             &tuning,
             &A,
         );
         let mut baro = Flight::new(
             MahonyBaro::new(&tuning),
-            CascadedPid::new(&tuning),
+            CascadedPid::new(&tuning, 800.0),
             CardAllocator::new(),
             &tuning,
             &B,
@@ -1281,7 +1350,7 @@ mod tests {
             let tuning = Tuning::DEFAULT;
             let mut flight = Flight::new(
                 MahonyBaro::new(&tuning),
-                CascadedPid::new(&tuning),
+                CascadedPid::new(&tuning, 800.0),
                 CardAllocator::new(),
                 &tuning,
                 handshake,
@@ -1476,9 +1545,9 @@ mod tests {
         }
     }
 
-    /// A6: the four records of one step, decoded by hand, field by field.
+    /// A6: the six records of one step, decoded by hand, field by field.
     #[test]
-    fn encode_step_writes_the_four_records() {
+    fn encode_step_writes_the_six_records() {
         extern crate std;
         let out = StepOut {
             t_us: 0x0102_0304_0506,
@@ -1522,10 +1591,19 @@ mod tests {
                 },
             }),
             attitude_sp: [0.0; 4],
+            rate: RateLog {
+                target_rads: [1.0, 2.0, 3.0],
+                p_nm: [0.5, 0.6, 0.7],
+                i_nm: [-0.5, -0.6, -0.7],
+                d_nm: [0.25, 0.125, 0.0625],
+                rate_rads: [0.1, -0.25, 0.5],
+                f1_hz: [100.0, 0.0, 120.0, 130.0],
+                on: true,
+            },
         };
-        let mut buf = [0u8; 200];
-        assert_eq!(encode_step(&out, &mut buf), 40 + 44 + 29 + 29);
-        assert_eq!(encode_step(&out, &mut [0u8; 141]), 0);
+        let mut buf = [0u8; 300];
+        assert_eq!(encode_step(&out, &mut buf), 40 + 44 + 29 + 29 + 59 + 40);
+        assert_eq!(encode_step(&out, &mut [0u8; 240]), 0);
         let f = |at: usize| f32::from_le_bytes(buf[at..at + 4].try_into().unwrap());
         let h = |at: usize| u16::from_le_bytes(buf[at..at + 2].try_into().unwrap());
         let fs = |at: usize, n: usize| (0..n).map(|i| f(at + 4 * i)).collect::<std::vec::Vec<_>>();
@@ -1555,7 +1633,20 @@ mod tests {
         assert_eq!(buf[124..126], [1, 1]);
         let levels: std::vec::Vec<u16> = (0..8).map(|i| h(126 + 2 * i)).collect();
         assert_eq!(levels, [120, 130, 140, 150, 111, 222, 333, 444]);
-        assert!(buf[142..].iter().all(|&b| b == 0));
+        // PIDT at 142: per axis Tar, P, I, D.
+        assert_eq!(buf[142..145], [0xA3, 0x95, 154]);
+        assert_eq!(buf[145..153], time);
+        assert_eq!(
+            fs(153, 12),
+            [1.0, 0.5, -0.5, 0.25, 2.0, 0.6, -0.6, 0.125, 3.0, 0.7, -0.7, 0.0625]
+        );
+        // NTCH at 201: the rate the loop used, F0..F3, On.
+        assert_eq!(buf[201..204], [0xA3, 0x95, 155]);
+        assert_eq!(buf[204..212], time);
+        assert_eq!(fs(212, 3), [0.1, -0.25, 0.5]);
+        assert_eq!(fs(224, 4), [100.0, 0.0, 120.0, 130.0]);
+        assert_eq!(buf[240], 1);
+        assert!(buf[241..].iter().all(|&b| b == 0));
     }
 
     #[test]
@@ -1571,7 +1662,7 @@ mod tests {
                     )
                 })
         };
-        assert_eq!(count(true), (64, 64, 16));
+        assert_eq!(count(true), (64, 64, 64));
         assert_eq!(count(false), (64, 8, 8));
         assert_eq!(
             log_due(0, false),
@@ -1602,7 +1693,7 @@ mod tests {
             LogDue {
                 imu: true,
                 block: true,
-                esc: false
+                esc: true
             }
         );
     }
@@ -1616,7 +1707,7 @@ mod tests {
             assert_eq!(d.esc, k % 8 == 0);
             let a = log_due(k, true);
             assert!(a.imu && a.block);
-            assert_eq!(a.esc, k % 4 == 0);
+            assert!(a.esc);
         }
     }
 
@@ -1640,7 +1731,7 @@ mod tests {
         // restores the compass reset after the timeout, through the same `mag_job` -> `yaw_set` path.
         core.armed_yaw_reset = true;
         let steer = EskfSteer::new(&mut core, &tuning).unwrap();
-        let mut flight = Flight::new(steer, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
+        let mut flight = Flight::new(steer, CascadedPid::new(&tuning, 800.0), CardAllocator::new(), &tuning, handshake);
         handshake.set_permit(true);
         let mut world = World::new(&tuning);
         world.yaw = 0.4;
@@ -1664,7 +1755,7 @@ mod tests {
                 flight.estimator.inject_tilt(2.0_f32.to_radians());
             }
             let before = flight.estimator.core().stats().yaw_resets;
-            let out = flight.step(&FlightInputs { sensors, rc });
+            let out = flight.step(&FlightInputs { sensors, rc, erpm: [None; LINES] });
             if flight.estimator.core().stats().yaw_resets > before && t_us > 20_000_000 {
                 reset_at = Some(k);
             }
@@ -1738,7 +1829,7 @@ mod tests {
         let tuning = Tuning::DEFAULT;
         let (mut core, mut vz) = (Eskf::new(&tuning).unwrap(), EskfZ::with_aiding(&tuning, Aiding::ImuBaro).unwrap());
         let mix = SteerMix::new(EskfSteer::new(&mut core, &tuning).unwrap(), &mut vz);
-        let mut flight = Flight::new(mix, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
+        let mut flight = Flight::new(mix, CascadedPid::new(&tuning, 800.0), CardAllocator::new(), &tuning, handshake);
         handshake.set_permit(true);
         let mut world = World::new(&tuning);
         world.yaw = 0.4;
@@ -1759,7 +1850,7 @@ mod tests {
             if Some(k) == poison_at {
                 poison(flight.estimator.vert_mut());
             }
-            let out = flight.step(&FlightInputs { sensors, rc });
+            let out = flight.step(&FlightInputs { sensors, rc, erpm: [None; LINES] });
             let z = flight.estimator.vert();
             recs.push(MixRec {
                 t_us,
@@ -1870,7 +1961,7 @@ mod tests {
         let mut core = Eskf::new(&tuning).unwrap();
         core.keep_started_at_timeout = keep;
         let steer = EskfSteer::new(&mut core, &tuning).unwrap();
-        let mut flight = Flight::new(steer, CascadedPid::new(&tuning), CardAllocator::new(), &tuning, handshake);
+        let mut flight = Flight::new(steer, CascadedPid::new(&tuning, 800.0), CardAllocator::new(), &tuning, handshake);
         handshake.set_permit(true);
         // The latch is not under test (as in position_tests): forced, the vehicle is taken to be in the air.
         flight.airborne_forced = true;
@@ -1895,7 +1986,7 @@ mod tests {
                 switch6: Switch3::High,
                 t_us,
             });
-            let out = flight.step(&FlightInputs { sensors, rc });
+            let out = flight.step(&FlightInputs { sensors, rc, erpm: [None; LINES] });
             recs.push(P2Rec {
                 t_us,
                 mode: out.mode,
@@ -1947,3 +2038,6 @@ mod althold_tests;
 
 #[cfg(test)]
 mod position_tests;
+
+#[cfg(test)]
+mod notch_tests;

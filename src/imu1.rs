@@ -316,7 +316,7 @@ pub async fn task(
 ) -> ! {
     // The flight code is built here, inside the task, on core 1, and owned by it (the steering estimator by
     // reference).
-    let task = crate::flight::Stepper::new(rc, steer).and_then(|stepper| {
+    let task = crate::flight::Stepper::new(rc, steer, period_us).and_then(|stepper| {
         ImuTask::new(
             &CELLS,
             adapter,

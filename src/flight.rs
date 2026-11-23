@@ -23,6 +23,7 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::dflog;
+use fw_core::esc::LINES;
 use fw_core::rc::RcSample;
 use fw_core::sample::{BaroReading, BaroSample, GnssReading, GnssSample, MagReading, MagSample};
 use fw_core::xcore::{
@@ -391,18 +392,68 @@ pub fn push_speed(why: &str) {
     );
 }
 
+/// Core 0 -> flight core: the stored `RPM_NOTCH_EN` (true: 1) and `MOT_POLES` (poles, not pole pairs), decision-rpm-notch-20261123
+/// section 1 (one writer, core 0, through [`push_notch`]; one reader, IMU1's [`Stepper`]). The flight code takes the pair at
+/// every disarmed step (`Flight::set_notch`), so the one in force at the arming step stays until the next disarm. No flash
+/// access on core 1: the pair is a copy of the stored values.
+pub static FLIGHT_NOTCH: TripleBuffer<(bool, i32)> = TripleBuffer::new((false, NOTCH_POLES_DEFAULT));
+
+/// The default of `MOT_POLES` (`fw_settings::esc`), the value of a parameter that cannot be read.
+const NOTCH_POLES_DEFAULT: i32 = 14;
+
+/// Core 0's writer of [`FLIGHT_NOTCH`].
+static NOTCH_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, (bool, i32)>>>> =
+    Mutex::new(RefCell::new(None));
+
+/// Takes the writer of [`FLIGHT_NOTCH`] and pushes the stored values. Call once, on core 0, after `settings::boot` and
+/// before core 1 starts, so the flight core's first read has them.
+pub fn init_notch() {
+    let Some(writer) = FLIGHT_NOTCH.take_writer() else {
+        defmt::panic!("[FAIL] RPM_NOTCH_EN writer taken twice");
+    };
+    NOTCH_WRITER.lock(|w| *w.borrow_mut() = Some(writer));
+    push_notch("boot");
+}
+
+/// Pushes the stored `RPM_NOTCH_EN` and `MOT_POLES` to the flight core (core 0; call with no store access in progress). A
+/// value that cannot be read or is not an `I32` is the table's default (off, 14).
+pub fn push_notch(why: &str) {
+    let (on, poles) = crate::store::with(|p| {
+        let get = |name| match p.get_named(name) {
+            Some(mavlink_device::ParamValue::I32(v)) => Some(v),
+            _ => None,
+        };
+        (get(fw_settings::flight::RPM_NOTCH_EN), get(fw_settings::esc::POLES))
+    })
+    .unwrap_or((None, None));
+    let value = (on.is_some_and(|v| v != 0), poles.unwrap_or(NOTCH_POLES_DEFAULT));
+    NOTCH_WRITER.lock(|w| {
+        if let Some(writer) = w.borrow_mut().as_mut() {
+            writer.write(value);
+        }
+    });
+    defmt::info!(
+        "[INFO] RPM_NOTCH_EN {=bool}, MOT_POLES {=i32} pushed to the flight core ({=str}); they take effect at the next arming",
+        value.0,
+        value.1,
+        why
+    );
+}
+
 /// The flight log ring's size (decision-flight-logging-20261119, section 3).
 pub const LOG_BYTES: usize = 16384;
 /// The flight records: producer IMU1's [`Stepper`] (core 1), consumer `logger`'s collector (core 0).
 pub static LOG: LogRing<LOG_BYTES> = LogRing::new();
 
-/// One step block: IMU1's sample, then NAV, SETP, DMD, MOT (182 bytes); disarmed, only every 8th step has the
-/// four flight records, the other steps log the 40-byte IMU1 record alone.
+/// One step block: IMU1's sample, then NAV, SETP, DMD, MOT, PIDT, NTCH (281 bytes); disarmed, only every 8th step has the
+/// six flight records, the other steps log the 40-byte IMU1 record alone.
 const BLOCK: usize = dflog::IMU.length as usize
     + dflog::NAV.length as usize
     + dflog::SETP.length as usize
     + dflog::DMD.length as usize
-    + dflog::MOT.length as usize;
+    + dflog::MOT.length as usize
+    + dflog::PIDT.length as usize
+    + dflog::NTCH.length as usize;
 
 /// IMU1's sample sink: the flight code and the writer of [`OUT`]. Built inside IMU1's task, on core 1.
 pub struct Stepper {
@@ -413,6 +464,7 @@ pub struct Stepper {
     mag: TripleReader<'static, MagSample>,
     gnss: TripleReader<'static, GnssSample>,
     speed: TripleReader<'static, f32>,
+    notch: TripleReader<'static, (bool, i32)>,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
     step: u32,
@@ -430,17 +482,20 @@ pub struct Stepper {
 
 impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
-    /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`] or [`FLIGHT_SPEED_XY`] or the writer of [`NAV_STAT`] was
-    /// taken already.
+    /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`], [`FLIGHT_SPEED_XY`] or [`FLIGHT_NOTCH`] or the writer of
+    /// [`NAV_STAT`] was taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
+    /// `period_us`: IMU1's sample period from its setup (the value the IMU1 task runs on); the notch's sample rate is
+    /// 1e6 / `period_us`.
     pub fn new(
         rc: Option<TripleReader<'static, RcSample>>,
         steer: Option<&'static mut BoardMix>,
+        period_us: u32,
     ) -> Option<Self> {
         Some(Self {
             flight: Flight::new(
                 steer?,
-                CascadedPid::new(&Tuning::DEFAULT),
+                CascadedPid::new(&Tuning::DEFAULT, 1_000_000.0 / period_us.max(1) as f32),
                 CardAllocator::new(),
                 &Tuning::DEFAULT,
                 &crate::settings::HANDSHAKE,
@@ -451,6 +506,7 @@ impl Stepper {
             mag: FLIGHT_MAG.take_reader()?,
             gnss: FLIGHT_GNSS.take_reader()?,
             speed: FLIGHT_SPEED_XY.take_reader()?,
+            notch: FLIGHT_NOTCH.take_reader()?,
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
@@ -551,6 +607,14 @@ impl SampleSink for Stepper {
         if speed_fresh {
             self.flight.set_pilot_speed_xy(speed);
         }
+        let (notch, notch_fresh) = self.notch.read();
+        if notch_fresh {
+            self.flight.set_notch(notch.0, notch.1);
+        }
+        // The ESC status, once: the eRPM of the step's notch and the ESC record below both come from this copy. A read
+        // that fails (the writer paused in mid-write) is no status: every line is missing.
+        let esc = crate::esc::ESC.try_read(1);
+        let erpm = esc.map_or([None; LINES], |s| s.lines.map(|l| l.erpm));
         let out = self.flight.step(&FlightInputs {
             sensors: Sensors {
                 imu1: *sample,
@@ -561,6 +625,7 @@ impl SampleSink for Stepper {
                 external: None,
             },
             rc: fresh.then_some(report),
+            erpm,
         });
         self.out.write(FlightOut {
             t_us: out.t_us,
@@ -598,7 +663,7 @@ impl SampleSink for Stepper {
                 .push_with(dflog::SPN.length.into(), |b| encode_spn(&out, b));
         }
         if due.esc
-            && let Some(status) = crate::esc::ESC.try_read(1)
+            && let Some(status) = esc
             && status.exchanges > 0
         {
             let f = log_fields(&status, self.esc_since_us);

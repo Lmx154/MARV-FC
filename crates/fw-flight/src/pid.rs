@@ -4,11 +4,13 @@
 //! acceleration is turned into a tilt (Amendment P, P2).
 //! Torques in N.m about FRD, rates in rad/s, collective thrust in N. No feed-forward in the attitude and rate loops.
 
-use crate::gnc::{Controller, NavState, Refused, Saturation, Setpoint, ThrustTorque};
+use crate::gnc::{Controller, NavState, RateLog, Refused, Saturation, Setpoint, ThrustTorque};
 use crate::mahony::DT_MAX_US;
+use crate::notch::{Notch, usable};
 use crate::quat::{conj, down_in_body, mul, pt1};
 use crate::tuning::{Tuning, full_thrust_n};
 use fw_core::calib::GRAVITY_MSS;
+use fw_core::esc::LINES;
 use marv_card::MASS;
 
 /// The thrust multiplier for a tilt whose cosine is `cos` (third component of the estimated down vector in the body):
@@ -57,9 +59,10 @@ impl Axis {
         }
     }
 
-    /// Torque, N.m, for rate error `err` and measured `rate`, rad/s, over `dt_s`. `first`: the first step after a
-    /// reset (dt 0, the D filter starts at the measurement). `limited`: this axis's flag from the previous allocation.
-    /// `ground`: the integrator is set to 0 and adds nothing to this step's torque.
+    /// The terms [P, I, D], N.m, of the torque for rate error `err` and measured `rate`, rad/s, over `dt_s`; the torque
+    /// is P + I + D, summed in that order. `first`: the first step after a reset (dt 0, the D filter starts at the
+    /// measurement). `limited`: this axis's flag from the previous allocation. `ground`: the integrator is set to 0 and
+    /// adds nothing to this step's torque.
     fn step(
         &mut self,
         err: f32,
@@ -69,7 +72,7 @@ impl Axis {
         limited: bool,
         ground: bool,
         fltd_hz: f32,
-    ) -> f32 {
+    ) -> [f32; 3] {
         // D on the filtered measurement, not the error (decision 3c).
         let m = if first {
             rate
@@ -92,7 +95,7 @@ impl Axis {
             }
             self.i = self.i.max(-self.imax).min(self.imax);
         }
-        self.kp * err + self.i + d
+        [self.kp * err, self.i, d]
     }
 }
 
@@ -166,6 +169,12 @@ pub struct CascadedPid {
     pos_active: bool,
     /// The attitude setpoint of the latest `Position` update, [0; 4] after any other update.
     q_sp_pos: [f32; 4],
+    /// The RPM notch on the measured rates (decision-rpm-notch-20261123).
+    notch: Notch,
+    /// The notch switch of the latest `set_rotor_hz`.
+    notch_on: bool,
+    /// The rate loop of the latest `update`, with the latest rotor frequencies and switch.
+    rate_log: RateLog,
     /// Tests only: the anti-windup rule is off.
     #[cfg(test)]
     pub(crate) antiwindup_off: bool,
@@ -181,8 +190,9 @@ pub struct CascadedPid {
 }
 
 impl CascadedPid {
-    /// Gains, limits and the D filter from `tuning`; integrators zero.
-    pub fn new(tuning: &Tuning) -> Self {
+    /// Gains, limits and the D filter from `tuning`; integrators zero. `fs_hz`: the configured IMU1 rate, Hz, the sample
+    /// rate of the notch; the notch is off until `set_rotor_hz` switches it on.
+    pub fn new(tuning: &Tuning, fs_hz: f32) -> Self {
         let [p0, p1, p2] = tuning.atc_rat_p;
         let [i0, i1, i2] = tuning.atc_rat_i;
         let [d0, d1, d2] = tuning.atc_rat_d;
@@ -218,6 +228,9 @@ impl CascadedPid {
             xy_i: [0.0; 2],
             pos_active: false,
             q_sp_pos: [0.0; 4],
+            notch: Notch::new(tuning, fs_hz),
+            notch_on: false,
+            rate_log: RateLog::NONE,
             #[cfg(test)]
             antiwindup_off: false,
             #[cfg(test)]
@@ -451,19 +464,32 @@ impl Controller for CascadedPid {
         };
 
         let [sx, sy, sz] = rate_sp;
-        let [mx, my, mz] = nav.rates_rads;
+        // The notch filters the measurement once; the rate error and the D filter both take its output.
+        let rates = if self.notch_on {
+            self.notch.apply(nav.rates_rads)
+        } else {
+            nav.rates_rads
+        };
+        let [mx, my, mz] = rates;
         let hz = self.fltd_hz;
         // On the ground (the collective below the threshold; in Altitude this step's computed, clamped collective):
         // the integrators are 0 (decision-flight-ground-20261119, section 1).
         let ground = thrust_n < self.ground_thrust_n;
         let [roll, pitch, yaw] = &mut self.axes;
+        let [rp, ri, rd] = roll.step(sx - mx, mx, dt, first, limited.roll, ground, hz);
+        let [pp, pi, pd] = pitch.step(sy - my, my, dt, first, limited.pitch, ground, hz);
+        let [yp, yi, yd] = yaw.step(sz - mz, mz, dt, first, limited.yaw, ground, hz);
+        self.rate_log = RateLog {
+            target_rads: rate_sp,
+            p_nm: [rp, pp, yp],
+            i_nm: [ri, pi, yi],
+            d_nm: [rd, pd, yd],
+            rate_rads: rates,
+            ..self.rate_log
+        };
         Ok(ThrustTorque {
             thrust_n: thrust_n.max(0.0),
-            torque_nm: [
-                roll.step(sx - mx, mx, dt, first, limited.roll, ground, hz),
-                pitch.step(sy - my, my, dt, first, limited.pitch, ground, hz),
-                yaw.step(sz - mz, mz, dt, first, limited.yaw, ground, hz),
-            ],
+            torque_nm: [rp + ri + rd, pp + pi + pd, yp + yi + yd],
         })
     }
 
@@ -478,6 +504,12 @@ impl Controller for CascadedPid {
         self.xy_i = [0.0; 2];
         self.pos_active = false;
         self.q_sp_pos = [0.0; 4];
+        self.notch.reset();
+        self.rate_log = RateLog {
+            f1_hz: self.rate_log.f1_hz,
+            on: self.rate_log.on,
+            ..RateLog::NONE
+        };
     }
 
     fn set_speed_limit_xy(&mut self, ms: f32) {
@@ -487,6 +519,19 @@ impl Controller for CascadedPid {
     fn attitude_setpoint(&self) -> [f32; 4] {
         self.q_sp_pos
     }
+
+    fn set_rotor_hz(&mut self, f1_hz: [Option<f32>; LINES], on: bool) {
+        self.notch_on = on;
+        self.rate_log.on = on;
+        self.rate_log.f1_hz = f1_hz.map(|f| usable(f).unwrap_or(0.0));
+        if on {
+            self.notch.set_rotor_hz(f1_hz);
+        }
+    }
+
+    fn rate_log(&self) -> RateLog {
+        self.rate_log
+    }
 }
 
 #[cfg(test)]
@@ -494,6 +539,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::gnc::Valid;
+    use std::vec::Vec;
 
     const PERIOD_US: u64 = 1_250;
 
@@ -534,7 +580,7 @@ mod tests {
     fn integrator_holds_when_its_axis_is_limited() {
         let tuning = Tuning::DEFAULT;
         let imax = tuning.atc_rat_imax[0];
-        let mut pid = CascadedPid::new(&tuning);
+        let mut pid = CascadedPid::new(&tuning, 800.0);
         let mut t = 0;
         let mut step = |pid: &mut CascadedPid, sp: f32, lim: bool| {
             pid.update(&nav(t), &rates(sp), &limited(lim)).unwrap();
@@ -602,7 +648,7 @@ mod tests {
             rates_rads: [1.0, -0.5, 0.25],
             thrust_n,
         };
-        let mut pid = CascadedPid::new(&tuning);
+        let mut pid = CascadedPid::new(&tuning, 800.0);
         let mut t = 0;
         let mut step = |pid: &mut CascadedPid, thrust_n: f32| {
             let out = pid
@@ -689,7 +735,7 @@ mod tests {
     fn altitude_thrust_is_the_weight_at_rest_and_follows_the_velocity_law() {
         let t = Tuning::DEFAULT;
         let hover = MASS * GRAVITY_MSS;
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         // Entry, level, at the target, at rest: m g exactly.
         let out = pid.update(&alt_nav(0, 3.0, 0.0), &alt(3.0, 0.0), &limited(false)).unwrap();
         assert_eq!(out.thrust_n, hover);
@@ -705,7 +751,7 @@ mod tests {
         let want = MASS * (GRAVITY_MSS - t.psc_velz_p * v_sp);
         assert!((out.thrust_n - want).abs() <= 1e-4 * hover, "{} vs {want}", out.thrust_n);
         // A target far below saturates the setpoint at the descent speed, far above at the climb speed.
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         pid.update(&alt_nav(0, 0.0, 0.0), &alt(0.0, 0.0), &limited(false)).unwrap();
         let out = pid.update(&alt_nav(PERIOD_US, 0.0, 0.0), &alt(100.0, 0.0), &limited(false)).unwrap();
         let want = MASS * (GRAVITY_MSS - t.psc_velz_p * t.pilot_speed_dn_ms);
@@ -730,7 +776,7 @@ mod tests {
             let a = libm::acosf(cos);
             let mut n = alt_nav(0, 0.0, 0.0);
             n.attitude = [libm::cosf(a / 2.0), libm::sinf(a / 2.0), 0.0, 0.0];
-            let mut pid = CascadedPid::new(&t);
+            let mut pid = CascadedPid::new(&t, 800.0);
             let out = pid.update(&n, &alt(0.0, 0.0), &limited(false)).unwrap();
             let want = (hover * factor).min(full);
             assert!((out.thrust_n - want).abs() <= 1e-3 * hover, "cos {cos}: {} vs {want}", out.thrust_n);
@@ -749,12 +795,12 @@ mod tests {
             ("high flag, e_v > 0", false, true, 1.0, 0.0, false, 1.0),
         ];
         for (name, low, high, v_ff, v_d, frozen, sign) in cases {
-            let mut pid = CascadedPid::new(&t);
+            let mut pid = CascadedPid::new(&t, 800.0);
             let (i, _) = run_alt(&mut pid, v_ff, v_d, flags(low, high), 200);
             if frozen {
                 assert_eq!(i, 0.0, "{name}");
                 // Control: with the rule off the integrator grows in that direction.
-                let mut off = CascadedPid::new(&t);
+                let mut off = CascadedPid::new(&t, 800.0);
                 off.antiwindup_off = true;
                 let (i, _) = run_alt(&mut off, v_ff, v_d, flags(low, high), 200);
                 assert!(i * sign > 0.0, "{name}: control {i}");
@@ -764,19 +810,19 @@ mod tests {
         }
         // Our own clamp, no flags: thrust at 0 with e_v >= 0 (the setpoint at the descent speed, climbing at it too).
         let full = full_thrust_n(t.pilot_thrust_max_g);
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         let (i, thrust) = run_alt(&mut pid, t.pilot_speed_dn_ms, -t.pilot_speed_dn_ms, flags(false, false), 200);
         assert_eq!(thrust, 0.0);
         assert_eq!(i, 0.0, "own minimum clamp");
-        let mut off = CascadedPid::new(&t);
+        let mut off = CascadedPid::new(&t, 800.0);
         off.antiwindup_off = true;
         assert!(run_alt(&mut off, t.pilot_speed_dn_ms, -t.pilot_speed_dn_ms, flags(false, false), 200).0 > 0.0);
         // Our own clamp at the maximum with e_v <= 0: descending fast at a target that holds.
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         let (i, thrust) = run_alt(&mut pid, 0.0, 3.0 * t.pilot_speed_dn_ms, flags(false, false), 200);
         assert_eq!(thrust, full);
         assert_eq!(i, 0.0, "own maximum clamp");
-        let mut off = CascadedPid::new(&t);
+        let mut off = CascadedPid::new(&t, 800.0);
         off.antiwindup_off = true;
         assert!(run_alt(&mut off, 0.0, 3.0 * t.pilot_speed_dn_ms, flags(false, false), 200).0 < 0.0);
     }
@@ -784,7 +830,7 @@ mod tests {
     #[test]
     fn the_integrator_starts_at_0_at_each_entry_and_stays_within_its_limit() {
         let t = Tuning::DEFAULT;
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         // Wind it (descending slowly at a held target: e_v < 0, a thrust inside the limits).
         let (i, thrust) = run_alt(&mut pid, 0.0, 0.5, flags(false, false), 400);
         assert!(i < 0.0 && thrust > 0.0);
@@ -825,14 +871,14 @@ mod tests {
         // Descent demanded at the limit: a_d = velz_p x speed, thrust m (g - a_d), below the ground threshold.
         let low = MASS * (GRAVITY_MSS - t.psc_velz_p * t.pilot_speed_dn_ms);
         assert!(low < ground);
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         for k in 0..200u64 {
             let out = pid.update(&alt_nav(k * PERIOD_US, 0.0, 0.0), &tilted(t.pilot_speed_dn_ms), &limited(false)).unwrap();
             assert!(out.thrust_n < ground);
             assert_eq!(pid.axes[0].i, 0.0, "step {k}");
         }
         // At the hover thrust (above the threshold) it grows.
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         for k in 0..200u64 {
             pid.update(&alt_nav(k * PERIOD_US, 0.0, 0.0), &tilted(0.0), &limited(false)).unwrap();
         }
@@ -929,7 +975,7 @@ mod tests {
         let cmds: [[f32; 2]; 4] = [[1.0, 0.0], [-1.0, 0.0], [0.0, 1.0], [0.0, -1.0]];
         for yaw in YAWS {
             for c in cmds {
-                let mut pid = CascadedPid::new(&t);
+                let mut pid = CascadedPid::new(&t, 800.0);
                 pid.update(&pnav(0, [0.0; 3], [0.0; 3], yaw), &pos([0.0; 3], [c[0], c[1], 0.0], yaw), &limited(false)).unwrap();
                 let a = accel_ne(pid.attitude_setpoint());
                 let want = [t.psc_velxy_p * c[0], t.psc_velxy_p * c[1]];
@@ -958,12 +1004,12 @@ mod tests {
         let t = Tuning::DEFAULT;
         let norm = |p: [f32; 2]| libm::sqrtf(p[0] * p[0] + p[1] * p[1]);
         for (n, yaw) in YAWS.into_iter().enumerate() {
-            let mut pid = CascadedPid::new(&t);
+            let mut pid = CascadedPid::new(&t, 800.0);
             let end = point_mass(&mut pid, yaw, [1.2, 1.6], 40.0, |_| [0.0; 2]);
             std::println!("yaw {} deg: 2 m -> {:.5} m after 40 s", n * 90, norm(end));
             assert!(norm(end) < 0.01, "yaw {yaw}: {end:?}");
             // Control.
-            let mut flipped = CascadedPid::new(&t);
+            let mut flipped = CascadedPid::new(&t, 800.0);
             flipped.rotation_flipped = true;
             let end = point_mass(&mut flipped, yaw, [1.2, 1.6], 10.0, |_| [0.0; 2]);
             std::println!("  control, rotation sign flipped: {:.3} m after 10 s", norm(end));
@@ -989,13 +1035,13 @@ mod tests {
                 let want = a_w / (t.psc_posxy_p * t.psc_velxy_p);
                 let mut no_i = t;
                 no_i.psc_velxy_i = 0.0;
-                let mut pid = CascadedPid::new(&no_i);
+                let mut pid = CascadedPid::new(&no_i, 800.0);
                 let end = point_mass(&mut pid, yaw, [0.0; 2], 80.0, drag);
                 std::println!("yaw {} wind {wind:?}: no integrator offset {:.4} m (a_w/(kp kv) = {want:.4}); ", n * 90, norm(end));
                 near_f(norm(end), want, 0.02 * want);
                 // The offset is along the wind (downwind).
                 assert!(end[0] * wind[0] + end[1] * wind[1] > 0.0);
-                let mut pid = CascadedPid::new(&t);
+                let mut pid = CascadedPid::new(&t, 800.0);
                 let end = point_mass(&mut pid, yaw, [0.0; 2], 200.0, drag);
                 std::println!("  with the integrator: {:.5} m after 200 s", norm(end));
                 assert!(norm(end) < 0.01, "{end:?}");
@@ -1015,7 +1061,7 @@ mod tests {
         let a_max = GRAVITY_MSS * libm::tanf(t.angle_max_rad);
         // A far target at rest: v_sp at the speed limit, a = velxy_p x speed > a_max, clipped at every step.
         let run = |off: bool| {
-            let mut pid = CascadedPid::new(&t);
+            let mut pid = CascadedPid::new(&t, 800.0);
             pid.antiwindup_off = off;
             let mut worst_tilt: f32 = 0.0;
             let mut worst_i: f32 = 0.0;
@@ -1037,7 +1083,7 @@ mod tests {
         assert!(tilt <= t.angle_max_rad + 1e-5);
         assert!(i > 0.5 * a_max && i <= a_max * (1.0 + 1e-5), "{i}");
         // It may shrink while clipped: I along north at 4 m/s^2, the vehicle 10 m/s too fast the other way round.
-        let mut pid = CascadedPid::new(&t);
+        let mut pid = CascadedPid::new(&t, 800.0);
         pid.update(&pnav(0, [0.0; 3], [10.0, 0.0, 0.0], 0.0), &pos([0.0; 3], [0.0; 3], 0.0), &limited(false)).unwrap();
         pid.xy_i = [4.0, 0.0];
         let mut last = 4.0;
@@ -1052,7 +1098,7 @@ mod tests {
         for yaw in YAWS {
             for (px, py) in [(50.0, 0.0), (0.0, -50.0), (-3.0, 4.0), (0.0, 0.0)] {
                 for (vx, vy) in [(0.0, 0.0), (15.0, 0.0), (-8.0, 12.0)] {
-                    let mut pid = CascadedPid::new(&t);
+                    let mut pid = CascadedPid::new(&t, 800.0);
                     for k in 0..3u64 {
                         pid.update(&pnav(k * PERIOD_US, [0.0; 3], [vx, vy, 0.0], yaw), &pos([px, py, 0.0], [3.0, -2.0, 0.0], yaw), &limited(false)).unwrap();
                         worst = worst.max(tilt_of(pid.attitude_setpoint()));
@@ -1069,7 +1115,7 @@ mod tests {
     fn the_velocity_setpoint_is_limited_to_the_speed_in_force() {
         let t = Tuning::DEFAULT;
         for speed in [3.0_f32, 3.1, t.pilot_speed_xy_ms] {
-            let mut pid = CascadedPid::new(&t);
+            let mut pid = CascadedPid::new(&t, 800.0);
             pid.set_speed_limit_xy(speed);
             pid.update(&pnav(0, [0.0; 3], [0.0; 3], 0.0), &pos([100.0, 0.0, 0.0], [0.0; 3], 0.0), &limited(false)).unwrap();
             let a = accel_ne(pid.attitude_setpoint());
@@ -1084,7 +1130,7 @@ mod tests {
     fn n2_the_entry_zeroes_the_horizontal_integrator_and_does_not_advance_it() {
         let t = Tuning::DEFAULT;
         for keep in [false, true] {
-            let mut pid = CascadedPid::new(&t);
+            let mut pid = CascadedPid::new(&t, 800.0);
             pid.entry_keeps_integrator = keep;
             // Wind it: a steady 0.5 m/s velocity error.
             for k in 0..4_000u64 {
@@ -1126,8 +1172,8 @@ mod tests {
     fn n3_altitude_and_position_share_the_vertical_loop_bit_for_bit() {
         let t = Tuning::DEFAULT;
         let run = |clear: bool| {
-            let mut stay = CascadedPid::new(&t);
-            let mut change = CascadedPid::new(&t);
+            let mut stay = CascadedPid::new(&t, 800.0);
+            let mut change = CascadedPid::new(&t, 800.0);
             change.position_clears_alt_active = clear;
             let mut same = true;
             for k in 0..3_000u64 {
@@ -1155,11 +1201,90 @@ mod tests {
     #[test]
     fn position_with_a_far_target_height_asks_the_same_thrust_as_altitude() {
         let t = Tuning::DEFAULT;
-        let mut a = CascadedPid::new(&t);
-        let mut p = CascadedPid::new(&t);
+        let mut a = CascadedPid::new(&t, 800.0);
+        let mut p = CascadedPid::new(&t, 800.0);
         let n = pnav(0, [0.0, 0.0, 0.0], [0.0; 3], 0.0);
         let ra = a.update(&n, &alt(1.0, 0.0), &limited(false)).unwrap();
         let rp = p.update(&n, &pos([0.0, 0.0, 1.0], [0.0; 3], 0.0), &limited(false)).unwrap();
         assert_eq!(ra.thrust_n.to_bits(), rp.thrust_n.to_bits());
+    }
+
+    /// A deterministic rate sequence with 120 Hz content, noise, and signed zeros: step `k` of 800 Hz.
+    fn noisy_rates(k: u32, seed: &mut u32) -> [f32; 3] {
+        let mut noise = || {
+            *seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (*seed >> 8) as f32 / (1u32 << 24) as f32 - 0.5
+        };
+        let t = k as f32 / 800.0;
+        let tone = 0.4 * libm::sinf(core::f32::consts::TAU * 120.0 * t);
+        if k % 97 == 0 {
+            return [-0.0, 0.0, -0.0];
+        }
+        [0.3 * libm::sinf(2.0 * t) + tone + 0.05 * noise(), 0.2 * noise() + tone, 0.1 * noise()]
+    }
+
+    /// Runs `steps` of the noisy rates through `pid` with a roll rate setpoint, returning the torques and the rates the
+    /// loop used.
+    fn run_noisy(pid: &mut CascadedPid, steps: u32, each: impl Fn(&mut CascadedPid)) -> Vec<([f32; 3], [f32; 3])> {
+        let mut seed = 7;
+        let mut out = Vec::new();
+        for k in 0..steps {
+            each(pid);
+            let mut n = nav(u64::from(k) * PERIOD_US);
+            n.rates_rads = noisy_rates(k, &mut seed);
+            let sp = rates(0.5 * libm::sinf(k as f32 * 0.01));
+            let torque = pid.update(&n, &sp, &limited(false)).unwrap().torque_nm;
+            out.push((torque, pid.rate_log().rate_rads));
+        }
+        out
+    }
+
+    /// With the switch off, with no usable eRPM, with every h f1 below 50 Hz, with an eRPM of 0: the torques and the rate
+    /// the loop used are bit-identical to the controller that never had the notch set. Control: a live notch differs.
+    #[test]
+    fn a_notch_with_no_weight_leaves_the_torques_bit_identical() {
+        let t = Tuning::DEFAULT;
+        let base = run_noisy(&mut CascadedPid::new(&t, 800.0), 3000, |_| {});
+        let same = |f1: [Option<f32>; LINES], on: bool| {
+            let got = run_noisy(&mut CascadedPid::new(&t, 800.0), 3000, |p| p.set_rotor_hz(f1, on));
+            got.iter().zip(base.iter()).all(|(a, b)| {
+                a.0.iter().zip(b.0.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+                    && a.1.iter().zip(b.1.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+            })
+        };
+        assert!(same([Some(100.0), Some(110.0), Some(120.0), Some(130.0)], false), "switch off");
+        assert!(same([None; LINES], true), "all eRPM missing");
+        assert!(same([Some(16.6); LINES], true), "every h f1 below 50 Hz");
+        assert!(same([Some(0.0); LINES], true), "eRPM 0");
+        assert!(same([Some(f32::NAN), Some(-3.0), None, Some(0.0)], true), "unusable values");
+        assert!(!same([Some(100.0), Some(110.0), Some(120.0), Some(130.0)], true), "control: a live notch must differ");
+        assert!(!same([Some(100.0), None, None, None], true), "control: one live line must differ");
+    }
+
+    /// `rate_log` carries the usable frequencies (0 for the rest), the switch, the setpoint and the three terms, which
+    /// sum to the torque; `reset` clears the loop's part and keeps the frequencies and the switch.
+    #[test]
+    fn rate_log_reports_the_frequencies_the_switch_and_the_loop() {
+        let t = Tuning::DEFAULT;
+        let mut pid = CascadedPid::new(&t, 800.0);
+        pid.set_rotor_hz([Some(100.0), None, Some(f32::NAN), Some(0.0)], true);
+        let mut n = nav(0);
+        n.rates_rads = [0.25, -0.5, 1.0];
+        pid.update(&n, &rates(2.0), &limited(false)).unwrap();
+        let log = pid.rate_log();
+        assert_eq!(log.f1_hz, [100.0, 0.0, 0.0, 0.0]);
+        assert!(log.on);
+        assert_eq!(log.target_rads, [2.0, 0.0, 0.0]);
+        // The first sample starts the filter's memory, so the rate used is the measurement.
+        assert_eq!(log.rate_rads, [0.25, -0.5, 1.0]);
+        let torque = pid.update(&nav(PERIOD_US), &rates(2.0), &limited(false)).unwrap().torque_nm;
+        let log = pid.rate_log();
+        for axis in 0..3 {
+            assert_eq!((log.p_nm[axis] + log.i_nm[axis]) + log.d_nm[axis], torque[axis]);
+        }
+        pid.reset();
+        let log = pid.rate_log();
+        assert_eq!((log.f1_hz, log.on), ([100.0, 0.0, 0.0, 0.0], true), "reset keeps the frequencies and the switch");
+        assert_eq!((log.target_rads, log.p_nm, log.i_nm, log.d_nm, log.rate_rads), ([0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]));
     }
 }

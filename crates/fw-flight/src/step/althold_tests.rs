@@ -60,7 +60,7 @@ pub(super) fn flight<'a>(
 ) -> TestFlight<'a> {
     Flight::new(
         Fake(cell),
-        CascadedPid::new(tuning),
+        CascadedPid::new(tuning, 800.0),
         CardAllocator::new(),
         tuning,
         handshake,
@@ -97,6 +97,7 @@ pub(super) fn input(t_us: u64, rc: Option<RcSample>) -> FlightInputs {
             external: None,
         },
         rc,
+        erpm: [None; LINES],
     }
 }
 

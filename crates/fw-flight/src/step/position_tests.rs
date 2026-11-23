@@ -1077,9 +1077,9 @@ fn the_log_in_position_spn_setp_kind_3_and_mot_code_3() {
     assert_eq!(fields, [p[0], p[1], p[2], v[0], v[1], v[2], hdg]);
     assert!(fields[..2] == [1.25, -0.5], "unlocked (the stick moved): the position is the estimate's");
     // SETP kind 3 with the controller's attitude setpoint; MOT code 3.
-    let mut buf = [0u8; 200];
+    let mut buf = [0u8; 300];
     let n = encode_step(&out, &mut buf);
-    assert_eq!(n, 40 + 44 + 29 + 29);
+    assert_eq!(n, 40 + 44 + 29 + 29 + 59 + 40);
     let setp = usize::from(dflog::NAV.length);
     // SETP: header 3, TimeUS 8, Kind 1, then Q1..Q4.
     assert_eq!(buf[setp + 11], 3);
@@ -1094,7 +1094,7 @@ fn the_log_in_position_spn_setp_kind_3_and_mot_code_3() {
     let out = step_sticks(&mut f, t, false, [0.0, 0.0, HOVER, 0.0], Switch3::Middle);
     assert_eq!(out.attitude_sp, [0.0; 4]);
     let n = encode_step(&out, &mut buf);
-    assert_eq!(n, 40 + 44 + 29 + 29);
+    assert_eq!(n, 40 + 44 + 29 + 29 + 59 + 40);
     assert_eq!(buf[setp + 11], 2);
     assert!((0..4).all(|i| f32_at(&buf[setp..], 12 + 4 * i) == 0.0));
 }
