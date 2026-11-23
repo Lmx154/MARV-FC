@@ -454,10 +454,10 @@ impl HandsOff {
                 if i.airborne {
                     self.home_window = false;
                 } else {
-                    if self.home_d.is_none() && i.position_d_valid {
+                    if self.home_d.is_none() && i.position_d_valid && i.position_d_m.is_finite() {
                         self.home_d = Some(i.position_d_m);
                     }
-                    if self.home_ne.is_none() && i.position_ne_valid {
+                    if self.home_ne.is_none() && i.position_ne_valid && i.position_ne_m.iter().all(|v| v.is_finite()) {
                         self.home_ne = Some(i.position_ne_m);
                     }
                 }
@@ -720,7 +720,7 @@ impl HandsOff {
         if i.tier != Tier::T3 {
             return Some(DenyReason::NotT3);
         }
-        if !i.battery_ok {
+        if !i.battery_ok || i.battery_critical {
             return Some(DenyReason::BatteryNotOk);
         }
         if !i.crsf.is_some_and(|r| r.switch6 == Switch3::High) {
@@ -1517,9 +1517,22 @@ mod tests {
         let mut h = HandsOff::new(&Tuning::DEFAULT);
         let mut i = Rig::new().i;
         let mut seen = [false; 8];
+        let (mut prev, mut high_seen) = (State::Stop, false);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
             let out = h.step(&i);
+            // A2': TAKEOVER hands over only after a High report since its entry, on a report that is not High.
+            let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
+            if prev == State::Takeover && out.state == State::Pilot {
+                assert!(high_seen && !high_now, "hand-over: seen {high_seen}, now High {high_now}");
+            }
+            if out.state == State::Takeover {
+                if prev != State::Takeover {
+                    high_seen = false;
+                }
+                high_seen |= high_now;
+            }
+            prev = out.state;
             if let Some(slot) = seen.get_mut(usize::from(out.state.code() - 1)) {
                 *slot = true;
             }
@@ -2011,6 +2024,150 @@ mod tests {
             assert!(matches!(out.command, None | Some(CommandResult::Denied(_))));
         }
         assert!(pilot > 1_000 && stop > 1_000, "both reached: {pilot} {stop}");
+    }
+
+    // ---- Review follow-up ----
+
+    #[test]
+    fn hands_off_arm_switch_off_is_stop_in_the_same_step_from_every_state() {
+        let rigs: [(&str, fn() -> Rig, State); 6] = [
+            ("pilot", Rig::pilot, State::Pilot),
+            ("hold", Rig::hold, State::Hold),
+            ("auto", Rig::auto, State::Auto),
+            ("return", Rig::ret, State::Return),
+            ("land", Rig::land, State::Land),
+            ("blind", Rig::blind, State::Blind),
+        ];
+        for (name, make, from) in rigs {
+            let mut r = make();
+            assert_eq!(r.h.state(), from, "{name}");
+            let t = r.now() + 1_000;
+            let out = r.report_with(t, CENTRED, Switch3::High, false);
+            assert_eq!((out.state, out.hands_off, out.synthetic_sticks), (State::Stop, false, false), "{name}");
+        }
+    }
+
+    #[test]
+    fn hands_off_link_age_is_from_the_newer_of_crsf_and_heartbeat() {
+        // The heartbeat is 30 s old; the last CRSF report counts: no RETURN until more than 10 s after it.
+        let mut r = Rig::hold();
+        let t0 = r.last_report();
+        r.i.last_radio_heartbeat_us = Some(r.now() - 30 * S);
+        assert_eq!(r.at(t0 + 5 * S).state, State::Hold);
+        assert_eq!(r.at(t0 + LINK_LOSS_US).state, State::Hold);
+        assert_eq!(r.at(t0 + LINK_LOSS_US + 1).state, State::Return);
+    }
+
+    #[test]
+    fn hands_off_link_loss_is_strictly_above_10_s() {
+        let mut r = Rig::hold();
+        let t_hb = r.now();
+        assert_eq!(r.at(t_hb + LINK_LOSS_US).state, State::Hold, "exactly 10.0 s");
+        assert_eq!(r.at(t_hb + LINK_LOSS_US + 1).state, State::Return, "one step later");
+    }
+
+    #[test]
+    fn hands_off_b5_a_tier_upgrade_takes_effect_at_once() {
+        // T2 for longer than the debounce with fresh sticks, then T3 at the stick-loss step: HOLD, not LAND.
+        let mut r = Rig::pilot();
+        r.drop_tier(Tier::T2);
+        let t = r.now() + 2 * TIER_DEBOUNCE_US;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        assert_eq!(r.h.debounced, Tier::T2);
+        r.i.tier = Tier::T3;
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        // In LAND on a matured T2: Abort is denied; at the step T3 is back it is accepted.
+        let mut r = Rig::land();
+        r.drop_tier(Tier::T2);
+        assert_eq!(r.hold_drop().state, State::Land);
+        assert_eq!(r.cmd(Command::Abort).command, denied(DenyReason::NotT3));
+        r.i.tier = Tier::T3;
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Hold, Some(CommandResult::Accepted)));
+    }
+
+    #[test]
+    fn hands_off_start_deny_order_is_the_contracts() {
+        let mut r = Rig::hold();
+        r.i.last_radio_heartbeat_us = Some(r.now() - STATION_LOST_US - 1);
+        r.i.mission.has_waypoints = false;
+        r.i.mission.z_within_limits = false;
+        r.h.home_ne = None;
+        r.i.position_ne_valid = false;
+        r.i.mission.max_waypoint_distance_m = None;
+        r.i.heading_ok = false;
+        r.i.tier = Tier::T2;
+        r.i.battery_ok = false;
+        r.i.crsf = r.i.crsf.map(|c| RcSample {
+            switch6: Switch3::Middle,
+            ..c
+        });
+        let steps: [(DenyReason, fn(&mut Rig)); 11] = [
+            (DenyReason::StationAbsent, |r| r.i.last_radio_heartbeat_us = Some(r.now())),
+            (DenyReason::NoWaypoints, |r| r.i.mission.has_waypoints = true),
+            (DenyReason::HeightOutsideLimits, |r| r.i.mission.z_within_limits = true),
+            (DenyReason::NoHome, |r| r.h.home_ne = Some(HOME_NE)),
+            (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_valid = true),
+            (DenyReason::WaypointDistanceUnknown, |r| {
+                r.i.mission.max_waypoint_distance_m = Some(1500.0)
+            }),
+            (DenyReason::WaypointBeyondRange, |r| {
+                r.i.mission.max_waypoint_distance_m = Some(100.0)
+            }),
+            (DenyReason::HeadingNotOk, |r| r.i.heading_ok = true),
+            (DenyReason::NotT3, |r| r.i.tier = Tier::T3),
+            (DenyReason::BatteryNotOk, |r| r.i.battery_ok = true),
+            (DenyReason::SwitchNotHigh, |r| {
+                r.i.crsf = r.i.crsf.map(|c| RcSample {
+                    switch6: Switch3::High,
+                    ..c
+                })
+            }),
+        ];
+        for (reason, fix) in steps {
+            assert_eq!(r.h.start_check(&r.i), Some(reason));
+            fix(&mut r);
+        }
+        assert_eq!(r.h.start_check(&r.i), None);
+    }
+
+    #[test]
+    fn hands_off_start_is_denied_when_the_battery_is_critical_even_if_ok_is_set() {
+        let mut r = Rig::hold();
+        assert_eq!(r.h.start_check(&r.i), None);
+        r.i.battery_ok = true;
+        r.i.battery_critical = true;
+        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::BatteryNotOk));
+    }
+
+    #[test]
+    fn hands_off_home_latches_only_finite_values() {
+        let bads = [f32::NAN, f32::INFINITY, f32::NEG_INFINITY];
+        for bad in bads {
+            for which in 0..3 {
+                let mut r = Rig::new();
+                r.step();
+                r.i.armed = true;
+                match which {
+                    0 => r.i.position_d_m = bad,
+                    1 => r.i.position_ne_m = [bad, 0.0],
+                    _ => r.i.position_ne_m = [0.0, bad],
+                }
+                assert_eq!(r.report(T0 + 1_000, Switch3::High).home, None, "{bad} {which}");
+                assert_eq!(r.at(T0 + 2_000).home, None, "{bad} {which}");
+                // Finite values later in the same window latch.
+                r.i.position_d_m = HOME_D;
+                r.i.position_ne_m = HOME_NE;
+                assert_eq!(
+                    r.at(T0 + 3_000).home,
+                    Some(Home {
+                        ne_m: HOME_NE,
+                        d_m: HOME_D
+                    })
+                );
+            }
+        }
     }
 
     struct Lcg(u64);
