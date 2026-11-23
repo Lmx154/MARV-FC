@@ -73,20 +73,20 @@ const _: () = assert!(
     "EskfSteer::new(&Tuning::DEFAULT) would refuse the compiled tuning"
 );
 
-/// The ESKF3 core's storage (about 16 KB: the IMU ring, the waiting buffers, P), in `.bss`.
+/// The ESKF3 core's storage (17 592 B: the IMU ring, the waiting buffers, P), in `.bss`.
 static STEER_CORE: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
 /// Builds the ESKF3 core (`Aiding::Full`) into [`STEER_CORE`]. Call once, on core 0 before core 1 starts (the value
 /// passes through core 0's stack, not core 1's 16 KB one). `None` if the constructor refused, which the assertions above
 /// rule out, or on a second call; [`steer`] then returns `None` and the board does not fly.
-// Never inlined: the roughly 16 KB value (and its move into the static) must live in this call's own frame, not in
+// Never inlined: the 17 592 B value (and its move into the static) must live in this call's own frame, not in
 // the frame of the caller's `poll`, which core 0 would then carry under everything the main task ever calls.
 #[inline(never)]
 pub fn steer_core() -> Option<&'static mut Eskf> {
     STEER_CORE.try_init_with(|| Eskf::new(&Tuning::DEFAULT))?.as_mut().ok()
 }
 
-/// The zero-delay ESKF2's storage (a full `Eskf`, about 16 KB; its ring is used as one entry), in `.bss`.
+/// The zero-delay ESKF2's storage (a full `Eskf`, 17 592 B; its ring is used as one entry), in `.bss`.
 static VERT: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
 /// Builds ESKF2 (`Aiding::ImuBaro`) into [`VERT`]; as [`steer_core`].

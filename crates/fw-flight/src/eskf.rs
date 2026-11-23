@@ -50,7 +50,7 @@
 //! nominal v_D, go into a ring of [`VD_RING`] entries; an epoch is predicted as v_D(now) - (S_now - S(t_m)), t_m = arrival -
 //! nav_gps_delay_us, S(t_m) the newest entry at or before t_m (none: stale, counted, skipped). Acceptance: tilt aligned,
 //! fix type >= 3 with a position, the interval rule as `Full`'s, armed, not an exact repeat of the previous fix (screened,
-//! NKI Src 12 Ok 3), a velocity, not stale. Gated: counted only. The GNSS job runs after the propagation and before the
+//! NKI Src 12 Ok 3), a velocity, not stale. Gated: counted only. A re-initialisation empties the ring and sets S to 0. The GNSS job runs after the propagation and before the
 //! barometer; the vertical flags, the aiding timeout and the height reset stay the barometer's.
 //!
 //! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to (C8: "for I = 1, TimeUS is
@@ -500,6 +500,12 @@ pub struct EskfN<const R: usize> {
     /// V-4 test control: the prediction is v_D(now), no time alignment.
     #[cfg(test)]
     vd_align_off: bool,
+    /// Test control: a re-initialisation keeps the S ring and S (the rule before the fix).
+    #[cfg(test)]
+    vd_keep_on_reinit: bool,
+    /// Test control: the VelD job fuses a non-finite measurement or innovation (the rule before the fix).
+    #[cfg(test)]
+    vd_no_finite_check: bool,
 }
 
 /// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
@@ -685,6 +691,10 @@ impl<const R: usize> EskfN<R> {
             vd_job: None,
             #[cfg(test)]
             vd_align_off: false,
+            #[cfg(test)]
+            vd_keep_on_reinit: false,
+            #[cfg(test)]
+            vd_no_finite_check: false,
         })
     }
 
@@ -794,6 +804,14 @@ impl<const R: usize> EskfN<R> {
         self.baro_job = None;
         self.mag_job = None;
         self.vd_job = None;
+        #[cfg(test)]
+        let keep = self.vd_keep_on_reinit;
+        #[cfg(not(test))]
+        let keep = false;
+        if !keep {
+            self.vd_ring = Fifo::new();
+            self.vd_s = 0.0;
+        }
         self.stats.reinits = self.stats.reinits.wrapping_add(1);
     }
 
@@ -1452,11 +1470,20 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only.
+    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only. A non-finite
+    /// measurement or innovation is counted as screened, with no record, and changes nothing.
     fn vd_job(&mut self, (z, s_m): (f32, f32)) {
         #[cfg(test)]
         let s_m = if self.vd_align_off { self.vd_s } else { s_m };
         let innov = z - (self.nom.v[2] - (self.vd_s - s_m));
+        #[cfg(test)]
+        let check = !self.vd_no_finite_check;
+        #[cfg(not(test))]
+        let check = true;
+        if check && !(z.is_finite() && innov.is_finite()) {
+            self.stats.gps_vd_screened = self.stats.gps_vd_screened.wrapping_add(1);
+            return;
+        }
         let sv = self.t.nav_gps_vd_sigma_ms;
         let (ok, s) = self.fuse_vertical_masked(VEL + 2, innov, sv * sv);
         if ok {
@@ -4895,5 +4922,105 @@ pub(crate) mod tests {
         // The documented differences: without GST VelD accepts what Full refuses; without a velocity Full accepts what VelD refuses.
         assert!(tally[10][1] >= 23 && mismatch[10] == tally[10][1], "{:?} {}", tally[10], mismatch[10]);
         assert!(tally[12][0] == 25 && mismatch[12] >= 23, "{:?} {}", tally[12], mismatch[12]);
+    }
+
+    /// The VelD filter armed from 5 s, moving, VelD fused; `keep` the test control that keeps the S ring and S at a
+    /// re-initialisation. Runs to just before `secs` s.
+    fn vd_warm(t: &Tuning, secs: u64, keep: bool) -> (Eskf, World) {
+        let mut f = Eskf::with_gps_vd(t).unwrap();
+        f.vd_keep_on_reinit = keep;
+        let mut w = World::new(t);
+        w.gps_vel = true;
+        w.v = [1.0, 0.5, 0.0];
+        while w.t_us() < secs * 1_000_000 {
+            let s = w.step();
+            f.set_armed(w.t_us() >= 5_000_000);
+            f.update(&s);
+        }
+        (f, w)
+    }
+
+    #[test]
+    fn vr1_a_reinitialisation_empties_the_s_ring_so_an_epoch_measured_before_it_is_stale() {
+        let t = Tuning::DEFAULT;
+        // A forced re-initialisation (a non-finite v_N) 40 ms before a GNSS epoch: that epoch's t_m is 30 ms before the
+        // re-initialisation. The tilt re-aligns at the first propagation after it, before the epoch.
+        let epoch_us = 20_000_000;
+        let run = |keep: bool| {
+            let (mut f, mut w) = vd_warm(&t, 0, keep);
+            let mut out = None;
+            while w.t_us() < epoch_us + 100_000 {
+                let s = w.step();
+                if w.t_us() == epoch_us - 40_000 {
+                    poison(&mut f);
+                }
+                f.set_armed(w.t_us() >= 5_000_000);
+                let before = *f.stats();
+                f.update(&s);
+                if w.t_us() == epoch_us - 40_000 {
+                    assert_eq!(f.stats().reinits, before.reinits + 1);
+                    if !keep {
+                        assert_eq!((f.vd_s.to_bits(), f.vd_ring.len), (0, 0));
+                    }
+                }
+                if w.t_us() == epoch_us {
+                    assert!(s.gnss.is_some() && f.tilt_aligned());
+                    let st = f.stats();
+                    let paired = st.gps_vd_fused + st.gps_vd_gated - before.gps_vd_fused - before.gps_vd_gated + u32::from(f.vd_job.is_some());
+                    out = Some((st.gps_vd_stale - before.gps_vd_stale, paired, (0..f.vd_ring.len).all(|i| f.vd_ring.get(i).0 > epoch_us - 40_000)));
+                }
+            }
+            out.unwrap()
+        };
+        let (stale, paired, post) = run(false);
+        let (stale_c, paired_c, post_c) = run(true);
+        println!("vr1: epoch measured before the re-initialisation: stale {stale}, paired {paired}, ring entries all after it {post}; control (ring and S kept): stale {stale_c}, paired {paired_c}, {post_c}");
+        assert_eq!((stale, paired, post), (1, 0, true));
+        assert_eq!((stale_c, paired_c, post_c), (0, 1, false), "the control must pair the epoch with an S from before the re-initialisation");
+    }
+
+    #[test]
+    fn vr2_a_non_finite_veld_or_s_never_reaches_the_state() {
+        let t = Tuning::DEFAULT;
+        // (a) Direct: a NaN S or a NaN measurement is counted as screened, writes no record and changes nothing; the control
+        // (no finite check) puts the NaN into the state.
+        let (f, _) = vd_warm(&t, 20, false);
+        assert!(f.stats().gps_vd_fused > 0);
+        let before = bits(&f);
+        for (vd_s, z) in [(f32::NAN, 0.0f32), (f.vd_s, f32::NAN)] {
+            let mut a = f.clone();
+            a.vd_s = vd_s;
+            a.events = [None; EVENTS];
+            a.vd_job((z, f.vd_s));
+            assert_eq!(bits(&a), before);
+            assert_eq!((a.stats().gps_vd_screened, a.stats().gps_vd_fused, a.stats().gps_vd_gated), (f.stats().gps_vd_screened + 1, f.stats().gps_vd_fused, f.stats().gps_vd_gated));
+            assert!(vd_events(&a).is_empty());
+            let mut c = f.clone();
+            c.vd_s = vd_s;
+            c.vd_no_finite_check = true;
+            c.vd_job((z, f.vd_s));
+            assert!(!c.finite(), "the control must inject the non-finite value");
+        }
+        // (b) End to end: a NaN v_D at 20 s makes S NaN in that step and re-initialises; VelD fuses again after it and no
+        // further re-initialisation follows. Control (ring and S kept, no finite check: the code before the fix): a
+        // re-initialisation at every accepted epoch.
+        let run = |old: bool| {
+            let (mut f, mut w) = vd_warm(&t, 20, old);
+            f.vd_no_finite_check = old;
+            f.nom.v[2] = f32::NAN;
+            let fused = f.stats().gps_vd_fused;
+            while w.t_us() < 40_000_000 {
+                let s = w.step();
+                f.set_armed(true);
+                f.update(&s);
+            }
+            (f.stats().reinits, f.stats().gps_vd_fused - fused, f.vd_s.is_finite())
+        };
+        let (reinits, fused, finite) = run(false);
+        let (reinits_c, fused_c, finite_c) = run(true);
+        println!("vr2: NaN v_D at 20 s: re-initialisations {reinits}, VelD fused after {fused}, S finite {finite}; control (the code before the fix): re-initialisations {reinits_c}, fused {fused_c}, S finite {finite_c}");
+        assert_eq!((reinits, finite), (1, true));
+        assert!(fused > 50, "{fused}");
+        assert!(reinits_c > 50 && !finite_c, "the control must loop: {reinits_c}");
     }
 }
