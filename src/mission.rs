@@ -23,7 +23,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::mission::{
-    CAPACITY, Frame, Item, Link, MISSION_ACK_ID, MISSION_CLEAR_ALL_ID, MISSION_COUNT_ID,
+    MAX_ITEMS, Frame, Item, Link, MISSION_ACK_ID, MISSION_CLEAR_ALL_ID, MISSION_COUNT_ID,
     MISSION_ITEM_INT_ID, MISSION_REQUEST_INT_ID, MISSION_REQUEST_LIST_ID, MissionService, Tx,
     TxMsg, decode, result,
 };
@@ -112,8 +112,19 @@ pub fn message(link: Link, m: Incoming<'_>) -> bool {
         msg,
     };
     let armed = crate::settings::HANDSHAKE.armed();
+    // The height limits in force now, read before the lock is taken (the store is never nested in it). A value that cannot be
+    // read or has the wrong type is NaN: every `z` is refused (fail closed).
+    let (alt_min, alt_max) = crate::store::with(|p| {
+        let get = |name| match p.get_named(name) {
+            Some(mavlink_device::ParamValue::F32(v)) => v,
+            _ => f32::NAN,
+        };
+        (get(fw_settings::flight::GDN_ALT_MIN), get(fw_settings::flight::GDN_ALT_MAX))
+    })
+    .unwrap_or((f32::NAN, f32::NAN));
     STATE.lock(|c| {
         let mut st = c.borrow_mut();
+        st.svc.set_limits(alt_min, alt_max);
         if let Some(tx) = st.svc.handle(m.now_us, armed, &frame) {
             offer(&mut st.slots, tx);
         }
@@ -153,15 +164,16 @@ pub fn link_down(link: Link) {
     });
 }
 
-/// A copy of the committed list, its length and the change counter, for `flight::push_gdn`.
-pub fn committed() -> ([Item; CAPACITY], usize, u32) {
+/// A copy of the committed list (the waypoints and the return item), its length, the change counter and the plan id, for
+/// `flight::push_gdn`.
+pub fn committed() -> ([Item; MAX_ITEMS], usize, u32, u32) {
     STATE.lock(|c| {
         let st = c.borrow();
-        let mut items = [Item::default(); CAPACITY];
+        let mut items = [Item::default(); MAX_ITEMS];
         for (dst, src) in items.iter_mut().zip(st.svc.items()) {
             *dst = *src;
         }
-        (items, st.svc.items().len(), st.svc.change_counter())
+        (items, st.svc.items().len(), st.svc.change_counter(), st.svc.plan_id())
     })
 }
 
@@ -181,8 +193,10 @@ fn result_code(r: u8) -> MavMissionResult {
         result::UNSUPPORTED_FRAME => MavMissionResult::MAV_MISSION_UNSUPPORTED_FRAME,
         result::UNSUPPORTED => MavMissionResult::MAV_MISSION_UNSUPPORTED,
         result::NO_SPACE => MavMissionResult::MAV_MISSION_NO_SPACE,
+        result::INVALID => MavMissionResult::MAV_MISSION_INVALID,
         result::INVALID_PARAM5_X => MavMissionResult::MAV_MISSION_INVALID_PARAM5_X,
         result::INVALID_PARAM6_Y => MavMissionResult::MAV_MISSION_INVALID_PARAM6_Y,
+        result::INVALID_PARAM7 => MavMissionResult::MAV_MISSION_INVALID_PARAM7,
         result::INVALID_SEQUENCE => MavMissionResult::MAV_MISSION_INVALID_SEQUENCE,
         result::DENIED => MavMissionResult::MAV_MISSION_DENIED,
         result::OPERATION_CANCELLED => MavMissionResult::MAV_MISSION_OPERATION_CANCELLED,
@@ -201,7 +215,7 @@ fn plan_type(t: u8) -> MavMissionType {
     }
 }
 
-/// Encodes `tx`: MISSION_REQUEST_INT, MISSION_COUNT, MISSION_ACK or MISSION_ITEM_INT (frame 3, command 16, `current` 0,
+/// Encodes `tx`: MISSION_REQUEST_INT, MISSION_COUNT, MISSION_ACK or MISSION_ITEM_INT (frame 3, command 16, or 20 for the return item, `current` 0,
 /// `autocontinue` 1, `param1` to `param4` 0.0, `mission_type` 0).
 fn push(tx: &Tx, out: &mut Outgoing<'_>) -> bool {
     let (target_system, target_component) = (tx.dst_system, tx.dst_component);
@@ -230,6 +244,25 @@ fn push(tx: &Tx, out: &mut Outgoing<'_>) -> bool {
                 mavtype: result_code(result),
                 mission_type: plan_type(mission_type),
                 opaque_id,
+            })
+            .is_ok(),
+        TxMsg::ReturnItem { seq, z_bits } => out
+            .push(&MISSION_ITEM_INT_DATA {
+                param1: 0.0,
+                param2: 0.0,
+                param3: 0.0,
+                param4: 0.0,
+                x: 0,
+                y: 0,
+                z: f32::from_bits(z_bits),
+                seq,
+                command: MavCmd::MAV_CMD_NAV_RETURN_TO_LAUNCH,
+                target_system,
+                target_component,
+                frame: MavFrame::MAV_FRAME_GLOBAL_RELATIVE_ALT,
+                current: 0,
+                autocontinue: 1,
+                mission_type: MavMissionType::MAV_MISSION_TYPE_MISSION,
             })
             .is_ok(),
         TxMsg::Item { seq, x, y, z_bits } => out

@@ -8,7 +8,7 @@
 //! values: "send this message to this system and component on this link". At most one output
 //! comes from each [`MissionService::handle`] and each [`MissionService::poll`].
 //!
-//! It holds the committed list (16 waypoints of 12 bytes: `x`, `y` and the 4 bytes of `z`), a staging
+//! It holds the committed list (up to 16 waypoints and the return item, last, of 12 bytes each: `x`, `y` and the 4 bytes of `z`), a staging
 //! copy that replaces it in one step on the last valid item, and one transaction at a time across
 //! both links, owned by (link, system id, component id). The reply slot and its pacing, the
 //! accept list, the frame encoding and decoding and the critical-section static are the
@@ -37,6 +37,14 @@ pub const FRAME_STORED: u8 = 3;
 pub const FRAME_ALT_INT: u8 = 6;
 /// The `command` of a waypoint: `MAV_CMD_NAV_WAYPOINT`.
 pub const COMMAND_WAYPOINT: u16 = 16;
+/// The return item's `command` (`MAV_CMD_NAV_RETURN_TO_LAUNCH`): the last item of every upload, its `z` the return height.
+pub const COMMAND_RETURN: u16 = 20;
+/// Items the list holds: up to [`CAPACITY`] waypoints and the return item.
+pub const MAX_ITEMS: usize = CAPACITY + 1;
+/// The default `GDN_ALT_MIN`, m: what the service holds until [`MissionService::set_limits`] is called.
+pub const ALT_MIN_DEFAULT: f32 = 5.0;
+/// The default `GDN_ALT_MAX`, m.
+pub const ALT_MAX_DEFAULT: f32 = 50.0;
 /// The vehicle's system id: a frame is handled only when its target system is 0 or this.
 pub const VEHICLE_SYSTEM: u8 = 1;
 /// The vehicle's component id: a frame is handled only when its target component is 0 or this.
@@ -60,11 +68,15 @@ pub mod result {
     pub const UNSUPPORTED: u8 = 3;
     /// `MAV_MISSION_NO_SPACE`.
     pub const NO_SPACE: u8 = 4;
+    /// MAV_MISSION_INVALID.
+    pub const INVALID: u8 = 5;
     /// `MAV_MISSION_INVALID_PARAM5_X`.
     pub const INVALID_PARAM5_X: u8 = 10;
     /// `MAV_MISSION_INVALID_PARAM6_Y`.
     pub const INVALID_PARAM6_Y: u8 = 11;
     /// `MAV_MISSION_INVALID_SEQUENCE`.
+    pub const INVALID_PARAM7: u8 = 12;
+    /// MAV_MISSION_INVALID_SEQUENCE.
     pub const INVALID_SEQUENCE: u8 = 13;
     /// `MAV_MISSION_DENIED`.
     pub const DENIED: u8 = 14;
@@ -218,6 +230,14 @@ pub enum TxMsg {
         /// `opaque_id`: the new plan id of an accepted upload, 0 in every other MISSION_ACK.
         opaque_id: u32,
     },
+    /// MISSION_ITEM_INT of a download, the return item (`seq` n - 1): `command` [`COMMAND_RETURN`], `frame` [`FRAME_STORED`],
+    /// `x` 0, `y` 0, `current` 0, `autocontinue` 1, `param1` to `param4` 0.0, `mission_type` 0.
+    ReturnItem {
+        /// `seq`.
+        seq: u16,
+        /// `z` as single-precision bits, as stored.
+        z_bits: u32,
+    },
     /// MISSION_ITEM_INT of a download: `frame` [`FRAME_STORED`], `command` [`COMMAND_WAYPOINT`],
     /// `current` 0, `autocontinue` 1, `param1` to `param4` 0.0, `mission_type` 0.
     Item {
@@ -248,7 +268,7 @@ pub struct Tx {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Kind {
     Upload {
-        /// Waypoints announced by MISSION_COUNT (1 to 16).
+        /// Items announced by MISSION_COUNT (1 to 17: the waypoints and the return item).
         n: u8,
         /// The `seq` expected next.
         next: u16,
@@ -293,7 +313,7 @@ fn plan_id_of(items: &[Item]) -> u32 {
     if items.is_empty() {
         return 0;
     }
-    let mut buf = [0u8; CAPACITY * ITEM_BYTES];
+    let mut buf = [0u8; MAX_ITEMS * ITEM_BYTES];
     let mut len = 0;
     for (chunk, item) in buf.as_chunks_mut::<ITEM_BYTES>().0.iter_mut().zip(items) {
         chunk.copy_from_slice(&item.bytes());
@@ -303,19 +323,26 @@ fn plan_id_of(items: &[Item]) -> u32 {
 }
 
 /// The checks an upload item passes, in the contract's order (the `seq` check is before them).
-fn validate(armed: bool, it: &RxItem) -> Result<Item, u8> {
+fn validate(armed: bool, last: bool, limits: (f32, f32), it: &RxItem) -> Result<Item, u8> {
+    let z = f32::from_bits(it.z_bits);
     if it.mission_type != 0 {
         Err(result::UNSUPPORTED)
     } else if armed {
         Err(result::ERROR)
-    } else if it.command != COMMAND_WAYPOINT {
+    } else if last && it.command != COMMAND_RETURN {
+        Err(result::INVALID)
+    } else if !last && it.command == COMMAND_RETURN {
+        Err(result::INVALID)
+    } else if !last && it.command != COMMAND_WAYPOINT {
         Err(result::UNSUPPORTED)
     } else if it.frame != FRAME_STORED && it.frame != FRAME_ALT_INT {
         Err(result::UNSUPPORTED_FRAME)
-    } else if !(-900_000_000..=900_000_000).contains(&it.x) {
+    } else if last && it.x != 0 || !last && !(-900_000_000..=900_000_000).contains(&it.x) {
         Err(result::INVALID_PARAM5_X)
-    } else if !(-1_800_000_000..=1_800_000_000).contains(&it.y) {
+    } else if last && it.y != 0 || !last && !(-1_800_000_000..=1_800_000_000).contains(&it.y) {
         Err(result::INVALID_PARAM6_Y)
+    } else if !(z.is_finite() && z >= limits.0 && z <= limits.1) {
+        Err(result::INVALID_PARAM7)
     } else {
         Ok(Item { x: it.x, y: it.y, z_bits: it.z_bits })
     }
@@ -404,7 +431,7 @@ pub fn decode(message_id: u32, payload: &[u8]) -> Option<(u8, u8, Rx)> {
     }
 }
 
-/// How many targets the shadow guidance takes from the mission: all of its waypoints.
+/// How many targets the shadow guidance takes from the mission: all of its waypoints (not the return item).
 pub const GDN_TARGETS: usize = CAPACITY;
 
 /// The shadow guidance's target set as core 0 pushes it to the flight core: how many targets are in use (0 is off), the
@@ -417,10 +444,16 @@ pub struct GdnTargets {
     pub radius_m: f32,
     /// The targets as (latitude, longitude).
     pub targets: [(i32, i32); GDN_TARGETS],
+    /// The waypoints' `z`, m above home, one per target (0.0 for the unused ones and with `GDN_SRC` 0).
+    pub alts_m: [f32; GDN_TARGETS],
+    /// The return height, m above home: the return item's `z` (0.0 with `GDN_SRC` 0 or no mission).
+    pub return_m: f32,
+    /// The committed mission's plan id (0 with `GDN_SRC` 0 or no mission).
+    pub plan_id: u32,
 }
 
-/// The target set to push: with `source` 1 the committed mission's waypoints (`mission`, at most 16) with
-/// `radius_m`; with any other `source` (0, the default) exactly the `GDN_*` parameters, `count_param` clamped to
+/// The target set to push: with `source` 1 the committed mission's waypoints (`mission` without its last item, the return
+/// item, whose `z` is the return height) with `radius_m` and the mission's `plan_id`; with any other `source` (0, the default) exactly the `GDN_*` parameters, `count_param` clamped to
 /// `0..=param_targets.len()` and the first of `param_targets`, whatever the mission holds.
 pub fn select_targets(
     source: i32,
@@ -428,13 +461,26 @@ pub fn select_targets(
     radius_m: f32,
     param_targets: &[(i32, i32)],
     mission: &[Item],
+    plan_id: u32,
 ) -> GdnTargets {
     let mut targets = [(0, 0); GDN_TARGETS];
+    let mut alts_m = [0.0; GDN_TARGETS];
+    let mut return_m = 0.0;
+    let mut plan = 0;
     let count = if source == 1 {
-        for (dst, item) in targets.iter_mut().zip(mission) {
+        let (waypoints, ret) = match mission.split_last() {
+            Some((ret, waypoints)) => (waypoints, Some(ret)),
+            None => (mission, None),
+        };
+        for ((dst, alt), item) in targets.iter_mut().zip(alts_m.iter_mut()).zip(waypoints) {
             *dst = (item.x, item.y);
+            *alt = f32::from_bits(item.z_bits);
         }
-        mission.len().min(GDN_TARGETS)
+        if let Some(ret) = ret {
+            return_m = f32::from_bits(ret.z_bits);
+            plan = plan_id;
+        }
+        waypoints.len().min(GDN_TARGETS)
     } else {
         for (dst, src) in targets.iter_mut().zip(param_targets) {
             *dst = *src;
@@ -442,17 +488,19 @@ pub fn select_targets(
         let limit = i32::try_from(param_targets.len().min(GDN_TARGETS)).unwrap_or(0);
         usize::try_from(count_param.clamp(0, limit)).unwrap_or(0)
     };
-    GdnTargets { count: u8::try_from(count).unwrap_or(0), radius_m, targets }
+    GdnTargets { count: u8::try_from(count).unwrap_or(0), radius_m, targets, alts_m, return_m, plan_id: plan }
 }
 
 /// The vehicle's mission service; see the module documentation.
 #[derive(Clone, Debug)]
 pub struct MissionService {
-    items: [Item; CAPACITY],
+    items: [Item; MAX_ITEMS],
     count: u8,
     plan_id: u32,
     changes: u32,
-    staging: [Item; CAPACITY],
+    staging: [Item; MAX_ITEMS],
+    /// `GDN_ALT_MIN` and `GDN_ALT_MAX` in force (m), as of the last [`MissionService::set_limits`].
+    limits: (f32, f32),
     txn: Option<Txn>,
     last_upload: Option<LastUpload>,
 }
@@ -467,22 +515,29 @@ impl MissionService {
     /// An empty list (plan id 0, change counter 0) and no transaction: the state after boot.
     pub const fn new() -> Self {
         Self {
-            items: [Item::ZERO; CAPACITY],
+            items: [Item::ZERO; MAX_ITEMS],
             count: 0,
             plan_id: 0,
             changes: 0,
-            staging: [Item::ZERO; CAPACITY],
+            staging: [Item::ZERO; MAX_ITEMS],
+            limits: (ALT_MIN_DEFAULT, ALT_MAX_DEFAULT),
             txn: None,
             last_upload: None,
         }
     }
 
-    /// The committed waypoints, `seq` 0 first.
+    /// Sets the height limits (`GDN_ALT_MIN`, `GDN_ALT_MAX`, m) the next uploaded items are checked against. A minimum above the
+    /// maximum (or a NaN) refuses every `z`.
+    pub fn set_limits(&mut self, alt_min: f32, alt_max: f32) {
+        self.limits = (alt_min, alt_max);
+    }
+
+    /// The committed items, `seq` 0 first: the waypoints, then the return item (empty when no list is stored).
     pub fn items(&self) -> &[Item] {
         self.items.get(..usize::from(self.count)).unwrap_or(&[])
     }
 
-    /// The number of committed waypoints.
+    /// The number of committed items (the waypoints and the return item).
     pub fn count(&self) -> u8 {
         self.count
     }
@@ -596,7 +651,7 @@ impl MissionService {
     }
 
     fn clear(&mut self) {
-        self.items = [Item::ZERO; CAPACITY];
+        self.items = [Item::ZERO; MAX_ITEMS];
         self.count = 0;
         self.plan_id = 0;
         self.changes = self.changes.wrapping_add(1);
@@ -617,7 +672,7 @@ impl MissionService {
                     ack(from, result::UNSUPPORTED, mission_type, 0)
                 } else if armed {
                     ack(from, result::ERROR, mission_type, 0)
-                } else if usize::from(count) > CAPACITY {
+                } else if usize::from(count) > MAX_ITEMS {
                     ack(from, result::NO_SPACE, mission_type, 0)
                 } else if count == 0 {
                     self.clear();
@@ -683,6 +738,9 @@ impl MissionService {
                             return ack(from, result::UNSUPPORTED, mission_type, 0);
                         }
                         match self.items().get(usize::from(seq)) {
+                            Some(item) if usize::from(seq) + 1 == usize::from(self.count) => {
+                                to(from, TxMsg::ReturnItem { seq, z_bits: item.z_bits })
+                            }
                             Some(item) => to(
                                 from,
                                 TxMsg::Item { seq, x: item.x, y: item.y, z_bits: item.z_bits },
@@ -719,7 +777,8 @@ impl MissionService {
             });
             return to(from, TxMsg::RequestInt { seq: next });
         }
-        let stored = match validate(armed, &item) {
+        let last = usize::from(next) + 1 >= usize::from(n);
+        let stored = match validate(armed, last, self.limits, &item) {
             Ok(stored) => stored,
             Err(code) => {
                 self.txn = None;
@@ -737,7 +796,7 @@ impl MissionService {
             *slot = stored;
         }
         let crc = crc32_update(crc, &stored.bytes());
-        if usize::from(next) + 1 >= usize::from(n) {
+        if last {
             self.commit(n, crc);
             self.txn = None;
             self.last_upload = Some(LastUpload {
@@ -810,7 +869,7 @@ mod tests {
     }
 
     fn item(seq: u16, x: i32, y: i32) -> Rx {
-        Rx::ItemInt(rx_item(seq, x, y, 1.0))
+        Rx::ItemInt(rx_item(seq, x, y, 10.0))
     }
 
     fn done_ack() -> Rx {
@@ -841,11 +900,33 @@ mod tests {
 
     const PLAN3: u32 = 0x99C3_BD49;
 
+    /// The three points and a return item of 20.0 m: the contract's worked example 3.
+    fn full3() -> [Item; 4] {
+        let p = points3();
+        [p[0], p[1], p[2], Item { x: 0, y: 0, z_bits: 20.0f32.to_bits() }]
+    }
+
+    const PLAN3R: u32 = 0x1862_F4A2;
+
+    /// An item as the station sends it: the return item (x = y = 0, z) is the last one of `n`.
+    fn rx_of_n(it: &Item, seq: u16, n: usize) -> Rx {
+        Rx::ItemInt(RxItem {
+            seq,
+            frame: 3,
+            command: if usize::from(seq) + 1 == n { 20 } else { 16 },
+            x: it.x,
+            y: it.y,
+            z_bits: it.z_bits,
+            mission_type: 0,
+        })
+    }
+
+    /// An item as the station sends it; one with x = y = 0 is the return item (command 20).
     fn rx_of(it: &Item, seq: u16) -> Rx {
         Rx::ItemInt(RxItem {
             seq,
             frame: 3,
-            command: 16,
+            command: if it.x == 0 && it.y == 0 { 20 } else { 16 },
             x: it.x,
             y: it.y,
             z_bits: it.z_bits,
@@ -861,17 +942,36 @@ mod tests {
         for (i, it) in pts.iter().enumerate() {
             assert_eq!(out, want_req(link, i as u16), "request {i}");
             t += 40 * MS;
-            out = s.handle(t, false, &fr(link, rx_of(it, i as u16)));
+            out = s.handle(t, false, &fr(link, rx_of_n(it, i as u16, pts.len())));
+        }
+        out
+    }
+
+    /// A list of `n` items as uploaded: `n` - 1 waypoints (z 10 to 25 m) and the return item (0, 0, 20 m); empty for 0.
+    /// As `upload`, but ends at the first answer that is not the next request.
+    fn upload_to_the_end(s: &mut MissionService, link: Link, pts: &[Item]) -> Option<Tx> {
+        let mut out = s.handle(0, false, &fr(link, count(pts.len() as u16)));
+        for (i, it) in pts.iter().enumerate() {
+            if out != want_req(link, i as u16) {
+                return out;
+            }
+            out = s.handle(1 + i as u64, false, &fr(link, rx_of_n(it, i as u16, pts.len())));
         }
         out
     }
 
     fn many(n: usize) -> std::vec::Vec<Item> {
         (0..n)
-            .map(|i| Item {
-                x: 100_000_000 + i as i32 * 1000,
-                y: -300_000_000,
-                z_bits: (i as f32).to_bits(),
+            .map(|i| {
+                if i + 1 == n {
+                    Item { x: 0, y: 0, z_bits: 20.0f32.to_bits() }
+                } else {
+                    Item {
+                        x: 100_000_000 + i as i32 * 1000,
+                        y: -300_000_000,
+                        z_bits: (10.0 + i as f32).to_bits(),
+                    }
+                }
             })
             .collect()
     }
@@ -898,12 +998,18 @@ mod tests {
         for (p, w) in pts.iter().zip(want.iter()) {
             assert_eq!(&p.bytes(), w);
         }
-        assert_eq!(plan_id_of(&pts), 0x99C3_BD49);
-        let mut s = MissionService::new();
-        let end = upload(&mut s, Link::Radio, &pts, 0);
-        assert_eq!(end, want_ack(Link::Radio, 0, 0, 0x99C3_BD49));
-        assert_eq!(s.plan_id(), 0x99C3_BD49);
+        // Example 1 (the three points alone, the old rule's arithmetic) is not an upload any more.
+        assert_eq!(plan_id_of(&pts), PLAN3);
         assert_eq!(0x99C3_BD49u32, 2_579_742_025);
+        // Example 3: the same points and the return item (8 bytes of 0, then z = 20.0).
+        let full = full3();
+        assert_eq!(&full[3].bytes(), &[0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x00, 0xA0, 0x41]);
+        assert_eq!(plan_id_of(&full), PLAN3R);
+        let mut s = MissionService::new();
+        let end = upload(&mut s, Link::Radio, &full, 0);
+        assert_eq!(end, want_ack(Link::Radio, 0, 0, 0x1862_F4A2));
+        assert_eq!(s.plan_id(), 0x1862_F4A2);
+        assert_eq!(0x1862_F4A2u32, 409_138_338);
     }
 
     #[test]
@@ -920,16 +1026,29 @@ mod tests {
     fn zero_crc_becomes_one() {
         assert_eq!(plan_id_from_crc(0), 1);
         assert_eq!(plan_id_from_crc(5), 5);
-        // A real one-waypoint list whose CRC is 0: z is solved for (the CRC is affine in z).
-        let mut base = Item { x: 100_000_000, y: -300_000_000, z_bits: 0 };
-        let crc_of = |it: &Item| crc32(&it.bytes());
+        // A real list (one waypoint and the return item) whose CRC is 0: the free low bits of the waypoint's x, y and z are
+        // solved for (the CRC is affine in them); every value stays inside the checked ranges.
+        let ret = Item { x: 0, y: 0, z_bits: 20.0f32.to_bits() };
+        let base = Item { x: 100_000_000, y: -300_000_000, z_bits: 10.0f32.to_bits() };
+        let with = |m: u128| {
+            let mut it = base;
+            it.x ^= (m & 0xFF_FFFF) as i32;
+            it.y ^= ((m >> 24) & 0xFF_FFFF) as i32;
+            it.z_bits ^= ((m >> 48) & 0xF_FFFF) as u32;
+            it
+        };
+        let crc_of = |it: &Item| {
+            let mut b = [0u8; 2 * ITEM_BYTES];
+            b[..ITEM_BYTES].copy_from_slice(&it.bytes());
+            b[ITEM_BYTES..].copy_from_slice(&ret.bytes());
+            crc32(&b)
+        };
         let a = crc_of(&base);
-        // basis[i] = effect of z bit i; reduce with a tracking xor-basis.
-        let mut rows: std::vec::Vec<(u32, u32)> = std::vec::Vec::new();
-        for i in 0..32 {
-            let probe = Item { z_bits: 1 << i, ..base };
-            let mut v = crc_of(&probe) ^ a;
-            let mut m = 1u32 << i;
+        // rows: (effect on the CRC, the flipped bits) as an xor-basis.
+        let mut rows: std::vec::Vec<(u32, u128)> = std::vec::Vec::new();
+        for i in 0..68 {
+            let mut v = crc_of(&with(1u128 << i)) ^ a;
+            let mut m = 1u128 << i;
             for &(rv, rm) in &rows {
                 if v ^ rv < v {
                     v ^= rv;
@@ -942,19 +1061,20 @@ mod tests {
             }
         }
         let mut v = a;
-        let mut z = 0u32;
+        let mut flips = 0u128;
         for &(rv, rm) in &rows {
             if v ^ rv < v {
                 v ^= rv;
-                z ^= rm;
+                flips ^= rm;
             }
         }
         assert_eq!(v, 0, "CRC not solvable");
-        base.z_bits = z;
-        assert_eq!(crc_of(&base), 0);
-        assert_eq!(plan_id_of(&[base]), 1);
+        let waypoint = with(flips);
+        assert_eq!(crc_of(&waypoint), 0);
+        assert!(f32::from_bits(waypoint.z_bits) >= 10.0 && f32::from_bits(waypoint.z_bits) < 12.0);
+        assert_eq!(plan_id_of(&[waypoint, ret]), 1);
         let mut s = MissionService::new();
-        let end = upload(&mut s, Link::Usb, &[base], 0);
+        let end = upload(&mut s, Link::Usb, &[waypoint, ret], 0);
         assert_eq!(end, want_ack(Link::Usb, 0, 0, 1));
         assert_eq!(s.plan_id(), 1);
     }
@@ -962,75 +1082,87 @@ mod tests {
     // ---- worked examples ----
 
     #[test]
-    fn worked_example_1() {
-        let pts = points3();
+    fn worked_example_3() {
+        let pts = full3();
         let mut s = MissionService::new();
         let r = Link::Radio;
-        // 1-2. count 3 at t 0; MISSION_REQUEST_INT seq 0 (sent at t 40 by the slot).
-        assert_eq!(s.handle(0, false, &fr(r, count(3))), want_req(r, 0));
-        // 3-4. item 0 at about t 45; REQUEST_INT seq 1.
-        assert_eq!(s.handle(45 * MS, false, &fr(r, rx_of(&pts[0], 0))), want_req(r, 1));
-        // 5. item 1 is lost. Nothing until the vehicle's timer (45 + 1500 ms) runs out.
+        // The sequence of example 1 with count 4; seq 3 is the return item; item 1 is lost once.
+        assert_eq!(s.handle(0, false, &fr(r, count(4))), want_req(r, 0));
+        assert_eq!(s.handle(45 * MS, false, &fr(r, rx_of_n(&pts[0], 0, 4))), want_req(r, 1));
         assert_eq!(s.poll(1000 * MS), None);
         assert_eq!(s.poll(1544 * MS), None);
-        // 6. t 1560 (handed at 1545): retry 1 of 5.
         assert_eq!(s.poll(1545 * MS), want_req(r, 1));
-        // 7-8. item 1 again; REQUEST_INT seq 2.
-        assert_eq!(s.handle(1560 * MS, false, &fr(r, rx_of(&pts[1], 1))), want_req(r, 2));
-        // 9-10. item 2: commit, ACK ACCEPTED with the plan id.
+        assert_eq!(s.handle(1560 * MS, false, &fr(r, rx_of_n(&pts[1], 1, 4))), want_req(r, 2));
+        assert_eq!(s.handle(1580 * MS, false, &fr(r, rx_of_n(&pts[2], 2, 4))), want_req(r, 3));
         assert!(s.items().is_empty());
         assert_eq!(
-            s.handle(1600 * MS, false, &fr(r, rx_of(&pts[2], 2))),
-            want_ack(r, result::ACCEPTED, 0, 2_579_742_025)
+            s.handle(1600 * MS, false, &fr(r, rx_of_n(&pts[3], 3, 4))),
+            want_ack(r, result::ACCEPTED, 0, 409_138_338)
         );
         assert_eq!(s.items(), &pts);
-        assert_eq!(s.plan_id(), PLAN3);
-        assert_eq!(s.count(), 3);
+        assert_eq!(s.plan_id(), PLAN3R);
+        assert_eq!(s.count(), 4);
         assert_eq!(s.change_counter(), 1);
         assert!(!s.busy());
-        // 11-12. read back.
         assert_eq!(
             s.handle(1640 * MS, false, &fr(r, req_list())),
-            to_station(r, TxMsg::Count { count: 3, opaque_id: 2_579_742_025 })
+            to_station(r, TxMsg::Count { count: 4, opaque_id: 409_138_338 })
         );
-        // 13. items 0, 1, 2.
         for (i, p) in pts.iter().enumerate() {
             let t = (1680 + 40 * i as u64) * MS;
-            assert_eq!(
-                s.handle(t, false, &fr(r, req(i as u16))),
-                to_station(r, TxMsg::Item { seq: i as u16, x: p.x, y: p.y, z_bits: p.z_bits })
-            );
+            let want = if i == 3 {
+                TxMsg::ReturnItem { seq: 3, z_bits: 20.0f32.to_bits() }
+            } else {
+                TxMsg::Item { seq: i as u16, x: p.x, y: p.y, z_bits: p.z_bits }
+            };
+            assert_eq!(s.handle(t, false, &fr(r, req(i as u16))), to_station(r, want));
         }
-        // 14. ACCEPTED ends the download; no reply.
         assert_eq!(s.handle(1800 * MS, false, &fr(r, done_ack())), None);
         assert!(!s.busy());
         assert_eq!(s.poll(100_000 * MS), None);
     }
 
     #[test]
-    fn worked_example_2() {
-        let pts = points3();
+    fn worked_example_3_with_a_return_height_of_4_ends_at_seq_3_with_param7() {
+        let mut pts = full3();
+        pts[3].z_bits = 4.0f32.to_bits();
         let mut s = MissionService::new();
         let r = Link::Radio;
-        assert_eq!(upload(&mut s, r, &pts, 0), want_ack(r, 0, 0, PLAN3));
+        assert_eq!(upload(&mut s, r, &full3(), 0), want_ack(r, 0, 0, PLAN3R));
+        let before = held(&s);
+        assert_eq!(upload(&mut s, r, &pts, 100), want_ack(r, result::INVALID_PARAM7, 0, 0));
+        assert!(!s.busy());
+        assert_eq!(held(&s), before);
+    }
+
+    #[test]
+    fn worked_example_2() {
+        let pts = full3();
+        let mut s = MissionService::new();
+        let r = Link::Radio;
+        assert_eq!(upload(&mut s, r, &pts, 0), want_ack(r, 0, 0, PLAN3R));
         let before = held(&s);
         assert_eq!(
-            s.handle(10_000 * MS, false, &fr(r, count(17))),
+            s.handle(10_000 * MS, false, &fr(r, count(18))),
             want_ack(r, result::NO_SPACE, 0, 0)
         );
         assert!(!s.busy());
         assert_eq!(held(&s), before);
-        // The read back: the count and the three items of example 1.
+        // The read back: the count and the four items of example 3.
         assert_eq!(
             s.handle(10_040 * MS, false, &fr(r, req_list())),
-            to_station(r, TxMsg::Count { count: 3, opaque_id: 2_579_742_025 })
+            to_station(r, TxMsg::Count { count: 4, opaque_id: 409_138_338 })
         );
-        for (i, p) in pts.iter().enumerate() {
+        for (i, p) in pts.iter().take(3).enumerate() {
             assert_eq!(
                 s.handle(10_080 * MS, false, &fr(r, req(i as u16))),
                 to_station(r, TxMsg::Item { seq: i as u16, x: p.x, y: p.y, z_bits: p.z_bits })
             );
         }
+        assert_eq!(
+            s.handle(10_080 * MS, false, &fr(r, req(3))),
+            to_station(r, TxMsg::ReturnItem { seq: 3, z_bits: 20.0f32.to_bits() })
+        );
         assert_eq!(s.handle(10_200 * MS, false, &fr(r, done_ack())), None);
         assert_eq!(held(&s), before);
     }
@@ -1038,16 +1170,16 @@ mod tests {
     // ---- accept, commit, capacity ----
 
     #[test]
-    fn sixteen_accepted_seventeen_no_space() {
+    fn seventeen_accepted_eighteen_no_space() {
         let mut s = MissionService::new();
-        let pts = many(16);
+        let pts = many(17);
         let end = upload(&mut s, Link::Usb, &pts, 0);
         assert_eq!(end, want_ack(Link::Usb, 0, 0, plan_id_of(&pts)));
-        assert_eq!(s.count(), 16);
+        assert_eq!(s.count(), 17);
         assert_eq!(s.items(), &pts[..]);
         let before = held(&s);
         assert_eq!(
-            s.handle(0, false, &fr(Link::Usb, count(17))),
+            s.handle(0, false, &fr(Link::Usb, count(18))),
             want_ack(Link::Usb, result::NO_SPACE, 0, 0)
         );
         assert_eq!(
@@ -1061,9 +1193,12 @@ mod tests {
     #[test]
     fn one_item_upload_and_replace() {
         let mut s = MissionService::new();
+        // Count 1: the return item alone, a valid list with no waypoints.
         let one = many(1);
         assert_eq!(upload(&mut s, Link::Usb, &one, 0), want_ack(Link::Usb, 0, 0, plan_id_of(&one)));
         assert_eq!(s.change_counter(), 1);
+        assert_eq!(s.items(), &one[..]);
+        assert_eq!(s.count(), 1);
         let two = many(5);
         assert_eq!(upload(&mut s, Link::Usb, &two, 0), want_ack(Link::Usb, 0, 0, plan_id_of(&two)));
         assert_eq!(s.items(), &two[..]);
@@ -1080,8 +1215,9 @@ mod tests {
         let mut s = MissionService::new();
         let r = Link::Usb;
         let pts = [
-            Item { x: 900_000_000, y: 1_800_000_000, z_bits: 0 },
-            Item { x: -900_000_000, y: -1_800_000_000, z_bits: 0x8000_0000 },
+            Item { x: 900_000_000, y: 1_800_000_000, z_bits: 5.0f32.to_bits() },
+            Item { x: -900_000_000, y: -1_800_000_000, z_bits: 50.0f32.to_bits() },
+            Item { x: 0, y: 0, z_bits: 5.0f32.to_bits() },
         ];
         assert_eq!(upload(&mut s, r, &pts, 0), want_ack(r, 0, 0, plan_id_of(&pts)));
         assert_eq!(s.items(), &pts);
@@ -1091,7 +1227,7 @@ mod tests {
     fn count_zero_clears() {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         assert_eq!(s.change_counter(), 1);
         assert_eq!(s.handle(0, false, &fr(r, count(0))), want_ack(r, 0, 0, 0));
         assert!(!s.busy());
@@ -1108,7 +1244,7 @@ mod tests {
     fn clear_all_clears_and_acks_zero_opaque() {
         let mut s = MissionService::new();
         let r = Link::Usb;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         assert_eq!(s.handle(0, false, &fr(r, clear_all())), want_ack(r, 0, 0, 0));
         assert!(!s.busy());
         assert_eq!((s.count(), s.plan_id(), s.change_counter()), (0, 0, 2));
@@ -1121,7 +1257,7 @@ mod tests {
     fn refusal(frame_msg: Rx, armed: bool, code: u8, mission_type: u8) {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         let before = held(&s);
         assert_eq!(
             s.handle(1_000 * MS, armed, &fr(r, frame_msg)),
@@ -1133,7 +1269,7 @@ mod tests {
 
     #[test]
     fn count_mission_type_unsupported() {
-        refusal(Rx::Count { count: 3, mission_type: 1 }, false, result::UNSUPPORTED, 1);
+        refusal(Rx::Count { count: 4, mission_type: 1 }, false, result::UNSUPPORTED, 1);
         refusal(Rx::Count { count: 0, mission_type: 255 }, false, result::UNSUPPORTED, 255);
     }
 
@@ -1144,8 +1280,8 @@ mod tests {
     }
 
     #[test]
-    fn count_above_16_no_space() {
-        refusal(count(17), false, result::NO_SPACE, 0);
+    fn count_above_17_no_space() {
+        refusal(count(18), false, result::NO_SPACE, 0);
     }
 
     #[test]
@@ -1168,10 +1304,10 @@ mod tests {
     fn request_list_allowed_while_armed() {
         let mut s = MissionService::new();
         let r = Link::Usb;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         assert_eq!(
             s.handle(0, true, &fr(r, req_list())),
-            to_station(r, TxMsg::Count { count: 3, opaque_id: PLAN3 })
+            to_station(r, TxMsg::Count { count: 4, opaque_id: PLAN3R })
         );
     }
 
@@ -1179,10 +1315,10 @@ mod tests {
     fn item_refusal(mutate: impl Fn(&mut RxItem), armed: bool) -> (MissionService, Option<Tx>) {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         let before = held(&s);
         assert_eq!(s.handle(1_000 * MS, false, &fr(r, count(3))), want_req(r, 0));
-        let mut it = rx_item(0, 1, 2, 3.0);
+        let mut it = rx_item(0, 1, 2, 10.0);
         mutate(&mut it);
         let out = s.handle(1_040 * MS, armed, &fr(r, Rx::ItemInt(it)));
         assert!(!s.busy(), "a refusal ends the transaction");
@@ -1237,7 +1373,7 @@ mod tests {
         let mut s = MissionService::new();
         let r = Link::Usb;
         assert_eq!(s.handle(0, false, &fr(r, item(0, 1, 2))), want_ack(r, result::ERROR, 0, 0));
-        let mut it = rx_item(0, 1, 2, 3.0);
+        let mut it = rx_item(0, 1, 2, 10.0);
         it.mission_type = 9;
         assert_eq!(
             s.handle(0, false, &fr(r, Rx::ItemInt(it))),
@@ -1264,9 +1400,9 @@ mod tests {
     fn download_request_invalid_sequence() {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         let before = held(&s);
-        for seq in [3u16, 4, 65535] {
+        for seq in [4u16, 5, 65535] {
             assert!(s.handle(0, false, &fr(r, req_list())).is_some());
             assert_eq!(
                 s.handle(0, false, &fr(r, req(seq))),
@@ -1286,7 +1422,7 @@ mod tests {
     fn download_request_mission_type_unsupported() {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         assert!(s.handle(0, false, &fr(r, req_list())).is_some());
         assert_eq!(
             s.handle(0, false, &fr(r, Rx::RequestInt { seq: 0, mission_type: 1 })),
@@ -1323,6 +1459,198 @@ mod tests {
     #[test]
     fn clear_check_order() {
         refusal(Rx::ClearAll { mission_type: 255 }, true, result::UNSUPPORTED, 255);
+    }
+
+    /// A stored list, then an upload of 4 whose first three items are good and whose last (the return item) is as `mutate`
+    /// makes it, sent with the service's limits `limits`; returns the answer and whether the list kept its content.
+    fn last_item(mutate: impl Fn(&mut RxItem), limits: (f32, f32)) -> (Option<Tx>, bool) {
+        let mut s = MissionService::new();
+        let r = Link::Radio;
+        let _ = upload(&mut s, r, &full3(), 0);
+        let before = held(&s);
+        let new = many(4);
+        assert_eq!(s.handle(1_000 * MS, false, &fr(r, count(4))), want_req(r, 0));
+        for (i, it) in new.iter().enumerate().take(3) {
+            assert_eq!(s.handle(1_001 * MS, false, &fr(r, rx_of(it, i as u16))), want_req(r, i as u16 + 1));
+        }
+        s.set_limits(limits.0, limits.1);
+        let Rx::ItemInt(mut last) = rx_of(&new[3], 3) else { panic!() };
+        mutate(&mut last);
+        let out = s.handle(1_002 * MS, false, &fr(r, Rx::ItemInt(last)));
+        assert!(!s.busy());
+        (out, held(&s) == before)
+    }
+
+    const DEFAULT_LIMITS: (f32, f32) = (5.0, 50.0);
+
+    fn refused_last(mutate: impl Fn(&mut RxItem), code: u8, mission_type: u8) {
+        let (out, unchanged) = last_item(mutate, DEFAULT_LIMITS);
+        assert_eq!(out, want_ack(Link::Radio, code, mission_type, 0));
+        assert!(unchanged, "the previous list and plan id survive");
+    }
+
+    #[test]
+    fn last_item_command_not_20_is_invalid() {
+        for command in [16u16, 0, 1, 22, 21, 19, 400] {
+            refused_last(|i| i.command = command, result::INVALID, 0);
+        }
+    }
+
+    #[test]
+    fn command_20_at_any_other_seq_is_invalid() {
+        let (_, out) = item_refusal(|i| i.command = 20, false);
+        assert_eq!(out, want_ack(Link::Radio, result::INVALID, 0, 0));
+    }
+
+    #[test]
+    fn return_item_x_not_0_is_param5() {
+        for x in [1, -1, 100_000_000, i32::MAX, i32::MIN] {
+            refused_last(|i| i.x = x, result::INVALID_PARAM5_X, 0);
+        }
+    }
+
+    #[test]
+    fn return_item_y_not_0_is_param6() {
+        for y in [1, -1, 100_000_000, i32::MAX, i32::MIN] {
+            refused_last(|i| i.y = y, result::INVALID_PARAM6_Y, 0);
+        }
+    }
+
+    #[test]
+    fn return_item_frame_3_and_6_accepted_others_unsupported_frame() {
+        for frame in [0u8, 2, 4, 5, 7, 10, 255] {
+            refused_last(|i| i.frame = frame, result::UNSUPPORTED_FRAME, 0);
+        }
+        for frame in [3u8, 6] {
+            let (out, unchanged) = last_item(|i| i.frame = frame, DEFAULT_LIMITS);
+            assert_eq!(out, want_ack(Link::Radio, result::ACCEPTED, 0, plan_id_of(&many(4))), "frame {frame}");
+            assert!(!unchanged);
+        }
+    }
+
+    #[test]
+    fn return_item_mission_type_and_armed_come_first() {
+        refused_last(|i| i.mission_type = 1, result::UNSUPPORTED, 1);
+        // armed before command: the armed state is the service's input, here through the helper of item 0.
+        let (_, out) = item_refusal(|i| i.command = 20, true);
+        assert_eq!(out, want_ack(Link::Radio, result::ERROR, 0, 0));
+    }
+
+    #[test]
+    fn return_item_check_order_command_frame_x_y_z() {
+        refused_last(|i| { i.command = 16; i.frame = 99; i.x = 5; i.y = 5; i.z_bits = f32::NAN.to_bits(); }, result::INVALID, 0);
+        refused_last(|i| { i.frame = 99; i.x = 5; i.y = 5; i.z_bits = f32::NAN.to_bits(); }, result::UNSUPPORTED_FRAME, 0);
+        refused_last(|i| { i.x = 5; i.y = 5; i.z_bits = f32::NAN.to_bits(); }, result::INVALID_PARAM5_X, 0);
+        refused_last(|i| { i.y = 5; i.z_bits = f32::NAN.to_bits(); }, result::INVALID_PARAM6_Y, 0);
+        refused_last(|i| i.z_bits = f32::NAN.to_bits(), result::INVALID_PARAM7, 0);
+    }
+
+    #[test]
+    fn waypoint_check_order_ends_with_z() {
+        let (_, out) = item_refusal(|i| { i.z_bits = f32::NAN.to_bits(); i.y = i32::MAX; }, false);
+        assert_eq!(out, want_ack(Link::Radio, result::INVALID_PARAM6_Y, 0, 0));
+        let (_, out) = item_refusal(|i| i.z_bits = 4.999f32.to_bits(), false);
+        assert_eq!(out, want_ack(Link::Radio, result::INVALID_PARAM7, 0, 0));
+    }
+
+    fn just_below(v: f32) -> f32 {
+        f32::from_bits(v.to_bits() - 1)
+    }
+
+    fn just_above(v: f32) -> f32 {
+        f32::from_bits(v.to_bits() + 1)
+    }
+
+    #[test]
+    fn z_at_each_limit_accepted_a_hair_outside_param7_waypoint_and_return_item() {
+        for (lo, hi) in [(5.0f32, 50.0f32), (3.0, 120.0), (7.5, 7.5)] {
+            for z in [lo, hi, (lo + hi) / 2.0] {
+                // A waypoint and the return item at the limit.
+                let mut s = MissionService::new();
+                s.set_limits(lo, hi);
+                let list = [
+                    Item { x: 100_000_000, y: -300_000_000, z_bits: z.to_bits() },
+                    Item { x: 0, y: 0, z_bits: z.to_bits() },
+                ];
+                assert_eq!(
+                    upload(&mut s, Link::Usb, &list, 0),
+                    want_ack(Link::Usb, 0, 0, plan_id_of(&list)),
+                    "z {z} in [{lo}, {hi}]"
+                );
+            }
+            for z in [just_below(lo), just_above(hi), lo - 1.0, hi + 1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, -0.0, 0.0, f32::MAX] {
+                for at in 0..2usize {
+                    let mut s = MissionService::new();
+                    s.set_limits(lo, hi);
+                    let mid = ((lo + hi) / 2.0).to_bits();
+                    let mut list = [
+                        Item { x: 100_000_000, y: -300_000_000, z_bits: mid },
+                        Item { x: 0, y: 0, z_bits: mid },
+                    ];
+                    list[at].z_bits = z.to_bits();
+                    assert_eq!(
+                        upload_to_the_end(&mut s, Link::Usb, &list),
+                        want_ack(Link::Usb, result::INVALID_PARAM7, 0, 0),
+                        "z {z} at item {at} in [{lo}, {hi}]"
+                    );
+                    assert!(s.items().is_empty() && !s.busy());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_minimum_above_the_maximum_refuses_every_z() {
+        for z in [3.0f32, 10.0, 50.0, 100.0, 120.0] {
+            let (out, unchanged) = last_item(|i| i.z_bits = z.to_bits(), (100.0, 10.0));
+            assert_eq!(out, want_ack(Link::Radio, result::INVALID_PARAM7, 0, 0), "z {z}");
+            assert!(unchanged);
+        }
+        for bad in [(f32::NAN, 50.0), (5.0, f32::NAN)] {
+            let (out, _) = last_item(|_| {}, bad);
+            assert_eq!(out, want_ack(Link::Radio, result::INVALID_PARAM7, 0, 0));
+        }
+    }
+
+    #[test]
+    fn the_limits_in_force_at_the_item_are_used_and_a_stored_list_is_not_rechecked() {
+        let mut s = MissionService::new();
+        let r = Link::Usb;
+        assert_eq!(upload(&mut s, r, &full3(), 0), want_ack(r, 0, 0, PLAN3R));
+        let before = held(&s);
+        s.set_limits(30.0, 40.0);
+        assert_eq!(held(&s), before, "a limit changed afterwards leaves the list as it is");
+        assert_eq!(
+            s.handle(0, false, &fr(r, req_list())),
+            to_station(r, TxMsg::Count { count: 4, opaque_id: PLAN3R })
+        );
+    }
+
+    #[test]
+    fn count_1_is_the_return_item_alone_and_17_is_accepted() {
+        let mut s = MissionService::new();
+        let r = Link::Usb;
+        assert_eq!(s.handle(0, false, &fr(r, count(1))), want_req(r, 0));
+        // A waypoint (command 16) as the only item is the last item: INVALID.
+        assert_eq!(s.handle(1, false, &fr(r, item(0, 1, 1))), want_ack(r, result::INVALID, 0, 0));
+        assert_eq!(s.handle(2, false, &fr(r, count(17))), want_req(r, 0));
+        assert_eq!(s.handle(3, false, &fr(r, count(18))), want_ack(r, result::NO_SPACE, 0, 0));
+    }
+
+    #[test]
+    fn download_of_a_list_of_one_is_the_return_item() {
+        let mut s = MissionService::new();
+        let r = Link::Usb;
+        let one = many(1);
+        let _ = upload(&mut s, r, &one, 0);
+        assert_eq!(
+            s.handle(1, false, &fr(r, req_list())),
+            to_station(r, TxMsg::Count { count: 1, opaque_id: plan_id_of(&one) })
+        );
+        assert_eq!(
+            s.handle(2, false, &fr(r, req(0))),
+            to_station(r, TxMsg::ReturnItem { seq: 0, z_bits: 20.0f32.to_bits() })
+        );
     }
 
     #[test]
@@ -1495,7 +1823,7 @@ mod tests {
     fn download_idle_nine_seconds() {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
+        let _ = upload(&mut s, r, &full3(), 0);
         let t0 = 20_000 * MS;
         assert!(s.handle(t0, false, &fr(r, req_list())).is_some());
         // The vehicle asks for nothing in a download.
@@ -1507,7 +1835,7 @@ mod tests {
         assert_eq!(s.poll(t0 + 14_000 * MS), want_ack(r, result::OPERATION_CANCELLED, 0, 0));
         assert!(!s.busy());
         assert_eq!(s.poll(t0 + 99_000 * MS), None);
-        assert_eq!(s.plan_id(), PLAN3);
+        assert_eq!(s.plan_id(), PLAN3R);
         // A fresh download starts again.
         assert!(s.handle(t0 + 100_000 * MS, false, &fr(r, req_list())).is_some());
         assert_eq!(s.poll(t0 + 109_000 * MS), want_ack(r, result::OPERATION_CANCELLED, 0, 0));
@@ -1519,8 +1847,8 @@ mod tests {
     fn atomic_on_failure_at_the_last_item() {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let first = points3();
-        assert_eq!(upload(&mut s, r, &first, 0), want_ack(r, 0, 0, PLAN3));
+        let first = full3();
+        assert_eq!(upload(&mut s, r, &first, 0), want_ack(r, 0, 0, PLAN3R));
         let before = held(&s);
         let new = many(4);
         assert_eq!(s.handle(1_000 * MS, false, &fr(r, count(4))), want_req(r, 0));
@@ -1532,11 +1860,11 @@ mod tests {
             // Whatever reads the list sees the old one.
             assert_eq!(held(&s), before);
         }
-        let mut last = rx_item(3, 1, 1, 0.0);
-        last.y = 1_800_000_001;
+        let mut last = rx_item(3, 0, 0, 4.0);
+        last.command = 20;
         assert_eq!(
             s.handle(1_002 * MS, false, &fr(r, Rx::ItemInt(last))),
-            want_ack(r, result::INVALID_PARAM6_Y, 0, 0)
+            want_ack(r, result::INVALID_PARAM7, 0, 0)
         );
         assert_eq!(held(&s), before);
         assert_eq!(s.items(), &first);
@@ -1552,7 +1880,7 @@ mod tests {
         let r = Link::Radio;
         let fresh = || {
             let mut s = MissionService::new();
-            let _ = upload(&mut s, r, &points3(), 0);
+            let _ = upload(&mut s, r, &full3(), 0);
             let before = held(&s);
             let new = many(3);
             assert_eq!(s.handle(1_000 * MS, false, &fr(r, count(3))), want_req(r, 0));
@@ -1661,7 +1989,7 @@ mod tests {
     #[test]
     fn second_owner_denied_during_download_and_after_it_may_start() {
         let mut s = MissionService::new();
-        let _ = upload(&mut s, Link::Radio, &points3(), 0);
+        let _ = upload(&mut s, Link::Radio, &full3(), 0);
         assert!(s.handle(0, false, &fr(Link::Usb, req_list())).is_some());
         assert_eq!(
             s.handle(1, false, &fr(Link::Radio, req_list())),
@@ -1671,7 +1999,7 @@ mod tests {
             s.handle(1, false, &fr(Link::Radio, clear_all())),
             want_ack(Link::Radio, result::DENIED, 0, 0)
         );
-        assert_eq!(s.count(), 3);
+        assert_eq!(s.count(), 4);
         assert_eq!(s.handle(2, false, &fr(Link::Usb, done_ack())), None);
         assert_eq!(
             s.handle(3, false, &fr(Link::Radio, clear_all())),
@@ -1758,10 +2086,12 @@ mod tests {
             to_station(r, TxMsg::Count { count: 3, opaque_id: plan_id_of(&pts) })
         );
         for (i, p) in pts.iter().enumerate() {
-            assert_eq!(
-                s.handle(1, true, &fr(r, req(i as u16))),
-                to_station(r, TxMsg::Item { seq: i as u16, x: p.x, y: p.y, z_bits: p.z_bits })
-            );
+            let want = if i == 2 {
+                TxMsg::ReturnItem { seq: 2, z_bits: p.z_bits }
+            } else {
+                TxMsg::Item { seq: i as u16, x: p.x, y: p.y, z_bits: p.z_bits }
+            };
+            assert_eq!(s.handle(1, true, &fr(r, req(i as u16))), to_station(r, want));
         }
         assert_eq!(s.handle(2, true, &fr(r, done_ack())), None);
         assert_eq!(held(&s), before);
@@ -1774,18 +2104,18 @@ mod tests {
         let mut s = MissionService::new();
         let r = Link::Usb;
         // Frame 6 is stored and read back as 3 (the download carries no frame: it is always 3);
-        // z is kept as 4 bytes: NaN with a payload, -0.0, a subnormal.
+        // z is kept as 4 bytes; the return item is read back as command 20, frame 3, x = y = 0.
         let sent = [
-            Item { x: -900_000_000, y: 1_800_000_000, z_bits: 0x7FC0_1234 },
-            Item { x: 1, y: -1, z_bits: 0x8000_0000 },
-            Item { x: 0, y: 0, z_bits: 0x0000_0001 },
+            Item { x: -900_000_000, y: 1_800_000_000, z_bits: 5.0f32.to_bits() },
+            Item { x: 1, y: -1, z_bits: 50.0f32.to_bits() },
+            Item { x: 0, y: 0, z_bits: 12.5f32.to_bits() },
         ];
         assert_eq!(s.handle(0, false, &fr(r, count(3))), want_req(r, 0));
         for (i, p) in sent.iter().enumerate() {
             let mut it = RxItem {
                 seq: i as u16,
                 frame: 6,
-                command: 16,
+                command: if i == 2 { 20 } else { 16 },
                 x: p.x,
                 y: p.y,
                 z_bits: p.z_bits,
@@ -1807,10 +2137,12 @@ mod tests {
         // Any order, as often as asked.
         for seq in [2u16, 0, 1, 1, 0, 2, 2] {
             let p = sent[usize::from(seq)];
-            assert_eq!(
-                s.handle(11, false, &fr(r, req(seq))),
-                to_station(r, TxMsg::Item { seq, x: p.x, y: p.y, z_bits: p.z_bits })
-            );
+            let want = if seq == 2 {
+                TxMsg::ReturnItem { seq, z_bits: p.z_bits }
+            } else {
+                TxMsg::Item { seq, x: p.x, y: p.y, z_bits: p.z_bits }
+            };
+            assert_eq!(s.handle(11, false, &fr(r, req(seq))), to_station(r, want));
         }
         assert!(s.busy());
         // A dropped item in a download, no reply.
@@ -1845,7 +2177,7 @@ mod tests {
         assert_eq!(s.handle(2, false, &fr(r, rx_of(&a[1], 1))), want_req(r, 2));
         // Again, with another count: from the start, nothing of the first one is kept.
         assert_eq!(s.handle(3, false, &fr(r, count(2))), want_req(r, 0));
-        let b = [a[3], a[2]];
+        let b = [a[2], a[3]];
         assert_eq!(s.handle(4, false, &fr(r, rx_of(&b[0], 0))), want_req(r, 1));
         assert_eq!(s.handle(5, false, &fr(r, rx_of(&b[1], 1))), want_ack(r, 0, 0, plan_id_of(&b)));
         assert_eq!(s.items(), &b);
@@ -1861,8 +2193,8 @@ mod tests {
     fn repeated_request_list_and_clear_by_the_owner() {
         let mut s = MissionService::new();
         let r = Link::Radio;
-        let _ = upload(&mut s, r, &points3(), 0);
-        let count_msg = to_station(r, TxMsg::Count { count: 3, opaque_id: PLAN3 });
+        let _ = upload(&mut s, r, &full3(), 0);
+        let count_msg = to_station(r, TxMsg::Count { count: 4, opaque_id: PLAN3R });
         assert_eq!(s.handle(0, false, &fr(r, req_list())), count_msg);
         assert!(s.handle(1, false, &fr(r, req(2))).is_some());
         assert_eq!(s.handle(2, false, &fr(r, req_list())), count_msg);
@@ -1871,7 +2203,7 @@ mod tests {
         assert!(!s.busy());
         assert_eq!(s.count(), 0);
         // And during its own upload.
-        let _ = upload(&mut s, r, &points3(), 10);
+        let _ = upload(&mut s, r, &full3(), 10);
         assert_eq!(s.handle(100, false, &fr(r, count(3))), want_req(r, 0));
         assert_eq!(s.handle(101, false, &fr(r, clear_all())), want_ack(r, 0, 0, 0));
         assert!(!s.busy());
@@ -1900,36 +2232,36 @@ mod tests {
 
     #[test]
     fn lost_final_ack_is_answered_again() {
-        let pts = points3();
+        let pts = full3();
         let mut s = MissionService::new();
         let r = Link::Radio;
         let end = upload(&mut s, r, &pts, 0);
-        assert_eq!(end, want_ack(r, 0, 0, PLAN3));
+        assert_eq!(end, want_ack(r, 0, 0, PLAN3R));
         let changes = s.change_counter();
         // The station sends its last item again, as often as it must: the same ACK, nothing else.
         for k in 0..3 {
             assert_eq!(
-                s.handle(1000 * MS + k, false, &fr(r, rx_of(&pts[2], 2))),
-                want_ack(r, 0, 0, PLAN3)
+                s.handle(1000 * MS + k, false, &fr(r, rx_of(&pts[3], 3))),
+                want_ack(r, 0, 0, PLAN3R)
             );
             assert!(!s.busy());
             assert_eq!(s.change_counter(), changes);
         }
         // Armed does not matter for the repeat; the same ACK.
-        assert_eq!(s.handle(1100 * MS, true, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 0, 0, PLAN3));
+        assert_eq!(s.handle(1100 * MS, true, &fr(r, rx_of(&pts[3], 3))), want_ack(r, 0, 0, PLAN3R));
         // Another seq, another owner, the other link: ERROR.
-        assert_eq!(s.handle(1200 * MS, false, &fr(r, rx_of(&pts[1], 1))), want_ack(r, 1, 0, 0));
-        let o = frame_from(r, (255, 191), rx_of(&pts[2], 2));
+        assert_eq!(s.handle(1200 * MS, false, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 1, 0, 0));
+        let o = frame_from(r, (255, 191), rx_of(&pts[3], 3));
         assert_eq!(
             s.handle(1300 * MS, false, &o),
             Some(Tx { link: r, dst_system: 255, dst_component: 191, msg: TxMsg::Ack { result: 1, mission_type: 0, opaque_id: 0 } })
         );
         assert_eq!(
-            s.handle(1400 * MS, false, &fr(Link::Usb, rx_of(&pts[2], 2))),
+            s.handle(1400 * MS, false, &fr(Link::Usb, rx_of(&pts[3], 3))),
             want_ack(Link::Usb, 1, 0, 0)
         );
         // Those did not make it forget.
-        assert_eq!(s.handle(1500 * MS, false, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 0, 0, PLAN3));
+        assert_eq!(s.handle(1500 * MS, false, &fr(r, rx_of(&pts[3], 3))), want_ack(r, 0, 0, PLAN3R));
     }
 
     #[test]
@@ -1955,9 +2287,9 @@ mod tests {
 
     #[test]
     fn lost_final_ack_is_forgotten_by_a_start_message_and_by_link_down() {
-        let pts = points3();
+        let pts = full3();
         let r = Link::Radio;
-        for start in [count(3), count(17), count(0), req_list(), clear_all(), Rx::Count { count: 3, mission_type: 4 }] {
+        for start in [count(3), count(17), count(0), req_list(), clear_all(), Rx::Count { count: 4, mission_type: 4 }] {
             let mut s = MissionService::new();
             let _ = upload(&mut s, r, &pts, 0);
             let _ = s.handle(10, false, &fr(r, start));
@@ -1965,7 +2297,7 @@ mod tests {
             s.link_down(r);
             let _ = s.handle(12, false, &fr(r, done_ack()));
             // (link_down cleared any transaction left by `start`.)
-            assert_eq!(s.handle(13, false, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 1, 0, 0), "{start:?}");
+            assert_eq!(s.handle(13, false, &fr(r, rx_of(&pts[3], 3))), want_ack(r, 1, 0, 0), "{start:?}");
         }
         // After a start message alone.
         for start in [count(17), req_list(), clear_all()] {
@@ -1973,15 +2305,15 @@ mod tests {
             let _ = upload(&mut s, r, &pts, 0);
             let _ = s.handle(10, false, &fr(r, start));
             let _ = s.handle(11, false, &fr(r, done_ack()));
-            assert_eq!(s.handle(13, false, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 1, 0, 0), "{start:?}");
+            assert_eq!(s.handle(13, false, &fr(r, rx_of(&pts[3], 3))), want_ack(r, 1, 0, 0), "{start:?}");
         }
         // Link down of the owner's link forgets it; the other link's down does not.
         let mut s = MissionService::new();
         let _ = upload(&mut s, r, &pts, 0);
         s.link_down(Link::Usb);
-        assert_eq!(s.handle(1, false, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 0, 0, PLAN3));
+        assert_eq!(s.handle(1, false, &fr(r, rx_of(&pts[3], 3))), want_ack(r, 0, 0, PLAN3R));
         s.link_down(r);
-        assert_eq!(s.handle(2, false, &fr(r, rx_of(&pts[2], 2))), want_ack(r, 1, 0, 0));
+        assert_eq!(s.handle(2, false, &fr(r, rx_of(&pts[3], 3))), want_ack(r, 1, 0, 0));
     }
 
     #[test]
@@ -2065,54 +2397,75 @@ mod tests {
 
     #[test]
     fn source_0_is_the_parameters_whatever_the_mission_holds() {
-        let mut want = GdnTargets { count: 3, radius_m: 2.5, targets: [(0, 0); GDN_TARGETS] };
+        let mut want = GdnTargets {
+            count: 3,
+            radius_m: 2.5,
+            targets: [(0, 0); GDN_TARGETS],
+            alts_m: [0.0; GDN_TARGETS],
+            return_m: 0.0,
+            plan_id: 0,
+        };
         want.targets[..4].copy_from_slice(&PARAM_TARGETS);
         let missions = [many(0), many(1), many(3), many(7), many(16), points3().to_vec()];
         for mission in &missions {
-            assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, mission), want, "{} items", mission.len());
+            assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, mission, 7), want, "{} items", mission.len());
         }
         // Any other value than 1 is the parameters too (the parameter's range is 0 to 1).
-        assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5)), want);
-        assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5)), want);
+        assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5), 7), want);
+        assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5), 7), want);
     }
 
     #[test]
     fn source_0_clamps_the_count_as_the_board_did() {
-        let clamp = |n| select_targets(0, n, 2.0, &PARAM_TARGETS, &many(16)).count;
+        let clamp = |n| select_targets(0, n, 2.0, &PARAM_TARGETS, &many(17), 7).count;
         assert_eq!([clamp(-5), clamp(0), clamp(4), clamp(5), clamp(i32::MAX)], [0, 0, 4, 4, 4]);
         // Off stays off: no mission content turns it on.
-        assert_eq!(select_targets(0, 0, 2.0, &PARAM_TARGETS, &many(16)).count, 0);
+        assert_eq!(select_targets(0, 0, 2.0, &PARAM_TARGETS, &many(17), 7).count, 0);
     }
 
     #[test]
     fn source_1_differs_when_the_mission_is_not_empty() {
-        for n in [1usize, 3, 16] {
+        // n items: n - 1 waypoints and the return item.
+        for n in [2usize, 4, 17] {
             let mission = many(n);
-            let params = select_targets(0, 3, 2.5, &PARAM_TARGETS, &mission);
-            let from_mission = select_targets(1, 3, 2.5, &PARAM_TARGETS, &mission);
+            let params = select_targets(0, 3, 2.5, &PARAM_TARGETS, &mission, 7);
+            let from_mission = select_targets(1, 3, 2.5, &PARAM_TARGETS, &mission, 7);
             assert_ne!(from_mission, params, "{n} items");
-            assert_eq!(usize::from(from_mission.count), n);
+            assert_eq!(usize::from(from_mission.count), n - 1);
             assert_eq!(from_mission.radius_m, 2.5, "the radius is still GDN_RADIUS");
-            for (k, it) in mission.iter().enumerate() {
+            for (k, it) in mission[..n - 1].iter().enumerate() {
                 assert_eq!(from_mission.targets[k], (it.x, it.y));
+                assert_eq!(from_mission.alts_m[k], f32::from_bits(it.z_bits));
             }
-            assert!(from_mission.targets[n..].iter().all(|t| *t == (0, 0)));
+            assert!(from_mission.targets[n - 1..].iter().all(|t| *t == (0, 0)));
+            assert!(from_mission.alts_m[n - 1..].iter().all(|z| *z == 0.0));
+            assert_eq!(from_mission.return_m, 20.0);
+            assert_eq!(from_mission.plan_id, 7);
         }
     }
 
     #[test]
+    fn source_1_with_the_return_item_alone_has_no_targets_but_the_return_height() {
+        let g = select_targets(1, 4, 2.5, &PARAM_TARGETS, &many(1), 9);
+        assert_eq!((g.count, g.return_m, g.plan_id), (0, 20.0, 9));
+        assert!(g.targets.iter().all(|t| *t == (0, 0)));
+        assert!(g.alts_m.iter().all(|z| *z == 0.0));
+    }
+
+    #[test]
     fn source_1_with_an_empty_mission_is_off() {
-        let g = select_targets(1, 4, 3.0, &PARAM_TARGETS, &[]);
+        let g = select_targets(1, 4, 3.0, &PARAM_TARGETS, &[], 7);
         assert_eq!(g.count, 0);
         assert_eq!(g.radius_m, 3.0);
+        assert_eq!((g.return_m, g.plan_id), (0.0, 0));
         assert!(g.targets.iter().all(|t| *t == (0, 0)));
     }
 
     #[test]
     fn source_1_ignores_the_parameter_targets_and_count() {
-        let mission = many(2);
-        let a = select_targets(1, 0, 2.0, &PARAM_TARGETS, &mission);
-        let b = select_targets(1, 4, 2.0, &[], &mission);
+        let mission = many(3);
+        let a = select_targets(1, 0, 2.0, &PARAM_TARGETS, &mission, 7);
+        let b = select_targets(1, 4, 2.0, &[], &mission, 7);
         assert_eq!(a, b);
         assert_eq!(a.count, 2);
     }
@@ -2191,14 +2544,14 @@ mod tests {
         let varied = |n: usize| -> std::vec::Vec<Item> {
             (0..n)
                 .map(|i| Item {
-                    x: (i as i32 * 7_919_113 - 400_000_000) % 900_000_000,
-                    y: -(i as i32) * 12_345_679 + 5,
-                    z_bits: (i as f32 * -3.75 + 0.1).to_bits(),
+                    x: if i + 1 == n { 0 } else { (i as i32 * 7_919_113 - 400_000_000) % 900_000_000 },
+                    y: if i + 1 == n { 0 } else { -(i as i32) * 12_345_679 + 5 },
+                    z_bits: (i as f32 * 2.75 + 5.1).to_bits(),
                 })
                 .collect()
         };
         let r = Link::Usb;
-        for n in [1usize, 2, 3, 7, 16] {
+        for n in [1usize, 2, 3, 7, 17] {
             let pts = varied(n);
             let mut s = MissionService::new();
             let end = upload(&mut s, r, &pts, 0);
@@ -2207,9 +2560,11 @@ mod tests {
             assert_eq!(s.plan_id(), plan_id_of(s.items()));
         }
         let mut s = MissionService::new();
-        let _ = upload(&mut s, r, &points3(), 0);
-        assert_eq!(s.plan_id(), 0x99C3_BD49);
-        assert_eq!(one_shot(&points3()), 0x99C3_BD49);
+        let _ = upload(&mut s, r, &full3(), 0);
+        assert_eq!(s.plan_id(), PLAN3R);
+        assert_eq!(one_shot(&full3()), PLAN3R);
+        // Example 1's three points alone, under the old rule's arithmetic.
+        assert_eq!(one_shot(&points3()), PLAN3);
 
         // Dropped, repeated and out-of-order items in the middle, and a restart halfway.
         let a = varied(6);

@@ -511,7 +511,14 @@ pub fn push_gains(why: &str) {
 pub type GdnSet = GdnTargets;
 
 /// What [`FLIGHT_GDN`] holds before the first push: off.
-const GDN_OFF: GdnSet = GdnTargets { count: 0, radius_m: 2.0, targets: [(0, 0); GDN_TARGETS] };
+const GDN_OFF: GdnSet = GdnTargets {
+    count: 0,
+    radius_m: 2.0,
+    targets: [(0, 0); GDN_TARGETS],
+    alts_m: [0.0; GDN_TARGETS],
+    return_m: 0.0,
+    plan_id: 0,
+};
 
 /// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
 /// core 0, through [`push_gdn`]; one reader, IMU1's [`Stepper`]). The Stepper takes new targets on a disarmed step only.
@@ -556,8 +563,8 @@ pub fn push_gdn(why: &str) {
     })
     .unwrap_or((0, 0, GDN_OFF.radius_m, [(0, 0); GDN_SLOTS]));
     // The mission is read after the store is released (never nested); the counter noted is the one of the copy used.
-    let (items, items_len, changes) = crate::mission::committed();
-    let value = select_targets(source, count, radius, &params, items.get(..items_len).unwrap_or(&[]));
+    let (items, items_len, changes, plan_id) = crate::mission::committed();
+    let value = select_targets(source, count, radius, &params, items.get(..items_len).unwrap_or(&[]), plan_id);
     crate::mission::note_pushed(changes);
     GDN_WRITER.lock(|w| {
         if let Some(writer) = w.borrow_mut().as_mut() {
@@ -758,7 +765,7 @@ impl Stepper {
             self.gdn_wait = false;
             if self.gdn_pushed != self.gdn_in_force {
                 self.gdn_in_force = self.gdn_pushed;
-                let GdnTargets { count, radius_m, targets } = self.gdn_in_force;
+                let GdnTargets { count, radius_m, targets, .. } = self.gdn_in_force;
                 let mut geo = [GeoPoint { lat_e7: 0, lon_e7: 0, alt_mm: 0 }; GDN_TARGETS];
                 for (g, &(lat_e7, lon_e7)) in geo.iter_mut().zip(targets.iter()) {
                     *g = GeoPoint { lat_e7, lon_e7, alt_mm: 0 };
