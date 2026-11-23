@@ -1,5 +1,6 @@
 //! Heading integrity monitor (decision-heading-monitor-20261123, H0-H6 with the addenda H7, H8 and H9, which override the
-//! earlier text where they differ). A pure, read-only module: it never writes the filter and nothing calls it yet (HM2 wires it).
+//! earlier text where they differ). A pure, read-only module: it never writes the filter. ESKF3 feeds it in shadow (eskf.rs,
+//! packet HM2); nothing reads its output except the NKI Src 13 record.
 //!
 //! Sign: d_hat = true yaw minus the filter's yaw, in the filter's convention (yaw positive from north toward east, i.e.
 //! clockwise seen from above; eskf.rs:944 `yaw = atan2(r[1][0], r[0][0])`). B is A rotated by +d_hat in the (N, E) plane,
@@ -20,8 +21,13 @@
 //! next evaluated pair; `heading_ok` is false while blind. Review items: a non-finite velocity or increment breaks the chain
 //! and never enters the sums; a pair whose two epochs are more than the filter's interval rule apart (H10 (i)-(iii): 1 /
 //! `nav_gps_min_rate_hz`, 245 ms) is not evaluated and breaks the chain.
-//! R4 sums and tests run only while airborne and armed, the sums are cleared at take-off (H8 (2)). Both latches and the sums
-//! clear at the arming edge (H3). `heading_ok` = the filter's heading flag AND confirmed AND NOT fault (H0).
+//! R4 sums and tests run only while airborne and armed, the sums are cleared at take-off (H8 (2)) and by every epoch that is
+//! not airborne, a non-finite one included. Both latches and the sums clear at the arming edge (H3). `heading_ok` = the
+//! filter's heading flag AND confirmed AND NOT fault AND NOT blind (H0, H10 (2)), where confirmed needs the H10 (1) margin
+//! |d_hat| + CONF_SIGMA x sig <= D_TOL for T_FAULT, not |d_hat| <= D_TOL alone. The blind timer runs on every call that
+//! carries a time (`accepted_epoch`, `chain_broken`, `tick`) with the caller's airborne flag of that call; it starts at the
+//! first airborne call after a ground, disarmed or arming-edge state, so a caller that stops delivering epochs still turns
+//! blind as long as it calls `tick`.
 //!
 //! f32, no heap, no statics, no clock (the caller passes the epoch time), no log. Per epoch: one `atan2f`, one `expf`, three
 //! `sqrtf` (|A|, |B|, sqrt Saa).
@@ -52,9 +58,10 @@ pub const BLIND_US: u32 = Tuning::DEFAULT.nav_aid_timeout_us as u32;
 /// The monitor's output.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadingMon {
-    /// confirmed AND NOT fault (the monitor's own part of `heading_ok`).
+    /// confirmed AND NOT fault AND NOT blind (the monitor's own part of `heading_ok`).
     pub ok: bool,
-    /// An informed epoch has had |d_hat| <= D_TOL since the arming edge (latched).
+    /// Since the arming edge, informed evaluated epochs with |d_hat| + CONF_SIGMA x sig <= D_TOL have run without a break
+    /// for T_FAULT (H10 (1); any other evaluated epoch restarts the count, a screened pair does not count); latched.
     pub confirmed: bool,
     /// The R3 fault has been raised since the arming edge (latched).
     pub fault: bool,
@@ -74,6 +81,18 @@ pub struct HeadingMon {
     pub out_of_interval: u32,
     /// Airborne and no pair evaluated for `BLIND_US`; cleared by the next evaluated pair (H10 (2)).
     pub blind: bool,
+}
+
+/// What one accepted epoch did, for the caller's NKI Src 13 record (H3: one per evaluated epoch; H7 R2: Ok bit 16).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pair {
+    /// Neither evaluated nor screened: on the ground or disarmed, the first epoch of a chain, out of interval, dropped by
+    /// R2', or non-finite.
+    None,
+    /// A pair entered the sums: d_hat, sig and the tests are new.
+    Evaluated,
+    /// The pair was screened by R2 (and breaks the chain, R2').
+    Screened,
 }
 
 /// The monitor's state (at most 128 B).
@@ -96,6 +115,8 @@ pub struct HeadingMonitor {
     non_finite: u32,
     out_of_interval: u32,
     blind: bool,
+    /// The airborne flag of the previous call that ran the blind timer.
+    blind_air: bool,
     screened: u32,
     dropped: u32,
     armed: bool,
@@ -133,6 +154,7 @@ impl HeadingMonitor {
             non_finite: 0,
             out_of_interval: 0,
             blind: false,
+            blind_air: false,
             screened: 0,
             dropped: 0,
             armed: false,
@@ -158,44 +180,65 @@ impl HeadingMonitor {
         self.a_e += e;
     }
 
-    /// The GNSS chain is broken (a missing, repeated, frozen or out-of-interval epoch) at `t_us` (wrapping microseconds): the
-    /// next accepted epoch gives no pair. The time argument lets the blind timer run while no epoch arrives.
-    pub fn chain_broken(&mut self, t_us: u32) {
+    /// The GNSS chain is broken (a missing, repeated, frozen, screened or out-of-interval epoch) at `t_us` (wrapping
+    /// microseconds), with the caller's airborne flag of this step: the next accepted epoch gives no pair, A is zeroed, and
+    /// the blind timer runs.
+    pub fn chain_broken(&mut self, t_us: u32, airborne: bool) {
         self.have_prev = false;
         self.prev_bad = false;
         self.a_n = 0.0;
         self.a_e = 0.0;
-        self.advance_blind(t_us, self.prev_air, self.prev_air);
+        self.advance_blind(t_us, airborne && self.armed);
     }
 
-    fn advance_blind(&mut self, t_us: u32, air: bool, was_air: bool) {
-        if !air || !was_air {
+    /// A step without an accepted epoch (call it on every such step; `chain_broken` instead when an epoch was refused):
+    /// runs the blind timer at `t_us` (wrapping microseconds) with the caller's airborne flag of this step, nothing else.
+    pub fn tick(&mut self, t_us: u32, airborne: bool) {
+        self.advance_blind(t_us, airborne && self.armed);
+    }
+
+    /// The blind timer: restarted while not airborne (and at the first airborne call after that), blind once airborne
+    /// calls have run for `BLIND_US` since the last evaluated pair or the restart.
+    fn advance_blind(&mut self, t_us: u32, air: bool) {
+        if !air || !self.blind_air {
             self.last_eval_us = t_us;
             self.blind = false;
         } else if t_us.wrapping_sub(self.last_eval_us) >= BLIND_US {
             self.blind = true;
         }
+        self.blind_air = air;
     }
 
-    fn break_chain_at(&mut self, t_us: u32, air: bool, was_air: bool) {
+    fn break_chain_at(&mut self, t_us: u32, air: bool) {
         self.have_prev = false;
         self.prev_bad = false;
         self.prev_air = air;
-        self.advance_blind(t_us, air, was_air);
+        self.advance_blind(t_us, air);
     }
 
-    /// An epoch the GNSS job accepted: velocity (N, E) m/s at `t_us` (wrapping microseconds). Takes and zeroes A.
-    pub fn accepted_epoch(&mut self, t_us: u32, vn: f32, ve: f32, airborne: bool) {
+    /// An epoch the GNSS job accepted: velocity (N, E) m/s at `t_us` (wrapping microseconds), with the caller's airborne
+    /// flag. Takes and zeroes A. Returns whether a pair was evaluated or screened by R2 (the caller's Src 13 record).
+    pub fn accepted_epoch(&mut self, t_us: u32, vn: f32, ve: f32, airborne: bool) -> Pair {
         let air = airborne && self.armed;
-        let was_air = self.prev_air;
         let (an, ae) = (self.a_n, self.a_e);
         self.a_n = 0.0;
         self.a_e = 0.0;
+        if !air {
+            // R4 before anything else: no epoch on the ground, non-finite or not, leaves sums for the next flight.
+            self.sc = 0.0;
+            self.sd = 0.0;
+            self.saa = 0.0;
+            self.delta = 0.0;
+            self.sigma = f32::INFINITY;
+            self.flagged_us = 0;
+            self.confirm_us = 0;
+            self.prev_bad = false;
+        }
         if !(vn.is_finite() && ve.is_finite() && an.is_finite() && ae.is_finite()) {
             self.non_finite = self.non_finite.wrapping_add(1);
             self.t_prev_us = t_us;
-            self.break_chain_at(t_us, air, was_air);
-            return;
+            self.break_chain_at(t_us, air);
+            return Pair::None;
         }
         let (pvn, pve) = (self.v_n, self.v_e);
         let had = self.have_prev && self.prev_air;
@@ -205,26 +248,18 @@ impl HeadingMonitor {
         self.t_prev_us = t_us;
         self.have_prev = true;
         self.prev_air = air;
-        self.advance_blind(t_us, air, was_air);
+        self.advance_blind(t_us, air);
         if !air {
-            self.sc = 0.0;
-            self.sd = 0.0;
-            self.saa = 0.0;
-            self.delta = 0.0;
-            self.sigma = f32::INFINITY;
-            self.flagged_us = 0;
-            self.confirm_us = 0;
-            self.prev_bad = false;
-            return;
+            return Pair::None;
         }
         if !had {
             self.prev_bad = false;
-            return;
+            return Pair::None;
         }
         if dt_us > MAX_DT_US {
             self.out_of_interval = self.out_of_interval.wrapping_add(1);
             self.prev_bad = false;
-            return;
+            return Pair::None;
         }
         let (bn, be) = (vn - pvn, ve - pve);
         let nb = libm::sqrtf(bn * bn + be * be);
@@ -232,12 +267,12 @@ impl HeadingMonitor {
         if (nb - na).abs() > GATE_SIGMA * self.sig_b {
             self.prev_bad = true;
             self.screened = self.screened.wrapping_add(1);
-            return;
+            return Pair::Screened;
         }
         if self.prev_bad {
             self.prev_bad = false;
             self.dropped = self.dropped.wrapping_add(1);
-            return;
+            return Pair::None;
         }
         let lam = libm::expf(-(dt_us as f32) * 1e-6 / TAU_S);
         let sc = lam * self.sc + (an * be - ae * bn);
@@ -245,8 +280,8 @@ impl HeadingMonitor {
         let saa = lam * self.saa + (an * an + ae * ae);
         if !(sc.is_finite() && sd.is_finite() && saa.is_finite()) {
             self.non_finite = self.non_finite.wrapping_add(1);
-            self.break_chain_at(t_us, air, was_air);
-            return;
+            self.break_chain_at(t_us, air);
+            return Pair::None;
         }
         self.sc = sc;
         self.sd = sd;
@@ -273,6 +308,7 @@ impl HeadingMonitor {
         } else {
             self.flagged_us = 0;
         }
+        Pair::Evaluated
     }
 
     /// The monitor's output.
@@ -292,7 +328,7 @@ impl HeadingMonitor {
         }
     }
 
-    /// `heading_ok` = the filter's heading flag AND confirmed AND NOT fault AND NOT blind (H0, H10).
+    /// `heading_ok` = the filter's heading flag AND confirmed (with the H10 (1) margin) AND NOT fault AND NOT blind (H0, H10).
     pub fn heading_ok(&self, heading_flag: bool) -> bool {
         heading_flag && self.confirmed && !self.fault && !self.blind
     }
@@ -656,13 +692,105 @@ mod tests {
         assert!(!r.m.output().blind && r.m.heading_ok(true));
         // a broken chain with no epochs: the timer runs on chain_broken calls
         let t = r.t;
-        r.m.chain_broken(t + 1_000_000);
+        r.m.chain_broken(t + 1_000_000, true);
         assert!(!r.m.output().blind);
-        r.m.chain_broken(t + BLIND_US + 1_000_000);
+        r.m.chain_broken(t + BLIND_US + 1_000_000, true);
         assert!(r.m.output().blind);
         // on the ground it is never blind
         r.ep((0.0, 0.0), (0.0, 0.0), false);
         assert!(!r.m.output().blind);
+    }
+
+    #[test]
+    fn ticks_alone_turn_a_confirmed_monitor_blind_in_the_air_and_never_on_the_ground() {
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        r.run(10, 0.5, 0.0);
+        assert!(r.m.heading_ok(true));
+        // no epoch at all, a tick every 10 ms in the air: blind once BLIND_US have passed since the last evaluated pair
+        let t0 = r.t;
+        let mut t = t0;
+        while t - t0 < BLIND_US + 1_000_000 {
+            t += 10_000;
+            r.m.tick(t, true);
+            let o = r.m.output();
+            assert_eq!(o.blind, t - t0 >= BLIND_US, "{} us", t - t0);
+            assert_eq!(r.m.heading_ok(true), !o.blind);
+            assert!(o.confirmed && !o.fault);
+        }
+        // a tick on the ground clears it, and ticks on the ground never set it, however long
+        for _ in 0..3_000 {
+            t += 10_000;
+            r.m.tick(t, false);
+            assert!(!r.m.output().blind && r.m.heading_ok(true));
+        }
+        // take-off with ticks only: the timer starts at the first airborne tick
+        let t1 = t + 10_000;
+        while t + 10_000 - t1 < BLIND_US + 100_000 {
+            t += 10_000;
+            r.m.tick(t, true);
+            assert_eq!(r.m.output().blind, t - t1 >= BLIND_US, "{} us after take-off", t - t1);
+        }
+        // the stale-flag case: the last accepted epoch was on the ground, then only refused epochs in the air
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), false);
+        let t0 = r.t;
+        let mut blind_at = None;
+        for _ in 0..40 {
+            r.t += DT_US;
+            r.m.chain_broken(r.t, true);
+            if r.m.output().blind && blind_at.is_none() {
+                blind_at = Some(r.t - t0);
+            }
+        }
+        assert_eq!(blind_at, Some(DT_US + BLIND_US));
+        // disarmed, or right after the arming edge at any time, an airborne tick is not blind
+        let mut m = HeadingMonitor::default();
+        m.tick(4_000_000_000, true);
+        m.tick(4_100_000_000, true);
+        assert!(!m.output().blind);
+        m.set_armed(true);
+        m.tick(4_200_000_000, true);
+        assert!(!m.output().blind);
+    }
+
+    #[test]
+    fn a_non_finite_epoch_on_the_ground_still_clears_the_sums() {
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        r.run(10, 0.5, 10.0 * D2R);
+        assert!(r.m.output().info > 1.0 && r.m.output().delta_rad > 5.0 * D2R);
+        // landing: the only ground epoch is non-finite
+        r.t += DT_US;
+        r.m.add_increment(0.5, 0.0);
+        assert_eq!(r.m.accepted_epoch(r.t, f32::NAN, 0.0, false), Pair::None);
+        let o = r.m.output();
+        assert_eq!(o.non_finite, 1);
+        assert!(o.info == 0.0 && o.sigma_rad.is_infinite() && o.delta_rad == 0.0, "{o:?}");
+        // take-off: the first airborne epoch starts a chain, the second pairs with nothing old in the sums
+        r.v = (0.0, 0.0);
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        r.ep((0.5, 0.0), (0.5, 0.0), true);
+        let o = r.m.output();
+        assert!((o.info - 0.25).abs() < 1e-6 && o.delta_rad.abs() < 1e-3, "{} {}", o.info, o.delta_rad);
+    }
+
+    #[test]
+    fn accepted_epoch_reports_evaluated_and_screened_pairs() {
+        let mut m = HeadingMonitor::default();
+        m.set_armed(true);
+        let mut t = 1_000_000;
+        let mut ep = |m: &mut HeadingMonitor, a: f32, v: f32, air: bool| {
+            t += DT_US;
+            m.add_increment(a, 0.0);
+            m.accepted_epoch(t, v, 0.0, air)
+        };
+        assert_eq!(ep(&mut m, 0.0, 0.0, false), Pair::None); // ground
+        assert_eq!(ep(&mut m, 0.0, 0.0, true), Pair::None); // first airborne: no pair
+        assert_eq!(ep(&mut m, 0.5, 0.5, true), Pair::Evaluated);
+        assert_eq!(ep(&mut m, 0.5, 3.0, true), Pair::Screened); // R2
+        assert_eq!(ep(&mut m, 0.5, 3.5, true), Pair::None); // R2'
+        assert_eq!(ep(&mut m, 0.5, 4.0, true), Pair::Evaluated);
     }
 
     #[test]
@@ -684,7 +812,7 @@ mod tests {
         let info = r.m.output().info;
         // a repeated epoch: the filter's job refuses it and the chain is broken; the catch-up epoch carries two
         // intervals of B (rotated, as a stale one is) against one of A
-        r.m.chain_broken(r.t);
+        r.m.chain_broken(r.t, true);
         r.m.add_increment(0.5, 0.0);
         r.m.add_increment(0.5, 0.0);
         r.v = (r.v.0 + 0.7, r.v.1 + 0.7);
@@ -899,7 +1027,7 @@ mod tests {
                 conf_seen = false;
             }
             if brk {
-                m.chain_broken(t as u32);
+                m.chain_broken(t as u32, air);
             }
             m.add_increment(an, ae);
             let scr0 = m.output().screened_r2;
