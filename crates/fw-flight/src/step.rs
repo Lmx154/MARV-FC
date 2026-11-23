@@ -63,6 +63,20 @@ pub struct StepOut {
     pub rate: RateLog,
 }
 
+/// What the low-battery descent (Amendment BATT, `BATT_FS_CRT_ACT` 1) is doing, by value so core 0 can raise the texts
+/// (the flight core has none): [`Flight::batt_descent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BattDescent {
+    /// Not asked for, or the arm state says nothing.
+    Off = 0,
+    /// Asked for, not cancelled, and the estimate covers Altitude: the throttle stick reads 0.0.
+    Descending = 1,
+    /// Asked for, and a change of the mode switch cancelled it until disarm.
+    Cancelled = 2,
+    /// Asked for, but the estimate does not cover Altitude: Angle, the pilot's throttle.
+    NoHeight = 3,
+}
+
 /// The default of the parameter `MOT_POLES`: poles, not pole pairs (`fw_settings::esc`).
 const NOTCH_POLES_DEFAULT: i32 = 14;
 
@@ -101,6 +115,8 @@ struct StickShaper {
     target_d: Option<f32>,
     /// The position target, m north and east; `None` outside Position and while the sticks move the vehicle.
     target_ne: Option<[f32; 2]>,
+    /// The low-battery descent is in force: the throttle stick reads 0.0 in the vertical part of Altitude and Position.
+    descend: bool,
     /// The previous step's time, us; `None` before the first.
     t_prev_us: Option<u64>,
     /// Tests only: the lead cap is off.
@@ -169,7 +185,8 @@ impl StickShaper {
     /// Down is positive.
     fn height_target(&mut self, nav: &NavState, dt_s: f32) -> (f32, f32) {
         let d = nav.position_m[2];
-        let v_ff = self.stick_rate_d(self.sticks.throttle);
+        let throttle = if self.descend { 0.0 } else { self.sticks.throttle };
+        let v_ff = self.stick_rate_d(throttle);
         let target = match self.target_d {
             None => d,
             Some(target) => {
@@ -331,6 +348,14 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     gains: Gains,
     /// An eRPM this old or older is missing, us (`notch_hold_us`).
     notch_hold_us: u64,
+    /// The newest value of the low-battery monitor's descent request (core 0, `set_batt_descend`).
+    batt_request: bool,
+    /// A change of the mode switch cancelled the descent; cleared at the first step the gate is disarmed.
+    batt_cancelled: bool,
+    /// The mode switch of the previous stick report; `None` before the first.
+    prev_switch6: Option<Switch3>,
+    /// What the descent did at the latest step.
+    batt_state: BattDescent,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -386,6 +411,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 pilot_hold_speed_ms: tuning.pilot_hold_speed_ms,
                 target_d: None,
                 target_ne: None,
+                descend: false,
                 t_prev_us: None,
                 #[cfg(test)]
                 lead_cap_off: false,
@@ -411,6 +437,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             gains_pending: Gains::of(tuning),
             gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
+            batt_request: false,
+            batt_cancelled: false,
+            prev_switch6: None,
+            batt_state: BattDescent::Off,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -460,6 +490,19 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.gains_pending = gains;
         }
         ok
+    }
+
+    /// The low-battery monitor's descent request (Amendment BATT): true while CRITICAL is reached and `BATT_FS_CRT_ACT` is 1.
+    /// Core 0 sets it from one byte; every step reads the newest value. While true, armed and not cancelled the effective
+    /// mode is at least Altitude when the estimate covers it and the throttle stick reads 0.0 (F2's descent speed and lead
+    /// cap); false changes nothing, bit for bit.
+    pub fn set_batt_descend(&mut self, on: bool) {
+        self.batt_request = on;
+    }
+
+    /// What the descent did at the latest step, read only.
+    pub fn batt_descent(&self) -> BattDescent {
+        self.batt_state
     }
 
     /// The estimator, read only (the log of its own counters, packet E2).
@@ -519,7 +562,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 Switch3::Middle => Mode::Altitude,
                 Switch3::High => Mode::Position,
             };
+            // Any change of the mode switch while the descent is in force cancels it until disarm.
+            if self.batt_request && self.gate.armed() && self.prev_switch6.is_some_and(|p| p != rc.switch6) {
+                self.batt_cancelled = true;
+            }
+            self.prev_switch6 = Some(rc.switch6);
         }
+        if !self.gate.armed() {
+            self.batt_cancelled = false;
+        }
+        let batt_on = self.batt_request && !self.batt_cancelled && self.gate.armed();
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
         // A non-finite IMU value never reaches the estimator: no tilt, so the demand is refused and the gate stops.
@@ -555,11 +607,21 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             altitude_covered(&nav.valid),
             position_covered(&nav.valid) && self.airborne,
         );
-        let mode = match self.selected {
+        // The low-battery descent lifts Angle to Altitude (when covered); Position stays under its own rule.
+        let selected = if batt_on && self.selected == Mode::Angle { Mode::Altitude } else { self.selected };
+        let mode = match selected {
             Mode::Position if position_ok => Mode::Position,
             Mode::Altitude | Mode::Position if covered => Mode::Altitude,
             _ => Mode::Angle,
         };
+        self.batt_state = if batt_on {
+            if covered { BattDescent::Descending } else { BattDescent::NoHeight }
+        } else if self.batt_request && self.batt_cancelled && self.gate.armed() {
+            BattDescent::Cancelled
+        } else {
+            BattDescent::Off
+        };
+        self.shaper.descend = batt_on;
         let setpoint = self.shaper.setpoint(mode, &nav, t_us);
         // The rotor frequencies, f1 = eRPM x 2 / (poles x 60) Hz by DShot line, for the controller's notch; an eRPM
         // missing or `notch_hold_us` or more old is `None`.
@@ -2075,3 +2137,6 @@ mod notch_tests;
 
 #[cfg(test)]
 mod gain_tests;
+
+#[cfg(test)]
+mod batt_tests;

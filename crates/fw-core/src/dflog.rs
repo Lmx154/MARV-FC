@@ -172,6 +172,8 @@ pub const ID_PIDT: u8 = 154;
 pub const ID_NTCH: u8 = 155;
 /// Type number of GDN (the shadow guidance's target, setpoint and range; decision-guidance-shadow-20261123, section 1 item 5).
 pub const ID_GDN: u8 = 156;
+/// Type number of BFS (a battery level reached; Amendment BATT).
+pub const ID_BFS: u8 = 157;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -294,6 +296,10 @@ pub const GDN: RecordDef = def(
     "TimeUS,Idx,St,TN,TE,PN,PE,VN,VE,Dist,Brg",
 );
 
+/// BFS: the low-battery monitor reached a level (Amendment BATT): the level (1 LOW, 2 CRITICAL), the critical action
+/// (`BATT_FS_CRT_ACT`: 0 warn, 1 descend), the pack voltage (V) and `BATT_CELLS`. Written once per rise, on its own.
+pub const BFS: RecordDef = def(ID_BFS, "BFS", "QBBfB", "TimeUS,Level,Act,Volt,Cells");
+
 /// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the
 /// shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's. For I = 1 `TimeUS` is the
 /// horizon time, the time the state refers to.
@@ -328,9 +334,9 @@ pub const SPN: RecordDef = def(
 );
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 29] = [
+pub const TYPES: [RecordDef; 30] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH, GDN,
+    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH, GDN, BFS,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -1018,6 +1024,19 @@ pub fn encode_mode(out: &mut [u8], time_us: u64, selected: u8, effective: u8) ->
     w.pos
 }
 
+/// BFS: the level reached, the critical action, the pack voltage and the cell count. 18 bytes.
+pub fn encode_bfs(out: &mut [u8], time_us: u64, level: u8, action: u8, volts: f32, cells: u8) -> usize {
+    let Some(mut w) = Writer::start(out, &BFS) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(level);
+    w.u8(action);
+    w.f32(volts);
+    w.u8(cells);
+    w.pos
+}
+
 /// SPN: position NED, velocity NED, heading. 39 bytes.
 pub fn encode_spn(
     out: &mut [u8],
@@ -1179,6 +1198,8 @@ mod tests {
         out.push((ID_NTCH, b[..n].to_vec()));
         let n = encode_gdn(&mut b, 1, 2, 5, [1.0; 2], [2.0; 2], [3.0; 2], 4.0, 5.0);
         out.push((ID_GDN, b[..n].to_vec()));
+        let n = encode_bfs(&mut b, 1, 2, 1, 13.5, 4);
+        out.push((ID_BFS, b[..n].to_vec()));
         out
     }
 
@@ -1249,12 +1270,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_29_fmt_records() {
-        assert_eq!(TYPES.len(), 29);
-        assert_eq!(HEADER_SEQUENCE_LEN, 2581);
-        let mut buf = [0u8; 2591];
-        assert_eq!(write_header(&mut buf), 2581);
-        assert_eq!(write_header(&mut [0u8; 2580]), 0);
+    fn header_sequence_is_30_fmt_records() {
+        assert_eq!(TYPES.len(), 30);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2670);
+        let mut buf = [0u8; 2680];
+        assert_eq!(write_header(&mut buf), 2670);
+        assert_eq!(write_header(&mut [0u8; 2669]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -1352,7 +1373,8 @@ mod tests {
                 ("PPS", 31),
                 ("PIDT", 59),
                 ("NTCH", 40),
-                ("GDN", 45)
+                ("GDN", 45),
+                ("BFS", 18)
             ]
         );
     }
@@ -1739,6 +1761,19 @@ mod tests {
         assert_eq!(ID_GDN, 156);
         assert_eq!(GDN.format, "QBBffffffff");
         assert!(!FLIGHT_TYPES.iter().any(|d| d.type_id == ID_GDN), "not part of the per-step block");
+    }
+
+    /// BFS by hand: type 157 = 0x9D, length 18; Level 2, Act 1, Volt 13.5 V, Cells 4. Not part of the per-step block.
+    #[test]
+    fn golden_bfs() {
+        let mut b = [0xEEu8; 20];
+        assert_eq!(encode_bfs(&mut b, 7, 2, 1, 13.5, 4), 18);
+        let want = cat(&[&[0xA3, 0x95, 0x9D], &7u64.to_le_bytes(), &[2, 1], &13.5f32.to_le_bytes(), &[4]]);
+        assert_eq!(b[..18], want[..]);
+        assert_eq!(b[18..], [0xEE; 2], "nothing beyond the record is touched");
+        assert_eq!(encode_bfs(&mut [0u8; 17], 7, 2, 1, 13.5, 4), 0);
+        assert_eq!((ID_BFS, BFS.format, BFS.length), (157, "QBBfB", 18));
+        assert!(!FLIGHT_TYPES.iter().any(|d| d.type_id == ID_BFS), "not part of the per-step block");
     }
 
     #[test]

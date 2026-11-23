@@ -99,6 +99,8 @@ pub struct Inputs {
     pub gnss_fix: bool,
     /// `LED_BRIGHT`: 0 off, 1 dim, 2 medium, 3 bright (see [`level_brightness`]).
     pub level: i32,
+    /// The low-battery monitor's level (Amendment BATT): 0 none, 1 LOW, 2 CRITICAL (`fw_core::battery::Level`).
+    pub battery: u8,
 }
 
 /// The roll call starts this long after boot (ms); the ESCs are stable from about 5.4 s.
@@ -141,6 +143,10 @@ pub const fn level_brightness(level: i32) -> u8 {
 pub enum Mode {
     /// Red, double blink: IMU1, IMU2, BARO, MAG or BATT is FAILED.
     VitalFailed,
+    /// Red at 5 Hz: the battery monitor reached CRITICAL (Amendment BATT).
+    BatteryCritical,
+    /// Yellow at 5 Hz: the battery monitor reached LOW.
+    BatteryLow,
     /// Purple, solid: a motor is being commanded.
     MotorSpin,
     /// Blue / white at 5 Hz: a calibration is running.
@@ -161,6 +167,10 @@ pub fn mode(inputs: &Inputs) -> Mode {
         .any(|i| row(i) == State::Failed)
     {
         Mode::VitalFailed
+    } else if inputs.battery >= 2 {
+        Mode::BatteryCritical
+    } else if inputs.battery == 1 {
+        Mode::BatteryLow
     } else if inputs.motor_spin {
         Mode::MotorSpin
     } else if inputs.calibrating {
@@ -246,6 +256,8 @@ pub fn display(inputs: &Inputs, now_ms: u32) -> Output {
                 || (2 * DOUBLE_BLINK_MS..3 * DOUBLE_BLINK_MS).contains(&phase);
             lit(Colour::RED, if on { base } else { 0 })
         }
+        Mode::BatteryCritical => lit(Colour::RED, if (now_ms / ALTERNATE_MS).is_multiple_of(2) { base } else { 0 }),
+        Mode::BatteryLow => lit(Colour::YELLOW, if (now_ms / ALTERNATE_MS).is_multiple_of(2) { base } else { 0 }),
         Mode::MotorSpin => lit(Colour::PURPLE, base),
         Mode::Calibrating => {
             let colour = if (now_ms / ALTERNATE_MS).is_multiple_of(2) {
@@ -334,6 +346,7 @@ mod tests {
             log_open: true,
             gnss_fix: false,
             level: 3,
+            battery: 0,
         }
     }
 
@@ -698,5 +711,29 @@ mod tests {
             assert_eq!(roll_call_colour(s), Colour::YELLOW);
         }
         assert_eq!(display(&healthy(), 0).colour, Colour::WHITE);
+    }
+
+    /// Amendment BATT: CRITICAL is red and LOW yellow at 5 Hz (100 ms on, 100 ms off), above the motor spin, the calibration
+    /// and the yellow pulse, below a failed vital device; level 0 changes nothing.
+    #[test]
+    fn the_battery_levels_blink_at_5_hz_above_row_2_and_below_row_1() {
+        let base = |battery| Inputs { battery, ..healthy() };
+        let busy = |battery| Inputs { motor_spin: true, calibrating: true, log_open: false, ..base(battery) };
+        for (battery, colour, mode_now) in [(2, Colour::RED, Mode::BatteryCritical), (1, Colour::YELLOW, Mode::BatteryLow)] {
+            assert_eq!(mode(&busy(battery)), mode_now);
+            for k in 0..10u32 {
+                let out = display(&busy(battery), RUN + 100 * k);
+                if k % 2 == 0 {
+                    assert_eq!(out, Output { colour, brightness: level_brightness(3) }, "k {k}");
+                } else {
+                    assert_eq!(out, Output::DARK, "k {k}");
+                }
+            }
+        }
+        assert_eq!(mode(&base(2)), Mode::BatteryCritical);
+        assert_eq!(mode(&Inputs { battery: 2, rows: { let mut r = all(OK); r[BATT] = State::Failed; r }, ..healthy() }), Mode::VitalFailed);
+        // Negative control: with no level the same inputs are the rows below.
+        assert_eq!(mode(&busy(0)), Mode::MotorSpin);
+        assert_eq!(mode(&base(0)), Mode::Normal);
     }
 }

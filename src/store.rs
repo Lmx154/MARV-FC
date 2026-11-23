@@ -213,6 +213,29 @@ pub fn batt_config() -> adc_battery::BatteryConfig {
         })
 }
 
+/// The low-battery monitor's settings from the stored values, by index (`fw_settings::batt::FS_AT`): no name search inside
+/// the store's critical section. A value that cannot be read is the table's default.
+pub fn batt_monitor_config() -> fw_core::battery::Config {
+    use fw_settings::batt::{FS_AT, FS_TABLE, monitor_config};
+    with(|params| {
+        let at = |name: &str| {
+            let k = FS_TABLE.iter().position(|d| d.name == name)?;
+            params.get(u16::try_from(FS_AT + k).ok()?)
+        };
+        monitor_config(
+            |name| match at(name) {
+                Some(ParamValue::I32(v)) => Some(v),
+                _ => None,
+            },
+            |name| match at(name) {
+                Some(ParamValue::F32(v)) => Some(v),
+                _ => None,
+            },
+        )
+    })
+    .unwrap_or(fw_core::battery::Config::DEFAULT)
+}
+
 /// `ParamStore` for the node: the one store, behind the lock.
 pub struct Store;
 

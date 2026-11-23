@@ -96,6 +96,7 @@ fn inputs(now_us: u64, level: i32) -> Inputs {
         log_open: log_open(),
         gnss_fix,
         level,
+        battery: crate::batt_fs::level(),
     }
 }
 
