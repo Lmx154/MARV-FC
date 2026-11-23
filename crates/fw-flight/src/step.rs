@@ -9,7 +9,7 @@ use crate::gnc::{
 };
 use crate::mahony::DT_MAX_US;
 use crate::quat;
-use crate::tuning::{PILOT_SPEED_XY_MAX_MS, PILOT_SPEED_XY_MIN_MS, Tuning, full_thrust_n};
+use crate::tuning::{Gains, PILOT_SPEED_XY_MAX_MS, PILOT_SPEED_XY_MIN_MS, Tuning, full_thrust_n};
 use fw_core::calib::GRAVITY_MSS;
 use fw_core::dflog::{self, FLIGHT_TYPES};
 use fw_core::esc::LINES;
@@ -324,6 +324,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     notch_pending: (bool, i32),
     /// The notch switch and the pole count in force: the values of the latest disarmed step.
     notch: (bool, i32),
+    /// The newest set of the 14 gain parameters that `set_gains` accepted; taken at every disarmed step like
+    /// `speed_pending`.
+    gains_pending: Gains,
+    /// The gains in force: the values of the latest disarmed step.
+    gains: Gains,
     /// An eRPM this old or older is missing, us (`notch_hold_us`).
     notch_hold_us: u64,
     /// Tests only: the effective mode ignores what the estimate covers.
@@ -403,6 +408,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             speed_pending: tuning.pilot_speed_xy_ms,
             notch_pending: (false, NOTCH_POLES_DEFAULT),
             notch: (false, NOTCH_POLES_DEFAULT),
+            gains_pending: Gains::of(tuning),
+            gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
             #[cfg(test)]
             ignore_coverage: false,
@@ -443,6 +450,18 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         ok
     }
 
+    /// The newest set of the 14 gain parameters (decision-gain-params-20261123). Accepted only if every value is finite and
+    /// within `Gains::MIN` to `Gains::MAX` (the parameter table enforces the same ranges; this is the flight core's own
+    /// check); a refused set keeps the previous one. It takes effect at the next arming: every disarmed step latches the
+    /// newest set, no armed step does. Returns whether it was accepted.
+    pub fn set_gains(&mut self, gains: Gains) -> bool {
+        let ok = gains.in_range();
+        if ok {
+            self.gains_pending = gains;
+        }
+        ok
+    }
+
     /// The estimator, read only (the log of its own counters, packet E2).
     pub fn estimator(&self) -> &E {
         &self.estimator
@@ -451,6 +470,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// The pilot's horizontal speed in force, m/s (`PILOT_SPEED_XY` as latched), read only.
     pub fn speed_xy_in_force(&self) -> f32 {
         self.shaper.pilot_speed_xy_ms
+    }
+
+    /// The 14 gains in force (as latched), read only.
+    pub fn gains_in_force(&self) -> Gains {
+        self.gains
     }
 
     /// [`Flight::step`], then `publish` with its output (the board sends the command there), then the shadow estimator
@@ -485,6 +509,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.shaper.pilot_speed_xy_ms = self.speed_pending;
             self.controller.set_speed_limit_xy(self.speed_pending);
             self.notch = self.notch_pending;
+            self.gains = self.gains_pending;
+            self.controller.set_gains(&self.gains);
         }
         if let Some(rc) = inputs.rc {
             self.shaper.sticks = rc.sticks;
@@ -2046,3 +2072,6 @@ mod position_tests;
 
 #[cfg(test)]
 mod notch_tests;
+
+#[cfg(test)]
+mod gain_tests;

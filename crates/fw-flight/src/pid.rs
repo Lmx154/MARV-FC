@@ -8,7 +8,7 @@ use crate::gnc::{Controller, NavState, RateLog, Refused, Saturation, Setpoint, T
 use crate::mahony::DT_MAX_US;
 use crate::notch::{Notch, usable};
 use crate::quat::{conj, down_in_body, mul, pt1};
-use crate::tuning::{Tuning, full_thrust_n};
+use crate::tuning::{Gains, Tuning, full_thrust_n};
 use fw_core::calib::GRAVITY_MSS;
 use fw_core::esc::LINES;
 use marv_card::MASS;
@@ -514,6 +514,17 @@ impl Controller for CascadedPid {
 
     fn set_speed_limit_xy(&mut self, ms: f32) {
         self.speed_xy_ms = ms;
+    }
+
+    fn set_gains(&mut self, gains: &Gains) {
+        let Gains([rp, yaw, p0, p1, p2, i0, i1, i2, d0, d1, m0, m1, m2, fltd]) = *gains;
+        self.k_rp = rp;
+        self.k_y = yaw;
+        self.fltd_hz = fltd;
+        let [a0, a1, a2] = &mut self.axes;
+        (a0.kp, a0.ki, a0.kd, a0.imax) = (p0, i0, d0, m0);
+        (a1.kp, a1.ki, a1.kd, a1.imax) = (p1, i1, d1, m1);
+        (a2.kp, a2.ki, a2.imax) = (p2, i2, m2);
     }
 
     fn attitude_setpoint(&self) -> [f32; 4] {

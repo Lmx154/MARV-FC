@@ -19,6 +19,7 @@
 //! (packet E2) prints the estimators' state from [`NAV_STAT`].
 
 use core::cell::RefCell;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
@@ -42,7 +43,7 @@ use fw_flight::pid::CascadedPid;
 use fw_flight::step::{
     Flight, FlightInputs, ModeLog, StepOut, encode_mode, encode_nkf, encode_spn, encode_step, log_due,
 };
-use fw_flight::tuning::Tuning;
+use fw_flight::tuning::{GAIN_COUNT, GAIN_NAMES, Gains, Tuning};
 use static_cell::StaticCell;
 
 /// The steering estimator: a [`SteerMix`] (Amendment G-1) whose parts live in [`STEER_CORE`], [`VERT`] and [`STEER`].
@@ -243,6 +244,14 @@ pub static NAV_STAT: Seqlock<NavStat> = Seqlock::new(NavStat {
 
 /// The `[STAT] NAV:` line (core 0, every 10 s, from the supervisor). Heights and vertical speeds only.
 pub fn stat() {
+    // The gain sets the flight core refused since the last line (`GAINS_REFUSED`; core 1 has no defmt, so the line is here).
+    let refused = GAINS_REFUSED.load(Ordering::Relaxed);
+    if refused != GAINS_REFUSED_SEEN.swap(refused, Ordering::Relaxed) {
+        defmt::warn!(
+            "[WARN] the flight core refused {=u32} set(s) of the ATC_* gains since boot; it keeps the previous set",
+            refused
+        );
+    }
     let Some(s) = NAV_STAT.try_read(4) else {
         defmt::info!("[STAT] NAV: not read");
         return;
@@ -441,6 +450,60 @@ pub fn push_notch(why: &str) {
     );
 }
 
+/// Core 0 -> flight core: the 14 stored gains `ATC_*` as one set (decision-gain-params-20261123, section 1 item 5; one
+/// writer, core 0, through [`push_gains`]; one reader, IMU1's [`Stepper`]). The flight code takes the set at every disarmed
+/// step (`Flight::set_gains`), so the one in force at the arming step stays until the next disarm. No flash access on
+/// core 1: the set is a copy of the stored values.
+pub static FLIGHT_GAINS: TripleBuffer<Gains> = TripleBuffer::new(Gains::of(&Tuning::DEFAULT));
+
+/// Sets of [`FLIGHT_GAINS`] that `Flight::set_gains` refused (written by core 1, read by [`stat`] on core 0).
+static GAINS_REFUSED: AtomicU32 = AtomicU32::new(0);
+
+/// The value of [`GAINS_REFUSED`] at the latest [`stat`] line (core 0).
+static GAINS_REFUSED_SEEN: AtomicU32 = AtomicU32::new(0);
+
+/// Core 0's writer of [`FLIGHT_GAINS`].
+static GAINS_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, Gains>>>> =
+    Mutex::new(RefCell::new(None));
+
+/// Takes the writer of [`FLIGHT_GAINS`] and pushes the stored values. Call once, on core 0, after `settings::boot` and
+/// before core 1 starts, so the flight core's first read has them.
+pub fn init_gains() {
+    let Some(writer) = FLIGHT_GAINS.take_writer() else {
+        defmt::panic!("[FAIL] ATC_* gains writer taken twice");
+    };
+    GAINS_WRITER.lock(|w| *w.borrow_mut() = Some(writer));
+    push_gains("boot");
+}
+
+/// Pushes the stored `ATC_*` gains to the flight core as one set (core 0; call with no store access in progress). A value
+/// that cannot be read or is not an `F32` is its compiled default.
+pub fn push_gains(why: &str) {
+    let defaults = Gains::of(&Tuning::DEFAULT);
+    let value = crate::store::with(|p| {
+        let mut g = defaults;
+        for (v, name) in g.0.iter_mut().zip(GAIN_NAMES) {
+            if let Some(mavlink_device::ParamValue::F32(x)) = p.get_named(name) {
+                *v = x;
+            }
+        }
+        g
+    })
+    .unwrap_or(defaults);
+    GAINS_WRITER.lock(|w| {
+        if let Some(writer) = w.borrow_mut().as_mut() {
+            writer.write(value);
+        }
+    });
+    let changed = value.0.iter().zip(defaults.0.iter()).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
+    defmt::info!(
+        "[INFO] ATC_* gains: {=usize} of {=usize} differ from the compiled defaults, pushed to the flight core ({=str}); they take effect at the next arming",
+        changed,
+        GAIN_COUNT,
+        why
+    );
+}
+
 /// The shadow guidance's targets: how many are in use (0 is off), the arrival radius (m) and the four slots (`alt_mm` 0:
 /// the guidance converts at the origin's altitude).
 pub type GdnSet = (u8, f32, [GeoPoint; fw_settings::flight::GDN_SLOTS]);
@@ -526,6 +589,7 @@ pub struct Stepper {
     speed: TripleReader<'static, f32>,
     notch: TripleReader<'static, (bool, i32)>,
     gdn: TripleReader<'static, GdnSet>,
+    gains: TripleReader<'static, Gains>,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
     step: u32,
@@ -552,7 +616,7 @@ pub struct Stepper {
 impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
     /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`], [`FLIGHT_SPEED_XY`] or [`FLIGHT_NOTCH`] or the writer of
-    /// [`NAV_STAT`] or the reader of [`FLIGHT_GDN`] was taken already.
+    /// [`NAV_STAT`] or the reader of [`FLIGHT_GDN`] or [`FLIGHT_GAINS`] was taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     /// `period_us`: IMU1's sample period from its setup (the value the IMU1 task runs on); the notch's sample rate is
     /// 1e6 / `period_us`.
@@ -577,6 +641,7 @@ impl Stepper {
             speed: FLIGHT_SPEED_XY.take_reader()?,
             notch: FLIGHT_NOTCH.take_reader()?,
             gdn: FLIGHT_GDN.take_reader()?,
+            gains: FLIGHT_GAINS.take_reader()?,
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
@@ -723,6 +788,11 @@ impl SampleSink for Stepper {
         let (notch, notch_fresh) = self.notch.read();
         if notch_fresh {
             self.flight.set_notch(notch.0, notch.1);
+        }
+        // A refused set keeps the previous one; core 1 has no defmt, so it only counts (`stat` prints).
+        let (gains, gains_fresh) = self.gains.read();
+        if gains_fresh && !self.flight.set_gains(gains) {
+            GAINS_REFUSED.fetch_add(1, Ordering::Relaxed);
         }
         let (gdn, gdn_fresh) = self.gdn.read();
         if gdn_fresh {

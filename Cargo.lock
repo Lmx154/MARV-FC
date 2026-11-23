@@ -828,6 +828,7 @@ dependencies = [
  "bmm350",
  "bmp581",
  "fw-core",
+ "fw-flight",
  "icm45686",
  "lsm6dsk320x",
  "mavlink-device",

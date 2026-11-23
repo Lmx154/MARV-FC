@@ -9,6 +9,8 @@ rust-version = "1.99"
 
 [dependencies]
 fw-core = { path = "../fw-core" }
+# `Gains`, `GAIN_NAMES` and the defaults and bounds of the 14 gain parameters (`flight::TABLE` is built from them).
+fw-flight = { path = "../fw-flight" }
 # The driver's `Config` types, at the same commit as the binary's (without its `defmt` feature).
 bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca9493e5dddd3d019a23b6d05395b" }
 # The magnetometer driver's `Config` types (same commit as the binary's, without `defmt`).

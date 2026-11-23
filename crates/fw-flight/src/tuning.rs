@@ -283,3 +283,253 @@ impl Tuning {
     /// MPC_ACC_HOR 3.0 (multicopter_autonomous_params.yaml:82-91; ArduPilot WP_ACC 2.5, online only); owner-approved.
     pub const GUIDANCE_ACC_MS2: f32 = 3.0;
 }
+
+/// The number of runtime gain parameters (decision-gain-params-20261123, section 1).
+pub const GAIN_COUNT: usize = 14;
+
+/// The parameter names of [`Gains`], in the order of its values (decision-gain-params-20261123, section 2).
+pub const GAIN_NAMES: [&str; GAIN_COUNT] = [
+    "ATC_ANG_RP_P",
+    "ATC_ANG_YAW_P",
+    "ATC_RAT_RLL_P",
+    "ATC_RAT_PIT_P",
+    "ATC_RAT_YAW_P",
+    "ATC_RAT_RLL_I",
+    "ATC_RAT_PIT_I",
+    "ATC_RAT_YAW_I",
+    "ATC_RAT_RLL_D",
+    "ATC_RAT_PIT_D",
+    "ATC_RAT_RLL_IMAX",
+    "ATC_RAT_PIT_IMAX",
+    "ATC_RAT_YAW_IMAX",
+    "ATC_RAT_FLTD",
+];
+
+/// The 14 gains that are runtime parameters (decision-gain-params-20261123), in the order of [`GAIN_NAMES`]. Physical units
+/// as in [`Tuning`]. The yaw D stays the compiled 0 and is not here. The defaults are `Gains::of(&Tuning::DEFAULT)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Gains(pub [f32; GAIN_COUNT]);
+
+impl Gains {
+    /// The lower bounds: rule R, default / 3 rounded outward to 3 significant figures (derived: only refuses a downward
+    /// slip). PROPOSED, awaiting the owner (decision-gain-params-20261123, section 2).
+    pub const MIN: Gains = Gains([
+        1.5,     // ATC_ANG_RP_P: R
+        0.45,    // ATC_ANG_YAW_P: R
+        0.0553,  // ATC_RAT_RLL_P: R
+        0.0530,  // ATC_RAT_PIT_P: R
+        0.0295,  // ATC_RAT_YAW_P: R
+        0.0553,  // ATC_RAT_RLL_I: R
+        0.0530,  // ATC_RAT_PIT_I: R
+        0.00295, // ATC_RAT_YAW_I: R
+        0.00248, // ATC_RAT_RLL_D: R
+        0.00238, // ATC_RAT_PIT_D: R
+        0.0910,  // ATC_RAT_RLL_IMAX: R
+        0.0830,  // ATC_RAT_PIT_IMAX: R
+        0.0118,  // ATC_RAT_YAW_IMAX: R
+        6.66,    // ATC_RAT_FLTD: R
+    ]);
+
+    /// The upper bounds: rule R, default x 3 rounded outward to 3 significant figures, except ATC_ANG_RP_P. PROPOSED,
+    /// awaiting the owner (decision-gain-params-20261123, section 2).
+    pub const MAX: Gains = Gains([
+        12.0,   // ATC_ANG_RP_P: the exception: ArduPilot 3-12, PX4 max 12; x3 = 13.5 exceeds both
+        4.05,   // ATC_ANG_YAW_P: R
+        0.498,  // ATC_RAT_RLL_P: R
+        0.477,  // ATC_RAT_PIT_P: R
+        0.266,  // ATC_RAT_YAW_P: R
+        0.498,  // ATC_RAT_RLL_I: R
+        0.477,  // ATC_RAT_PIT_I: R
+        0.0266, // ATC_RAT_YAW_I: R
+        0.0224, // ATC_RAT_RLL_D: R
+        0.0215, // ATC_RAT_PIT_D: R
+        0.819,  // ATC_RAT_RLL_IMAX: R, below the 0.911 N.m authority
+        0.747,  // ATC_RAT_PIT_IMAX: R, below 0.831 N.m
+        0.107,  // ATC_RAT_YAW_IMAX: R, below 0.118 N.m
+        60.0,   // ATC_RAT_FLTD: R, equals the gyro PT1
+    ]);
+
+    /// The 14 gains of `tuning`.
+    pub const fn of(tuning: &Tuning) -> Gains {
+        let [p0, p1, p2] = tuning.atc_rat_p;
+        let [i0, i1, i2] = tuning.atc_rat_i;
+        let [d0, d1, _] = tuning.atc_rat_d;
+        let [m0, m1, m2] = tuning.atc_rat_imax;
+        Gains([
+            tuning.atc_ang_rp_p,
+            tuning.atc_ang_yaw_p,
+            p0,
+            p1,
+            p2,
+            i0,
+            i1,
+            i2,
+            d0,
+            d1,
+            m0,
+            m1,
+            m2,
+            tuning.atc_rat_fltd_hz,
+        ])
+    }
+
+    /// True if every value is finite and within [`Gains::MIN`] to [`Gains::MAX`], ends included.
+    pub fn in_range(&self) -> bool {
+        self.0
+            .iter()
+            .zip(Self::MIN.0.iter().zip(Self::MAX.0.iter()))
+            .all(|(v, (lo, hi))| (*lo..=*hi).contains(v))
+    }
+}
+
+impl Tuning {
+    /// This tuning with the 14 gains of `gains`; every other field, and the yaw D, unchanged.
+    pub fn with_gains(self, gains: Gains) -> Tuning {
+        let Gains([rp, yaw, p0, p1, p2, i0, i1, i2, d0, d1, m0, m1, m2, fltd]) = gains;
+        let [_, _, d2] = self.atc_rat_d;
+        Tuning {
+            atc_ang_rp_p: rp,
+            atc_ang_yaw_p: yaw,
+            atc_rat_p: [p0, p1, p2],
+            atc_rat_i: [i0, i1, i2],
+            atc_rat_d: [d0, d1, d2],
+            atc_rat_imax: [m0, m1, m2],
+            atc_rat_fltd_hz: fltd,
+            ..self
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+
+    use super::*;
+    use std::string::ToString;
+
+    /// The 14 values of `t` read field by field, in the order of `GAIN_NAMES`, written out here and not by `Gains::of`.
+    fn named(t: &Tuning) -> [f32; GAIN_COUNT] {
+        [
+            t.atc_ang_rp_p,
+            t.atc_ang_yaw_p,
+            t.atc_rat_p[0],
+            t.atc_rat_p[1],
+            t.atc_rat_p[2],
+            t.atc_rat_i[0],
+            t.atc_rat_i[1],
+            t.atc_rat_i[2],
+            t.atc_rat_d[0],
+            t.atc_rat_d[1],
+            t.atc_rat_imax[0],
+            t.atc_rat_imax[1],
+            t.atc_rat_imax[2],
+            t.atc_rat_fltd_hz,
+        ]
+    }
+
+    /// `t` with the field that parameter `i` of `GAIN_NAMES` names set to `v`, by an explicit assignment.
+    fn with_field(mut t: Tuning, i: usize, v: f32) -> Tuning {
+        match GAIN_NAMES[i] {
+            "ATC_ANG_RP_P" => t.atc_ang_rp_p = v,
+            "ATC_ANG_YAW_P" => t.atc_ang_yaw_p = v,
+            "ATC_RAT_RLL_P" => t.atc_rat_p[0] = v,
+            "ATC_RAT_PIT_P" => t.atc_rat_p[1] = v,
+            "ATC_RAT_YAW_P" => t.atc_rat_p[2] = v,
+            "ATC_RAT_RLL_I" => t.atc_rat_i[0] = v,
+            "ATC_RAT_PIT_I" => t.atc_rat_i[1] = v,
+            "ATC_RAT_YAW_I" => t.atc_rat_i[2] = v,
+            "ATC_RAT_RLL_D" => t.atc_rat_d[0] = v,
+            "ATC_RAT_PIT_D" => t.atc_rat_d[1] = v,
+            "ATC_RAT_RLL_IMAX" => t.atc_rat_imax[0] = v,
+            "ATC_RAT_PIT_IMAX" => t.atc_rat_imax[1] = v,
+            "ATC_RAT_YAW_IMAX" => t.atc_rat_imax[2] = v,
+            "ATC_RAT_FLTD" => t.atc_rat_fltd_hz = v,
+            other => panic!("{other}"),
+        }
+        t
+    }
+
+    #[test]
+    fn the_names_are_the_table_and_distinct() {
+        assert_eq!(GAIN_NAMES.len(), 14);
+        for (i, a) in GAIN_NAMES.iter().enumerate() {
+            assert!(GAIN_NAMES[..i].iter().all(|b| a != b), "{a}");
+        }
+        assert_eq!(GAIN_NAMES[0], "ATC_ANG_RP_P");
+        assert_eq!(GAIN_NAMES[13], "ATC_RAT_FLTD");
+    }
+
+    #[test]
+    fn the_defaults_round_trip_through_gains_bit_for_bit() {
+        let d = Tuning::DEFAULT;
+        let back = d.with_gains(Gains::of(&d));
+        assert_eq!(back, d);
+        assert_eq!(std::format!("{back:?}"), std::format!("{d:?}"));
+        // Yaw D is not a gain: any tuning keeps its own.
+        let mut other = d;
+        other.atc_rat_d[2] = 0.125;
+        assert_eq!(other.with_gains(Gains::of(&d)).atc_rat_d[2].to_bits(), 0.125f32.to_bits());
+        // `of` reads what `named` reads.
+        assert_eq!(Gains::of(&d).0.map(f32::to_bits), named(&d).map(f32::to_bits));
+    }
+
+    #[test]
+    fn changing_gain_i_changes_exactly_its_named_field() {
+        let d = Tuning::DEFAULT;
+        let base = Gains::of(&d);
+        for i in 0..GAIN_COUNT {
+            // A value that is none of the other fields' defaults.
+            let marker = 1234.5 + i as f32;
+            let mut g = base;
+            g.0[i] = marker;
+            let t = d.with_gains(g);
+            let want = with_field(d, i, marker);
+            assert_eq!(std::format!("{t:?}"), std::format!("{want:?}"), "{}", GAIN_NAMES[i]);
+            for (j, v) in named(&t).into_iter().enumerate() {
+                let expect = if i == j { marker } else { named(&d)[j] };
+                assert_eq!(v.to_bits(), expect.to_bits(), "{} set, {} read", GAIN_NAMES[i], GAIN_NAMES[j]);
+            }
+            assert_eq!(Gains::of(&t), g, "{}", GAIN_NAMES[i]);
+        }
+    }
+
+    #[test]
+    fn the_defaults_are_inside_the_bounds_and_the_ends_are_accepted() {
+        let d = Gains::of(&Tuning::DEFAULT);
+        assert!(d.in_range());
+        assert!(Gains::MIN.in_range() && Gains::MAX.in_range());
+        for i in 0..GAIN_COUNT {
+            let name = GAIN_NAMES[i];
+            assert!(Gains::MIN.0[i] < d.0[i] && d.0[i] < Gains::MAX.0[i], "{name}");
+            let below = f32::from_bits(Gains::MIN.0[i].to_bits() - 1);
+            let above = f32::from_bits(Gains::MAX.0[i].to_bits() + 1);
+            for (v, ok) in [
+                (Gains::MIN.0[i], true),
+                (Gains::MAX.0[i], true),
+                (below, false),
+                (above, false),
+                (f32::NAN, false),
+                (f32::INFINITY, false),
+                (f32::NEG_INFINITY, false),
+                (0.0, false),
+                (-d.0[i], false),
+            ] {
+                let mut g = d;
+                g.0[i] = v;
+                assert_eq!(g.in_range(), ok, "{name} = {v}");
+            }
+        }
+    }
+
+    /// The text path the CLI and the parameter files use: f32 to text, text to f64, f64 to f32.
+    #[test]
+    fn the_defaults_and_the_bounds_survive_the_text_round_trip() {
+        let sets = [("default", Gains::of(&Tuning::DEFAULT)), ("min", Gains::MIN), ("max", Gains::MAX)];
+        for (which, g) in sets {
+            for (name, d) in GAIN_NAMES.iter().zip(g.0) {
+                let back = d.to_string().parse::<f64>().unwrap() as f32;
+                assert_eq!(back.to_bits(), d.to_bits(), "{which} {name}: {d}");
+            }
+        }
+    }
+}

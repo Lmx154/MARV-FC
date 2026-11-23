@@ -2,6 +2,7 @@
 //! (decision-sim-seams-20261119, sections 3 to 5). Frames, units and signs: decision-sim-conventions-20261119.
 
 use crate::imu::ImuSample;
+use crate::tuning::Gains;
 use fw_core::esc::LINES;
 use fw_core::sample::{BaroSample, GnssSample, MagSample};
 
@@ -330,6 +331,10 @@ pub trait Controller {
     /// (Amendment P, P2, P9). `Flight::step` calls it on every disarmed step, so the value cannot change in flight. The
     /// default ignores it.
     fn set_speed_limit_xy(&mut self, _ms: f32) {}
+    /// The 14 gains of the runtime parameters (decision-gain-params-20261123). `Flight::step` calls it on every disarmed
+    /// step, so the values cannot change in flight. Gains only: integrator and filter memories are not touched. The
+    /// default ignores it.
+    fn set_gains(&mut self, _gains: &Gains) {}
     /// The attitude setpoint [w, x, y, z] the latest `update` made from a `Setpoint::Position` (the SETP record of kind 3,
     /// Amendment P, P5); [0; 4] when that update was not one. The default has none.
     fn attitude_setpoint(&self) -> [f32; 4] {

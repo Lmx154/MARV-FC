@@ -54,7 +54,7 @@ pub const COUNT: usize = baro::COUNT
 
 /// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
 /// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's
-/// soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN` and the ten `GDN_*` parameters (appended, so the first 81 indices did not change).
+/// soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, the ten `GDN_*` parameters and the 14 `ATC_*` gains (appended, so the first 81 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
@@ -184,7 +184,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 105);
+        assert_eq!(COUNT, 119);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -322,6 +322,20 @@ mod tests {
             "GDN_LON3",
             "GDN_LAT4",
             "GDN_LON4",
+            "ATC_ANG_RP_P",
+            "ATC_ANG_YAW_P",
+            "ATC_RAT_RLL_P",
+            "ATC_RAT_PIT_P",
+            "ATC_RAT_YAW_P",
+            "ATC_RAT_RLL_I",
+            "ATC_RAT_PIT_I",
+            "ATC_RAT_YAW_I",
+            "ATC_RAT_RLL_D",
+            "ATC_RAT_PIT_D",
+            "ATC_RAT_RLL_IMAX",
+            "ATC_RAT_PIT_IMAX",
+            "ATC_RAT_YAW_IMAX",
+            "ATC_RAT_FLTD",
         ];
         for (k, name) in appended.iter().enumerate() {
             assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
@@ -336,7 +350,7 @@ mod tests {
     fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
         use mavlink_device::{ParamError, ParamValue};
         use ParamValue::{F32, I32};
-        assert_eq!(COUNT, 105);
+        assert_eq!(COUNT, 119);
         assert_eq!(mag::CAL_OFFSET, 81);
         let expected = [
             ("MAG_DIAGX", F32(1.0), F32(0.2), F32(5.0), true),
@@ -422,7 +436,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 105);
+        assert_eq!(COUNT, 119);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [

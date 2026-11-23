@@ -1273,6 +1273,7 @@ async fn main(spawner: Spawner) {
     flight::init_speed();
     flight::init_notch();
     flight::init_gdn();
+    flight::init_gains();
     let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
     settings::fake_arm();
