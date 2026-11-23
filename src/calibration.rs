@@ -121,8 +121,8 @@ pub fn init(board: Rotation) {
 }
 
 /// The stored offsets of `mask`'s IMUs are pushed at the next supervisor tick (bits of other
-/// devices are ignored, but device 0's: its Live parameters include `PILOT_SPEED_XY` and `RPM_NOTCH_EN`, pushed now by
-/// `flight::push_speed` and `flight::push_notch`, and the ESC device's: `MOT_POLES`, pushed by `flight::push_notch`).
+/// devices are ignored, but device 0's: its Live parameters include `PILOT_SPEED_XY`, `RPM_NOTCH_EN` and the `GDN_*` targets, pushed now by
+/// `flight::push_speed`, `flight::push_notch` and `flight::push_gdn`, and the ESC device's: `MOT_POLES`, pushed by `flight::push_notch`).
 pub fn raise_push(mask: u32) {
     PENDING.fetch_or(mask & ALL, Ordering::Relaxed);
     // Device 0's Live parameters: `PILOT_SPEED_XY` goes to the flight core at once (the flight code latches it at arming).
@@ -133,6 +133,10 @@ pub fn raise_push(mask: u32) {
     // them at arming).
     if mask & (1 | 1 << MarvDevice::MARV_DEVICE_ESC as u32) != 0 {
         crate::flight::push_notch("parameters changed");
+    }
+    // The `GDN_*` targets (device 0) go to the flight core, which takes them on a disarmed step.
+    if mask & 1 != 0 {
+        crate::flight::push_gdn("parameters changed");
     }
 }
 

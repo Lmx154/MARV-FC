@@ -448,6 +448,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         &self.estimator
     }
 
+    /// The pilot's horizontal speed in force, m/s (`PILOT_SPEED_XY` as latched), read only.
+    pub fn speed_xy_in_force(&self) -> f32 {
+        self.shaper.pilot_speed_xy_ms
+    }
+
     /// [`Flight::step`], then `publish` with its output (the board sends the command there), then the shadow estimator
     /// (decision-nav-eskf-20261120, 8a): the gate's armed state after the step and the same sensors. The step's output
     /// is computed and published before the shadow runs and nothing of the shadow reaches the flight code; its state is

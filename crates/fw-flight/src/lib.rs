@@ -96,3 +96,4 @@ pub mod mahony_baro;
 pub mod eskf;
 pub mod eskf_out;
 pub mod notch;
+pub mod guidance;

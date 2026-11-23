@@ -35,7 +35,8 @@ use fw_flight::eskf::{Eskf, EskfError, EskfStats, RING};
 use fw_flight::eskf_n0::{POS, VEL};
 use fw_flight::eskf_out::{EskfSteer, SteerMix};
 use fw_flight::gate::MotorCommand;
-use fw_flight::gnc::{NavState, Sensors, Setpoint};
+use fw_flight::gnc::{Estimator, GeoPoint, NavState, Sensors, Setpoint};
+use fw_flight::guidance::Guidance;
 use fw_flight::imu::{ImuSample, SampleSink};
 use fw_flight::pid::CascadedPid;
 use fw_flight::step::{
@@ -440,6 +441,65 @@ pub fn push_notch(why: &str) {
     );
 }
 
+/// The shadow guidance's targets: how many are in use (0 is off), the arrival radius (m) and the four slots (`alt_mm` 0:
+/// the guidance converts at the origin's altitude).
+pub type GdnSet = (u8, f32, [GeoPoint; fw_settings::flight::GDN_SLOTS]);
+
+/// What [`FLIGHT_GDN`] holds before the first push: off.
+const GDN_OFF: GdnSet = (0, 2.0, [GeoPoint { lat_e7: 0, lon_e7: 0, alt_mm: 0 }; fw_settings::flight::GDN_SLOTS]);
+
+/// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
+/// core 0, through [`push_gdn`]; one reader, IMU1's [`Stepper`]). The Stepper takes new targets on a disarmed step only.
+/// No flash access on core 1: the value is a copy of the stored ones.
+pub static FLIGHT_GDN: TripleBuffer<GdnSet> = TripleBuffer::new(GDN_OFF);
+
+/// Core 0's writer of [`FLIGHT_GDN`].
+static GDN_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, GdnSet>>>> =
+    Mutex::new(RefCell::new(None));
+
+/// Takes the writer of [`FLIGHT_GDN`] and pushes the stored values. Call once, on core 0, after `settings::boot` and
+/// before core 1 starts, so the flight core's first read has them.
+pub fn init_gdn() {
+    let Some(writer) = FLIGHT_GDN.take_writer() else {
+        defmt::panic!("[FAIL] GDN writer taken twice");
+    };
+    GDN_WRITER.lock(|w| *w.borrow_mut() = Some(writer));
+    push_gdn("boot");
+}
+
+/// Pushes the stored `GDN_*` parameters to the flight core (core 0; call with no store access in progress). A value that
+/// cannot be read or has the wrong type is the table's default (count 0: off).
+pub fn push_gdn(why: &str) {
+    use fw_settings::flight::{GDN_COUNT, GDN_LAT, GDN_LON, GDN_RADIUS, GDN_SLOTS};
+    let value = crate::store::with(|p| {
+        let int = |name| match p.get_named(name) {
+            Some(mavlink_device::ParamValue::I32(v)) => v,
+            _ => 0,
+        };
+        let radius = match p.get_named(GDN_RADIUS) {
+            Some(mavlink_device::ParamValue::F32(v)) => v,
+            _ => GDN_OFF.1,
+        };
+        let mut targets = GDN_OFF.2;
+        for k in 0..GDN_SLOTS {
+            targets[k] = GeoPoint { lat_e7: int(GDN_LAT[k]), lon_e7: int(GDN_LON[k]), alt_mm: 0 };
+        }
+        (int(GDN_COUNT).clamp(0, GDN_SLOTS as i32) as u8, radius, targets)
+    })
+    .unwrap_or(GDN_OFF);
+    GDN_WRITER.lock(|w| {
+        if let Some(writer) = w.borrow_mut().as_mut() {
+            writer.write(value);
+        }
+    });
+    defmt::info!(
+        "[INFO] GDN_COUNT {=u8}, GDN_RADIUS {=f32} m pushed to the flight core ({=str}); new targets are taken on a disarmed step",
+        value.0,
+        value.1,
+        why
+    );
+}
+
 /// The flight log ring's size (decision-flight-logging-20261119, section 3).
 pub const LOG_BYTES: usize = 16384;
 /// The flight records: producer IMU1's [`Stepper`] (core 1), consumer `logger`'s collector (core 0).
@@ -465,6 +525,7 @@ pub struct Stepper {
     gnss: TripleReader<'static, GnssSample>,
     speed: TripleReader<'static, f32>,
     notch: TripleReader<'static, (bool, i32)>,
+    gdn: TripleReader<'static, GdnSet>,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
     step: u32,
@@ -478,12 +539,20 @@ pub struct Stepper {
     stat: SeqlockWriter<'static, NavStat>,
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
+    /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
+    guidance: Guidance<{ fw_settings::flight::GDN_SLOTS }>,
+    /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
+    /// whether the previous step was armed.
+    gdn_in_force: GdnSet,
+    gdn_pushed: GdnSet,
+    gdn_wait: bool,
+    was_armed: bool,
 }
 
 impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
     /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`], [`FLIGHT_SPEED_XY`] or [`FLIGHT_NOTCH`] or the writer of
-    /// [`NAV_STAT`] was taken already.
+    /// [`NAV_STAT`] or the reader of [`FLIGHT_GDN`] was taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     /// `period_us`: IMU1's sample period from its setup (the value the IMU1 task runs on); the notch's sample rate is
     /// 1e6 / `period_us`.
@@ -507,6 +576,7 @@ impl Stepper {
             gnss: FLIGHT_GNSS.take_reader()?,
             speed: FLIGHT_SPEED_XY.take_reader()?,
             notch: FLIGHT_NOTCH.take_reader()?,
+            gdn: FLIGHT_GDN.take_reader()?,
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
@@ -514,6 +584,11 @@ impl Stepper {
             corrected: 0,
             stat: NAV_STAT.take_writer()?,
             mode_log: ModeLog::new(),
+            guidance: Guidance::new(),
+            gdn_in_force: GDN_OFF,
+            gdn_pushed: GDN_OFF,
+            gdn_wait: false,
+            was_armed: false,
         })
     }
 
@@ -595,6 +670,44 @@ impl Stepper {
     }
 }
 
+impl Stepper {
+    /// The shadow guidance (decision-guidance-shadow-20261123, section 3), after the command is out and the step's own
+    /// records are pushed. New targets are taken on a disarmed step only and start the guidance over, and so does arming.
+    /// Only with a count in force above 0, and on every 8th step, armed or not: `anchor`, then `step`, from copies of
+    /// `out.nav`, the estimator's origin and the speed in force; one GDN record, a push of its own (it is dropped and
+    /// counted by the ring if it does not fit, and the step block is never affected). Nothing here reaches `Flight`.
+    fn guide(&mut self, out: &StepOut, step: u32) {
+        if self.gdn_wait && !out.armed {
+            self.gdn_wait = false;
+            if self.gdn_pushed != self.gdn_in_force {
+                self.gdn_in_force = self.gdn_pushed;
+                let (count, radius, targets) = self.gdn_in_force;
+                self.guidance.set_targets(&targets[..usize::from(count)], radius);
+            }
+        }
+        if out.armed && !self.was_armed {
+            self.guidance.reset();
+        }
+        self.was_armed = out.armed;
+        if self.gdn_in_force.0 == 0 || step % 8 != 0 {
+            return;
+        }
+        let nav = out.nav;
+        let mix: &BoardMix = self.flight.estimator();
+        let origin = mix.origin();
+        let speed = self.flight.speed_xy_in_force();
+        self.guidance.anchor(&nav);
+        let g = self.guidance.step(&nav, origin, speed, out.t_us);
+        let (position, velocity) = match g.setpoint {
+            Some(Setpoint::Position { position_m, velocity_ms, .. }) => ([position_m[0], position_m[1]], [velocity_ms[0], velocity_ms[1]]),
+            _ => ([0.0; 2], [0.0; 2]),
+        };
+        self.log.push_with(dflog::GDN.length.into(), |b| {
+            dflog::encode_gdn(b, out.t_us, g.active, g.status, g.target_ne, position, velocity, g.dist_m, g.bearing_rad)
+        });
+    }
+}
+
 impl SampleSink for Stepper {
     /// One flight step for the IMU1 sample just published, with the stick report and the barometer, compass and
     /// GNSS samples that are new since the previous step. IMU2 comes with later steps.
@@ -610,6 +723,11 @@ impl SampleSink for Stepper {
         let (notch, notch_fresh) = self.notch.read();
         if notch_fresh {
             self.flight.set_notch(notch.0, notch.1);
+        }
+        let (gdn, gdn_fresh) = self.gdn.read();
+        if gdn_fresh {
+            self.gdn_pushed = gdn;
+            self.gdn_wait = true;
         }
         // The ESC status, once: the eRPM of the step's notch and the ESC record below both come from this copy. A read
         // that fails (the writer paused in mid-write) is no status: every line is missing.
@@ -633,6 +751,7 @@ impl SampleSink for Stepper {
         });
         // The log, after the command is out. A record that does not fit is dropped and counted by the ring.
         let due = log_due(self.step, out.armed);
+        let gdn_step = self.step;
         self.step = self.step.wrapping_add(1);
         if due.imu {
             let r = &sample.reading;
@@ -685,5 +804,6 @@ impl SampleSink for Stepper {
             });
         }
         self.log_nav(&out);
+        self.guide(&out, gdn_step);
     }
 }

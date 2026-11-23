@@ -278,4 +278,8 @@ impl Tuning {
         pilot_hold_speed_ms: 0.8,
         land_detect_us: 1_000_000,
     };
+
+    /// Guidance: the horizontal acceleration of the leg carrot, m/s^2 (decision-guidance-shadow-20261123, section 2). PX4
+    /// MPC_ACC_HOR 3.0 (multicopter_autonomous_params.yaml:82-91; ArduPilot WP_ACC 2.5, online only); owner-approved.
+    pub const GUIDANCE_ACC_MS2: f32 = 3.0;
 }
