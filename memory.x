@@ -136,6 +136,8 @@ SECTIONS {
         *(.text.*9fw_flight4eskf*)
         /* EskfSteer and SteerMix (Amendments G and G-1): the steering estimator the flight image runs since packet P-G6. */
         *(.text.*9fw_flight8eskf_out*)
+        /* The heading monitor (decision-heading-monitor-20261123, packet HM2): fw_flight::heading_mon, fed by Eskf in shadow. */
+        *(.text.*9fw_flight11heading_mon*)
         /* The flight log (decision-flight-logging-20261119): the dflog encoders the Stepper calls; core 0's stay in flash. */
         *(.text.*7fw_core5dflog10encode_imu* .text.*7fw_core5dflog10encode_nav* .text.*7fw_core5dflog11encode_setp*)
         *(.text.*7fw_core5dflog10encode_dmd* .text.*7fw_core5dflog10encode_mot* .text.*7fw_core5dflog10encode_esc*)
