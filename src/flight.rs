@@ -587,6 +587,8 @@ const BLOCK: usize = dflog::IMU.length as usize
     + dflog::MOT.length as usize
     + dflog::PIDT.length as usize
     + dflog::NTCH.length as usize;
+// A block over the ring's push limit is refused whole and counted as a drop: every step would lose its records.
+const _: () = assert!(BLOCK <= fw_core::xcore::PUSH_WITH_MAX);
 
 /// IMU1's sample sink: the flight code and the writer of [`OUT`]. Built inside IMU1's task, on core 1.
 pub struct Stepper {

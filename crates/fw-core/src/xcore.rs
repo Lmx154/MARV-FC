@@ -688,7 +688,7 @@ impl<const N: usize> LogProducer<'_, N> {
 
 /// The longest record [`LogProducer::push_with`] takes (it holds a stack buffer of this size for
 /// the case of a free area that wraps around the end of the storage).
-pub const PUSH_WITH_MAX: usize = 256;
+pub const PUSH_WITH_MAX: usize = 320;
 
 /// Space reserved in a [`LogRing`] for one record, from [`LogProducer::reserve`]: one or two
 /// mutable slices (two when the area wraps around the end of the storage), `len` bytes in all.
