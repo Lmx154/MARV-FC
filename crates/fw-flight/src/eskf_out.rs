@@ -2138,4 +2138,109 @@ mod tests {
     fn size_of_the_mix() {
         println!("size_of SteerMix {} EskfSteer {} EskfZ {} Eskf {}", size_of::<SteerMix>(), size_of::<EskfSteer>(), size_of::<EskfZ>(), size_of::<Eskf>());
     }
+
+    // ---- HM2 / F2 (decision-heading-monitor HM-I1): the heading monitor is read-only ----
+
+    /// A 45 s stream for F2: yaw 0.4 rad turning at 0.05 rad/s, (2, 0.5) m/s with the receiver's NED velocity, from 6 s a
+    /// 1 m/s^2 horizontal acceleration turning once every 8 s, a frozen fix from 20 s to 21 s (E1s screens) and north off by
+    /// ten sigmas from 30 s (gating, the C3 reset).
+    fn f2_stream(t: &Tuning) -> Vec<Sensors> {
+        let mut w = World::new(t);
+        w.yaw = 0.4;
+        w.yaw_rate = 0.05;
+        w.v = [2.0, 0.5, 0.0];
+        w.gps_vel = true;
+        w.fault = Fault::Freeze(20_000_000, 21_000_000);
+        let sigma = (f64::from(w.std_mm) * 1e-3).max(f64::from(t.nav_gps_pos_sigma_min_m));
+        let mut out = Vec::new();
+        while w.t_us() < 45_000_000 {
+            let ts = w.t_us() as f64 * 1e-6;
+            w.a = if ts >= 6.0 {
+                let ph = (ts - 6.0) * core::f64::consts::TAU / 8.0;
+                [ph.cos(), ph.sin(), 0.0]
+            } else {
+                [0.0; 3]
+            };
+            if w.t_us() >= 30_000_000 && !matches!(w.fault, Fault::North(..)) {
+                w.fault = Fault::North(w.t_us(), 10.0 * sigma);
+            }
+            out.push(w.step());
+        }
+        out
+    }
+
+    /// Every field of a NavState as bits.
+    fn nav_bits_all(n: &NavState) -> Vec<u32> {
+        let mut b: Vec<u32> = std::vec![n.t_us as u32, (n.t_us >> 32) as u32];
+        b.extend(n.attitude.iter().chain(&n.rates_rads).chain(&n.velocity_ms).chain(&n.position_m).map(|x| x.to_bits()));
+        let v = n.valid;
+        b.extend([v.tilt, v.heading, v.rates, v.velocity_ne, v.velocity_d, v.position_ne, v.position_d].map(u32::from));
+        if let Some(s) = n.sigma {
+            b.extend([s.tilt_rad, s.heading_rad, s.velocity_ne_ms, s.velocity_d_ms, s.position_ne_m, s.position_d_m].map(f32::to_bits));
+        }
+        b
+    }
+
+    /// F2: `st` through two mixes, the heading monitor fed in `on` and switched off in `off`, armed from 5 s, airborne from
+    /// 8 s to 38 s and again from 40 s; `perturb` adds 1e-3 m/s^2 to one accelerometer sample of `off`. Returns the first
+    /// step at which anything but the Src 13 records differs (the mix output, the whole core state with P, the core's flags,
+    /// statistics, events and reset, the predictor's tracking), the Src 13 records of `on`, and its monitor's output.
+    fn f2_run(t: &Tuning, st: &[Sensors], perturb: Option<usize>) -> (Option<usize>, usize, crate::heading_mon::HeadingMon) {
+        use crate::eskf::code;
+        use crate::eskf::tests::core_bits_all;
+        let (mut core_a, mut vz_a) = (Eskf::new(t).unwrap(), zero_delay(t));
+        let (mut core_b, mut vz_b) = (Eskf::new(t).unwrap(), zero_delay(t));
+        core_b.hm_off = true;
+        let mut on = SteerMix::new(EskfSteer::new(&mut core_a, t).unwrap(), &mut vz_a);
+        let mut off = SteerMix::new(EskfSteer::new(&mut core_b, t).unwrap(), &mut vz_b);
+        let (mut first, mut n13) = (None, 0usize);
+        for (k, s) in st.iter().enumerate() {
+            let ts = s.imu1.t_us;
+            let (armed, air) = (ts >= 5_000_000, (8_000_000..38_000_000).contains(&ts) || ts >= 40_000_000);
+            on.set_armed(armed);
+            off.set_armed(armed);
+            on.set_airborne(air);
+            off.set_airborne(air);
+            let mut s_off = *s;
+            if Some(k) == perturb {
+                s_off.imu1.reading.accel_ms2[0] += 1e-3;
+            }
+            let (a, b) = (on.update(s), off.update(&s_off));
+            let (ca, cb) = (on.steer().core(), off.steer().core());
+            n13 += ca.events().filter(|e| e.src == code::HEADING_MON).count();
+            assert!(cb.events().all(|e| e.src != code::HEADING_MON), "the switched-off monitor writes nothing");
+            let ev_a: Vec<_> = ca.events().filter(|e| e.src != code::HEADING_MON).copied().collect();
+            let ev_b: Vec<_> = cb.events().copied().collect();
+            let same = nav_bits_all(&a) == nav_bits_all(&b)
+                && core_bits_all(ca) == core_bits_all(cb)
+                && ca.stats() == cb.stats()
+                && ev_a == ev_b
+                && ca.last_reset() == cb.last_reset()
+                && ca.origin() == cb.origin()
+                && on.steer().tracking() == off.steer().tracking()
+                && on.vert_nav().map(nav_bits_all) == off.vert_nav().map(nav_bits_all);
+            if !same && first.is_none() {
+                first = Some(k);
+            }
+        }
+        (first, n13, on.steer().core().heading_mon())
+    }
+
+    #[test]
+    fn f2_the_core_and_the_mix_are_bit_identical_with_the_heading_monitor_fed_or_not_and_one_perturbed_sample_breaks_it() {
+        let t = Tuning::DEFAULT;
+        let st = f2_stream(&t);
+        let (first, n13, o) = f2_run(&t, &st, None);
+        println!(
+            "f2: {} steps, first difference {first:?}; Src 13 records {n13}; monitor confirmed {} fault {} d_hat {:.2} deg sig {:.2} deg screened {} non-finite {}",
+            st.len(), o.confirmed, o.fault, o.delta_rad.to_degrees(), o.sigma_rad.to_degrees(), o.screened_r2, o.non_finite
+        );
+        assert_eq!(first, None, "the monitor changed the filter");
+        assert!(n13 > 100 && o.confirmed, "the monitor must have run: {n13} records");
+        // Negative control: one accelerometer sample of the switched-off twin changed by 1e-3 m/s^2 at 12 s.
+        let k = st.iter().position(|s| s.imu1.t_us >= 12_000_000).unwrap();
+        let (first_c, _, _) = f2_run(&t, &st, Some(k));
+        println!("f2 control: perturbed step {k}, first difference {first_c:?}");
+        assert!(first_c.is_some_and(|f| f >= k), "the comparison must see a perturbed input: {first_c:?}");
+    }
 }

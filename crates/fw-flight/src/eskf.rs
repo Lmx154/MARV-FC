@@ -2061,7 +2061,7 @@ pub(crate) mod tests {
     }
 
     /// The whole core state as bits: nominal, biases, the full P, horizon, flags that gate aiding.
-    fn core_bits_all(e: &Eskf) -> Vec<u32> {
+    pub(crate) fn core_bits_all(e: &Eskf) -> Vec<u32> {
         let n = &e.nom;
         let mut b: Vec<u32> = n.q.iter().chain(&n.v).chain(&n.p).chain(&n.bg).chain(&n.ba).map(|x| x.to_bits()).collect();
         b.extend(e.p.iter().flatten().map(|x| x.to_bits()));
