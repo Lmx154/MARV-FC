@@ -522,6 +522,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         }
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
+        // The airborne latch the previous step left: only ESKF3's heading monitor reads it (shadow, HM2).
+        self.estimator.set_airborne(self.airborne);
         // A non-finite IMU value never reaches the estimator: no tilt, so the demand is refused and the gate stops.
         let reading = &inputs.sensors.imu1.reading;
         let finite = reading.gyro_rads.iter().all(|v| v.is_finite())
@@ -1898,6 +1900,41 @@ mod tests {
             });
         }
         recs
+    }
+
+    /// HM2: `Flight` passes its airborne latch of the previous step to the estimator before `update`, through `&mut E`,
+    /// `SteerMix` and `EskfSteer` to the ESKF3 core (the board's chain), on every step, both values seen.
+    #[test]
+    fn hm2_the_core_sees_the_airborne_latch_of_the_previous_step_through_the_boards_estimator_chain() {
+        extern crate std;
+        use crate::eskf::tests::World;
+        use crate::eskf::{Aiding, Eskf, EskfZ};
+        use crate::eskf_out::{EskfSteer, SteerMix};
+        static H: Handshake = Handshake::new();
+        let tuning = Tuning::DEFAULT;
+        let (mut core, mut vz) = (Eskf::new(&tuning).unwrap(), EskfZ::with_aiding(&tuning, Aiding::ImuBaro).unwrap());
+        let mut mix = SteerMix::new(EskfSteer::new(&mut core, &tuning).unwrap(), &mut vz);
+        let mut flight = Flight::new(&mut mix, CascadedPid::new(&tuning, 800.0), CardAllocator::new(), &tuning, &H);
+        H.set_permit(true);
+        let mut world = World::new(&tuning);
+        let (mut seen, mut steps) = ([0usize; 2], 0usize);
+        for k in 0..12_000_000 / 1_250usize {
+            let sensors = world.step();
+            let t_us = sensors.imu1.t_us;
+            let rc = (k % 10 == 0).then_some(RcSample {
+                sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: if t_us < 3_000_000 { 0.0 } else { 0.6 }, yaw: 0.0 },
+                arm: (2_000_000..8_000_000).contains(&t_us),
+                switch6: Switch3::Low,
+                t_us,
+            });
+            let before = flight.airborne;
+            flight.step(&FlightInputs { sensors, rc, erpm: [None; LINES] });
+            assert_eq!(flight.estimator.steer().core().airborne_seen(), before, "step {k}");
+            seen[usize::from(before)] += 1;
+            steps += 1;
+        }
+        std::println!("hm2 wiring: {steps} steps, the core saw airborne false in {} and true in {}", seen[0], seen[1]);
+        assert!(seen[0] > 1_000 && seen[1] > 1_000);
     }
 
     /// P-G1m M2 (Amendment G-1, V3): the barometer 40 m too high from 20 s, armed. ESKF2's height reset moves D by about

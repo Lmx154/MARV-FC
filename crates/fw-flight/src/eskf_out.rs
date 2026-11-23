@@ -573,6 +573,10 @@ impl Estimator for EskfSteer<'_> {
     fn set_armed(&mut self, armed: bool) {
         self.core.set_armed(armed);
     }
+
+    fn set_airborne(&mut self, airborne: bool) {
+        self.core.set_airborne(airborne);
+    }
 }
 
 /// The composite steering estimator (Amendment G-1, G-1b): attitude, rates and the horizontal state from the output
@@ -664,6 +668,10 @@ macro_rules! steer_mix_estimator {
             fn set_armed(&mut self, armed: bool) {
                 self.h.set_armed(armed);
                 self.v.set_armed(armed);
+            }
+
+            fn set_airborne(&mut self, airborne: bool) {
+                self.h.set_airborne(airborne);
             }
         }
     };

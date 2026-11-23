@@ -139,6 +139,9 @@ pub trait Estimator {
     }
     /// The gate's armed state after the previous step; `Flight::step` calls it once, before `update`.
     fn set_armed(&mut self, _armed: bool) {}
+    /// `Flight`'s airborne latch after the previous step (Amendment P, P3); `Flight::step` calls it once, before `update`.
+    /// Only ESKF3's heading monitor reads it (decision-heading-monitor H9), never a filter.
+    fn set_airborne(&mut self, _airborne: bool) {}
 }
 
 /// A borrowed estimator is an estimator: the board's steering `Eskf` lives in a static and `Flight` owns the reference.
@@ -151,6 +154,9 @@ impl<E: Estimator + ?Sized> Estimator for &mut E {
     }
     fn set_armed(&mut self, armed: bool) {
         (**self).set_armed(armed);
+    }
+    fn set_airborne(&mut self, airborne: bool) {
+        (**self).set_airborne(airborne);
     }
 }
 

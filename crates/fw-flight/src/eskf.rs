@@ -94,6 +94,15 @@
 //! - A barometer, compass or GNSS sample whose time (validity time, sample time, arrival time minus
 //!   nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us, is dropped and counted
 //!   ([`EskfStats::stale`]).
+//! - Heading monitor (decision-heading-monitor-20261123, packet HM2; `Full` only; shadow, read-only: it never writes the
+//!   filter, HM-I1). A = the sum of the nominal step's N and E velocity change, (R(q)(f - b_a) dt)_N,E of every integrated
+//!   sample (gravity is in D only, corrections are not nominal steps), from one accepted epoch to the next. An epoch enters
+//!   ([`crate::heading_mon::HeadingMonitor::accepted_epoch`], at the horizon time, with the receiver's NED velocity) only when
+//!   `gnss_arrival` made it a job (Src 9 reset or the scalars, which may gate) with the receiver's own NED velocity; an epoch
+//!   it refuses or screens, a stale one, one with no velocity, or one whose velocity came from speed and course breaks the
+//!   chain; every other step ticks the blind timer. `airborne` is `Flight`'s latch of the previous step
+//!   ([`Estimator::set_airborne`]). NKI Src 13 at the end of the step, for an evaluated or R2-screened pair, only into a free
+//!   slot (else counted, [`EskfN::heading_mon_dropped`]).
 // Fixed-size arrays only; every index is a loop bound or a constant below the array length.
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
@@ -101,6 +110,7 @@ use crate::eskf_n0::{
     self as n0, ACCEL_BIAS, ATT, Cov, GYRO_BIAS, N, Noise, Nominal, POS, VEL, rotation,
 };
 use crate::gnc::{Estimator, GeoPoint, NavSigma, NavState, Sensors, Valid};
+use crate::heading_mon::{HeadingMon, HeadingMonitor, Pair};
 use crate::mahony::{ACCEL_MAX_G, ACCEL_MIN_G, DT_MAX_US};
 use crate::mahony_baro::isa_height_m;
 use crate::quat::pt1;
@@ -179,6 +189,22 @@ pub mod code {
     pub const GPS_RESET: u8 = 9;
     /// Src: GNSS vertical velocity (`ImuBaro` with the VelD option, Amendment V; logged as I = 1).
     pub const GPS_VD: u8 = 12;
+    /// Src: heading monitor, ESKF3 (decision-heading-monitor H3, H7, H10; logged as I = 0), one per evaluated or R2-screened
+    /// pair while armed and airborne: Inn = d_hat (rad), Var = sig^2 (rad^2; of the last evaluated pair), Ok = the bits
+    /// below.
+    pub const HEADING_MON: u8 = 13;
+    /// Src 13 Ok bit: confirmed (latched).
+    pub const HM_CONFIRMED: u8 = 1;
+    /// Src 13 Ok bit: fault (latched).
+    pub const HM_FAULT: u8 = 2;
+    /// Src 13 Ok bit: the filter's heading flag (`Valid::heading` of this step's NavState).
+    pub const HM_HEADING: u8 = 4;
+    /// Src 13 Ok bit: the G6-B latch (`global_off`).
+    pub const HM_G6B: u8 = 8;
+    /// Src 13 Ok bit: this epoch's pair was screened by R2 (Inn and Var are the last evaluated pair's).
+    pub const HM_SCREENED: u8 = 16;
+    /// Src 13 Ok bit: blind (H10 (2)).
+    pub const HM_BLIND: u8 = 32;
     /// Ok: gated out.
     pub const GATED: u8 = 0;
     /// Ok: fused (or applied, for a reset).
@@ -506,6 +532,15 @@ pub struct EskfN<const R: usize> {
     /// Test control: the VelD job fuses a non-finite measurement or innovation (the rule before the fix).
     #[cfg(test)]
     vd_no_finite_check: bool,
+    /// The heading monitor (HM2, `Full` only): read-only with respect to the filter.
+    hmon: HeadingMonitor,
+    /// `Flight`'s airborne latch of the previous step ([`Estimator::set_airborne`]); only the heading monitor reads it.
+    airborne: bool,
+    /// Src 13 records not written because the step's event slots were full.
+    hm_dropped: u32,
+    /// F2 test control: the heading monitor is not fed and writes nothing.
+    #[cfg(test)]
+    pub(crate) hm_off: bool,
 }
 
 /// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
@@ -695,6 +730,11 @@ impl<const R: usize> EskfN<R> {
             vd_keep_on_reinit: false,
             #[cfg(test)]
             vd_no_finite_check: false,
+            hmon: HeadingMonitor::default(),
+            airborne: false,
+            hm_dropped: 0,
+            #[cfg(test)]
+            hm_off: false,
         })
     }
 
@@ -770,6 +810,49 @@ impl<const R: usize> EskfN<R> {
         core::array::from_fn(|i| sqrtf(self.p[i][i].max(0.0)))
     }
 
+    /// The heading monitor's output (HM2, shadow): nothing reads it but the Src 13 record and tests (HM-I5).
+    pub fn heading_mon(&self) -> HeadingMon {
+        self.hmon.output()
+    }
+
+    /// Src 13 records dropped because the step's [`EVENTS`] slots were full.
+    pub fn heading_mon_dropped(&self) -> u32 {
+        self.hm_dropped
+    }
+
+    /// Tests: the airborne flag the last `set_airborne` gave.
+    #[cfg(test)]
+    pub(crate) fn airborne_seen(&self) -> bool {
+        self.airborne
+    }
+
+    /// The heading monitor is fed (`Full`; in tests, not switched off).
+    fn hm_on(&self) -> bool {
+        #[cfg(test)]
+        let off = self.hm_off;
+        #[cfg(not(test))]
+        let off = false;
+        self.aiding_set == Aiding::Full && !off
+    }
+
+    /// HM2: the Src 13 record of an evaluated (or, `screened`, R2-screened) pair, written last in the step and only into a
+    /// free slot, so the filter's own records keep theirs; with none free it is counted instead.
+    fn hm_record(&mut self, screened: bool, heading: bool) {
+        let o = self.hmon.output();
+        let bit = |on: bool, b: u8| if on { b } else { 0 };
+        let ok = bit(o.confirmed, code::HM_CONFIRMED)
+            | bit(o.fault, code::HM_FAULT)
+            | bit(heading, code::HM_HEADING)
+            | bit(self.global_off, code::HM_G6B)
+            | bit(screened, code::HM_SCREENED)
+            | bit(o.blind, code::HM_BLIND);
+        if self.events.iter().any(Option::is_none) {
+            self.event(code::HEADING_MON, o.delta_rad, o.sigma_rad * o.sigma_rad, ok);
+        } else {
+            self.hm_dropped = self.hm_dropped.wrapping_add(1);
+        }
+    }
+
     fn event(&mut self, src: u8, inn: f32, var: f32, ok: u8) {
         let t_us = self.horizon_us.unwrap_or(0);
         if let Some(slot) = self.events.iter_mut().find(|e| e.is_none()) {
@@ -836,9 +919,14 @@ impl<const R: usize> EskfN<R> {
         let dt = dt_us as f32 * 1e-6;
         if self.tilt_aligned {
             let v0 = self.nom.v[2];
+            let (vn0, ve0) = (self.nom.v[0], self.nom.v[1]);
             n0::nominal_step(&mut self.nom, &s.gyro, &s.accel, dt);
             if self.gps_vd {
                 self.vd_s += self.nom.v[2] - v0;
+            }
+            if self.hm_on() {
+                // HM2: this sample's strapdown increment (R(q)(f - b_a) dt)_N,E, read off the nominal step (no gravity in N, E).
+                self.hmon.add_increment(self.nom.v[0] - vn0, self.nom.v[1] - ve0);
             }
             if Some(s.t_us) == self.snap_req {
                 self.snap = Some((s.t_us, self.nom.q, self.nom.v, self.nom.p));
@@ -1266,28 +1354,29 @@ impl<const R: usize> EskfN<R> {
     }
 
     /// A GNSS epoch on arrival (its time is the horizon's, C2a): acceptance (5c, C2b), the origin (6a), the C-1 rules,
-    /// the frozen-fix and near-zero-speed screens (C2d), and the plan: the Src 9 reset or the scalars.
-    fn gnss_arrival(&mut self, g: &GnssSample) {
+    /// the frozen-fix and near-zero-speed screens (C2d), and the plan: the Src 9 reset or the scalars. Returns the
+    /// receiver's NED velocity (N, E) when the epoch became a job with it (the heading monitor's accepted epoch, HM2 R1).
+    fn gnss_arrival(&mut self, g: &GnssSample) -> Option<[f32; 2]> {
         self.stats.gps_epochs = self.stats.gps_epochs.wrapping_add(1);
         let r = &g.reading;
         let (Some(lat), Some(lon)) = (r.lat_e7, r.lon_e7) else {
             self.stats.gps_unaccepted = self.stats.gps_unaccepted.wrapping_add(1);
-            return;
+            return None;
         };
         if r.fix_type < 3 {
             self.stats.gps_unaccepted = self.stats.gps_unaccepted.wrapping_add(1);
-            return;
+            return None;
         }
         let prev = self.gps_prev.replace((g.t_us, lat, lon));
         let max_interval_us = 1e6 / self.t.nav_gps_min_rate_hz;
         let in_rate = prev.is_some_and(|(t0, _, _)| (g.t_us.saturating_sub(t0) as f32) <= max_interval_us);
         let (Some(lat_std), Some(lon_std)) = (r.lat_std_mm, r.lon_std_mm) else {
             self.stats.gps_unaccepted = self.stats.gps_unaccepted.wrapping_add(1);
-            return;
+            return None;
         };
         if !in_rate {
             self.stats.gps_unaccepted = self.stats.gps_unaccepted.wrapping_add(1);
-            return;
+            return None;
         }
         let alt = r.alt_mm.unwrap_or(0);
         let d_mm = (self.nom.p[2] * 1000.0) as i32;
@@ -1309,16 +1398,16 @@ impl<const R: usize> EskfN<R> {
         self.fix_hist.push((g.t_us, lat, lon));
         if !self.yaw_aligned {
             self.stats.gps_prealign = self.stats.gps_prealign.wrapping_add(1);
-            return;
+            return None;
         }
         if !self.armed || self.global_off {
             self.stats.gps_disarmed = self.stats.gps_disarmed.wrapping_add(1);
-            return;
+            return None;
         }
         if repeat {
             self.stats.gps_e1s = self.stats.gps_e1s.wrapping_add(1);
             self.event(code::GPS_N, 0.0, 0.0, code::SCREENED);
-            return;
+            return None;
         }
         let sv = self.t.nav_gps_vel_sigma_ms;
         let (vel, h_speed) = if let Some(v) = r.vel_ned_mm_s {
@@ -1360,9 +1449,11 @@ impl<const R: usize> EskfN<R> {
             self.event(code::VN, 0.0, 0.0, code::SCREENED);
             vel = None;
         }
+        let hm_vel = vel.filter(|_| r.vel_ned_mm_s.is_some()).map(|(v, _)| v);
         if self.gps_job.replace(GpsJob { plan, ne, sigma_ne, vel }).is_some() {
             self.stats.replaced = self.stats.replaced.wrapping_add(1);
         }
+        hm_vel
     }
 
     fn gps_job(&mut self, job: GpsJob) {
@@ -1639,11 +1730,23 @@ impl<const R: usize> Estimator for EskfN<R> {
                 self.stats.dropped = self.stats.dropped.wrapping_add(1);
             }
         }
+        let mut hm_epoch = None;
         if let Some(g) = sensors.gnss.filter(|_| full) {
             if stale(g.t_us.saturating_sub(self.t.nav_gps_delay_us)) {
                 self.stats.stale = self.stats.stale.wrapping_add(1);
+                hm_epoch = Some(None);
             } else {
-                self.gnss_arrival(&g);
+                hm_epoch = Some(self.gnss_arrival(&g));
+            }
+        }
+        // HM2: the heading monitor at the horizon time; nothing below reads it.
+        let mut hm_pair = Pair::None;
+        if self.hm_on() {
+            let (t_hm, air) = (self.horizon() as u32, self.airborne);
+            match hm_epoch {
+                Some(Some([vn, ve])) => hm_pair = self.hmon.accepted_epoch(t_hm, vn, ve, air),
+                Some(None) => self.hmon.chain_broken(t_hm, air),
+                None => self.hmon.tick(t_hm, air),
             }
         }
         if let Some(g) = sensors.gnss.filter(|_| self.gps_vd) {
@@ -1705,7 +1808,11 @@ impl<const R: usize> Estimator for EskfN<R> {
             self.reinitialise();
             self.reset = None;
         }
-        self.nav()
+        let nav = self.nav();
+        if hm_pair != Pair::None {
+            self.hm_record(hm_pair == Pair::Screened, nav.valid.heading);
+        }
+        nav
     }
 
     fn origin(&self) -> Option<GeoPoint> {
@@ -1730,6 +1837,11 @@ impl<const R: usize> Estimator for EskfN<R> {
             }
         }
         self.armed = armed;
+        self.hmon.set_armed(armed);
+    }
+
+    fn set_airborne(&mut self, airborne: bool) {
+        self.airborne = airborne;
     }
 }
 
@@ -5022,5 +5134,164 @@ pub(crate) mod tests {
         assert_eq!((reinits, finite), (1, true));
         assert!(fused > 50, "{fused}");
         assert!(reinits_c > 50 && !finite_c, "the control must loop: {reinits_c}");
+    }
+
+    // ---- Heading monitor, packet HM2 ----
+
+    /// The HM2 manoeuvre: from 6 s a horizontal acceleration of 1 m/s^2 turning once every 8 s (the velocity stays bounded).
+    fn hm_accel(w: &mut World) {
+        let ts = w.t_us() as f64 * 1e-6;
+        w.a = if ts >= 6.0 {
+            let ph = (ts - 6.0) * core::f64::consts::TAU / 8.0;
+            [ph.cos(), ph.sin(), 0.0]
+        } else {
+            [0.0; 3]
+        };
+    }
+
+    /// A World for HM2 moving at (2, 0.5) m/s, yaw 0.4 rad turning at 0.05 rad/s (so that body and NED differ), with the
+    /// receiver's NED velocity (`vel` false: speed and course only).
+    fn hm_world(t: &Tuning, vel: bool) -> World {
+        let mut w = World::new(t);
+        w.v = [2.0, 0.5, 0.0];
+        w.yaw = 0.4;
+        w.yaw_rate = 0.05;
+        w.gps_vel = vel;
+        w
+    }
+
+    /// The HM2 flight to `secs`: armed from 5 s, airborne from `air_s`; `each` after every step.
+    fn hm_run(e: &mut Eskf, w: &mut World, secs: f64, air_s: f64, mut each: impl FnMut(&Eskf, &NavState, &World)) {
+        while (w.t_us() as f64) < secs * 1e6 {
+            hm_accel(w);
+            let s = w.step();
+            let ts = w.t_us() as f64 * 1e-6;
+            e.set_armed(ts >= 5.0);
+            e.set_airborne(ts >= air_s);
+            let nav = e.update(&s);
+            each(e, &nav, w);
+        }
+    }
+
+    #[test]
+    fn hm1_a_scripted_flight_feeds_the_monitor_at_the_horizon_confirms_and_logs_src_13_only_airborne() {
+        use crate::heading_mon::SIG_CONF_RAD;
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = hm_world(&t, true);
+        let (mut recs, mut first_conf, mut max_d) = (0usize, None, 0.0f32);
+        hm_run(&mut f, &mut w, 40.0, 8.0, |e, nav, w| {
+            let ts = w.t_us() as f64 * 1e-6;
+            let o = e.heading_mon();
+            if ts < 8.0 {
+                assert!(o.info == 0.0 && !o.confirmed && !o.blind, "armed on the ground: nothing enters ({ts} s)");
+            }
+            assert!(e.events().filter(|ev| ev.src == code::HEADING_MON).count() <= 1);
+            for ev in e.events().filter(|ev| ev.src == code::HEADING_MON) {
+                assert!(ts >= 8.0, "a record before take-off at {ts} s");
+                assert_eq!(ev.t_us, nav.t_us, "TimeUS is the horizon time");
+                assert_eq!((ev.inn.to_bits(), ev.var.to_bits()), (o.delta_rad.to_bits(), (o.sigma_rad * o.sigma_rad).to_bits()));
+                assert_eq!(ev.ok & code::HM_HEADING != 0, nav.valid.heading);
+                assert_eq!(ev.ok & code::HM_CONFIRMED != 0, o.confirmed);
+                assert_eq!(ev.ok & (code::HM_FAULT | code::HM_G6B | code::HM_SCREENED | code::HM_BLIND), 0, "{ev:?}");
+                recs += 1;
+                if o.sigma_rad <= SIG_CONF_RAD {
+                    max_d = max_d.max(o.delta_rad.abs());
+                }
+            }
+            if o.confirmed && first_conf.is_none() {
+                first_conf = Some(ts - 8.0);
+            }
+        });
+        let o = f.heading_mon();
+        // |A| = 1 m/s^2 x 0.2 s per pair: the steady sum is 0.04 / (1 - exp(-0.2 / 5)) (m/s)^2.
+        let steady = 0.04 / (1.0 - libm::expf(-0.04));
+        println!(
+            "hm1: {recs} Src 13 records; confirmed {:?} s after take-off; max |d_hat| informed {:.3} deg; final d_hat {:.3} deg sig {:.2} deg Saa {:.4} (steady {steady:.4}); screened {} dropped {}",
+            first_conf, max_d.to_degrees(), o.delta_rad.to_degrees(), o.sigma_rad.to_degrees(), o.info, o.screened_r2, f.heading_mon_dropped()
+        );
+        assert!(recs >= 150, "{recs}");
+        assert!(first_conf.is_some_and(|c| c < 6.0), "{first_conf:?}");
+        assert!(o.confirmed && !o.fault && !o.blind && o.screened_r2 == 0 && o.non_finite == 0 && o.out_of_interval == 0);
+        assert!(max_d < 2.0_f32.to_radians(), "{}", max_d.to_degrees());
+        assert!((o.info - steady).abs() < 0.02 * steady, "the increment is the whole strapdown change of the interval: {}", o.info);
+        assert_eq!(f.heading_mon_dropped(), 0);
+    }
+
+    #[test]
+    fn hm2_refused_epochs_break_the_chain_an_outage_turns_it_blind_and_speed_course_or_ground_epochs_never_enter() {
+        let t = Tuning::DEFAULT;
+        let delay = t.nav_gps_delay_us;
+        // (a) A frozen fix from 20 s to 21 s (exact repeats, screened by E1s): no record from the first repeat until the second
+        // accepted epoch after the last one.
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = hm_world(&t, true);
+        w.fault = Fault::Freeze(20_000_000, 21_000_000);
+        let (mut e1s, mut rec) = (Vec::new(), Vec::new());
+        hm_run(&mut f, &mut w, 30.0, 8.0, |e, _, w| {
+            if e.events().any(|ev| ev.src == code::GPS_N && ev.ok == code::SCREENED) {
+                e1s.push(w.t_us());
+            }
+            if e.events().any(|ev| ev.src == code::HEADING_MON) {
+                rec.push(w.t_us());
+            }
+        });
+        let (first, last) = (*e1s.first().unwrap(), *e1s.last().unwrap());
+        let resumed = *rec.iter().find(|&&r| r > first).unwrap();
+        println!("hm2a: E1s repeats {} from {first} to {last} us; records resume at {resumed} us", e1s.len());
+        assert!(e1s.len() >= 4);
+        assert_eq!(resumed, last + 2 * GNSS_EVERY * PERIOD_US, "the first accepted epoch after the repeats starts a chain, the second pairs");
+        assert!(f.heading_mon().confirmed && !f.heading_mon().fault);
+        // (b) No epoch from 20 s to 28 s: the ticks turn it blind BLIND_US after the last evaluated pair, the second epoch back
+        // clears it.
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = hm_world(&t, true);
+        w.fault = Fault::Gone(20_000_000, 28_000_000);
+        let (mut last_eval, mut blind_from, mut blind_to) = (0u64, None, None);
+        hm_run(&mut f, &mut w, 32.0, 8.0, |e, nav, w| {
+            let o = e.heading_mon();
+            if e.events().any(|ev| ev.src == code::HEADING_MON) && blind_from.is_none() {
+                last_eval = nav.t_us;
+            }
+            if o.blind && blind_from.is_none() {
+                blind_from = Some(nav.t_us);
+                assert!(o.confirmed && !e.hmon.heading_ok(true));
+            }
+            if !o.blind && blind_from.is_some() && blind_to.is_none() {
+                blind_to = Some(w.t_us());
+            }
+        });
+        let (b0, b1) = (blind_from.unwrap(), blind_to.unwrap());
+        println!("hm2b: last evaluated pair at horizon {last_eval} us, blind from horizon {b0} us to step {b1} us");
+        assert!(b0 - last_eval >= u64::from(crate::heading_mon::BLIND_US) && b0 - last_eval < u64::from(crate::heading_mon::BLIND_US) + 2 * PERIOD_US);
+        assert!(last_eval > 19_000_000 - delay && b1 > 28_000_000 && b1 < 29_000_000);
+        // (c) Speed and course only (no NED velocity): no epoch enters, and the monitor turns blind 5 s after take-off.
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = hm_world(&t, false);
+        let mut any = false;
+        hm_run(&mut f, &mut w, 20.0, 8.0, |e, _, _| any |= e.events().any(|ev| ev.src == code::HEADING_MON));
+        assert!(!any && f.heading_mon().info == 0.0 && f.heading_mon().blind && f.stats().gps_vel_fused > 100);
+        // (d) Armed and manoeuvring but never airborne: nothing enters, never blind.
+        let mut f = Eskf::new(&t).unwrap();
+        let mut w = hm_world(&t, true);
+        let mut any = false;
+        hm_run(&mut f, &mut w, 20.0, f64::INFINITY, |e, _, _| any |= e.events().any(|ev| ev.src == code::HEADING_MON) || e.heading_mon().blind);
+        assert!(!any && f.heading_mon().info == 0.0 && f.stats().gps_vel_fused > 100);
+    }
+
+    #[test]
+    fn hm3_the_src_13_record_takes_a_free_slot_only_and_counts_a_drop_when_the_slots_are_full() {
+        let mut f = Eskf::new(&Tuning::DEFAULT).unwrap();
+        let other = Nki { t_us: 1, src: code::BARO, inn: 0.5, var: 0.25, ok: code::FUSED };
+        f.events = [Some(other), Some(other), None];
+        f.hm_record(false, true);
+        assert_eq!(f.events[..2], [Some(other), Some(other)]);
+        assert_eq!(f.events[2].map(|e| (e.src, e.ok)), Some((code::HEADING_MON, code::HM_HEADING)));
+        assert_eq!(f.heading_mon_dropped(), 0);
+        let full = [Some(other); EVENTS];
+        f.events = full;
+        f.hm_record(true, true);
+        assert_eq!(f.events, full);
+        assert_eq!(f.heading_mon_dropped(), 1);
     }
 }
