@@ -231,6 +231,10 @@ pub static NAV_STAT: Seqlock<NavStat> = Seqlock::new(NavStat {
         max_jobs_per_step: 0,
         replaced: 0,
         dropped: 0,
+        gps_vd_fused: 0,
+        gps_vd_gated: 0,
+        gps_vd_screened: 0,
+        gps_vd_stale: 0,
     },
 });
 

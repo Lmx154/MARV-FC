@@ -38,10 +38,20 @@
 //! returned by [`Eskf::events`] for the caller to write.
 //!
 //! Three variants, chosen at construction ([`Aiding`]): `Full` (ESKF3) is the filter described here; `ImuBaro` (ESKF2)
-//! ignores GNSS and compass, has no horizon delay (every IMU1 sample is integrated in the step it arrives, so the state
-//! refers to the current sample), never aligns the yaw and holds N and E with each barometer set; `Imu` (ESKF1) also
-//! ignores the barometer and holds N, E and D at the tilt alignment's values, one set per barometer period of horizon
-//! time (no-aid source code 5 for all three axes).
+//! ignores GNSS (unless built with the VelD option below) and compass, has no horizon delay (every IMU1 sample is
+//! integrated in the step it arrives, so the state refers to the current sample), never aligns the yaw and holds N and E
+//! with each barometer set; `Imu` (ESKF1) also ignores the barometer and holds N, E and D at the tilt alignment's values,
+//! one set per barometer period of horizon time (no-aid source code 5 for all three axes).
+//!
+//! Amendment V: `ImuBaro` built with the VelD option ([`EskfN::with_gps_vd`]; [`EskfN::with_aiding`] builds it without)
+//! also fuses the GNSS vertical velocity as one scalar, z = vel_ned_mm_s[2] x 1e-3 m/s (down positive), sigma
+//! `Tuning::nav_gps_vd_sigma_ms`, gated at nav_gate_sigma, with the barometer's masked gain (support on D, v_D and b_a,z;
+//! Joseph form). Time alignment: every nav_predict_us the time and S, the running sum of the IMU-only change of the
+//! nominal v_D, go into a ring of [`VD_RING`] entries; an epoch is predicted as v_D(now) - (S_now - S(t_m)), t_m = arrival -
+//! nav_gps_delay_us, S(t_m) the newest entry at or before t_m (none: stale, counted, skipped). Acceptance: tilt aligned,
+//! fix type >= 3 with a position, the interval rule as `Full`'s, armed, not an exact repeat of the previous fix (screened,
+//! NKI Src 12 Ok 3), a velocity, not stale. Gated: counted only. The GNSS job runs after the propagation and before the
+//! barometer; the vertical flags, the aiding timeout and the height reset stay the barometer's.
 //!
 //! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to (C8: "for I = 1, TimeUS is
 //! the horizon time"); there is no output predictor in phase 1.
@@ -124,6 +134,8 @@ pub const BARO_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * BARO_RATE_HZ).div_
 /// sample does not use the slot), so any sample of the window may be the one; samples that arrive before the next
 /// fusion slot while the yaw is aligned are not kept.
 pub const MAG_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * MAG_RATE_HZ).div_ceil(1_000_000) as usize;
+/// Entries of the VelD option's S ring (Amendment V): nav_buffer_us / nav_predict_us + 1, 51.
+pub const VD_RING: usize = (Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_predict_us + 1) as usize;
 /// 360 degrees in 1e-7 degree.
 const E7_TURN: i64 = 3_600_000_000;
 
@@ -165,6 +177,8 @@ pub mod code {
     pub const YAW_RESET: u8 = 8;
     /// Src: GNSS position/velocity reset.
     pub const GPS_RESET: u8 = 9;
+    /// Src: GNSS vertical velocity (`ImuBaro` with the VelD option, Amendment V; logged as I = 1).
+    pub const GPS_VD: u8 = 12;
     /// Ok: gated out.
     pub const GATED: u8 = 0;
     /// Ok: fused (or applied, for a reset).
@@ -253,6 +267,14 @@ pub struct EskfStats {
     /// Barometer, compass or GNSS samples dropped on arrival because their time (validity time, sample time, or arrival
     /// time minus nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us.
     pub stale: u32,
+    /// VelD scalars fused (Amendment V).
+    pub gps_vd_fused: u32,
+    /// VelD scalars gated out.
+    pub gps_vd_gated: u32,
+    /// VelD epochs screened as an exact repeat of the previous fix.
+    pub gps_vd_screened: u32,
+    /// VelD epochs skipped because the S ring has no entry at or before t_m.
+    pub gps_vd_stale: u32,
 }
 
 /// The aiding set of an [`Eskf`], fixed at construction.
@@ -467,6 +489,17 @@ pub struct EskfN<const R: usize> {
     /// P-2 test control: horizontal aiding stopping at the timeout leaves `started` set (the rule before P-2).
     #[cfg(test)]
     pub(crate) keep_started_at_timeout: bool,
+    /// Amendment V: the VelD option (`ImuBaro` only, fixed at construction).
+    gps_vd: bool,
+    /// The running sum of the IMU-only change of the nominal v_D, m/s.
+    vd_s: f32,
+    /// (time, `vd_s`) every nav_predict_us.
+    vd_ring: Fifo<(u64, f32), VD_RING>,
+    /// The queued VelD scalar: the measurement and S(t_m).
+    vd_job: Option<(f32, f32)>,
+    /// V-4 test control: the prediction is v_D(now), no time alignment.
+    #[cfg(test)]
+    vd_align_off: bool,
 }
 
 /// The filter with the board's ring, [`RING`] samples (the horizon delay up to nav_buffer_us).
@@ -557,6 +590,19 @@ impl<const R: usize> EskfN<R> {
     /// (`Full` with nav_gps_delay_us > 0) meets a ring shorter than [`RING`]; with no delay any ring of one or more is
     /// the same filter (the sample pushed is integrated in the same step).
     pub fn with_aiding(tuning: &Tuning, aiding: Aiding) -> Result<Self, EskfError> {
+        Self::build(tuning, aiding, false)
+    }
+
+    /// `ImuBaro` with the VelD option (Amendment V). Err as [`EskfN::with_aiding`], and with [`EskfError::RingTooSmall`] when
+    /// nav_predict_us is 0 or the S ring is shorter than nav_buffer_us / nav_predict_us + 1 entries.
+    pub fn with_gps_vd(tuning: &Tuning) -> Result<Self, EskfError> {
+        if tuning.nav_predict_us == 0 || tuning.nav_buffer_us / tuning.nav_predict_us + 1 > VD_RING as u64 {
+            return Err(EskfError::RingTooSmall);
+        }
+        Self::build(tuning, Aiding::ImuBaro, true)
+    }
+
+    fn build(tuning: &Tuning, aiding: Aiding, gps_vd: bool) -> Result<Self, EskfError> {
         if R == 0 {
             return Err(EskfError::RingTooSmall);
         }
@@ -633,12 +679,23 @@ impl<const R: usize> EskfN<R> {
             armed_yaw_reset: false,
             #[cfg(test)]
             keep_started_at_timeout: false,
+            gps_vd,
+            vd_s: 0.0,
+            vd_ring: Fifo::new(),
+            vd_job: None,
+            #[cfg(test)]
+            vd_align_off: false,
         })
     }
 
     /// The aiding set.
     pub fn aiding(&self) -> Aiding {
         self.aiding_set
+    }
+
+    /// Built with the VelD option (Amendment V).
+    pub fn gps_vd(&self) -> bool {
+        self.gps_vd
     }
 
     /// The horizon delay: nav_gps_delay_us, none without GNSS.
@@ -736,6 +793,7 @@ impl<const R: usize> EskfN<R> {
         self.gps_job = None;
         self.baro_job = None;
         self.mag_job = None;
+        self.vd_job = None;
         self.stats.reinits = self.stats.reinits.wrapping_add(1);
     }
 
@@ -759,7 +817,11 @@ impl<const R: usize> EskfN<R> {
         self.horizon_gyro = s.gyro;
         let dt = dt_us as f32 * 1e-6;
         if self.tilt_aligned {
+            let v0 = self.nom.v[2];
             n0::nominal_step(&mut self.nom, &s.gyro, &s.accel, dt);
+            if self.gps_vd {
+                self.vd_s += self.nom.v[2] - v0;
+            }
             if Some(s.t_us) == self.snap_req {
                 self.snap = Some((s.t_us, self.nom.q, self.nom.v, self.nom.p));
             }
@@ -772,6 +834,11 @@ impl<const R: usize> EskfN<R> {
         self.since_predict_us += dt_us;
         if self.since_predict_us >= self.t.nav_predict_us {
             self.predict_due = true;
+        }
+        if self.gps_vd
+            && (self.vd_ring.len == 0 || s.t_us >= self.vd_ring.get(self.vd_ring.len - 1).0.saturating_add(self.t.nav_predict_us))
+        {
+            self.vd_ring.push((s.t_us, self.vd_s));
         }
     }
 
@@ -940,12 +1007,16 @@ impl<const R: usize> EskfN<R> {
         self.event(code::NOAID, innov, s, code::FUSED);
     }
 
-    /// The `ImuBaro` barometer scalar on D (E1, H1), gated as [`n0::fuse_position`] gates (innovation^2 <= gate^2 s, s = P_DD + var):
-    /// K has support on D, v_D and b_a,z only (every other entry zeroed) and P is updated in Joseph form with that K for every
-    /// entry, as `fuse_noaid` does, then mirrored and the diagonal held at or above 0. Returns (accepted, innovation variance);
-    /// nothing changes when gated out.
+    /// The `ImuBaro` barometer scalar on D (E1, H1): [`EskfN::fuse_vertical_masked`] of state D.
     fn fuse_baro_masked(&mut self, innov: f32, var: f32) -> (bool, f32) {
-        let k = POS + 2;
+        self.fuse_vertical_masked(POS + 2, innov, var)
+    }
+
+    /// An `ImuBaro` scalar on state `k` (H a single 1: D for the barometer, v_D for the VelD option), gated as
+    /// [`n0::fuse_position`] gates (innovation^2 <= gate^2 s, s = P_kk + var): K has support on D, v_D and b_a,z only (every
+    /// other entry zeroed) and P is updated in Joseph form with that K for every entry, as `fuse_noaid` does, then mirrored
+    /// and the diagonal held at or above 0. Returns (accepted, innovation variance); nothing changes when gated out.
+    fn fuse_vertical_masked(&mut self, k: usize, innov: f32, var: f32) -> (bool, f32) {
         let ph = self.p[k];
         let s = ph[k] + var;
         let gate = self.t.nav_gate_sigma;
@@ -1347,12 +1418,64 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
+    /// A GNSS epoch on arrival for the VelD option (Amendment V): acceptance as `Full`'s where it applies (a position with
+    /// fix type >= 3, the interval rule, armed, the exact-repeat screen), a velocity, and an S entry at or before t_m.
+    fn vd_arrival(&mut self, g: &GnssSample) {
+        let r = &g.reading;
+        let (Some(lat), Some(lon)) = (r.lat_e7, r.lon_e7) else {
+            return;
+        };
+        if r.fix_type < 3 {
+            return;
+        }
+        let prev = self.gps_prev.replace((g.t_us, lat, lon));
+        let max_interval_us = 1e6 / self.t.nav_gps_min_rate_hz;
+        let in_rate = prev.is_some_and(|(t0, _, _)| (g.t_us.saturating_sub(t0) as f32) <= max_interval_us);
+        if !in_rate || !self.armed || !self.tilt_aligned {
+            return;
+        }
+        if prev.is_some_and(|(_, la, lo)| la == lat && lo == lon) {
+            self.stats.gps_vd_screened = self.stats.gps_vd_screened.wrapping_add(1);
+            self.event(code::GPS_VD, 0.0, 0.0, code::SCREENED);
+            return;
+        }
+        let Some(v) = r.vel_ned_mm_s else {
+            return;
+        };
+        let t_m = g.t_us.saturating_sub(self.t.nav_gps_delay_us);
+        let Some((_, s_m)) = (0..self.vd_ring.len).rev().map(|i| self.vd_ring.get(i)).find(|&(t, _)| t <= t_m) else {
+            self.stats.gps_vd_stale = self.stats.gps_vd_stale.wrapping_add(1);
+            return;
+        };
+        if self.vd_job.replace((v[2] as f32 * 1e-3, s_m)).is_some() {
+            self.stats.replaced = self.stats.replaced.wrapping_add(1);
+        }
+    }
+
+    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only.
+    fn vd_job(&mut self, (z, s_m): (f32, f32)) {
+        #[cfg(test)]
+        let s_m = if self.vd_align_off { self.vd_s } else { s_m };
+        let innov = z - (self.nom.v[2] - (self.vd_s - s_m));
+        let sv = self.t.nav_gps_vd_sigma_ms;
+        let (ok, s) = self.fuse_vertical_masked(VEL + 2, innov, sv * sv);
+        if ok {
+            self.stats.gps_vd_fused = self.stats.gps_vd_fused.wrapping_add(1);
+            self.event(code::GPS_VD, innov, s, code::FUSED);
+        } else {
+            self.stats.gps_vd_gated = self.stats.gps_vd_gated.wrapping_add(1);
+            self.event(code::GPS_VD, innov, s, code::GATED);
+        }
+    }
+
     /// The one heavy job of the step, if any: the propagation first, then GNSS, barometer, compass.
     fn one_job(&mut self) -> u32 {
         if self.predict_due {
             self.predict();
         } else if let Some(job) = self.gps_job {
             self.gps_job(job);
+        } else if let Some(job) = self.vd_job.take() {
+            self.vd_job(job);
         } else if let Some(job) = self.baro_job {
             self.baro_job(job);
         } else if let Some(m) = self.mag_job.take() {
@@ -1496,6 +1619,9 @@ impl<const R: usize> Estimator for EskfN<R> {
                 self.gnss_arrival(&g);
             }
         }
+        if let Some(g) = sensors.gnss.filter(|_| self.gps_vd) {
+            self.vd_arrival(&g);
+        }
         let horizon = self.horizon();
         while let Some(b) = self.baro_wait.front() {
             if self.horizon_us.is_none() || b.t_valid_us > horizon {
@@ -1564,6 +1690,7 @@ impl<const R: usize> Estimator for EskfN<R> {
             // GNSS only while armed; the first accepted epoch after arming resets the horizontal state (C-1).
             self.started = false;
             self.gps_job = None;
+            self.vd_job = None;
             self.rej_since = [None; 2];
             self.arm_edge = armed;
             if !armed {
@@ -4353,5 +4480,420 @@ pub(crate) mod tests {
         println!("g1-e disarmed ImuBaro: height resets at {:?}", kinds[2]);
         assert!(kinds[2].len() == 1 && kinds[2][0] > poke);
         assert!(kinds[3].is_empty() && !kinds[2].is_empty());
+    }
+
+    // ---- Amendment V, packet P-V1: the GNSS vertical velocity in `ImuBaro` (the VelD option) ----
+
+    /// The VelD records of the last step.
+    fn vd_events(e: &Eskf) -> Vec<Nki> {
+        e.events().filter(|n| n.src == code::GPS_VD).copied().collect()
+    }
+
+    /// Vertical acceleration of the V tests' stream at `ts` s: a climb, a descent and a climb (as `eskf_out`'s mix stream).
+    fn vd_a(ts: f64) -> f64 {
+        if (10.0..12.0).contains(&ts) || (30.0..32.0).contains(&ts) {
+            -1.0
+        } else if (20.0..24.0).contains(&ts) {
+            1.0
+        } else {
+            0.0
+        }
+    }
+
+    #[test]
+    fn v1_one_veld_fusion_changes_only_d_vd_and_ba_z() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::with_gps_vd(&t).unwrap();
+        assert!(f.gps_vd() && f.aiding() == Aiding::ImuBaro);
+        let mut w = World::new(&t);
+        for _ in 0..40_000_000 / PERIOD_US {
+            let sec = w.t_us() as f64 * 1e-6;
+            let s = moving_sample(&mut w, sec);
+            f.set_armed(sec >= 10.0);
+            f.update(&s);
+        }
+        let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
+        let outside = |i: usize| i != d && i != vd && i != bz;
+        // Precondition: P has non-zero cross terms between v_D and the attitude, the horizontal velocity and the gyro bias.
+        for j in (ATT..ATT + 3).chain(VEL..VEL + 2).chain(GYRO_BIAS..GYRO_BIAS + 3) {
+            assert!(f.p[vd][j] != 0.0 && f.p[vd][j].is_finite(), "P[{vd}][{j}] = {}", f.p[vd][j]);
+        }
+        let r = t.nav_gps_vd_sigma_ms * t.nav_gps_vd_sigma_ms;
+        let innov = 0.3f32;
+        assert!(innov * innov <= t.nav_gate_sigma * t.nav_gate_sigma * (f.p[vd][vd] + r), "the innovation is outside the gate");
+        // The VelD job itself, with S(t_m) = S_now (no motion since t_m): innovation z - v_D.
+        let job = |e: &Eskf| (e.nom.v[2] + innov, e.vd_s);
+        let mut a = f.clone();
+        a.events = [None; EVENTS];
+        a.vd_job(job(&f));
+        let ev = vd_events(&a);
+        assert!(ev.len() == 1 && ev[0].ok == code::FUSED && fabsf(ev[0].inn - innov) < 1e-5, "{ev:?}");
+        assert_eq!(a.nom.q.map(f32::to_bits), f.nom.q.map(f32::to_bits), "attitude");
+        assert_eq!(a.nom.bg.map(f32::to_bits), f.nom.bg.map(f32::to_bits), "gyro bias");
+        assert_eq!([a.nom.v[0].to_bits(), a.nom.v[1].to_bits()], [f.nom.v[0].to_bits(), f.nom.v[1].to_bits()], "v_N, v_E");
+        assert_eq!([a.nom.p[0].to_bits(), a.nom.p[1].to_bits()], [f.nom.p[0].to_bits(), f.nom.p[1].to_bits()], "p_N, p_E");
+        assert_eq!([a.nom.ba[0].to_bits(), a.nom.ba[1].to_bits()], [f.nom.ba[0].to_bits(), f.nom.ba[1].to_bits()], "b_a,x, b_a,y");
+        for i in (0..N).filter(|&i| outside(i)) {
+            for j in (0..N).filter(|&j| outside(j)) {
+                assert_eq!(a.p[i][j].to_bits(), f.p[i][j].to_bits(), "P[{i}][{j}]");
+            }
+        }
+        let moved = [a.nom.p[2] != f.nom.p[2], a.nom.v[2] != f.nom.v[2], a.nom.ba[2] != f.nom.ba[2]];
+        assert!(moved.iter().all(|m| *m), "D, v_D, b_a,z moved: {moved:?}");
+        let sym = (0..N).all(|i| (0..N).all(|j| a.p[i][j].to_bits() == a.p[j][i].to_bits())) && (0..N).all(|i| a.p[i][i] >= 0.0);
+        assert!(sym && a.finite());
+        // Control: the full gain (the test-only switch) on the same filter and job moves the attitude and the gyro bias.
+        let mut c = f.clone();
+        c.baro_full_gain = true;
+        c.vd_job(job(&f));
+        let dq = (0..4).fold(0.0f32, |m, i| m.max(fabsf(c.nom.q[i] - f.nom.q[i])));
+        let tol_q = 100.0 * f32::EPSILON * f.nom.q.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+        let dbg = (0..3).fold(0.0f32, |m, i| m.max(fabsf(c.nom.bg[i] - f.nom.bg[i])));
+        let tol_bg = 100.0 * f32::EPSILON * f.nom.bg.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
+        println!(
+            "v1: masked: D {:e} -> {:e}, vD {:e} -> {:e}, ba_z {:e} -> {:e}, the rest bit-identical; full gain (control): max |dq| {dq:e} (tolerance {tol_q:e}), max |dbg| {dbg:e} (tolerance {tol_bg:e})",
+            f.nom.p[2], a.nom.p[2], f.nom.v[2], a.nom.v[2], f.nom.ba[2], a.nom.ba[2]
+        );
+        assert!(dq > tol_q && dbg > tol_bg, "the control did not move: {dq:e} vs {tol_q:e}, {dbg:e} vs {tol_bg:e}");
+    }
+
+    #[test]
+    fn v2_the_option_off_ignores_gnss_bit_for_bit_and_the_option_on_does_not() {
+        let t = Tuning::DEFAULT;
+        assert!(!Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap().gps_vd() && !Eskf::new(&t).unwrap().gps_vd());
+        // The same samples with and without GNSS, 30 s, a climb and descent, armed from 5 s.
+        let run = |on: bool| {
+            let mk = || if on { Eskf::with_gps_vd(&t).unwrap() } else { Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap() };
+            let (mut a, mut b) = (mk(), mk());
+            let mut w = World::new(&t);
+            w.gps_vel = true;
+            w.v = [1.0, 0.5, 0.0];
+            let mut differ = 0usize;
+            for _ in 0..30_000_000 / PERIOD_US {
+                w.a[2] = vd_a(w.t_us() as f64 * 1e-6);
+                let s = w.step();
+                let mut s0 = s;
+                s0.gnss = None;
+                let armed = w.t_us() >= 5_000_000;
+                a.set_armed(armed);
+                b.set_armed(armed);
+                let (na, nb) = (a.update(&s), b.update(&s0));
+                differ += usize::from(na != nb || core_bits_all(&a) != core_bits_all(&b));
+            }
+            (differ, *a.stats())
+        };
+        let (differ_off, st_off) = run(false);
+        let (differ_on, st_on) = run(true);
+        println!("v2: option off: steps differing with and without GNSS {differ_off}; option on (control): {differ_on}, VelD fused {} gated {}", st_on.gps_vd_fused, st_on.gps_vd_gated);
+        assert_eq!(differ_off, 0);
+        assert_eq!((st_off.gps_vd_fused, st_off.gps_vd_gated, st_off.gps_vd_screened, st_off.gps_vd_stale), (0, 0, 0, 0));
+        assert!(differ_on > 1_000 && st_on.gps_vd_fused > 100, "the control: the option on must use the GNSS");
+    }
+
+    #[test]
+    fn v3_no_accepted_veld_is_the_off_filter_bit_for_bit() {
+        let t = Tuning::DEFAULT;
+        let (mut on, mut off) = (Eskf::with_gps_vd(&t).unwrap(), Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap());
+        let mut w = World::new(&t);
+        w.gps_vel = true;
+        w.v = [1.0, 0.5, 0.0];
+        // Every epoch until 70 s fails one acceptance rule: disarmed (0-10 s), fix type 2, no velocity, an exact repeat (the
+        // receiver's hold), 1 Hz, no position, stale (the arrival time 600 ms old). From 70 s (the control) the epochs are clean.
+        w.fault = Fault::Freeze(30_000_000, 40_000_000);
+        let (mut first_diff, mut stale_seen) = (None, 0u32);
+        for _ in 0..80_000_000 / PERIOD_US {
+            w.a[2] = vd_a((w.t_us() as f64 * 1e-6) % 40.0);
+            let mut s = w.step();
+            let ts = w.t_us() as f64 * 1e-6;
+            if let Some(g) = s.gnss.as_mut() {
+                let r = &mut g.reading;
+                if (10.0..20.0).contains(&ts) {
+                    r.fix_type = 2;
+                } else if (20.0..30.0).contains(&ts) {
+                    r.vel_ned_mm_s = None;
+                } else if (50.0..60.0).contains(&ts) {
+                    (r.lat_e7, r.lon_e7) = (None, None);
+                } else if (60.0..70.0).contains(&ts) {
+                    g.t_us -= 600_000;
+                }
+            }
+            if (40.0..50.0).contains(&ts) && (ts < 41.0 || !w.t_us().is_multiple_of(1_000_000)) {
+                s.gnss = None;
+            }
+            let armed = ts >= 10.0;
+            on.set_armed(armed);
+            off.set_armed(armed);
+            let (a, b) = (on.update(&s), off.update(&s));
+            let same = a == b && core_bits_all(&on) == core_bits_all(&off);
+            if ts < 70.0 {
+                assert!(same, "{ts} s: the option on moved without an accepted epoch, {:?}", on.stats());
+                stale_seen = on.stats().gps_vd_stale;
+            } else if !same && first_diff.is_none() {
+                first_diff = Some(ts);
+            }
+        }
+        let st = on.stats();
+        println!("v3: no accepted VelD until 70 s: bit-identical; screened {}, stale {stale_seen}; clean from 70 s (control): first difference at {first_diff:?} s, fused {}", st.gps_vd_screened, st.gps_vd_fused);
+        assert!(st.gps_vd_screened > 10 && stale_seen > 10, "{st:?}");
+        assert!(first_diff.is_some_and(|x| x < 70.5) && st.gps_vd_fused > 10, "the control: clean epochs must change the filter");
+    }
+
+    #[test]
+    fn v4_the_time_alignment_takes_out_the_gps_delay_and_without_it_the_innovation_follows_minus_t_times_a_d() {
+        let t = Tuning::DEFAULT;
+        // A 0.3 Hz vertical sinusoid, 2 m amplitude (a_D up to 7.1 m/s^2, v_D up to 3.8 m/s), VelD delayed nav_gps_delay_us
+        // (the World's GNSS), armed from 5 s; the VelD innovations regressed on the true a_D at the arrival time.
+        let (amp, w0) = (2.0f64, 2.0 * core::f64::consts::PI * 0.3);
+        let run = |aligned: bool| {
+            let mut f = Eskf::with_gps_vd(&t).unwrap();
+            f.vd_align_off = !aligned;
+            let mut w = World::new(&t);
+            w.gps_vel = true;
+            w.v[2] = amp * w0;
+            let (mut sxy, mut sxx, mut n) = (0.0f64, 0.0f64, 0u32);
+            for _ in 0..60_000_000 / PERIOD_US {
+                let ts = w.t_us() as f64 * 1e-6;
+                w.a[2] = -amp * w0 * w0 * (w0 * (ts + 0.5 * PERIOD_US as f64 * 1e-6)).sin();
+                let s = w.step();
+                f.set_armed(w.t_us() >= 5_000_000);
+                f.update(&s);
+                for e in vd_events(&f).iter().filter(|e| e.ok == code::FUSED) {
+                    if w.t_us() >= 15_000_000 {
+                        let a = w.a[2];
+                        sxy += a * f64::from(e.inn);
+                        sxx += a * a;
+                        n += 1;
+                    }
+                }
+            }
+            (sxy / sxx, n, *f.stats())
+        };
+        let tt = t.nav_gps_delay_us as f64 * 1e-6;
+        let (slope, n, st) = run(true);
+        let (slope_c, n_c, st_c) = run(false);
+        println!("v4: slope of the VelD innovation on a_D: aligned {slope:.5} s ({n} epochs, gated {}), control without alignment {slope_c:.5} s ({n_c} epochs, gated {}); -T = {:.3} s", st.gps_vd_gated, st_c.gps_vd_gated, -tt);
+        assert!(n > 200 && n_c > 200);
+        // Aligned: within the S ring's spacing (S(t_m) is the newest entry at or before t_m, up to nav_predict_us older).
+        assert!(slope.abs() <= t.nav_predict_us as f64 * 1e-6, "{slope}");
+        // Control: about -T (the filter, pulled by the misaligned VelD, takes up part of it).
+        assert!(slope_c < -0.5 * tt && slope_c > -1.2 * tt, "{slope_c}");
+    }
+
+    #[test]
+    fn v5_the_vertical_flags_stay_the_barometers_while_veld_fuses() {
+        let t = Tuning::DEFAULT;
+        // The barometer cut from 15 s to 35 s while armed (beyond nav_aid_timeout_us), VelD fused throughout. A VelD job delays
+        // a barometer job by one step (one heavy job per step, GNSS first), so the two filters' barometer aid times may differ
+        // by one step; the rule checked is that only a barometer job moves the aid time, and the flags drop at its timeout.
+        let run = |on: bool| {
+            let mut f = if on { Eskf::with_gps_vd(&t).unwrap() } else { Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap() };
+            let mut w = World::new(&t);
+            w.gps_vel = true;
+            w.v = [1.0, 0.5, 0.0];
+            let (mut last_aid, mut drop, mut bad, mut fused_dropped) = (None, None, 0usize, 0u32);
+            let mut vert = Vec::new();
+            for _ in 0..50_000_000 / PERIOD_US {
+                w.a[2] = vd_a(w.t_us() as f64 * 1e-6);
+                let mut s = w.step();
+                let ts = w.t_us() as f64 * 1e-6;
+                let cut = (15.0..35.0).contains(&ts);
+                if cut {
+                    s.baro = None;
+                }
+                f.set_armed(ts >= 5.0);
+                let (aid, fused) = (f.last_baro_aid_us, f.stats().gps_vd_fused);
+                let nav = f.update(&s);
+                let baro_aid = f.events().any(|e| (e.src == code::BARO || e.src == code::HEIGHT_RESET) && e.ok == code::FUSED);
+                bad += usize::from(f.last_baro_aid_us != aid && !baro_aid);
+                if cut && drop.is_none() {
+                    last_aid = f.last_baro_aid_us;
+                    if !nav.valid.velocity_d {
+                        drop = Some(nav.t_us);
+                    }
+                } else if cut {
+                    bad += usize::from(nav.valid.velocity_d || nav.valid.position_d);
+                    fused_dropped += f.stats().gps_vd_fused - fused;
+                }
+                vert.push((nav.position_m[2], nav.velocity_ms[2]));
+            }
+            (last_aid.unwrap(), drop.expect("the flags never dropped"), bad, fused_dropped, vert)
+        };
+        let (last, drop, bad, fused, vert) = run(true);
+        let (last_off, drop_off, bad_off, _, vert_off) = run(false);
+        let differ = vert.iter().zip(&vert_off).filter(|(a, b)| a != b).count();
+        println!("v5: option on: last barometer aid {last} us, flags dropped at {drop} us ({} us after the timeout), then false while VelD fused {fused} times; off: {last_off} / {drop_off}; aid moves without a barometer job {bad} / {bad_off}; D or vD differ in {differ} steps (control)", drop - (last + t.nav_aid_timeout_us));
+        assert_eq!((bad, bad_off), (0, 0));
+        assert!(drop - (last + t.nav_aid_timeout_us) < PERIOD_US && drop.abs_diff(drop_off) <= PERIOD_US, "{drop} {last} {drop_off}");
+        assert!(fused > 50 && differ > 1_000, "the control: VelD must be fused after the drop and change the vertical state");
+    }
+
+    #[test]
+    fn v6_gated_veld_is_counted_only_and_veld_never_resets_or_moves_a_flag() {
+        let t = Tuning::DEFAULT;
+        // (a) A warm filter, then the VelD job just beyond the gate: bit-identical, counted, recorded as gated; just inside: fused.
+        let mut f = Eskf::with_gps_vd(&t).unwrap();
+        let mut w = World::new(&t);
+        w.gps_vel = true;
+        run(&mut f, &mut w, 20.0, |s| s >= 5.0, |_, _, _| {});
+        let r = t.nav_gps_vd_sigma_ms * t.nav_gps_vd_sigma_ms;
+        let s = f.p[VEL + 2][VEL + 2] + r;
+        let edge = t.nav_gate_sigma * sqrtf(s);
+        let (before, gated) = (bits(&f), f.stats().gps_vd_gated);
+        for sign in [1.0f32, -1.0] {
+            let mut a = f.clone();
+            a.events = [None; EVENTS];
+            a.vd_job((a.nom.v[2] + sign * 1.001 * edge, a.vd_s));
+            assert_eq!(bits(&a), before);
+            assert_eq!((a.stats().gps_vd_gated, vd_events(&a)[0].ok), (gated + 1, code::GATED));
+        }
+        let mut a = f.clone();
+        a.vd_job((a.nom.v[2] + 0.999 * edge, a.vd_s));
+        assert!(bits(&a) != before && a.stats().gps_vd_fused == f.stats().gps_vd_fused + 1, "just inside the gate was rejected");
+        // (b) VelD off by `bias` m/s from 10 s to 30 s armed (longer than nav_aid_timeout_us). 5 m/s: every one gated; 0.3 m/s
+        // (the control): fused.
+        let run = |bias: f64| {
+            let (mut on, mut off) = (Eskf::with_gps_vd(&t).unwrap(), Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap());
+            let mut w = World::new(&t);
+            w.gps_vel = true;
+            w.v = [1.0, 0.5, 0.0];
+            let (mut worst, mut bad) = (0.0f32, 0usize);
+            for _ in 0..40_000_000 / PERIOD_US {
+                w.a[2] = vd_a(w.t_us() as f64 * 1e-6);
+                let mut s = w.step();
+                let ts = w.t_us() as f64 * 1e-6;
+                if let Some(g) = s.gnss.as_mut() {
+                    if (10.0..30.0).contains(&ts) {
+                        g.reading.vel_ned_mm_s = g.reading.vel_ned_mm_s.map(|v| [v[0], v[1], v[2] + (bias * 1e3) as i32]);
+                    } else {
+                        g.reading.vel_ned_mm_s = None;
+                    }
+                }
+                on.set_armed(ts >= 5.0);
+                off.set_armed(ts >= 5.0);
+                let (aid, reinit, resets) = (on.last_baro_aid_us, on.baro_reinit, on.stats().height_resets);
+                let (a, b) = (on.update(&s), off.update(&s));
+                worst = worst.max(fabsf(a.position_m[2] - b.position_m[2])).max(fabsf(a.velocity_ms[2] - b.velocity_ms[2]));
+                bad += usize::from((a.valid.velocity_d, a.valid.position_d) != (b.valid.velocity_d, b.valid.position_d));
+                // A step whose job was the VelD scalar: no reset reported, no barometer aid, no height reset.
+                if vd_events(&on).iter().any(|e| e.ok != code::SCREENED) {
+                    bad += usize::from(on.last_reset().is_some() || on.last_baro_aid_us != aid || on.baro_reinit != reinit || on.stats().height_resets != resets);
+                }
+            }
+            (worst, bad, *on.stats(), on.stats().height_resets == off.stats().height_resets)
+        };
+        let (worst, bad, st, resets_eq) = run(5.0);
+        let (worst_c, bad_c, st_c, resets_eq_c) = run(0.3);
+        println!("v6: (a) gate edge {edge:e} m/s: beyond it bit-identical; (b) VelD 5 m/s off: gated {} fused {}, largest |dD|, |dvD| from the off filter {worst:e} (the barometer job one step later); 0.3 m/s off (control): fused {} gated {}, largest {worst_c:e}; steps with a flag difference or a VelD step with a reset/aid {bad} / {bad_c}", st.gps_vd_gated, st.gps_vd_fused, st_c.gps_vd_fused, st_c.gps_vd_gated);
+        assert!(st.gps_vd_gated > 90 && st.gps_vd_fused == 0, "{st:?}");
+        assert!(resets_eq && resets_eq_c && bad == 0 && bad_c == 0);
+        // Gated VelD jobs only take job slots (each delays the barometer set by one step): the vertical state stays within
+        // a hundredth of what the accepted control moves.
+        assert!(worst < 0.01 * worst_c, "a gated VelD moved the vertical state by {worst}");
+        assert!(st_c.gps_vd_fused > 90 && worst_c > 0.1, "the control: an accepted VelD must change the filter: {worst_c}");
+    }
+
+    #[test]
+    fn v7_one_heavy_job_per_step_in_the_order_propagation_gnss_barometer() {
+        let t = Tuning::DEFAULT;
+        let mut f = Eskf::with_gps_vd(&t).unwrap();
+        let mut w = World::new(&t);
+        w.gps_vel = true;
+        w.v = [1.0, 0.5, 0.0];
+        run(&mut f, &mut w, 10.0, |s| s >= 5.0, |_, _, _| {});
+        assert!(f.stats().gps_vd_fused > 0 && f.stats().baro_fused > 0, "{:?}", f.stats());
+        // 4 s of a burst: the barometer on every step, a new GNSS epoch (a changed fix) on two steps of every three.
+        let (mut exercised, mut wrong) = (0usize, 0usize);
+        let base = w.last_fix.unwrap();
+        for i in 0..4_000_000 / PERIOD_US {
+            let mut s = w.step();
+            let k = w.k;
+            let (p, v, _) = w.at(w.t_us() - t.nav_gps_delay_us);
+            s.baro = Some(BaroSample { reading: BaroReading { pressure_pa: pressure_at(-p[2]), temperature_c: 15.0 }, t_us: w.t_us(), seq: k as u32 });
+            s.gnss = (i % 3 != 2).then(|| {
+                let mut r = base;
+                r.lat_e7 = base.lat_e7.map(|x| x + i as i32);
+                r.vel_ned_mm_s = Some(v.map(|x| (x * 1e3) as i32));
+                GnssSample { reading: r, t_us: w.t_us(), seq: k as u32 }
+            });
+            // Queued at the end of the previous step.
+            let (pred, vd, baro) = (f.predict_due, f.vd_job.is_some(), f.baro_job.is_some());
+            let before = *f.stats();
+            f.set_armed(true);
+            f.update(&s);
+            let st = f.stats();
+            let ran_pred = st.predicts > before.predicts;
+            let ran_vd = st.gps_vd_fused + st.gps_vd_gated > before.gps_vd_fused + before.gps_vd_gated;
+            let ran_baro = st.baro_fused + st.baro_gated + st.noaid + st.height_resets > before.baro_fused + before.baro_gated + before.noaid + before.height_resets;
+            exercised += usize::from(vd && baro);
+            wrong += usize::from((pred && !ran_pred) || (vd && ran_baro && !ran_vd));
+        }
+        let st = f.stats();
+        println!("v7: burst: steps with VelD and barometer both queued {exercised}, out of order {wrong}; max jobs per step {}, replaced {}", st.max_jobs_per_step, st.replaced);
+        assert_eq!(st.max_jobs_per_step, 1, "I2: more than one heavy job in a step");
+        assert!(exercised > 100, "{exercised}");
+        assert_eq!(wrong, 0);
+    }
+
+    #[test]
+    fn v9_veld_acceptance_mirrors_full_on_every_epoch() {
+        let t = Tuning::DEFAULT;
+        let (mut full, mut on) = (Eskf::new(&t).unwrap(), Eskf::with_gps_vd(&t).unwrap());
+        let mut w = World::new(&t);
+        w.gps_vel = true;
+        w.v = [1.0, 0.5, 0.0];
+        // 5 s segments: disarmed, clean, fix type 2, clean, no position, clean, 1 Hz, clean, repeats, clean, then the two
+        // documented differences: no GST (Full refuses, VelD needs none), clean, no velocity (Full fuses the position), clean.
+        let seg = |ts: f64| (ts / 5.0) as usize;
+        let mut tally = [[0u32; 2]; 14];
+        let mut mismatch = [0u32; 14];
+        w.fault = Fault::Freeze(40_000_000, 45_000_000);
+        for _ in 0..70_000_000 / PERIOD_US - 1 {
+            let mut s = w.step();
+            let ts = w.t_us() as f64 * 1e-6;
+            let k = seg(ts);
+            if let Some(g) = s.gnss.as_mut() {
+                let r = &mut g.reading;
+                match k {
+                    2 => r.fix_type = 2,
+                    4 => (r.lat_e7, r.lon_e7) = (None, None),
+                    10 => r.lat_std_mm = None,
+                    12 => r.vel_ned_mm_s = None,
+                    _ => {}
+                }
+            }
+            if k == 6 && (ts < 31.0 || !w.t_us().is_multiple_of(1_000_000)) {
+                s.gnss = None;
+            }
+            let armed = ts >= 5.0;
+            full.set_armed(armed);
+            on.set_armed(armed);
+            let (fb, ob) = (*full.stats(), *on.stats());
+            full.update(&s);
+            on.update(&s);
+            if s.gnss.is_none() {
+                continue;
+            }
+            let fs = full.stats();
+            let full_acc = fs.gps_epochs > fb.gps_epochs
+                && (fs.gps_unaccepted, fs.gps_prealign, fs.gps_disarmed, fs.gps_e1s) == (fb.gps_unaccepted, fb.gps_prealign, fb.gps_disarmed, fb.gps_e1s);
+            let os = on.stats();
+            let vd_acc = on.vd_job.is_some() || os.gps_vd_fused + os.gps_vd_gated > ob.gps_vd_fused + ob.gps_vd_gated;
+            tally[k][usize::from(vd_acc)] += 1;
+            mismatch[k] += u32::from(vd_acc != full_acc);
+        }
+        println!("v9: per segment [VelD refused, accepted] {tally:?}; epochs where VelD and Full disagree {mismatch:?}");
+        for k in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13] {
+            assert_eq!(mismatch[k], 0, "segment {k}");
+        }
+        // Each refusal rule refused every epoch of its segment, and the clean segments accepted all but the first one or two.
+        for k in [0, 2, 4, 6, 8] {
+            assert!(tally[k][1] == 0 && tally[k][0] >= 4, "segment {k}: {:?}", tally[k]);
+        }
+        for k in [1, 3, 5, 7, 9, 11, 13] {
+            assert!(tally[k][1] >= 23, "segment {k}: {:?}", tally[k]);
+        }
+        // The documented differences: without GST VelD accepts what Full refuses; without a velocity Full accepts what VelD refuses.
+        assert!(tally[10][1] >= 23 && mismatch[10] == tally[10][1], "{:?} {}", tally[10], mismatch[10]);
+        assert!(tally[12][0] == 25 && mismatch[12] >= 23, "{:?} {}", tally[12], mismatch[12]);
     }
 }

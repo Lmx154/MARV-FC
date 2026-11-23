@@ -142,6 +142,9 @@ pub struct Tuning {
     pub nav_gps_pos_sigma_min_m: f32,
     /// GNSS velocity sigma, m/s (section 10).
     pub nav_gps_vel_sigma_ms: f32,
+    /// GNSS vertical velocity sigma of `Eskf`'s VelD option, m/s (Amendment V; owner approved 2026-11-22). ArduPilot copter
+    /// VELD_M_NSE_DEFAULT 0.5 (ap-AP_NavEKF3.cpp:24); PX4 max(sAcc, 0.3) x 1.5 = 0.45.
+    pub nav_gps_vd_sigma_ms: f32,
     /// Lowest ground speed whose course is used, m/s (section 10, recon.py:42).
     pub nav_gps_course_min_ms: f32,
     /// No-aid position noise while armed, m (section 10, ArduPilot NOAID_M_NSE).
@@ -214,6 +217,7 @@ impl Tuning {
         nav_gps_min_rate_hz: 1000.0 / 245.0,
         nav_gps_pos_sigma_min_m: 0.3,
         nav_gps_vel_sigma_ms: 0.2,
+        nav_gps_vd_sigma_ms: 0.5,
         nav_gps_course_min_ms: 0.3,
         nav_noaid_sigma_m: 10.0,
         nav_noaid_sigma_dis_m: 0.5,

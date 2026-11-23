@@ -2064,6 +2064,68 @@ mod tests {
         assert!(h_vs_z > 1_000 && worst > 1e-4, "taking D from the output predictor must be visible: {h_vs_z}, {worst}");
     }
 
+    // ---- Amendment V, packet P-V1: the zero-delay filter with the VelD option ----
+
+    #[test]
+    fn v8_with_veld_on_the_mix_and_its_core_equal_the_mix_with_it_off_off_the_vertical() {
+        let t = Tuning::DEFAULT;
+        let st = mix_stream(&t, 45);
+        let (mut core_a, mut vz_a) = (Eskf::new(&t).unwrap(), EskfZ::with_gps_vd(&t).unwrap());
+        assert!(!core_a.gps_vd() && vz_a.gps_vd());
+        let mut on = SteerMix::new(EskfSteer::new(&mut core_a, &t).unwrap(), &mut vz_a);
+        let (mut core_b, mut vz_b) = (Eskf::new(&t).unwrap(), zero_delay(&t));
+        let mut off = SteerMix::new(EskfSteer::new(&mut core_b, &t).unwrap(), &mut vz_b);
+        let mut differ = 0usize;
+        for (k, s) in st.iter().enumerate() {
+            let armed = armed_at(s);
+            on.set_armed(armed);
+            off.set_armed(armed);
+            let (m, o) = (on.update(s), off.update(s));
+            assert_eq!(nonvertical_bits(&m), nonvertical_bits(&o), "step {k}");
+            assert!(on.steer().core().events().eq(off.steer().core().events()), "step {k}");
+            assert_eq!(on.steer().core().nominal(), off.steer().core().nominal(), "step {k}");
+            differ += usize::from(m.position_m[2] != o.position_m[2] || m.velocity_ms[2] != o.velocity_ms[2]);
+        }
+        assert_eq!(on.steer().core().stats(), off.steer().core().stats());
+        let vs = on.vert().stats();
+        println!("v8: {} steps: non-vertical fields and the ESKF3 core bit-identical with VelD on and off; VelD fused {} gated {}; D or vD differ in {differ} steps (control)", st.len(), vs.gps_vd_fused, vs.gps_vd_gated);
+        assert!(vs.gps_vd_fused > 100 && differ > 1_000, "the control: VelD must change the vertical fields");
+    }
+
+    #[test]
+    fn v10_with_veld_on_the_mix_still_takes_only_the_vertical_from_eskf2() {
+        let t = Tuning::DEFAULT;
+        let st = mix_stream(&t, 45);
+        let (mut core, mut vz) = (Eskf::new(&t).unwrap(), EskfZ::with_gps_vd(&t).unwrap());
+        let mut mix = SteerMix::new(EskfSteer::new(&mut core, &t).unwrap(), &mut vz);
+        let mut core_b = Eskf::new(&t).unwrap();
+        let mut bare_h = EskfSteer::new(&mut core_b, &t).unwrap();
+        let mut bare_z = EskfZ::with_gps_vd(&t).unwrap();
+        let (mut h_vs_z, mut moved_steps) = (0usize, 0usize);
+        for (k, s) in st.iter().enumerate() {
+            let armed = armed_at(s);
+            mix.set_armed(armed);
+            bare_h.set_armed(armed);
+            bare_z.set_armed(armed);
+            let (m, h, z) = (mix.update(s), bare_h.update(s), bare_z.update(s));
+            assert_eq!(nonvertical_bits(&m), nonvertical_bits(&h), "step {k}");
+            assert_eq!(m.position_m[2].to_bits(), z.position_m[2].to_bits(), "step {k}: D");
+            assert_eq!(m.velocity_ms[2].to_bits(), z.velocity_ms[2].to_bits(), "step {k}: v_D");
+            let (ms, zs) = (m.sigma.unwrap(), z.sigma.unwrap());
+            assert_eq!(ms.position_d_m.to_bits(), zs.position_d_m.to_bits(), "step {k}: sigma D");
+            assert_eq!(ms.velocity_d_ms.to_bits(), zs.velocity_d_ms.to_bits(), "step {k}: sigma v_D");
+            let vmoved = bare_z.last_reset().is_some_and(|r| r.dp[2] != 0.0 || r.dv[2] != 0.0);
+            assert_eq!(m.valid.position_d, z.valid.position_d && !vmoved, "step {k}: flag D");
+            assert_eq!(m.valid.velocity_d, z.valid.velocity_d && !vmoved, "step {k}: flag v_D");
+            moved_steps += usize::from(vmoved);
+            h_vs_z += usize::from(h.position_m[2].to_bits() != z.position_m[2].to_bits());
+        }
+        let vs = bare_z.stats();
+        println!("v10: {} steps; VelD fused {} gated {}; ESKF2 reset moved D or vD in {moved_steps} step(s); the output's D differs from ESKF2's in {h_vs_z} steps (control)", st.len(), vs.gps_vd_fused, vs.gps_vd_gated);
+        assert!(vs.gps_vd_fused > 100 && moved_steps >= 1);
+        assert!(h_vs_z > 1_000, "the control: taking D from the output predictor must be visible: {h_vs_z}");
+    }
+
     #[test]
     fn size_of_the_mix() {
         println!("size_of SteerMix {} EskfSteer {} EskfZ {} Eskf {}", size_of::<SteerMix>(), size_of::<EskfSteer>(), size_of::<EskfZ>(), size_of::<Eskf>());
