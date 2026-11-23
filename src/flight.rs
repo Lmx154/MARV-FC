@@ -30,7 +30,7 @@ use fw_core::xcore::{
 };
 use fw_flight::alloc::CardAllocator;
 use fw_flight::esc::log_fields;
-use fw_flight::eskf::{Aiding, Eskf, EskfError, EskfStats, RING};
+use fw_flight::eskf::{Eskf, EskfError, EskfStats, RING};
 use fw_flight::eskf_n0::{POS, VEL};
 use fw_flight::eskf_out::{EskfSteer, SteerMix};
 use fw_flight::gate::MotorCommand;
@@ -89,10 +89,11 @@ pub fn steer_core() -> Option<&'static mut Eskf> {
 /// The zero-delay ESKF2's storage (a full `Eskf`, 17 592 B; its ring is used as one entry), in `.bss`.
 static VERT: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
-/// Builds ESKF2 (`Aiding::ImuBaro`) into [`VERT`]; as [`steer_core`].
+/// Builds ESKF2 (`Aiding::ImuBaro` with the GPS vertical velocity option, Amendment V, owner 2026-11-22) into [`VERT`];
+/// as [`steer_core`].
 #[inline(never)]
 pub fn vert() -> Option<&'static mut Eskf> {
-    VERT.try_init_with(|| Eskf::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro))?.as_mut().ok()
+    VERT.try_init_with(|| Eskf::with_gps_vd(&Tuning::DEFAULT))?.as_mut().ok()
 }
 
 /// The steering estimator's storage (the output predictor's ring and the two references), in `.bss`.
