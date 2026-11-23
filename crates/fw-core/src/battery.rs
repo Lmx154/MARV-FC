@@ -578,4 +578,80 @@ mod tests {
             assert!(!code.contains(word), "{word}");
         }
     }
+
+    /// T2: the recorded pack voltage of log 286 (BAT, instance 0, armed windows 2 and 3 of PB0, 10 Hz) replayed through the
+    /// monitor. Expected times are PB0's table (pb0-report.md, seconds after the window's first armed sample); the monitor
+    /// fires at the first sample MORE than the timer after the first one below the level, PB0's script at `>=`, so they may
+    /// differ by one sample (0.1 s). Timer 0 is off here and fires never.
+    #[test]
+    fn log_286_replay_fires_where_the_pre_study_did() {
+        let csv = include_str!("battery_log286_bat.csv");
+        let mut wins: [std::vec::Vec<(u64, f32)>; 2] = [std::vec::Vec::new(), std::vec::Vec::new()];
+        for line in csv.lines().skip(1) {
+            let mut f = line.split(',');
+            let w: usize = f.next().unwrap().parse().unwrap();
+            let t: u64 = f.next().unwrap().parse().unwrap();
+            let v: f32 = f.next().unwrap().parse().unwrap();
+            wins[w - 2].push((t, v));
+        }
+        assert_eq!((wins[0].len(), wins[1].len()), (606, 1176));
+        // Fire time (ms after the first sample) of the first LOW rise with the LOW level at `level_v` volts (4 cells).
+        let fire = |win: usize, level_v: f32, timer_s: i32| -> Option<u64> {
+            let cfg = Config { cells: 4, low_cell_v: level_v / 4.0, crt_cell_v: 1.0, timer_s, act: 0 };
+            let mut m = Monitor::new();
+            let t0 = wins[win][0].0;
+            for &(t, volts) in &wins[win] {
+                if m.step(&cfg, t, true, Some(Sample { volts, t_ms: t })).rose.is_some() {
+                    return Some(t - t0);
+                }
+            }
+            None
+        };
+        let near = |got: Option<u64>, want: Option<f32>| match (got, want) {
+            (None, None) => true,
+            (Some(g), Some(w)) => (g as f32 - w * 1000.0).abs() <= 100.0,
+            _ => false,
+        };
+        // (level V, timer s, PB0's window 3 time s, this monitor's time s). The recorded volts are f32 at 0.01 V steps; PB0
+        // compared them with an f64 threshold, so a reading equal to 14.4 or 13.2 as f32 (just under it as f64) counted as
+        // below there and is not below here (the threshold is f32 too). Those two levels therefore differ from PB0 by
+        // more than a sample for 14.4 V and for 13.2 V / 10 s; 14.0 V (exact in both) and 13.2 V / 3 s agree.
+        let w3 = [
+            (14.4, 3, 50.2, 53.5),
+            (14.4, 10, 57.3, 60.5),
+            (14.0, 3, 88.5, 88.5),
+            (14.0, 10, 95.6, 95.6),
+            (13.2, 3, 102.1, 102.2),
+            (13.2, 10, 109.0, 109.2),
+        ];
+        for (level, timer, pb0, rust) in w3 {
+            let got = fire(1, level, timer);
+            assert!(near(got, Some(rust)), "{level} V / {timer} s: {got:?} want {rust}");
+            if level == 14.0 || timer == 3 && level == 13.2 {
+                assert!(near(got, Some(pb0)), "{level} V / {timer} s: {got:?} PB0 {pb0}");
+            }
+        }
+        // Window 2 (the 14.4 V / 0 s false fire of PB0): nothing fires with a timer, and none with timer 0 (off).
+        for level in [14.4, 14.0, 13.2] {
+            for timer in [0, 3, 10] {
+                assert_eq!(fire(0, level, timer), None, "w2 {level} V / {timer} s");
+            }
+        }
+        for level in [14.4, 14.0, 13.2] {
+            assert_eq!(fire(1, level, 0), None, "w3 {level} V / 0 s");
+        }
+        // The defaults (LOW 14.4 V, CRITICAL 14.0 V, 10 s): LOW at 60.5 s (PB0: 57.3 s, see above) and CRITICAL at 95.6 s of window 3.
+        let mut m = Monitor::new();
+        let t0 = wins[1][0].0;
+        let mut rises = std::vec::Vec::new();
+        for &(t, volts) in &wins[1] {
+            if let Some(l) = m.step(&DEFAULT, t, true, Some(Sample { volts, t_ms: t })).rose {
+                rises.push((l, t - t0));
+            }
+        }
+        assert_eq!(rises.len(), 2, "{rises:?}");
+        assert_eq!(rises[0].0, Level::Low);
+        assert_eq!(rises[1].0, Level::Critical);
+        assert!(near(Some(rises[0].1), Some(60.5)) && near(Some(rises[1].1), Some(95.6)), "{rises:?}");
+    }
 }

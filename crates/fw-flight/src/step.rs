@@ -350,6 +350,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     notch_hold_us: u64,
     /// The newest value of the low-battery monitor's descent request (core 0, `set_batt_descend`).
     batt_request: bool,
+    /// The request at the previous step.
+    batt_prev_request: bool,
+    /// A false-to-true edge of the request was seen while armed and the request has not fallen since; cleared while
+    /// disarmed, so a request already true at arming (disarm and re-arm within one supervisor tick) starts nothing.
+    batt_started: bool,
     /// A change of the mode switch cancelled the descent; cleared at the first step the gate is disarmed.
     batt_cancelled: bool,
     /// The mode switch of the previous stick report; `None` before the first.
@@ -438,6 +443,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
             batt_request: false,
+            batt_prev_request: false,
+            batt_started: false,
             batt_cancelled: false,
             prev_switch6: None,
             batt_state: BattDescent::Off,
@@ -555,6 +562,13 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.gains = self.gains_pending;
             self.controller.set_gains(&self.gains);
         }
+        // The descent starts on a false-to-true edge of the request seen while armed, never on a level.
+        if !self.gate.armed() || !self.batt_request {
+            self.batt_started = false;
+        } else if !self.batt_prev_request {
+            self.batt_started = true;
+        }
+        self.batt_prev_request = self.batt_request;
         if let Some(rc) = inputs.rc {
             self.shaper.sticks = rc.sticks;
             self.selected = match rc.switch6 {
@@ -563,7 +577,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 Switch3::High => Mode::Position,
             };
             // Any change of the mode switch while the descent is in force cancels it until disarm.
-            if self.batt_request && self.gate.armed() && self.prev_switch6.is_some_and(|p| p != rc.switch6) {
+            if self.batt_started && self.gate.armed() && self.prev_switch6.is_some_and(|p| p != rc.switch6) {
                 self.batt_cancelled = true;
             }
             self.prev_switch6 = Some(rc.switch6);
@@ -571,7 +585,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if !self.gate.armed() {
             self.batt_cancelled = false;
         }
-        let batt_on = self.batt_request && !self.batt_cancelled && self.gate.armed();
+        let batt_on = self.batt_started && !self.batt_cancelled && self.gate.armed();
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
         // A non-finite IMU value never reaches the estimator: no tilt, so the demand is refused and the gate stops.
@@ -616,7 +630,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         self.batt_state = if batt_on {
             if covered { BattDescent::Descending } else { BattDescent::NoHeight }
-        } else if self.batt_request && self.batt_cancelled && self.gate.armed() {
+        } else if self.batt_started && self.batt_cancelled && self.gate.armed() {
             BattDescent::Cancelled
         } else {
             BattDescent::Off

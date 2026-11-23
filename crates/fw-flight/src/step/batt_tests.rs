@@ -233,20 +233,68 @@ fn a_change_of_the_mode_switch_cancels_until_disarm() {
             assert_eq!(out.mode, Mode::Angle);
         }
     }
-    // Disarm (switch off), then arm again: the request stands, the descent starts again.
+    // Disarm (switch off), then arm again: core 0 clears the request at the disarm and raises it after the new arming (an
+    // edge while armed), and the descent starts again.
     t += DT_US;
     let out = step_rc(&mut f, t, false, 0.0, Switch3::Low);
     assert!(!out.armed);
     // The state reads the armed state the previous step left, so the next step shows it.
+    f.set_batt_descend(false);
     t += DT_US;
     step_rc(&mut f, t, false, 0.0, Switch3::Low);
     assert_eq!(f.batt_descent(), BattDescent::Off);
     t += DT_US;
     step_rc(&mut f, t, true, 0.0, Switch3::Low);
     assert!(f.gate.armed());
+    f.set_batt_descend(true);
     for _ in 0..3 {
         t += DT_US;
         step_rc(&mut f, t, true, 0.0, Switch3::Low);
+    }
+    assert_eq!(f.batt_descent(), BattDescent::Descending);
+}
+
+/// A request that is already true when the arming step runs (disarm and re-arm within one supervisor tick: core 0 has not
+/// cleared the byte) starts nothing and so wipes no cancel; a later false then true is an edge and starts the descent.
+#[test]
+fn a_request_standing_across_a_quick_rearm_starts_nothing_until_a_new_edge() {
+    let tuning = Tuning::DEFAULT;
+    let cell = Cell::new(nav_at(-2.0, ALTITUDE));
+    let mut f = flight(&cell, handshake(), &tuning);
+    let mut t = 1_000;
+    arm(&mut f, &mut t, Switch3::Low);
+    f.set_batt_descend(true);
+    for _ in 0..5 {
+        t += DT_US;
+        step_rc(&mut f, t, true, 1.0, Switch3::Low);
+    }
+    assert_eq!(f.batt_descent(), BattDescent::Descending);
+    // The request stays true through a disarm and a re-arm.
+    for _ in 0..3 {
+        t += DT_US;
+        step_rc(&mut f, t, false, 0.0, Switch3::Low);
+    }
+    assert_eq!(f.batt_descent(), BattDescent::Off);
+    arm(&mut f, &mut t, Switch3::Low);
+    for _ in 0..20 {
+        t += DT_US;
+        let out = step_rc(&mut f, t, true, 1.0, Switch3::Low);
+        assert!(out.armed);
+        assert_eq!((out.mode, f.batt_descent()), (Mode::Angle, BattDescent::Off));
+    }
+    // The pilot's switch change is no cancel of a descent that never started.
+    t += DT_US;
+    step_rc(&mut f, t, true, 1.0, Switch3::Middle);
+    assert_eq!(f.batt_descent(), BattDescent::Off);
+    // False, then true: a new edge while armed starts it.
+    f.set_batt_descend(false);
+    t += DT_US;
+    step_rc(&mut f, t, true, 1.0, Switch3::Low);
+    assert_eq!(f.batt_descent(), BattDescent::Off);
+    f.set_batt_descend(true);
+    for _ in 0..3 {
+        t += DT_US;
+        step_rc(&mut f, t, true, 1.0, Switch3::Low);
     }
     assert_eq!(f.batt_descent(), BattDescent::Descending);
 }
