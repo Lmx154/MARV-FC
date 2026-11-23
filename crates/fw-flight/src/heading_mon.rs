@@ -1,6 +1,11 @@
 //! Heading integrity monitor (decision-heading-monitor-20261123, H0-H6 with the addenda H7, H8 and H9, which override the
 //! earlier text where they differ). A pure, read-only module: it never writes the filter and nothing calls it yet (HM2 wires it).
 //!
+//! Sign: d_hat = true yaw minus the filter's yaw, in the filter's convention (yaw positive from north toward east, i.e.
+//! clockwise seen from above; eskf.rs:944 `yaw = atan2(r[1][0], r[0][0])`). B is A rotated by +d_hat in the (N, E) plane,
+//! which is what the test `b_rotated_by_d_gives_d_hat` builds and recovers (a vehicle whose true nose is d clockwise of the
+//! filter's yaw sees its acceleration turned d clockwise in N, E).
+//!
 //! Principle: does the filter's yaw carry the strapdown velocity increment A (N, E; the IMU's measured acceleration through
 //! the filter attitude) onto the GNSS-measured velocity change B? With the horizontal plane as complex numbers a yaw error d
 //! multiplies A by e^{jd}. Per pair of accepted GNSS velocity epochs, with lam = exp(-dt/TAU):
@@ -10,6 +15,11 @@
 //! a broken chain gives no pair (H7). R2 no pair when ||B| - |A|| > GATE x sigB (H7), R2' a pair screened by R2 also breaks
 //! the chain, so the bad epoch leaves both differences it enters (H8 (2)). R3 fault = informed AND |d_hat| > D_TOL AND
 //! |d_hat| > GATE x sig on every evaluated epoch for T_FAULT; a screened pair neither counts nor resets the count (H7, H8).
+//! H10 (1): confirmed = informed AND |d_hat| + CONF_SIGMA x sig <= D_TOL on every evaluated epoch for T_FAULT (same
+//! accumulated-time rule), latched. H10 (2): `blind` = airborne and no pair evaluated for `nav_aid_timeout_us`; cleared by the
+//! next evaluated pair; `heading_ok` is false while blind. Review items: a non-finite velocity or increment breaks the chain
+//! and never enters the sums; a pair whose two epochs are more than the filter's interval rule apart (H10 (i)-(iii): 1 /
+//! `nav_gps_min_rate_hz`, 245 ms) is not evaluated and breaks the chain.
 //! R4 sums and tests run only while airborne and armed, the sums are cleared at take-off (H8 (2)). Both latches and the sums
 //! clear at the arming edge (H3). `heading_ok` = the filter's heading flag AND confirmed AND NOT fault (H0).
 //!
@@ -32,6 +42,12 @@ pub const TAU_S: f32 = 5.0;
 pub const GATE_SIGMA: f32 = Tuning::DEFAULT.nav_gate_sigma;
 /// Noise of B per axis, m/s: 0.1085 (H9 / H4: MEASURED, flights/20261123-headmon round 3, t7_round3.out "binding sigB").
 pub const SIG_B_DEFAULT: f32 = 0.1085;
+/// Margin of the confirmation test, in sigmas: 2.58 (H10 (1); H4's p99 calibration of d_hat/sig).
+pub const CONF_SIGMA: f32 = 2.58;
+/// Longest time between the two epochs of a pair, us: the filter's interval rule 1 / `nav_gps_min_rate_hz` = 245 ms (H10).
+pub const MAX_DT_US: u32 = (1.0e6 / Tuning::DEFAULT.nav_gps_min_rate_hz + 0.5) as u32;
+/// Time without an evaluated pair, airborne, after which the monitor is blind, us: `nav_aid_timeout_us` (H10 (2)).
+pub const BLIND_US: u32 = Tuning::DEFAULT.nav_aid_timeout_us as u32;
 
 /// The monitor's output.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -52,6 +68,12 @@ pub struct HeadingMon {
     pub screened_r2: u32,
     /// Pairs dropped because the previous pair was screened by R2 (R2'), since the arming edge.
     pub dropped_r2p: u32,
+    /// Epochs or increments with a non-finite value (chain broken), since the arming edge.
+    pub non_finite: u32,
+    /// Pairs not evaluated because the epochs were more than `MAX_DT_US` apart, since the arming edge.
+    pub out_of_interval: u32,
+    /// Airborne and no pair evaluated for `BLIND_US`; cleared by the next evaluated pair (H10 (2)).
+    pub blind: bool,
 }
 
 /// The monitor's state (at most 128 B).
@@ -69,6 +91,11 @@ pub struct HeadingMonitor {
     sigma: f32,
     t_prev_us: u32,
     flagged_us: u32,
+    confirm_us: u32,
+    last_eval_us: u32,
+    non_finite: u32,
+    out_of_interval: u32,
+    blind: bool,
     screened: u32,
     dropped: u32,
     armed: bool,
@@ -101,6 +128,11 @@ impl HeadingMonitor {
             sigma: f32::INFINITY,
             t_prev_us: 0,
             flagged_us: 0,
+            confirm_us: 0,
+            last_eval_us: 0,
+            non_finite: 0,
+            out_of_interval: 0,
+            blind: false,
             screened: 0,
             dropped: 0,
             armed: false,
@@ -126,28 +158,54 @@ impl HeadingMonitor {
         self.a_e += e;
     }
 
-    /// The GNSS chain is broken (a missing, repeated, frozen or out-of-interval epoch): the next accepted epoch gives no pair.
-    pub fn chain_broken(&mut self) {
+    /// The GNSS chain is broken (a missing, repeated, frozen or out-of-interval epoch) at `t_us` (wrapping microseconds): the
+    /// next accepted epoch gives no pair. The time argument lets the blind timer run while no epoch arrives.
+    pub fn chain_broken(&mut self, t_us: u32) {
         self.have_prev = false;
         self.prev_bad = false;
         self.a_n = 0.0;
         self.a_e = 0.0;
+        self.advance_blind(t_us, self.prev_air, self.prev_air);
+    }
+
+    fn advance_blind(&mut self, t_us: u32, air: bool, was_air: bool) {
+        if !air || !was_air {
+            self.last_eval_us = t_us;
+            self.blind = false;
+        } else if t_us.wrapping_sub(self.last_eval_us) >= BLIND_US {
+            self.blind = true;
+        }
+    }
+
+    fn break_chain_at(&mut self, t_us: u32, air: bool, was_air: bool) {
+        self.have_prev = false;
+        self.prev_bad = false;
+        self.prev_air = air;
+        self.advance_blind(t_us, air, was_air);
     }
 
     /// An epoch the GNSS job accepted: velocity (N, E) m/s at `t_us` (wrapping microseconds). Takes and zeroes A.
     pub fn accepted_epoch(&mut self, t_us: u32, vn: f32, ve: f32, airborne: bool) {
         let air = airborne && self.armed;
+        let was_air = self.prev_air;
         let (an, ae) = (self.a_n, self.a_e);
+        self.a_n = 0.0;
+        self.a_e = 0.0;
+        if !(vn.is_finite() && ve.is_finite() && an.is_finite() && ae.is_finite()) {
+            self.non_finite = self.non_finite.wrapping_add(1);
+            self.t_prev_us = t_us;
+            self.break_chain_at(t_us, air, was_air);
+            return;
+        }
         let (pvn, pve) = (self.v_n, self.v_e);
         let had = self.have_prev && self.prev_air;
         let dt_us = t_us.wrapping_sub(self.t_prev_us);
-        self.a_n = 0.0;
-        self.a_e = 0.0;
         self.v_n = vn;
         self.v_e = ve;
         self.t_prev_us = t_us;
         self.have_prev = true;
         self.prev_air = air;
+        self.advance_blind(t_us, air, was_air);
         if !air {
             self.sc = 0.0;
             self.sd = 0.0;
@@ -155,10 +213,16 @@ impl HeadingMonitor {
             self.delta = 0.0;
             self.sigma = f32::INFINITY;
             self.flagged_us = 0;
+            self.confirm_us = 0;
             self.prev_bad = false;
             return;
         }
         if !had {
+            self.prev_bad = false;
+            return;
+        }
+        if dt_us > MAX_DT_US {
+            self.out_of_interval = self.out_of_interval.wrapping_add(1);
             self.prev_bad = false;
             return;
         }
@@ -176,15 +240,30 @@ impl HeadingMonitor {
             return;
         }
         let lam = libm::expf(-(dt_us as f32) * 1e-6 / TAU_S);
-        self.sc = lam * self.sc + (an * be - ae * bn);
-        self.sd = lam * self.sd + (an * bn + ae * be);
-        self.saa = lam * self.saa + (an * an + ae * ae);
+        let sc = lam * self.sc + (an * be - ae * bn);
+        let sd = lam * self.sd + (an * bn + ae * be);
+        let saa = lam * self.saa + (an * an + ae * ae);
+        if !(sc.is_finite() && sd.is_finite() && saa.is_finite()) {
+            self.non_finite = self.non_finite.wrapping_add(1);
+            self.break_chain_at(t_us, air, was_air);
+            return;
+        }
+        self.sc = sc;
+        self.sd = sd;
+        self.saa = saa;
+        self.last_eval_us = t_us;
+        self.blind = false;
         self.delta = libm::atan2f(self.sc, self.sd);
         self.sigma = if self.saa > 0.0 { self.sig_b / libm::sqrtf(self.saa) } else { f32::INFINITY };
         let informed = self.sigma <= SIG_CONF_RAD;
         let ad = self.delta.abs();
-        if informed && ad <= D_TOL_RAD {
-            self.confirmed = true;
+        if informed && ad + CONF_SIGMA * self.sigma <= D_TOL_RAD {
+            self.confirm_us = self.confirm_us.saturating_add(dt_us);
+            if self.confirm_us >= T_FAULT_US {
+                self.confirmed = true;
+            }
+        } else {
+            self.confirm_us = 0;
         }
         if informed && ad > D_TOL_RAD && ad > GATE_SIGMA * self.sigma {
             self.flagged_us = self.flagged_us.saturating_add(dt_us);
@@ -199,7 +278,7 @@ impl HeadingMonitor {
     /// The monitor's output.
     pub fn output(&self) -> HeadingMon {
         HeadingMon {
-            ok: self.confirmed && !self.fault,
+            ok: self.confirmed && !self.fault && !self.blind,
             confirmed: self.confirmed,
             fault: self.fault,
             delta_rad: self.delta,
@@ -207,12 +286,15 @@ impl HeadingMonitor {
             info: self.saa,
             screened_r2: self.screened,
             dropped_r2p: self.dropped,
+            non_finite: self.non_finite,
+            out_of_interval: self.out_of_interval,
+            blind: self.blind,
         }
     }
 
-    /// `heading_ok` = the filter's heading flag AND confirmed AND NOT fault (H0).
+    /// `heading_ok` = the filter's heading flag AND confirmed AND NOT fault AND NOT blind (H0, H10).
     pub fn heading_ok(&self, heading_flag: bool) -> bool {
-        heading_flag && self.confirmed && !self.fault
+        heading_flag && self.confirmed && !self.fault && !self.blind
     }
 }
 
@@ -286,6 +368,7 @@ mod tests {
 
     #[test]
     fn state_is_at_most_128_bytes() {
+        std::println!("size_of HeadingMonitor {}", core::mem::size_of::<HeadingMonitor>());
         assert!(core::mem::size_of::<HeadingMonitor>() <= 128, "{}", core::mem::size_of::<HeadingMonitor>());
     }
 
@@ -357,7 +440,7 @@ mod tests {
         // informed with |d_hat| <= 25 deg confirms; informed beyond 25 deg does not
         let mut r = Rig::new();
         r.ep((0.0, 0.0), (0.0, 0.0), true);
-        r.run(10, 0.5, 20.0 * D2R);
+        r.run(10, 0.5, 10.0 * D2R);
         assert!(r.m.output().confirmed);
         let mut r = Rig::new();
         r.ep((0.0, 0.0), (0.0, 0.0), true);
@@ -366,9 +449,9 @@ mod tests {
         // not informed (small A) does not confirm, however good d_hat looks; confirms once the sums carry enough A
         let mut r = Rig::new();
         r.ep((0.0, 0.0), (0.0, 0.0), true);
-        r.run(1, 0.1, 0.0);
+        r.run(1, 0.2, 0.0);
         assert!(r.m.output().sigma_rad > SIG_CONF_RAD && !r.m.output().confirmed);
-        r.run(400, 0.1, 0.0);
+        r.run(400, 0.2, 0.0);
         let o = r.m.output();
         assert!(o.sigma_rad <= SIG_CONF_RAD && o.confirmed);
         // a pair on the ground, or before arming, confirms nothing
@@ -393,25 +476,204 @@ mod tests {
         assert!((o.info - first / core::f32::consts::E).abs() < 1e-4, "{}", o.info);
     }
 
+    /// Screened epochs (B 4 x A, then back) for `n` epochs: no pair is evaluated.
+    fn screen(r: &mut Rig, n: usize) {
+        for _ in 0..n / 2 {
+            r.ep((0.5, 0.0), (2.0, 0.0), true);
+            r.ep((0.5, 0.0), (-2.0, 0.0), true);
+        }
+    }
+
     #[test]
     fn heading_ok_truth_table() {
-        // (confirmed, fault) from a fresh monitor: (0,0), (1,0), (0,1), (1,1)
-        let states = [(false, false), (true, false), (false, true), (true, true)];
-        for (conf, fault) in states {
-            let mut r = Rig::new();
-            r.ep((0.0, 0.0), (0.0, 0.0), true);
-            if conf {
-                r.run(10, 0.5, 0.0);
-            }
-            if fault {
-                r.run(60, 0.5, 90.0 * D2R);
-            }
-            let o = r.m.output();
-            assert_eq!((o.confirmed, o.fault), (conf, fault));
-            for flag in [false, true] {
-                assert_eq!(r.m.heading_ok(flag), flag && conf && !fault, "flag {flag} conf {conf} fault {fault}");
+        // (confirmed, fault, blind) 8 states x the filter's flag = 16 rows; every state is reached by driving the monitor
+        for conf in [false, true] {
+            for fault in [false, true] {
+                for blind in [false, true] {
+                    let mut r = Rig::new();
+                    r.ep((0.0, 0.0), (0.0, 0.0), true);
+                    if conf {
+                        r.run(10, 0.5, 0.0);
+                    }
+                    if fault {
+                        r.run(60, 0.5, 90.0 * D2R);
+                    }
+                    if blind {
+                        screen(&mut r, 40);
+                    }
+                    let o = r.m.output();
+                    assert_eq!((o.confirmed, o.fault, o.blind), (conf, fault, blind));
+                    for flag in [false, true] {
+                        let want = flag && conf && !fault && !blind;
+                        assert_eq!(r.m.heading_ok(flag), want, "flag {flag} conf {conf} fault {fault} blind {blind}");
+                    }
+                    assert_eq!(o.ok, conf && !fault && !blind);
+                }
             }
         }
+    }
+
+    fn noise(state: &mut u32) -> f32 {
+        let mut acc = 0.0;
+        for _ in 0..12 {
+            *state ^= *state << 13;
+            *state ^= *state >> 17;
+            *state ^= *state << 5;
+            acc += (*state >> 8) as f32 / 16_777_216.0;
+        }
+        acc - 6.0
+    }
+
+    #[test]
+    fn non_finite_input_never_enters_the_sums() {
+        for kind in 0..3 {
+            let mut r = Rig::new();
+            r.ep((0.0, 0.0), (0.0, 0.0), true);
+            r.run(10, 0.5, 0.0);
+            assert!(r.m.output().confirmed && !r.m.output().fault);
+            match kind {
+                0 => {
+                    r.t += DT_US;
+                    r.m.add_increment(0.5, 0.0);
+                    r.m.accepted_epoch(r.t, f32::NAN, 0.0, true);
+                }
+                1 => {
+                    r.m.add_increment(f32::INFINITY, 0.0);
+                    r.ep((0.5, 0.0), (0.5, 0.0), true);
+                }
+                _ => {
+                    r.m.add_increment(f32::NAN, 0.0);
+                    r.ep((0.5, 0.0), (0.5, 0.0), true);
+                    // the bad value did not survive in A: the next increment is clean
+                }
+            }
+            let o = r.m.output();
+            assert_eq!(o.non_finite, 1, "kind {kind}");
+            assert!(o.info.is_finite() && o.delta_rad.is_finite() && o.sigma_rad.is_finite());
+            r.v = (0.0, 0.0);
+            r.ep((0.5, 0.0), (0.0, 0.0), true); // first epoch of the new chain, no pair
+            r.run(60, 0.5, 90.0 * D2R);
+            let o = r.m.output();
+            assert!(o.fault, "kind {kind}");
+            assert!(o.info.is_finite() && o.delta_rad.is_finite() && o.sigma_rad.is_finite());
+            assert_eq!(o.non_finite, 1);
+        }
+    }
+
+    #[test]
+    fn finite_inputs_that_overflow_the_sums_are_dropped() {
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        r.run(10, 0.5, 0.0);
+        let info = r.m.output().info;
+        r.ep((1e20, 0.0), (1e20, 0.0), true);
+        let o = r.m.output();
+        assert_eq!(o.non_finite, 1);
+        assert!(o.info == info && o.info.is_finite() && o.delta_rad.is_finite());
+    }
+
+    #[test]
+    fn a_gap_or_a_backwards_clock_gives_no_pair_and_no_fault() {
+        for back in [false, true] {
+            let mut r = Rig::new();
+            r.ep((0.0, 0.0), (0.0, 0.0), true);
+            r.run(4, 0.5, 90.0 * D2R);
+            let o = r.m.output();
+            assert!(!o.fault && o.delta_rad > 80.0 * D2R);
+            let info = o.info;
+            r.t = if back { r.t.wrapping_sub(1_000_000) } else { r.t + 3_000_000 };
+            r.run(1, 0.5, 90.0 * D2R);
+            let o = r.m.output();
+            assert!(!o.fault, "back {back}");
+            assert_eq!((o.info, o.out_of_interval), (info, 1));
+            // the next epoch starts a new chain from the late epoch: a pair again
+            r.run(1, 0.5, 90.0 * D2R);
+            assert_ne!(r.m.output().info, info);
+        }
+        assert_eq!(MAX_DT_US, 245_000);
+    }
+
+    #[test]
+    fn confirmation_needs_the_margin_for_one_second() {
+        // clean 0 deg: informed with |d| + 2.58 sig <= 25 deg from Saa about 0.41; confirmed after five such epochs
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        let mut ok_epochs = 0;
+        for n in 1..=12 {
+            r.run(1, 0.5, 0.0);
+            let o = r.m.output();
+            if o.sigma_rad <= SIG_CONF_RAD && o.delta_rad.abs() + CONF_SIGMA * o.sigma_rad <= D_TOL_RAD {
+                ok_epochs += 1;
+                assert!(o.info >= 0.40, "info {}", o.info);
+            } else {
+                assert_eq!(ok_epochs, 0);
+            }
+            assert_eq!(o.confirmed, ok_epochs >= 5, "pair {n}");
+        }
+        assert!(r.m.output().confirmed);
+        // one lucky epoch: four good epochs, then a strong 90 deg pair resets the count
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        r.run(4, 0.5, 0.0);
+        assert!(!r.m.output().confirmed);
+        r.run(1, 3.0, 90.0 * D2R);
+        r.run(4, 0.5, 0.0);
+        assert!(!r.m.output().confirmed);
+    }
+
+    #[test]
+    fn a_35_deg_error_at_9_to_15_deg_sigma_never_confirms() {
+        for (seed, sig_deg) in [(1u32, 9.0f32), (2, 10.0), (3, 12.0), (4, 14.5)] {
+            let mut st = 0x9e3779b9u32 ^ seed.wrapping_mul(2654435761);
+            let mut r = Rig::new();
+            r.ep((0.0, 0.0), (0.0, 0.0), true);
+            let mag = mag_for_sig(sig_deg * D2R);
+            for _ in 0..3000 {
+                let a = a_of(r.k, mag);
+                r.k += 1;
+                let b = rot(a, 35.0 * D2R);
+                let b = (b.0 + 0.1085 * noise(&mut st) / 1.4, b.1 + 0.1085 * noise(&mut st) / 1.4);
+                r.ep(a, b, true);
+                assert!(!r.m.output().confirmed, "seed {seed} sig {sig_deg}: d_hat {} sig {}", r.m.output().delta_rad / D2R, r.m.output().sigma_rad / D2R);
+            }
+        }
+    }
+
+    #[test]
+    fn blind_after_the_aid_timeout_without_an_evaluated_pair() {
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        r.run(10, 0.5, 0.0);
+        assert!(r.m.heading_ok(true) && !r.m.output().blind);
+        // R2 screening for just under the timeout: not blind; past it: blind, confirmed and not faulted, heading_ok false
+        screen(&mut r, 20);
+        assert!(!r.m.output().blind && r.m.heading_ok(true));
+        screen(&mut r, 10);
+        let o = r.m.output();
+        assert!(o.blind && o.confirmed && !o.fault && !o.ok && !r.m.heading_ok(true));
+        // the next evaluated pair clears it (the chain was left broken by the last screened pair: two epochs)
+        r.run(3, 0.5, 0.0);
+        assert!(!r.m.output().blind && r.m.heading_ok(true));
+        // a broken chain with no epochs: the timer runs on chain_broken calls
+        let t = r.t;
+        r.m.chain_broken(t + 1_000_000);
+        assert!(!r.m.output().blind);
+        r.m.chain_broken(t + BLIND_US + 1_000_000);
+        assert!(r.m.output().blind);
+        // on the ground it is never blind
+        r.ep((0.0, 0.0), (0.0, 0.0), false);
+        assert!(!r.m.output().blind);
+    }
+
+    #[test]
+    fn a_calm_hover_with_evaluated_low_information_pairs_is_never_blind() {
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        for _ in 0..1000 {
+            r.run(1, 0.01, 0.0);
+            assert!(!r.m.output().blind);
+        }
+        assert!(r.m.output().info > 0.0 && !r.m.output().confirmed);
     }
 
     #[test]
@@ -422,7 +684,7 @@ mod tests {
         let info = r.m.output().info;
         // a repeated epoch: the filter's job refuses it and the chain is broken; the catch-up epoch carries two
         // intervals of B (rotated, as a stale one is) against one of A
-        r.m.chain_broken();
+        r.m.chain_broken(r.t);
         r.m.add_increment(0.5, 0.0);
         r.m.add_increment(0.5, 0.0);
         r.v = (r.v.0 + 0.7, r.v.1 + 0.7);
@@ -607,13 +869,14 @@ mod tests {
     }
 
     /// Replays a fixture; returns (max |d_hat diff|, max sig diff, evaluated count, first-session time to confirmed).
-    fn replay(csv: &str) -> (f32, f32, usize, Vec<f32>, bool) {
+    fn replay(csv: &str) -> (f32, f32, usize, Vec<f32>, bool, bool) {
         let mut m = HeadingMonitor::default();
         let (mut max_d, mut max_s, mut n_ev, mut faulted) = (0.0f32, 0.0f32, 0usize, false);
         let mut sess = u32::MAX;
         let mut air_start: Option<f64> = None; // take-off time of the session, s (the fixture's #air line)
         let mut tconf: Vec<f32> = Vec::new();
         let mut conf_seen = false;
+        let mut blind_seen = false;
         let mut air0: Vec<f64> = Vec::new();
         for line in csv.lines().filter(|l| l.starts_with("#air,")) {
             air0.push(field(line)[2].parse().unwrap());
@@ -636,11 +899,14 @@ mod tests {
                 conf_seen = false;
             }
             if brk {
-                m.chain_broken();
+                m.chain_broken(t as u32);
             }
             m.add_increment(an, ae);
+            let scr0 = m.output().screened_r2;
             m.accepted_epoch(t as u32, vn, ve, air);
             let o = m.output();
+            assert_eq!(o.screened_r2 - scr0, u32::from(f[11] == "1"), "R2 flag at t {t}");
+            blind_seen |= o.blind;
             if ev {
                 n_ev += 1;
                 max_d = max_d.max(wrap(o.delta_rad - dh).abs());
@@ -655,33 +921,35 @@ mod tests {
         if !conf_seen {
             tconf.push(f32::INFINITY);
         }
-        (max_d, max_s, n_ev, tconf, faulted)
+        (max_d, max_s, n_ev, tconf, faulted, blind_seen)
     }
 
     #[test]
     fn recorded_log_311_reproduces_the_python_monitor() {
-        let (max_d, max_s, n_ev, tconf, faulted) = replay(include_str!("../testdata/headmon_311.csv"));
-        std::println!("311: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?}");
+        let (max_d, max_s, n_ev, tconf, faulted, blind) = replay(include_str!("../testdata/headmon_311.csv"));
+        std::println!("311: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?} blind seen {blind}");
         assert!(n_ev > 1000);
         assert!(max_d < 2e-3 && max_s < 1e-4, "{max_d} {max_s}");
         assert!(!faulted);
-        // t7_round3.out: first session confirmed 4.3 s after take-off (Python's three sessions: 4.262, 3.363, 1.296 s)
+        // H10 (1) rule, Python (hm3b.py) per session: 70.664, 13.944, 9.064 s after take-off (round 3, old rule: 4.262, 3.363,
+        // 1.296 s; t7_round3.out reports 4.3 for the first)
         assert_eq!(tconf.len(), 3);
-        for (a, b) in tconf.iter().zip([4.2616, 3.3632, 1.2959]) {
+        for (a, b) in tconf.iter().zip([70.6634, 13.9444, 9.0640]) {
             assert!((a - b).abs() < 0.02, "{tconf:?}");
         }
     }
 
     #[test]
     fn recorded_log_291_reproduces_the_python_monitor() {
-        let (max_d, max_s, n_ev, tconf, faulted) = replay(include_str!("../testdata/headmon_291.csv"));
-        std::println!("291: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?}");
+        let (max_d, max_s, n_ev, tconf, faulted, blind) = replay(include_str!("../testdata/headmon_291.csv"));
+        std::println!("291: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?} blind seen {blind}");
         assert!(n_ev > 500);
         assert!(max_d < 2e-3 && max_s < 1e-4, "{max_d} {max_s}");
         assert!(!faulted);
-        // t7_round3.out: first session confirmed 5.2 s after take-off (Python's two sessions: 5.193, 1.621 s)
+        // H10 (1) rule, Python (hm3b.py) per session: 12.970, 2.623 s after take-off (round 3, old rule: 5.193, 1.621 s;
+        // t7_round3.out reports 5.2 for the first)
         assert_eq!(tconf.len(), 2);
-        for (a, b) in tconf.iter().zip([5.1927, 1.6213]) {
+        for (a, b) in tconf.iter().zip([12.9699, 2.6231]) {
             assert!((a - b).abs() < 0.02, "{tconf:?}");
         }
     }
