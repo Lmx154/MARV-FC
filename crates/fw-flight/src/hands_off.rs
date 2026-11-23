@@ -1,5 +1,5 @@
 //! The hands-off state machine (decision-mavlink-mode-20261123, section 9 Amendment A as amended by section 10: A1,
-//! A2', A3, A6, A7, A9, A10, A10' and the state table). Pure: no clock, no log, no statics, no allocation; every time
+//! A2', A3, A6, A7, A9, A10, A10' and the state table; and by section 11 Amendment B, B1-B9). Pure: no clock, no log, no statics, no allocation; every time
 //! comes in as an argument. Each flight step the caller hands it the facts ([`Inputs`]) and gets the state and what the
 //! flight code must do ([`Output`]). Not called by the flight step yet (packets H2b, H2c wire it).
 
@@ -18,6 +18,11 @@ pub const STATION_LOST_US: u64 = 5_000_000;
 /// Decision section 9, A9 (line 213): "within 1000 m horizontally of home"; owner, section 8 Q9 "1km".
 pub const HOME_RANGE_M: f32 = 1000.0;
 
+/// A tier drop (position, heading or height) takes effect on state exits and the stick-loss entry only after it has
+/// lasted this long without a break, us; an upgrade takes effect at once. Decision section 11, B5: ArduPilot
+/// EKF_CHECK_ITERATIONS_MAX, "1 second ... of bad variances", ekf_check.cpp:10-11 (owner's approval pending, Q-B1).
+pub const TIER_DEBOUNCE_US: u64 = 1_000_000;
+
 /// The effective mode (link-contract section 10 codes 1 to 7; BLIND 8, not yet in the contract).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -35,7 +40,7 @@ pub enum State {
     Land,
     /// Disarmed, motors stopped (or sticks lost on the ground: the gate disarms).
     Stop,
-    /// Sticks lost in the air on T1 (tilt and rates only). Control law UNKNOWN (decision U-1): reported only.
+    /// LAND flown on the debounced T1 (tilt and rates only; B6). Control law UNKNOWN (decision U-1): reported only.
     Blind,
 }
 
@@ -60,7 +65,8 @@ impl State {
     }
 }
 
-/// The validity tier (A3), evaluated by the caller every step from the flags.
+/// The validity tier (A3), evaluated by the caller every step from the flags. Inside the module T3 is B4's T3':
+/// position covered and `heading_ok`; T3 without `heading_ok` counts as T2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     /// The position is covered (`Setpoint::Position`'s needs; includes the height).
@@ -93,6 +99,17 @@ pub enum Link {
     Usb,
 }
 
+/// The highest setpoint level this step's flags cover (B5, I12): the flight code must never demand more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Demand {
+    /// T3': the position is covered and `heading_ok`.
+    Position,
+    /// The height is covered.
+    Altitude,
+    /// Tilt and rates only: Angle with centred synthetic throttle when hands-off.
+    Angle,
+}
+
 /// A pending station command and the link it came on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StationCommand {
@@ -122,7 +139,8 @@ pub struct MissionFacts {
 pub struct Inputs {
     /// Board time, us.
     pub now_us: u64,
-    /// FS_HOLD_EN. False: only PILOT and STOP, `hands_off` always false.
+    /// FS_HOLD_EN's present value. Taken into force on disarmed steps only (B9); in force false: only PILOT and STOP,
+    /// `hands_off` always false.
     pub fs_hold_en: bool,
     /// The newest CRSF stick report (not necessarily new this step); `None` before the first. Its sticks are never
     /// read here.
@@ -172,6 +190,13 @@ pub enum DenyReason {
     HandsOffDisabled,
     /// The state does not take this command.
     NotInThisState,
+    /// A command into HOLD (and Abort in BLIND): the debounced tier is not T3' (B2, B6). Start: this step's tier is
+    /// not T3 (checked after `HeadingNotOk`, B4).
+    NotT3,
+    /// A command into HOLD: the battery is critical, so HOLD would land at once (B2).
+    BatteryCritical,
+    /// A command into HOLD: the link is lost (`LINK_LOSS_US`), so HOLD would leave at once (B2).
+    LinkLost,
     /// Start: no station HEARTBEAT on the radio link within `STATION_LOST_US`.
     StationAbsent,
     /// Start: no list with a waypoint is stored.
@@ -182,12 +207,10 @@ pub enum DenyReason {
     NoHome,
     /// Start: the vehicle is more than `HOME_RANGE_M` from home, or its position is not valid.
     VehicleBeyondRange,
-    /// Start: the waypoints' largest distance from home is unknown.
+    /// Start: the waypoints' largest distance from home is unknown or not finite.
     WaypointDistanceUnknown,
     /// Start: a waypoint is more than `HOME_RANGE_M` from home.
     WaypointBeyondRange,
-    /// Start (and Abort in LAND): the tier is not T3.
-    NotT3,
     /// Start: the heading monitor is not OK.
     HeadingNotOk,
     /// Start: the battery is not known to be non-critical.
@@ -262,6 +285,10 @@ pub struct Output {
     pub events: Events,
     /// LAND: the existing landing latch disarms at touchdown.
     pub landing: bool,
+    /// LAND on this step's T3': hold the horizontal position; otherwise LAND descends level (B4).
+    pub land_holds_position: bool,
+    /// The highest level the flight code may demand this step, from this step's flags (B5, I12).
+    pub demand: Demand,
 }
 
 /// The hands-off state machine.
@@ -282,8 +309,16 @@ pub struct HandsOff {
     was_armed: bool,
     home_d: Option<f32>,
     home_ne: Option<[f32; 2]>,
-    /// This arming may still latch the NE home (before take-off).
-    ne_window: bool,
+    /// This arming may still latch home (armed, before take-off; B8).
+    home_window: bool,
+    /// FS_HOLD_EN in force, taken on disarmed steps (B9).
+    fs_in_force: bool,
+    /// The tier for exits and the stick-loss entry (B5).
+    debounced: Tier,
+    /// The first step of the present run of steps below T3'.
+    below_t3_since: Option<u64>,
+    /// The first step of the present run of T1 steps.
+    below_t2_since: Option<u64>,
 }
 
 impl HandsOff {
@@ -300,7 +335,11 @@ impl HandsOff {
             was_armed: false,
             home_d: None,
             home_ne: None,
-            ne_window: false,
+            home_window: false,
+            fs_in_force: false,
+            debounced: Tier::T3,
+            below_t3_since: None,
+            below_t2_since: None,
         }
     }
 
@@ -324,7 +363,12 @@ impl HandsOff {
             .is_some_and(|r| i.now_us.saturating_sub(r.t_us) <= self.stick_loss_us);
         let mut ev = Events::NONE;
         self.update_home(i);
-        if i.fs_hold_en {
+        if !i.armed {
+            self.fs_in_force = i.fs_hold_en;
+        }
+        let instant = Self::instant_tier(i);
+        self.update_tier(i.now_us, instant);
+        if self.fs_in_force {
             self.automatic(i, fresh, &mut ev);
         } else {
             let state = if i.armed && fresh && i.crsf.is_some_and(|r| r.arm) {
@@ -336,6 +380,11 @@ impl HandsOff {
         }
         let command = i.command.map(|c| self.command(c, i, fresh, &mut ev));
         let hands_off = self.state.is_hands_off();
+        let demand = match instant {
+            Tier::T3 => Demand::Position,
+            Tier::T2 => Demand::Altitude,
+            Tier::T1 => Demand::Angle,
+        };
         Output {
             state: self.state,
             hands_off,
@@ -345,26 +394,72 @@ impl HandsOff {
             return_height_m: self.return_height_m,
             events: ev,
             landing: self.state == State::Land,
+            land_holds_position: self.state == State::Land && demand == Demand::Position,
+            demand,
         }
     }
 
-    /// A6: D at the arming step; NE at the first armed step with `position_ne` while not airborne; cleared at disarm.
+    /// This step's tier with B4's T3' (T3 needs `heading_ok`).
+    fn instant_tier(i: &Inputs) -> Tier {
+        match i.tier {
+            Tier::T3 if i.heading_ok => Tier::T3,
+            Tier::T3 | Tier::T2 => Tier::T2,
+            Tier::T1 => Tier::T1,
+        }
+    }
+
+    /// B5: a drop below a level counts once it has lasted `TIER_DEBOUNCE_US` without a break; a rise at once.
+    fn update_tier(&mut self, now: u64, instant: Tier) {
+        if instant == Tier::T3 {
+            self.below_t3_since = None;
+        } else if self.below_t3_since.is_none() {
+            self.below_t3_since = Some(now);
+        }
+        if instant != Tier::T1 {
+            self.below_t2_since = None;
+        } else if self.below_t2_since.is_none() {
+            self.below_t2_since = Some(now);
+        }
+        let held = |since: Option<u64>| since.is_some_and(|t| now.saturating_sub(t) >= TIER_DEBOUNCE_US);
+        self.debounced = if !held(self.below_t3_since) {
+            Tier::T3
+        } else if !held(self.below_t2_since) {
+            Tier::T2
+        } else {
+            Tier::T1
+        };
+    }
+
+    /// LAND, or BLIND when the debounced tier is T1 (B6: BLIND is LAND flown on T1).
+    fn land_state(&self) -> State {
+        if self.debounced == Tier::T1 {
+            State::Blind
+        } else {
+            State::Land
+        }
+    }
+
+    /// A6 with B8: D and NE each at the first armed step where they are valid while not airborne; the window closes on
+    /// airborne; home is both or nothing; cleared at disarm.
     fn update_home(&mut self, i: &Inputs) {
         if !i.armed {
             self.home_d = None;
             self.home_ne = None;
-            self.ne_window = false;
+            self.home_window = false;
         } else {
             if !self.was_armed {
-                self.home_d = i.position_d_valid.then_some(i.position_d_m);
-                self.ne_window = true;
+                self.home_window = true;
             }
-            if self.ne_window {
+            if self.home_window {
                 if i.airborne {
-                    self.ne_window = false;
-                } else if i.position_ne_valid {
-                    self.home_ne = Some(i.position_ne_m);
-                    self.ne_window = false;
+                    self.home_window = false;
+                } else {
+                    if self.home_d.is_none() && i.position_d_valid {
+                        self.home_d = Some(i.position_d_m);
+                    }
+                    if self.home_ne.is_none() && i.position_ne_valid {
+                        self.home_ne = Some(i.position_ne_m);
+                    }
                 }
             }
         }
@@ -386,12 +481,12 @@ impl HandsOff {
             }
             State::Pilot => {
                 if !fresh {
-                    self.go(Self::lost(i), i, ev);
+                    self.go(self.lost(i), i, ev);
                 }
             }
             State::Takeover => {
                 if !fresh {
-                    self.go(Self::lost(i), i, ev);
+                    self.go(self.lost(i), i, ev);
                 } else {
                     if high {
                         self.seen_high = true;
@@ -408,8 +503,8 @@ impl HandsOff {
                 self.seen_high = high;
             }
             State::Hold => {
-                if i.tier != Tier::T3 || i.battery_critical {
-                    self.go(State::Land, i, ev);
+                if self.debounced != Tier::T3 || i.battery_critical {
+                    self.go(self.land_state(), i, ev);
                 } else if self.link_age(i) > LINK_LOSS_US {
                     let next = if self.home().is_some() {
                         State::Return
@@ -422,8 +517,8 @@ impl HandsOff {
                 }
             }
             State::Auto => {
-                if i.tier != Tier::T3 || i.battery_critical {
-                    self.go(State::Land, i, ev);
+                if self.debounced != Tier::T3 || i.battery_critical {
+                    self.go(self.land_state(), i, ev);
                 } else if i.mission.plan_id != self.flown_plan || i.last_waypoint_reached {
                     self.go(State::Hold, i, ev);
                 } else if !Self::station_present(i) {
@@ -431,20 +526,29 @@ impl HandsOff {
                 }
             }
             State::Return => {
-                if i.tier != Tier::T3 || i.battery_critical || i.home_reached {
+                if self.debounced != Tier::T3 || i.battery_critical || i.home_reached {
+                    self.go(self.land_state(), i, ev);
+                }
+            }
+            State::Land => {
+                if self.debounced == Tier::T1 {
+                    self.go(State::Blind, i, ev);
+                }
+            }
+            State::Blind => {
+                if self.debounced != Tier::T1 {
                     self.go(State::Land, i, ev);
                 }
             }
-            State::Land | State::Blind => {}
         }
     }
 
-    /// Sticks lost in PILOT or TAKEOVER: by tier when armed and airborne, else STOP.
-    fn lost(i: &Inputs) -> State {
+    /// Sticks lost in PILOT or TAKEOVER: by the debounced tier when armed and airborne, else STOP.
+    fn lost(&self, i: &Inputs) -> State {
         if !i.airborne {
             State::Stop
         } else {
-            match i.tier {
+            match self.debounced {
                 Tier::T3 => State::Hold,
                 Tier::T2 => State::Land,
                 Tier::T1 => State::Blind,
@@ -519,13 +623,20 @@ impl HandsOff {
         if fresh {
             return Denied(DenyReason::CrsfFresh);
         }
-        if !i.fs_hold_en {
+        if !self.fs_in_force {
             return Denied(DenyReason::HandsOffDisabled);
+        }
+        let into_hold = matches!(
+            (c.command, self.state),
+            (Command::Pause | Command::Abort, State::Auto | State::Return) | (Command::Abort, State::Land)
+        );
+        if into_hold && let Some(reason) = self.hold_entry_check(i) {
+            return Denied(reason);
         }
         match (c.command, self.state) {
             (Command::Start, State::Auto)
             | (Command::Pause, State::Hold)
-            | (Command::Land, State::Land) => Accepted,
+            | (Command::Land, State::Land | State::Blind) => Accepted,
             (Command::Start, State::Hold) => match self.start_check(i) {
                 Some(reason) => Denied(reason),
                 None => {
@@ -544,7 +655,7 @@ impl HandsOff {
                 self.pause(i, ev);
                 Accepted
             }
-            (Command::Pause, State::Return) | (Command::Abort, State::Auto | State::Return) => {
+            (Command::Pause, State::Return) | (Command::Abort, State::Auto | State::Return | State::Land) => {
                 self.go(State::Hold, i, ev);
                 Accepted
             }
@@ -552,19 +663,25 @@ impl HandsOff {
                 self.drop_place(ev);
                 Accepted
             }
-            (Command::Abort, State::Land) => {
-                if i.tier == Tier::T3 {
-                    self.go(State::Hold, i, ev);
-                    Accepted
-                } else {
-                    Denied(DenyReason::NotT3)
-                }
-            }
+            (Command::Abort, State::Blind) => Denied(DenyReason::NotT3),
             (Command::Land, State::Hold | State::Auto | State::Return) => {
-                self.go(State::Land, i, ev);
+                self.go(self.land_state(), i, ev);
                 Accepted
             }
             _ => Denied(DenyReason::NotInThisState),
+        }
+    }
+
+    /// B2: a command into HOLD is DENIED when one of HOLD's automatic exits would fire on this step's facts.
+    fn hold_entry_check(&self, i: &Inputs) -> Option<DenyReason> {
+        if self.debounced != Tier::T3 {
+            Some(DenyReason::NotT3)
+        } else if i.battery_critical {
+            Some(DenyReason::BatteryCritical)
+        } else if self.link_age(i) > LINK_LOSS_US {
+            Some(DenyReason::LinkLost)
+        } else {
+            None
         }
     }
 
@@ -590,18 +707,18 @@ impl HandsOff {
         if !i.position_ne_valid || !vehicle_within {
             return Some(DenyReason::VehicleBeyondRange);
         }
-        let Some(far) = i.mission.max_waypoint_distance_m else {
+        let Some(far) = i.mission.max_waypoint_distance_m.filter(|d| d.is_finite()) else {
             return Some(DenyReason::WaypointDistanceUnknown);
         };
         let waypoints_within = far <= HOME_RANGE_M;
         if !waypoints_within {
             return Some(DenyReason::WaypointBeyondRange);
         }
-        if i.tier != Tier::T3 {
-            return Some(DenyReason::NotT3);
-        }
         if !i.heading_ok {
             return Some(DenyReason::HeadingNotOk);
+        }
+        if i.tier != Tier::T3 {
+            return Some(DenyReason::NotT3);
         }
         if !i.battery_ok {
             return Some(DenyReason::BatteryNotOk);
@@ -789,9 +906,22 @@ mod tests {
             r
         }
 
+        /// This step's tier becomes `tier` (the first step of the drop).
+        fn drop_tier(&mut self, tier: Tier) -> Output {
+            self.i.tier = tier;
+            self.step()
+        }
+
+        /// The drop has lasted `TIER_DEBOUNCE_US`.
+        fn hold_drop(&mut self) -> Output {
+            let t = self.now() + TIER_DEBOUNCE_US;
+            self.at(t)
+        }
+
+        /// Sticks lost in the air after T1 has lasted 1.0 s.
         fn blind() -> Rig {
             let mut r = Rig::pilot();
-            r.i.tier = Tier::T1;
+            assert_eq!(r.drop_tier(Tier::T1).state, State::Pilot);
             let t = r.last_report() + LOSS + 1;
             assert_eq!(r.at(t).state, State::Blind);
             r
@@ -832,7 +962,7 @@ mod tests {
             (Tier::T1, State::Blind),
         ] {
             let mut r = Rig::pilot();
-            r.i.tier = tier;
+            r.drop_tier(tier);
             let last = r.last_report();
             assert_eq!(r.at(last + LOSS).state, State::Pilot, "{tier:?} at exactly 1.0 s");
             let out = r.at(last + LOSS + 1);
@@ -881,7 +1011,7 @@ mod tests {
             (Tier::T1, State::Blind),
         ] {
             let mut r = Rig::takeover();
-            r.i.tier = tier;
+            r.drop_tier(tier);
             let last = r.last_report();
             assert_eq!(r.at(last + LOSS).state, State::Takeover);
             assert_eq!(r.at(last + LOSS + 1).state, want, "{tier:?}");
@@ -988,6 +1118,7 @@ mod tests {
     fn hands_off_hold_entries_from_return_and_land() {
         for c in [Command::Pause, Command::Abort] {
             let mut r = Rig::ret();
+            r.heartbeat(r.now() + 1_000);
             let out = r.cmd(c);
             assert_eq!((out.state, out.command), (State::Hold, Some(CommandResult::Accepted)), "{c:?}");
             assert_eq!(out.return_height_m, None);
@@ -1001,11 +1132,11 @@ mod tests {
     fn hands_off_hold_exits() {
         // CRSF: TAKEOVER (covered above). Start: AUTO (Rig::auto). Land command:
         assert_eq!(Rig::land().h.state(), State::Land);
-        // T3 lost:
-        for tier in [Tier::T2, Tier::T1] {
+        // T3 lost for 1.0 s: LAND, or BLIND on T1 (B6); latched (T3 back gives no HOLD).
+        for (tier, want) in [(Tier::T2, State::Land), (Tier::T1, State::Blind)] {
             let mut r = Rig::hold();
-            r.i.tier = tier;
-            assert_eq!(r.step().state, State::Land, "{tier:?}");
+            assert_eq!(r.drop_tier(tier).state, State::Hold);
+            assert_eq!(r.hold_drop().state, want, "{tier:?}");
             r.i.tier = Tier::T3;
             assert_eq!(r.step().state, State::Land, "latched");
         }
@@ -1111,8 +1242,8 @@ mod tests {
         let out = r.cmd(Command::Land);
         assert_eq!((out.state, out.command), (State::Land, Some(CommandResult::Accepted)));
         let mut r = Rig::auto();
-        r.i.tier = Tier::T2;
-        assert_eq!(r.step().state, State::Land);
+        assert_eq!(r.drop_tier(Tier::T2).state, State::Auto);
+        assert_eq!(r.hold_drop().state, State::Land);
         let mut r = Rig::auto();
         r.i.battery_critical = true;
         let out = r.step();
@@ -1201,7 +1332,11 @@ mod tests {
         ] {
             let mut r = Rig::ret();
             set(&mut r.i);
-            let out = r.step();
+            let mut out = r.step();
+            if name == "t3 lost" {
+                assert_eq!(out.state, State::Return, "debounced");
+                out = r.hold_drop();
+            }
             assert_eq!(out.state, State::Land, "{name}");
             assert_eq!(out.return_height_m, None);
         }
@@ -1233,7 +1368,10 @@ mod tests {
         let mut r = Rig::land();
         let t = r.now() + 600 * S;
         assert_eq!(r.at(t).state, State::Land);
-        r.i.tier = Tier::T2;
+        r.heartbeat(r.now() + 1_000);
+        r.drop_tier(Tier::T2);
+        r.i.last_radio_heartbeat_us = Some(r.now() + TIER_DEBOUNCE_US);
+        r.hold_drop();
         let out = r.cmd(Command::Abort);
         assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::NotT3)));
     }
@@ -1284,14 +1422,33 @@ mod tests {
     }
 
     #[test]
-    fn hands_off_blind_stays_until_crsf_or_disarm_and_takes_no_command() {
+    fn hands_off_b6_blind_and_land_switch_by_debounced_tier() {
+        // T1 -> T2 in BLIND: LAND at once (an upgrade).
         let mut r = Rig::blind();
-        r.i.tier = Tier::T3;
         let t = r.now() + 600 * S;
         assert_eq!(r.at(t).state, State::Blind);
-        for c in [Command::Start, Command::Pause, Command::Abort, Command::Land] {
-            r.heartbeat(r.now() + 1_000);
-            assert_eq!(r.cmd(c).command, denied(DenyReason::NotInThisState), "{c:?}");
+        r.i.battery_critical = true;
+        assert_eq!(r.step().state, State::Blind, "battery critical: no change");
+        let out = r.drop_tier(Tier::T2);
+        assert_eq!((out.state, out.landing), (State::Land, true));
+        // T2 -> T1 in LAND: BLIND only once held 1.0 s.
+        assert_eq!(r.drop_tier(Tier::T1).state, State::Land);
+        let t = r.now() + TIER_DEBOUNCE_US - 1;
+        assert_eq!(r.at(t).state, State::Land);
+        assert_eq!(r.at(t + 1).state, State::Blind);
+    }
+
+    #[test]
+    fn hands_off_b6_blind_command_table() {
+        let mut r = Rig::blind();
+        r.heartbeat(r.now() + 1_000);
+        let out = r.cmd(Command::Land);
+        assert_eq!((out.state, out.command, out.events), (State::Blind, Some(CommandResult::Accepted), Events::NONE));
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Blind, denied(DenyReason::NotT3)));
+        for c in [Command::Start, Command::Pause] {
+            let out = r.cmd(c);
+            assert_eq!((out.state, out.command), (State::Blind, denied(DenyReason::NotInThisState)), "{c:?}");
         }
     }
 
@@ -1352,9 +1509,10 @@ mod tests {
         assert_eq!(r.at(t).state, State::Land);
     }
 
-    /// Seeded walk: RETURN and Start never happen without home; disarmed is STOP; `hands_off` follows the state.
+    /// Seeded walk: RETURN and Start never happen without home; disarmed is STOP; `hands_off` follows the state;
+    /// I12: the level the flight code may demand never exceeds this step's flags.
     #[test]
-    fn hands_off_i8_walk_never_returns_or_starts_without_home() {
+    fn hands_off_i8_i12_walk_never_returns_or_starts_without_home_and_never_demands_uncovered() {
         let mut rng = Lcg(0x5eed_0001);
         let mut h = HandsOff::new(&Tuning::DEFAULT);
         let mut i = Rig::new().i;
@@ -1373,8 +1531,307 @@ mod tests {
             if out.state == State::Return || out.events.start.is_some() {
                 assert!(out.home.is_some(), "{out:?}");
             }
+            let covered = match out.demand {
+                Demand::Position => i.tier == Tier::T3 && i.heading_ok,
+                Demand::Altitude => i.tier != Tier::T1,
+                Demand::Angle => true,
+            };
+            assert!(covered, "{:?} {} {out:?}", i.tier, i.heading_ok);
+            if out.land_holds_position {
+                assert!(out.state == State::Land && out.demand == Demand::Position);
+            }
         }
         assert!(seen.iter().all(|&s| s), "every state reached: {seen:?}");
+    }
+
+    #[test]
+    fn hands_off_b8_home_d_waits_for_a_valid_height_before_take_off() {
+        // D invalid at the arming step, valid at the next: home, with the next step's D.
+        let mut r = Rig::new();
+        r.step();
+        r.i.armed = true;
+        r.i.position_d_valid = false;
+        assert_eq!(r.report(T0 + 1_000, Switch3::High).home, None);
+        r.i.position_d_valid = true;
+        r.i.position_d_m = HOME_D - 0.3;
+        assert_eq!(
+            r.at(T0 + 2_000).home,
+            Some(Home {
+                ne_m: HOME_NE,
+                d_m: HOME_D - 0.3
+            })
+        );
+        // Airborne before D is valid: no home this arming, even when D comes later.
+        let mut r = Rig::new();
+        r.step();
+        r.i.armed = true;
+        r.i.position_d_valid = false;
+        r.report(T0 + 1_000, Switch3::High);
+        r.i.airborne = true;
+        r.report(T0 + 2_000, Switch3::High);
+        r.i.position_d_valid = true;
+        assert_eq!(r.at(T0 + 3_000).home, None);
+        // Disarm clears home.
+        let mut r = Rig::pilot();
+        assert!(r.step().home.is_some());
+        r.i.armed = false;
+        assert_eq!(r.step().home, None);
+    }
+
+    // ---- B1: exit priority, pairs in the same step ----
+
+    #[test]
+    fn hands_off_b1_each_pair_of_exits_gives_the_higher_one() {
+        // (name, rig, the second cause; the first cause is set at the maturing step) -> state, place dropped
+        // HOLD: battery critical with link > 10 s and home: LAND.
+        let mut r = Rig::hold();
+        r.i.battery_critical = true;
+        let t = r.now() + LINK_LOSS_US + 1;
+        assert_eq!(r.at(t).state, State::Land, "hold: battery over link");
+        // HOLD: T3' lost (matured) with link > 10 s and home: LAND.
+        let mut r = Rig::hold();
+        r.drop_tier(Tier::T2);
+        let t = r.now() + LINK_LOSS_US + 1;
+        assert_eq!(r.at(t).state, State::Land, "hold: T3' over link");
+        // HOLD: link > 10 s with a kept place and a new plan: RETURN, place dropped.
+        let mut r = Rig::auto();
+        r.cmd(Command::Pause);
+        r.i.mission.plan_id = Some(PLAN + 1);
+        let t = r.now() + LINK_LOSS_US + 1;
+        let out = r.at(t);
+        assert_eq!((out.state, out.events.place_dropped), (State::Return, true), "hold: link over plan");
+        // HOLD: CRSF with battery critical: TAKEOVER. Disarm with CRSF: STOP.
+        let mut r = Rig::hold();
+        r.i.battery_critical = true;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Low).state, State::Takeover, "hold: CRSF over battery");
+        let mut r = Rig::hold();
+        r.i.armed = false;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Low).state, State::Stop, "disarm over CRSF");
+        // AUTO: T3' lost (matured) with a new plan: LAND.
+        let mut r = Rig::auto();
+        r.drop_tier(Tier::T2);
+        r.i.mission.plan_id = Some(PLAN + 1);
+        r.i.last_radio_heartbeat_us = Some(r.now() + TIER_DEBOUNCE_US);
+        assert_eq!(r.hold_drop().state, State::Land, "auto: T3' over plan");
+        // AUTO: battery critical with station lost: LAND.
+        let mut r = Rig::auto();
+        r.i.battery_critical = true;
+        let t = r.now() + STATION_LOST_US + 1;
+        assert_eq!(r.at(t).state, State::Land, "auto: battery over station");
+        // AUTO: new plan with station lost: HOLD, dropped.
+        let mut r = Rig::auto();
+        r.i.mission.plan_id = Some(PLAN + 1);
+        let t = r.now() + STATION_LOST_US + 1;
+        let out = r.at(t);
+        assert_eq!((out.state, out.events.place_dropped, out.events.place_kept), (State::Hold, true, false));
+        // AUTO: last waypoint with station lost: HOLD, dropped.
+        let mut r = Rig::auto();
+        r.i.last_waypoint_reached = true;
+        let t = r.now() + STATION_LOST_US + 1;
+        let out = r.at(t);
+        assert_eq!((out.state, out.events.place_dropped, out.events.place_kept), (State::Hold, true, false));
+        // AUTO: CRSF with battery critical: TAKEOVER.
+        let mut r = Rig::auto();
+        r.i.battery_critical = true;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Low).state, State::Takeover, "auto: CRSF over battery");
+        // RETURN: CRSF with arrival: TAKEOVER.
+        let mut r = Rig::ret();
+        r.i.home_reached = true;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Low).state, State::Takeover, "return: CRSF over arrival");
+    }
+
+    // ---- B2: no one-step HOLD ----
+
+    #[test]
+    fn hands_off_b2_commands_into_hold_denied_when_hold_would_leave_at_once() {
+        // LAND + battery critical: Abort DENIED BatteryCritical.
+        let mut r = Rig::land();
+        r.i.battery_critical = true;
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::BatteryCritical)));
+        assert_eq!(r.step().state, State::Land);
+        // LAND + link lost: Abort DENIED LinkLost.
+        let mut r = Rig::land();
+        let t = r.now() + LINK_LOSS_US + 1;
+        r.i.now_us = t;
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::LinkLost)));
+        assert_eq!(r.step().state, State::Land);
+        // LAND + debounced T2: Abort DENIED NotT3.
+        let mut r = Rig::land();
+        r.drop_tier(Tier::T2);
+        r.i.last_radio_heartbeat_us = Some(r.now() + TIER_DEBOUNCE_US);
+        r.hold_drop();
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::NotT3)));
+        assert_eq!(r.step().state, State::Land);
+        // RETURN + link lost (its own entry cause): Pause and Abort DENIED LinkLost.
+        for c in [Command::Pause, Command::Abort] {
+            let mut r = Rig::ret();
+            let out = r.cmd(c);
+            assert_eq!((out.state, out.command), (State::Return, denied(DenyReason::LinkLost)), "{c:?}");
+            assert_eq!(out.events, Events::NONE);
+            assert_eq!(r.step().state, State::Return);
+        }
+        // Reason order: NotT3, then BatteryCritical, then LinkLost.
+        let mut r = Rig::land();
+        r.drop_tier(Tier::T2);
+        r.i.battery_critical = true;
+        let t = r.now() + LINK_LOSS_US + 1;
+        r.i.now_us = t;
+        assert_eq!(r.cmd(Command::Abort).command, denied(DenyReason::NotT3));
+        r.i.tier = Tier::T3;
+        assert_eq!(r.cmd(Command::Abort).command, denied(DenyReason::BatteryCritical));
+        r.i.battery_critical = false;
+        assert_eq!(r.cmd(Command::Abort).command, denied(DenyReason::LinkLost));
+    }
+
+    // ---- B4: T3' ----
+
+    #[test]
+    fn hands_off_b4_heading_not_ok_at_stick_loss_on_t3_lands() {
+        let mut r = Rig::pilot();
+        r.i.heading_ok = false;
+        assert_eq!(r.step().state, State::Pilot);
+        let t = r.last_report() + LOSS + 1;
+        let out = r.at(t);
+        assert_eq!((out.state, out.land_holds_position, out.demand), (State::Land, false, Demand::Altitude));
+    }
+
+    #[test]
+    fn hands_off_b4_heading_drop_in_hold_auto_return_lands() {
+        let rigs: [(&str, fn() -> Rig); 3] = [("hold", Rig::hold), ("auto", Rig::auto), ("return", Rig::ret)];
+        for (name, make) in rigs {
+            let mut r = make();
+            let from = r.h.state();
+            r.i.heading_ok = false;
+            assert_eq!(r.step().state, from, "{name}: debounced");
+            r.i.last_radio_heartbeat_us = Some(r.now() + TIER_DEBOUNCE_US);
+            assert_eq!(r.hold_drop().state, State::Land, "{name}");
+        }
+    }
+
+    #[test]
+    fn hands_off_b4_land_holds_position_only_on_t3_prime() {
+        let mut r = Rig::land();
+        let out = r.step();
+        assert_eq!((out.land_holds_position, out.demand), (true, Demand::Position));
+        r.i.heading_ok = false;
+        let out = r.step();
+        assert_eq!((out.state, out.land_holds_position, out.demand), (State::Land, false, Demand::Altitude));
+    }
+
+    // ---- B5: debounced downgrades ----
+
+    #[test]
+    fn hands_off_b5_one_step_vertical_flag_drop_changes_no_state() {
+        let rigs: [(&str, fn() -> Rig); 3] = [("hold", Rig::hold), ("auto", Rig::auto), ("return", Rig::ret)];
+        for (name, make) in rigs {
+            let mut r = make();
+            let from = r.h.state();
+            let out = r.drop_tier(Tier::T1);
+            assert_eq!((out.state, out.demand), (from, Demand::Angle), "{name}: the law follows the flags");
+            r.i.tier = Tier::T3;
+            let t = r.now() + 1_000;
+            let out = r.at(t);
+            assert_eq!((out.state, out.demand), (from, Demand::Position), "{name}");
+        }
+        // At the stick-loss step.
+        let mut r = Rig::pilot();
+        let t = r.last_report() + LOSS + 1;
+        r.i.now_us = t;
+        let out = r.drop_tier(Tier::T1);
+        assert_eq!((out.state, out.demand), (State::Hold, Demand::Angle));
+        r.i.tier = Tier::T3;
+        assert_eq!(r.at(t + 1_000).state, State::Hold);
+    }
+
+    #[test]
+    fn hands_off_b5_a_1_0_s_drop_lands_a_0_99_s_drop_does_not() {
+        let mut r = Rig::hold();
+        let t0 = r.now() + 1_000;
+        r.i.now_us = t0;
+        r.drop_tier(Tier::T2);
+        assert_eq!(r.at(t0 + 990_000).state, State::Hold);
+        r.i.tier = Tier::T3;
+        assert_eq!(r.at(t0 + 991_000).state, State::Hold);
+        let t1 = t0 + 2 * S;
+        r.i.now_us = t1;
+        r.drop_tier(Tier::T2);
+        assert_eq!(r.at(t1 + TIER_DEBOUNCE_US - 1).state, State::Hold);
+        assert_eq!(r.at(t1 + TIER_DEBOUNCE_US).state, State::Land);
+    }
+
+    // ---- B7: a kept place survives only Start ----
+
+    #[test]
+    fn hands_off_b7_every_exit_from_hold_drops_a_kept_place() {
+        let paused = || {
+            let mut r = Rig::auto();
+            assert!(r.cmd(Command::Pause).events.place_kept);
+            r
+        };
+        // TAKEOVER.
+        let mut r = paused();
+        let t = r.now() + 1_000;
+        assert!(r.report(t, Switch3::Low).events.place_dropped, "takeover");
+        // LAND (command and battery).
+        let mut r = paused();
+        assert!(r.cmd(Command::Land).events.place_dropped, "land");
+        let mut r = paused();
+        r.i.battery_critical = true;
+        assert!(r.step().events.place_dropped, "battery");
+        // STOP.
+        let mut r = paused();
+        r.i.armed = false;
+        assert!(r.step().events.place_dropped, "stop");
+        // RETURN, Abort and a plan change: hands_off_return_forgets_a_kept_place, hands_off_command_already_in_its_
+        // result_is_accepted, hands_off_i6_new_plan_in_hold_drops_a_kept_place. Start keeps it:
+        let mut r = paused();
+        assert_eq!(r.cmd(Command::Start).events.start, Some(StartAt::KeptPlace));
+    }
+
+    // ---- B9: FS_HOLD_EN in force from disarmed steps ----
+
+    #[test]
+    fn hands_off_b9_fs_hold_en_takes_effect_at_the_next_arming() {
+        // Writing 0 in HOLD keeps HOLD with hands_off until disarm.
+        let mut r = Rig::hold();
+        r.i.fs_hold_en = false;
+        for k in 1..=5 {
+            let out = r.heartbeat(r.now() + k * S);
+            assert_eq!((out.state, out.hands_off), (State::Hold, true));
+        }
+        r.i.armed = false;
+        r.i.airborne = false;
+        assert_eq!(r.step().state, State::Stop);
+        // Re-armed with 0 in force: stick loss in the air is STOP, and commands answer HandsOffDisabled.
+        r.i.armed = true;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        r.i.airborne = true;
+        // Writing 1 while armed in PILOT gives no HOLD at stick loss.
+        r.i.fs_hold_en = true;
+        let t = r.last_report() + LOSS + 1;
+        let out = r.at(t);
+        assert_eq!((out.state, out.hands_off), (State::Stop, false));
+        assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::HandsOffDisabled));
+        // After disarm and re-arm the 1 applies.
+        r.i.armed = false;
+        r.i.airborne = false;
+        r.step();
+        r.i.armed = true;
+        let t = r.now() + 1_000;
+        r.report(t, Switch3::High);
+        r.i.airborne = true;
+        let t = r.now() + 1_000;
+        r.report(t, Switch3::High);
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.at(t).state, State::Hold);
     }
 
     // ---- I9 ----
@@ -1400,7 +1857,7 @@ mod tests {
 
     #[test]
     fn hands_off_each_start_condition_alone_is_denied_with_its_reason() {
-        let cases: [(DenyReason, fn(&mut Rig)); 11] = [
+        let cases: [(DenyReason, fn(&mut Rig)); 15] = [
             (DenyReason::StationAbsent, |r| {
                 r.i.last_radio_heartbeat_us = Some(r.now() - STATION_LOST_US - 1)
             }),
@@ -1410,8 +1867,14 @@ mod tests {
             (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_m = [2000.0, 0.0]),
             (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_valid = false),
             (DenyReason::WaypointDistanceUnknown, |r| r.i.mission.max_waypoint_distance_m = None),
-            (DenyReason::WaypointBeyondRange, |r| r.i.mission.max_waypoint_distance_m = Some(f32::NAN)),
+            (DenyReason::WaypointDistanceUnknown, |r| r.i.mission.max_waypoint_distance_m = Some(f32::NAN)),
+            (DenyReason::WaypointDistanceUnknown, |r| {
+                r.i.mission.max_waypoint_distance_m = Some(f32::INFINITY)
+            }),
+            (DenyReason::WaypointBeyondRange, |r| r.i.mission.max_waypoint_distance_m = Some(1000.5)),
+            (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_m = [f32::NAN, 0.0]),
             (DenyReason::HeadingNotOk, |r| r.i.heading_ok = false),
+            (DenyReason::NotT3, |r| r.i.tier = Tier::T2),
             (DenyReason::BatteryNotOk, |r| r.i.battery_ok = false),
             (DenyReason::SwitchNotHigh, |r| {
                 r.i.crsf = r.i.crsf.map(|c| RcSample {
@@ -1427,10 +1890,11 @@ mod tests {
             assert_eq!((out.state, out.command), (State::Hold, denied(reason)), "{reason:?}");
             assert_eq!(out.events, Events::NONE);
         }
-        // T3 alone: the check names it, but in HOLD T3 lost latches LAND at the same step (A3), before the command.
+        // After T3 was lost for 1.0 s HOLD has left: Start answers NotInThisState (B2).
         let mut r = Rig::hold();
-        r.i.tier = Tier::T2;
-        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::NotT3));
+        r.drop_tier(Tier::T2);
+        r.i.last_radio_heartbeat_us = Some(r.now() + TIER_DEBOUNCE_US);
+        assert_eq!(r.hold_drop().state, State::Land);
         let out = r.cmd(Command::Start);
         assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::NotInThisState)));
         // All met: accepted (Rig::auto).
@@ -1514,7 +1978,7 @@ mod tests {
             (Rig::ret, Command::Start),
             (Rig::land, Command::Start),
             (Rig::land, Command::Pause),
-            (Rig::blind, Command::Land),
+            (Rig::blind, Command::Start),
         ];
         for (make, c) in cases {
             let mut r = make();
