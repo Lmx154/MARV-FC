@@ -62,6 +62,7 @@ mod logdl;
 #[cfg(not(feature = "sd-fat-probe"))]
 mod logger;
 mod mag;
+mod mission;
 mod psram;
 mod ram;
 mod rc;
@@ -645,6 +646,9 @@ impl Telemetry for Board {
         if message_id == logdl::LOG_DATA_ID {
             return self.logs.sample(out);
         }
+        if message_id == mission::SLOT_ID {
+            return mission::sample(fw_core::mission::Link::Usb, now_us, out);
+        }
         if message_id == DEVICE_STATUS_ID {
             let mut sent = false;
             for _ in 0..ROWS.min(MAX_BATCH) {
@@ -848,6 +852,12 @@ async fn link_loop(
             default_interval_us: logdl::INTERVAL_US,
             min_interval_us: logdl::INTERVAL_US as u32,
         }),
+        // The mission service's reply slot (`mission::sample`).
+        StreamSlot::new(Stream {
+            message_id: mission::SLOT_ID,
+            default_interval_us: mission::USB_INTERVAL_US,
+            min_interval_us: mission::USB_INTERVAL_US as u32,
+        }),
     ];
     let mut node = Node::new(USB_NODE, &mut slots);
     let mut params = store::Store;
@@ -862,6 +872,7 @@ async fn link_loop(
         if !start_gate(&mut rx, &link, &mut node, &mut params).await {
             node.on_link_down();
             actions::link_lost(LINK_USB as u8);
+            mission::link_down(fw_core::mission::Link::Usb);
             continue;
         }
         LINK_STATE.store(LINK_RUN, Ordering::Relaxed);
@@ -879,14 +890,31 @@ async fn link_loop(
         node.on_link_down();
         board.logs.stop();
         actions::link_lost(LINK_USB as u8);
+        mission::link_down(fw_core::mission::Link::Usb);
     }
 }
 
-/// The USB node: system 1, component 1, the log-download requests handed over, and the station
+/// The USB node's accept list: the log-download requests, then the six mission messages.
+const USB_ACCEPT: [(u32, u8); logdl::ACCEPT.len() + mission::ACCEPT.len()] = {
+    let mut list = [(0, 0); logdl::ACCEPT.len() + mission::ACCEPT.len()];
+    let mut i = 0;
+    while i < logdl::ACCEPT.len() {
+        list[i] = logdl::ACCEPT[i];
+        i += 1;
+    }
+    let mut j = 0;
+    while j < mission::ACCEPT.len() {
+        list[logdl::ACCEPT.len() + j] = mission::ACCEPT[j];
+        j += 1;
+    }
+    list
+};
+
+/// The USB node: system 1, component 1, the log-download requests and the mission messages handed over, and the station
 /// counted present for 3 s after its HEARTBEAT (read by `start_gate` and `drive`).
 const USB_NODE: NodeConfig = match NodeConfig::new(1, 1)
     .with_gcs_timeout_us(logdl::GCS_TIMEOUT_US)
-    .with_accept_list(&logdl::ACCEPT)
+    .with_accept_list(&USB_ACCEPT)
 {
     Ok(config) => config,
     Err(_) => panic!("accept list too long"),
@@ -930,7 +958,11 @@ async fn drive<R: Read, W: Write>(
             Either::First(Ok(0)) => return RunError::EndOfStream,
             Either::First(Ok(n)) => {
                 if let Some(bytes) = buf.get(..n) {
-                    node.receive_with(bytes, now_us(), params, &mut |m| board.logs.message(m));
+                    node.receive_with(bytes, now_us(), params, &mut |m| {
+                        if !mission::message(fw_core::mission::Link::Usb, m) {
+                            board.logs.message(m);
+                        }
+                    });
                 }
             }
         }
@@ -1051,6 +1083,10 @@ async fn supervise() -> ! {
             watchdog::stat();
             #[cfg(feature = "xip-stat")]
             xip_probe::stat(now);
+        }
+        // The mission's change counter moved (a commit or a clear): the shadow guidance's targets are chosen again (`GDN_SRC`).
+        if mission::changed() {
+            flight::push_gdn("mission changed");
         }
         tick = tick.wrapping_add(1);
     }

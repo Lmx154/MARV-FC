@@ -111,7 +111,11 @@ impl Sector {
 
 /// The IEEE CRC-32 of `data` (bitwise, no table).
 pub fn crc32(data: &[u8]) -> u32 {
-    let mut crc = u32::MAX;
+    !crc32_update(u32::MAX, data)
+}
+
+/// Runs `data` through the CRC-32 register `crc` (start at `u32::MAX`, finish with `!`).
+pub fn crc32_update(mut crc: u32, data: &[u8]) -> u32 {
     for &byte in data {
         crc ^= u32::from(byte);
         for _ in 0..8 {
@@ -119,7 +123,7 @@ pub fn crc32(data: &[u8]) -> u32 {
             crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
         }
     }
-    !crc
+    crc
 }
 
 fn put(dst: &mut [u8], offset: usize, bytes: &[u8]) {

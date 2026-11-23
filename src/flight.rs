@@ -25,6 +25,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::dflog;
 use fw_core::esc::LINES;
+use fw_core::mission::{GDN_TARGETS, GdnTargets, select_targets};
 use fw_core::rc::RcSample;
 use fw_core::sample::{BaroReading, BaroSample, GnssReading, GnssSample, MagReading, MagSample};
 use fw_core::xcore::{
@@ -504,12 +505,13 @@ pub fn push_gains(why: &str) {
     );
 }
 
-/// The shadow guidance's targets: how many are in use (0 is off), the arrival radius (m) and the four slots (`alt_mm` 0:
-/// the guidance converts at the origin's altitude).
-pub type GdnSet = (u8, f32, [GeoPoint; fw_settings::flight::GDN_SLOTS]);
+/// The shadow guidance's targets: how many are in use (0 is off), the arrival radius (m) and the 16 slots as latitude and
+/// longitude (the guidance gets `alt_mm` 0: it converts at the origin's altitude). From [`fw_core::mission::select_targets`]:
+/// the `GDN_*` parameters or the committed mission, by `GDN_SRC`.
+pub type GdnSet = GdnTargets;
 
 /// What [`FLIGHT_GDN`] holds before the first push: off.
-const GDN_OFF: GdnSet = (0, 2.0, [GeoPoint { lat_e7: 0, lon_e7: 0, alt_mm: 0 }; fw_settings::flight::GDN_SLOTS]);
+const GDN_OFF: GdnSet = GdnTargets { count: 0, radius_m: 2.0, targets: [(0, 0); GDN_TARGETS] };
 
 /// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
 /// core 0, through [`push_gdn`]; one reader, IMU1's [`Stepper`]). The Stepper takes new targets on a disarmed step only.
@@ -530,35 +532,43 @@ pub fn init_gdn() {
     push_gdn("boot");
 }
 
-/// Pushes the stored `GDN_*` parameters to the flight core (core 0; call with no store access in progress). A value that
-/// cannot be read or has the wrong type is the table's default (count 0: off).
+/// Pushes the shadow guidance's targets to the flight core (core 0; call with no store access in progress): by `GDN_SRC`
+/// the stored `GDN_*` parameters (0, the default) or the committed mission's waypoints with `GDN_RADIUS` (1), chosen by
+/// [`select_targets`]. Runs when a `GDN_*` parameter or `GDN_SRC` changes and when the mission's change counter moves
+/// (the supervisor tick, [`crate::mission::changed`]). A value that cannot be read or has the wrong type is the table's
+/// default (count 0: off).
 pub fn push_gdn(why: &str) {
-    use fw_settings::flight::{GDN_COUNT, GDN_LAT, GDN_LON, GDN_RADIUS, GDN_SLOTS};
-    let value = crate::store::with(|p| {
+    use fw_settings::flight::{GDN_COUNT, GDN_LAT, GDN_LON, GDN_RADIUS, GDN_SLOTS, GDN_SRC};
+    let (source, count, radius, params) = crate::store::with(|p| {
         let int = |name| match p.get_named(name) {
             Some(mavlink_device::ParamValue::I32(v)) => v,
             _ => 0,
         };
         let radius = match p.get_named(GDN_RADIUS) {
             Some(mavlink_device::ParamValue::F32(v)) => v,
-            _ => GDN_OFF.1,
+            _ => GDN_OFF.radius_m,
         };
-        let mut targets = GDN_OFF.2;
+        let mut params = [(0, 0); GDN_SLOTS];
         for k in 0..GDN_SLOTS {
-            targets[k] = GeoPoint { lat_e7: int(GDN_LAT[k]), lon_e7: int(GDN_LON[k]), alt_mm: 0 };
+            params[k] = (int(GDN_LAT[k]), int(GDN_LON[k]));
         }
-        (int(GDN_COUNT).clamp(0, GDN_SLOTS as i32) as u8, radius, targets)
+        (int(GDN_SRC), int(GDN_COUNT), radius, params)
     })
-    .unwrap_or(GDN_OFF);
+    .unwrap_or((0, 0, GDN_OFF.radius_m, [(0, 0); GDN_SLOTS]));
+    // The mission is read after the store is released (never nested); the counter noted is the one of the copy used.
+    let (items, items_len, changes) = crate::mission::committed();
+    let value = select_targets(source, count, radius, &params, items.get(..items_len).unwrap_or(&[]));
+    crate::mission::note_pushed(changes);
     GDN_WRITER.lock(|w| {
         if let Some(writer) = w.borrow_mut().as_mut() {
             writer.write(value);
         }
     });
     defmt::info!(
-        "[INFO] GDN_COUNT {=u8}, GDN_RADIUS {=f32} m pushed to the flight core ({=str}); new targets are taken on a disarmed step",
-        value.0,
-        value.1,
+        "[INFO] GDN_SRC {=i32}, {=u8} targets, GDN_RADIUS {=f32} m pushed to the flight core ({=str}); new targets are taken on a disarmed step",
+        source,
+        value.count,
+        value.radius_m,
         why
     );
 }
@@ -604,7 +614,7 @@ pub struct Stepper {
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
-    guidance: Guidance<{ fw_settings::flight::GDN_SLOTS }>,
+    guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
     /// whether the previous step was armed.
     gdn_in_force: GdnSet,
@@ -746,15 +756,19 @@ impl Stepper {
             self.gdn_wait = false;
             if self.gdn_pushed != self.gdn_in_force {
                 self.gdn_in_force = self.gdn_pushed;
-                let (count, radius, targets) = self.gdn_in_force;
-                self.guidance.set_targets(&targets[..usize::from(count)], radius);
+                let GdnTargets { count, radius_m, targets } = self.gdn_in_force;
+                let mut geo = [GeoPoint { lat_e7: 0, lon_e7: 0, alt_mm: 0 }; GDN_TARGETS];
+                for (g, &(lat_e7, lon_e7)) in geo.iter_mut().zip(targets.iter()) {
+                    *g = GeoPoint { lat_e7, lon_e7, alt_mm: 0 };
+                }
+                self.guidance.set_targets(geo.get(..usize::from(count)).unwrap_or(&[]), radius_m);
             }
         }
         if out.armed && !self.was_armed {
             self.guidance.reset();
         }
         self.was_armed = out.armed;
-        if self.gdn_in_force.0 == 0 || step % 8 != 0 {
+        if self.gdn_in_force.count == 0 || step % 8 != 0 {
             return;
         }
         let nav = out.nav;

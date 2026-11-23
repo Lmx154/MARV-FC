@@ -35,6 +35,7 @@ pub mod i2c;
 pub mod led;
 pub mod logfile;
 pub mod mbr;
+pub mod mission;
 pub mod params;
 pub mod rc;
 pub mod record;

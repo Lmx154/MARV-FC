@@ -27,8 +27,12 @@ pub const GDN_LAT: [&str; GDN_SLOTS] = ["GDN_LAT1", "GDN_LAT2", "GDN_LAT3", "GDN
 /// Longitude of target 1 to 4, 1e-7 degree (west negative), `GDN_LON1` to `GDN_LON4`.
 pub const GDN_LON: [&str; GDN_SLOTS] = ["GDN_LON1", "GDN_LON2", "GDN_LON3", "GDN_LON4"];
 
+/// Where the shadow guidance takes its targets from: 0 = the `GDN_*` parameters (default), 1 = the committed mission
+/// (decision-mavlink-mode-20261123, section 1 item C).
+pub const GDN_SRC: &str = "GDN_SRC";
+
 /// The number of flight parameters.
-pub const COUNT: usize = 12 + GAIN_COUNT;
+pub const COUNT: usize = 13 + GAIN_COUNT;
 
 /// The index of [`SPEED_XY`] in the firmware's table: the one after `GPS_GNSS` (92).
 pub const SPEED_XY_AT: usize = 93;
@@ -49,6 +53,10 @@ pub const SPEED_XY_AT: usize = 93;
 /// 1800000000). Whole-degree values at 1e-7 degree travel exactly as INT32 parameters.
 ///
 /// The 14 gains follow, indices 105 to 118 (`GAINS_AT`): see [`gain`].
+///
+/// `GDN_SRC` follows at index 119 (`GDN_SRC_AT`): `I32`, 0 or 1, default 0, `Live`, device 0. 0 = the targets are the `GDN_*`
+/// parameters above, 1 = the targets are the waypoints of the committed mission (up to 16) with the radius still `GDN_RADIUS`;
+/// core 0 pushes the choice's result to the flight core, which takes new targets on a disarmed step.
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(SPEED_XY, 0, 5.0, 3.0, 20.0, Apply::Live),
     ParamDef::i32(RPM_NOTCH_EN, 0, 0, 0, 1, Apply::Live),
@@ -76,11 +84,15 @@ pub static TABLE: [ParamDef; COUNT] = [
     gain(11),
     gain(12),
     gain(13),
+    ParamDef::i32(GDN_SRC, 0, 0, 0, 1, Apply::Live),
 ];
 
 /// The index of [`GAIN_NAMES`]`[0]`, `ATC_ANG_RP_P`, in the firmware's table: the one after `GDN_LON4` (104). The other 13
 /// follow in the order of `GAIN_NAMES`.
 pub const GAINS_AT: usize = 105;
+
+/// The index of [`GDN_SRC`] in the firmware's table: the one after the last gain, `ATC_RAT_FLTD` (118).
+pub const GDN_SRC_AT: usize = 119;
 
 /// The definition of gain `i` of `GAIN_NAMES`: `F32`, device 0, `Live`; the default is the field of `Tuning::DEFAULT`
 /// and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own (decision-gain-params-20261123,
@@ -148,7 +160,7 @@ mod tests {
     fn the_gdn_parameters_are_appended_at_95_to_104_with_their_types_defaults_ranges_and_class() {
         use ParamValue::{F32, I32};
         assert_eq!(GDN_COUNT_AT, RPM_NOTCH_EN_AT + 1);
-        assert_eq!(GDN_COUNT_AT + 10 + GAIN_COUNT, crate::COUNT);
+        assert_eq!(GDN_COUNT_AT + 10 + GAIN_COUNT + 1, crate::COUNT);
         let mut expected = std::vec![("GDN_COUNT", I32(0), I32(0), I32(4)), ("GDN_RADIUS", F32(2.0), F32(0.05), F32(10.0))];
         for k in 0..GDN_SLOTS {
             expected.push((GDN_LAT[k], I32(0), I32(-900_000_000), I32(900_000_000)));
@@ -178,10 +190,33 @@ mod tests {
     }
 
     #[test]
+    fn gdn_src_is_appended_at_index_119_after_the_gains_i32_0_or_1_default_0_live() {
+        use ParamValue::I32;
+        let def = &crate::TABLE[GDN_SRC_AT];
+        assert_eq!(def.name, "GDN_SRC");
+        assert!(def.name.len() <= 16);
+        assert_eq!((def.device, def.default, def.min, def.max, def.apply), (0, I32(0), I32(0), I32(1), Apply::Live));
+        assert!(!def.calibration && !def.read_only);
+        assert_eq!(crate::TABLE[GDN_SRC_AT - 1].name, "ATC_RAT_FLTD");
+        assert_eq!(GDN_SRC_AT, 119);
+        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
+        let i = u16::try_from(GDN_SRC_AT).unwrap();
+        for ok in [0, 1] {
+            assert_eq!(p.set(i, I32(ok)), Ok(I32(ok)));
+        }
+        for bad in [-1, 2] {
+            assert_eq!(p.set(i, I32(bad)), Err(ParamError::OutOfRange), "{bad}");
+        }
+        assert_eq!(p.get_named(GDN_SRC), Some(I32(1)));
+        assert!(p.set(i, ParamValue::F32(1.0)).is_err());
+    }
+
+    #[test]
     fn the_gain_parameters_are_appended_at_105_to_118_in_table_order_f32_device_0_live() {
         assert_eq!(GAINS_AT, GDN_COUNT_AT + 10);
-        assert_eq!(GAINS_AT + GAIN_COUNT, crate::COUNT);
-        assert_eq!(crate::COUNT, 119);
+        assert_eq!(GAINS_AT + GAIN_COUNT, GDN_SRC_AT);
+        assert_eq!(GDN_SRC_AT + 1, crate::COUNT);
+        assert_eq!(crate::COUNT, 120);
         assert_eq!(crate::TABLE[GAINS_AT - 1].name, "GDN_LON4");
         let names = [
             "ATC_ANG_RP_P",
@@ -264,9 +299,9 @@ mod tests {
         }
     }
 
-    /// All 119 parameters stored as non-default values (the worst case of a record) fit one record in one sector.
+    /// All 120 parameters stored as non-default values (the worst case of a record) fit one record in one sector.
     #[test]
-    fn all_119_parameters_as_non_default_values_fit_one_record_and_one_sector() {
+    fn all_120_parameters_as_non_default_values_fit_one_record_and_one_sector() {
         use fw_core::record::{self, Boot, ENTRY_LEN, Entry, HEADER_LEN, MAX_ENTRIES, SECTOR_LEN};
         assert!(crate::COUNT <= MAX_ENTRIES);
         let entries = crate::TABLE.iter().map(|def| Entry {
