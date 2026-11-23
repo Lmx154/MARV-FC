@@ -592,7 +592,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.limited = a.saturation;
         }
         let levels = allocation.as_ref().map(|a| &a.levels);
-        let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels);
+        let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels, false, false);
         // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
         // arming step.
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));

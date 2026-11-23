@@ -81,13 +81,17 @@ impl Gate {
     }
 
     /// The last stage of every step. `rc` is this step's new stick report. RC loss is the age of the newest report at
-    /// `t_us` above `RC_FS_TIMEOUT`. `levels` is `None` when the controller refused.
+    /// `t_us` above `RC_FS_TIMEOUT`. `levels` is `None` when the controller refused. While armed, `hands_off` keeps RC
+    /// loss from disarming (decision-mavlink-mode-20261123, A2) and `arm_off_holds` keeps a report with the switch off
+    /// from disarming (C1); both are ignored while disarmed, so neither can arm.
     pub fn apply(
         &mut self,
         t_us: u64,
         rc: Option<&RcSample>,
         nav: &NavState,
         levels: Option<&MotorLevels>,
+        hands_off: bool,
+        arm_off_holds: bool,
     ) -> MotorCommand {
         // 0. A gap above the limit since the previous step, or armed while `ARMED` is clear: disarm.
         let gap = self.last_step_us.map(|last| t_us.saturating_sub(last));
@@ -103,15 +107,17 @@ impl Gate {
         let fresh = self
             .last_rc_us
             .is_some_and(|last| t_us.saturating_sub(last) <= self.rc_fs_timeout_us);
-        if !fresh {
+        if !fresh && !(self.armed && hands_off) {
             self.disarm();
             return MotorCommand::STOP;
         }
         // 4. A new report: the switch off disarms at once; on, it arms only from a switch cycle with every check met.
         if let Some(r) = rc {
             if !r.arm {
-                self.disarm();
-                self.seen_off = true;
+                if !(self.armed && arm_off_holds) {
+                    self.disarm();
+                    self.seen_off = true;
+                }
             } else if !self.armed {
                 let ready = self.seen_off
                     && r.sticks.throttle <= self.arm_thr_max
@@ -188,7 +194,11 @@ mod tests {
         rc: Option<RcSample>,
         levels: Option<[u16; 4]>,
     ) -> MotorCommand {
-        let nav = NavState {
+        step_flags(gate, t_us, rc, levels, false, false)
+    }
+
+    fn level_nav(t_us: u64) -> NavState {
+        NavState {
             t_us,
             attitude: [1.0, 0.0, 0.0, 0.0],
             rates_rads: [0.0; 3],
@@ -200,9 +210,21 @@ mod tests {
                 ..Valid::NONE
             },
             sigma: None,
-        };
+        }
+    }
+
+    /// `step` with the two hands-off inputs.
+    fn step_flags(
+        gate: &mut Gate,
+        t_us: u64,
+        rc: Option<RcSample>,
+        levels: Option<[u16; 4]>,
+        hands_off: bool,
+        arm_off_holds: bool,
+    ) -> MotorCommand {
+        let nav = level_nav(t_us);
         let levels = levels.map(|level| MotorLevels { level });
-        gate.apply(t_us, rc.as_ref(), &nav, levels.as_ref())
+        gate.apply(t_us, rc.as_ref(), &nav, levels.as_ref(), hands_off, arm_off_holds)
     }
 
     /// Asserts Stop, disarmed, and the handshake not armed.
@@ -328,5 +350,338 @@ mod tests {
             );
             assert!(gate.armed() && HANDSHAKE.armed(), "step {k}");
         }
+    }
+
+    const LEVELS: Option<[u16; 4]> = Some([600, 600, 600, 600]);
+
+    /// Arms `gate` by a switch cycle from `*t`; flags false.
+    fn arm(gate: &mut Gate, t: &mut u64) {
+        *t += 1_000;
+        step(gate, *t, Some(report(*t, false, 0.0)), LEVELS);
+        *t += 1_000;
+        assert!(step(gate, *t, Some(report(*t, true, 0.0)), LEVELS).throttles().is_some());
+        assert!(gate.armed());
+    }
+
+    /// Decision-mavlink-mode A2/I2: with `hands_off` RC loss does not disarm; without it the gate disarms at exactly
+    /// the step it does today (the timeout plus one microsecond).
+    #[test]
+    fn gate_hands_off_keeps_rc_loss_from_disarming() {
+        static HS_OFF: Handshake = Handshake::new();
+        static HS_ON: Handshake = Handshake::new();
+        HS_OFF.set_permit(true);
+        HS_ON.set_permit(true);
+        let mut off = Gate::new(&Tuning::DEFAULT, &HS_OFF);
+        let mut on = Gate::new(&Tuning::DEFAULT, &HS_ON);
+        let (mut t_off, mut t_on) = (1_000, 1_000);
+        arm(&mut off, &mut t_off);
+        arm(&mut on, &mut t_on);
+        assert_eq!(t_off, t_on);
+        let last = t_on;
+        for k in 1..=TIMEOUT / FLIGHT_GAP_DISARM_US {
+            let t = last + k * FLIGHT_GAP_DISARM_US;
+            assert!(step_flags(&mut off, t, None, LEVELS, false, false).throttles().is_some(), "{k}");
+            assert!(step_flags(&mut on, t, None, LEVELS, true, false).throttles().is_some(), "{k}");
+        }
+        let t = last + TIMEOUT + 1;
+        let cmd = step_flags(&mut off, t, None, LEVELS, false, false);
+        assert!(cmd == MotorCommand::STOP && !off.armed() && !HS_OFF.armed(), "false: disarmed at timeout + 1");
+        let cmd = step_flags(&mut on, t, None, LEVELS, true, false);
+        assert!(cmd.throttles().is_some() && on.armed() && HS_ON.armed(), "true: still armed");
+        // A minute without reports, then reports resume with the switch on: armed throughout.
+        let mut t = t;
+        for _ in 0..600 {
+            t += FLIGHT_GAP_DISARM_US;
+            assert!(step_flags(&mut on, t, None, LEVELS, true, false).throttles().is_some());
+        }
+        t += 1_000;
+        assert!(step_flags(&mut on, t, Some(report(t, true, 0.5)), LEVELS, true, false).throttles().is_some());
+        // Unchanged while hands-off: the flight gap, levels None, and RC loss once `hands_off` is false.
+        t += FLIGHT_GAP_DISARM_US + 1;
+        assert_eq!(step_flags(&mut on, t, None, LEVELS, true, false), MotorCommand::STOP);
+        assert!(!on.armed() && !HS_ON.armed(), "flight gap");
+        arm(&mut on, &mut t);
+        t += 1_000;
+        assert_eq!(step_flags(&mut on, t, None, None, true, true), MotorCommand::STOP);
+        assert!(!on.armed() && !HS_ON.armed(), "levels None");
+        arm(&mut on, &mut t);
+        let last = t;
+        for k in 1..=TIMEOUT / FLIGHT_GAP_DISARM_US {
+            step_flags(&mut on, last + k * FLIGHT_GAP_DISARM_US, None, LEVELS, true, false);
+        }
+        assert!(on.armed());
+        let cmd = step_flags(&mut on, last + TIMEOUT + FLIGHT_GAP_DISARM_US, None, LEVELS, false, false);
+        assert!(cmd == MotorCommand::STOP && !on.armed(), "hands_off false while lost: disarm");
+        // Ignored while disarmed: RC loss clears seen_off as today, and nothing arms.
+        let mut t = last + 2 * TIMEOUT;
+        step_flags(&mut on, t, Some(report(t, false, 0.0)), LEVELS, true, false);
+        assert!(on.seen_off && !on.armed());
+        t += TIMEOUT + 1;
+        assert_eq!(step_flags(&mut on, t, None, LEVELS, true, true), MotorCommand::STOP);
+        assert!(!on.seen_off && !on.armed());
+        t += 1_000;
+        assert_eq!(step_flags(&mut on, t, Some(report(t, true, 0.0)), LEVELS, true, true), MotorCommand::STOP);
+        assert!(!on.armed() && !HS_ON.armed());
+    }
+
+    /// C1: with `arm_off_holds` a report with the switch off leaves `armed` and `seen_off` alone; disarmed, the flag is
+    /// ignored and cannot arm.
+    #[test]
+    fn gate_arm_off_holds_keeps_an_arm_off_report_from_disarming_and_never_arms() {
+        static HS_HOLD: Handshake = Handshake::new();
+        HS_HOLD.set_permit(true);
+        let mut gate = Gate::new(&Tuning::DEFAULT, &HS_HOLD);
+        let mut t = 1_000;
+        arm(&mut gate, &mut t);
+        let seen_off = gate.seen_off;
+        for _ in 0..50 {
+            t += 1_000;
+            let cmd = step_flags(&mut gate, t, Some(report(t, false, 0.0)), LEVELS, true, true);
+            assert!(cmd.throttles().is_some() && gate.armed() && HS_HOLD.armed());
+            assert_eq!(gate.seen_off, seen_off);
+        }
+        // The flag dropped (K set): the next arm-OFF report disarms at once.
+        t += 1_000;
+        let cmd = step_flags(&mut gate, t, Some(report(t, false, 0.0)), LEVELS, true, false);
+        assert_stopped_on(&gate, &HS_HOLD, cmd, "flag false");
+        assert!(gate.seen_off, "as today: the switch-off report counts toward the cycle");
+        // Disarmed, both flags true: switch-on reports without a cycle never arm.
+        let mut gate = Gate::new(&Tuning::DEFAULT, &HS_HOLD);
+        for _ in 0..50 {
+            t += 1_000;
+            let cmd = step_flags(&mut gate, t, Some(report(t, true, 0.0)), LEVELS, true, true);
+            assert_stopped_on(&gate, &HS_HOLD, cmd, "no cycle");
+        }
+        // Disarmed, the flag is ignored: switch off sets seen_off as today, and only the existing cycle arms.
+        t += 1_000;
+        let cmd = step_flags(&mut gate, t, Some(report(t, false, 0.0)), LEVELS, true, true);
+        assert_stopped_on(&gate, &HS_HOLD, cmd, "switch off");
+        assert!(gate.seen_off);
+        t += 1_000;
+        assert!(step_flags(&mut gate, t, Some(report(t, true, 0.0)), LEVELS, true, true).throttles().is_some());
+    }
+
+    fn assert_stopped_on(gate: &Gate, hs: &Handshake, cmd: MotorCommand, what: &str) {
+        assert_eq!(cmd, MotorCommand::STOP, "{what}");
+        assert!(!gate.armed() && !hs.armed(), "{what}");
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            self.0 >> 33
+        }
+
+        fn chance(&mut self, per_1000: u64) -> bool {
+            self.next() % 1000 < per_1000
+        }
+    }
+
+    /// One random step's facts: time, report, levels and the two flags.
+    struct Facts {
+        t: u64,
+        rc: Option<RcSample>,
+        levels: Option<[u16; 4]>,
+        hands_off: bool,
+        arm_off_holds: bool,
+    }
+
+    /// `quiet` counts down a stretch of steps with no report (up to 3 s), so RC loss happens without a flight gap.
+    fn random_facts(rng: &mut Rng, t: &mut u64, quiet: &mut u64) -> Facts {
+        if *quiet == 0 && rng.chance(3) {
+            *quiet = 1 + rng.next() % 300;
+        }
+        *quiet = quiet.saturating_sub(1);
+        *t += match rng.next() % 1000 {
+            0 => FLIGHT_GAP_DISARM_US + 1 + rng.next() % 100_000,
+            1..=2 => TIMEOUT / 2 + rng.next() % TIMEOUT,
+            _ => 1 + rng.next() % 20_000,
+        };
+        let throttles = [0.0, 0.0, 0.05, 0.5];
+        let rc = (*quiet == 0 && rng.chance(600)).then(|| {
+            let throttle = throttles[(rng.next() % 4) as usize];
+            report(*t, !rng.chance(300), throttle)
+        });
+        Facts {
+            t: *t,
+            rc,
+            levels: if rng.chance(2) { None } else { LEVELS },
+            hands_off: rng.chance(500),
+            arm_off_holds: rng.chance(500),
+        }
+    }
+
+    /// I1 / C1 a5: over random reports, gaps, levels and both flags, disarmed becomes armed only on a switch-on report
+    /// with the throttle low and levels present, right after a switch-off report that left the gate disarmed.
+    #[test]
+    fn gate_walk_flags_never_arm_outside_the_switch_cycle() {
+        static HS_WALK: Handshake = Handshake::new();
+        HS_WALK.set_permit(true);
+        let mut gate = Gate::new(&Tuning::DEFAULT, &HS_WALK);
+        let mut rng = Rng(0x5eed_00a5);
+        let (mut t, mut quiet) = (1_000, 0);
+        let mut off_then_disarmed = false;
+        let (mut armings, mut held_loss, mut held_off) = (0u32, 0u32, 0u32);
+        for _ in 0..300_000 {
+            if rng.chance(2) {
+                HS_WALK.disarm();
+            }
+            let f = random_facts(&mut rng, &mut t, &mut quiet);
+            let was = gate.armed();
+            let lost = gate.last_rc_us.is_some_and(|l| f.t.saturating_sub(l) > TIMEOUT) && f.rc.is_none();
+            let cmd = step_flags(&mut gate, f.t, f.rc, f.levels, f.hands_off, f.arm_off_holds);
+            assert!(!gate.armed() || HS_WALK.armed());
+            assert_eq!(cmd.throttles().is_some(), gate.armed() && f.levels.is_some());
+            if !was && gate.armed() {
+                let r = f.rc.expect("arming needs a report");
+                assert!(r.arm && r.sticks.throttle <= Tuning::DEFAULT.arm_thr_max && f.levels.is_some());
+                assert!(off_then_disarmed, "arming without a switch cycle");
+                armings += 1;
+            }
+            if was && gate.armed() {
+                held_loss += u32::from(lost && f.hands_off);
+                held_off += u32::from(f.rc.is_some_and(|r| !r.arm) && f.arm_off_holds);
+            }
+            if let Some(r) = f.rc {
+                off_then_disarmed = !r.arm && !gate.armed();
+            }
+        }
+        assert!(armings > 100 && held_loss > 100 && held_off > 100, "{armings} {held_loss} {held_off}");
+    }
+
+    /// The gate as it was at 047aff0, verbatim but for the handshake argument: the reference for (false, false).
+    struct OldGate {
+        armed: bool,
+        last_step_us: Option<u64>,
+        last_rc_us: Option<u64>,
+        seen_off: bool,
+        handshake: &'static Handshake,
+        rc_fs_timeout_us: u64,
+        arm_thr_max: f32,
+        cos_angle_max: f32,
+    }
+
+    impl OldGate {
+        fn apply(
+            &mut self,
+            t_us: u64,
+            rc: Option<&RcSample>,
+            nav: &NavState,
+            levels: Option<&MotorLevels>,
+        ) -> MotorCommand {
+            let gap = self.last_step_us.map(|last| t_us.saturating_sub(last));
+            self.last_step_us = Some(t_us);
+            if gap.is_some_and(|g| g > FLIGHT_GAP_DISARM_US) || (self.armed && !self.handshake.armed())
+            {
+                self.disarm();
+            }
+            if let Some(r) = rc {
+                self.last_rc_us = Some(r.t_us);
+            }
+            let fresh = self
+                .last_rc_us
+                .is_some_and(|last| t_us.saturating_sub(last) <= self.rc_fs_timeout_us);
+            if !fresh {
+                self.disarm();
+                return MotorCommand::STOP;
+            }
+            if let Some(r) = rc {
+                if !r.arm {
+                    self.disarm();
+                    self.seen_off = true;
+                } else if !self.armed {
+                    let ready = self.seen_off
+                        && r.sticks.throttle <= self.arm_thr_max
+                        && nav.valid.tilt
+                        && nav.valid.rates
+                        && down_in_body(nav.attitude)[2] >= self.cos_angle_max
+                        && levels.is_some();
+                    if ready && self.handshake.try_arm() {
+                        self.armed = true;
+                    } else {
+                        self.seen_off = false;
+                    }
+                }
+            }
+            if !self.armed {
+                return MotorCommand::STOP;
+            }
+            let Some(levels) = levels else {
+                self.disarm();
+                return MotorCommand::STOP;
+            };
+            let spin = levels
+                .level
+                .map(|l| dshot::Throttle::new(l.clamp(IDLE_LEVEL, LEVEL_MAX)));
+            match spin {
+                [Some(a), Some(b), Some(c), Some(d)] => MotorCommand {
+                    spin: Some([a, b, c, d]),
+                },
+                _ => MotorCommand::STOP,
+            }
+        }
+
+        fn disarm(&mut self) {
+            if self.armed {
+                self.handshake.disarm();
+            }
+            self.armed = false;
+            self.seen_off = false;
+        }
+    }
+
+    /// I2: with (false, false) the gate is bit-identical to the gate before the two inputs, step by step, over a
+    /// seeded walk of reports, gaps, levels, permit, saves and `ARMED` cleared from outside.
+    #[test]
+    fn gate_false_false_matches_the_old_gate_step_by_step() {
+        static HS_NEW: Handshake = Handshake::new();
+        static HS_OLD: Handshake = Handshake::new();
+        HS_NEW.set_permit(true);
+        HS_OLD.set_permit(true);
+        let mut gate = Gate::new(&Tuning::DEFAULT, &HS_NEW);
+        let tuning = Tuning::DEFAULT;
+        let mut old = OldGate {
+            armed: false,
+            last_step_us: None,
+            last_rc_us: None,
+            seen_off: false,
+            handshake: &HS_OLD,
+            rc_fs_timeout_us: tuning.rc_fs_timeout_us,
+            arm_thr_max: tuning.arm_thr_max,
+            cos_angle_max: libm::cosf(tuning.angle_max_rad),
+        };
+        let mut rng = Rng(0x5eed_0012);
+        let (mut t, mut quiet) = (1_000, 0);
+        let (mut armed_steps, mut spins) = (0u32, 0u32);
+        for k in 0..300_000 {
+            if rng.chance(2) {
+                HS_NEW.disarm();
+                HS_OLD.disarm();
+            }
+            if rng.chance(5) {
+                let permit = !rng.chance(300);
+                HS_NEW.set_permit(permit);
+                HS_OLD.set_permit(permit);
+            }
+            let f = random_facts(&mut rng, &mut t, &mut quiet);
+            let levels = f.levels.map(|level| MotorLevels { level });
+            let nav = level_nav(f.t);
+            let want = old.apply(f.t, f.rc.as_ref(), &nav, levels.as_ref());
+            let got = gate.apply(f.t, f.rc.as_ref(), &nav, levels.as_ref(), false, false);
+            assert_eq!(got, want, "step {k}");
+            assert_eq!(
+                (gate.armed, gate.seen_off, gate.last_rc_us, HS_NEW.armed()),
+                (old.armed, old.seen_off, old.last_rc_us, HS_OLD.armed()),
+                "step {k}"
+            );
+            armed_steps += u32::from(gate.armed);
+            spins += u32::from(got.throttles().is_some());
+        }
+        assert!(armed_steps > 10_000 && spins > 10_000, "{armed_steps} {spins}");
     }
 }
