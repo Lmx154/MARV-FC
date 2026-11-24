@@ -1935,7 +1935,8 @@ fn hands_off_msg_names_every_state_with_its_code() {
         assert!(text.starts_with(&std::format!("HO {} ", s.code())), "{text}");
         assert!(text.len() <= 64);
     }
-    assert!(hands_off_msg(State::Auto).contains("HOLD's law") && hands_off_msg(State::Return).contains("HOLD's law"));
+    // H3b: AUTO flies its own law; RETURN (not reachable) still names HOLD's.
+    assert!(!hands_off_msg(State::Auto).contains("HOLD's law") && hands_off_msg(State::Return).contains("HOLD's law"));
 }
 
 // ---- Amendment N: no motor stop in the air (N2, N4, E2, the NS walk of N1) ----

@@ -675,6 +675,8 @@ pub struct Stepper {
     mode_log: ModeLog,
     /// The hands-off state of the last MSG written (`None` before the first; `hands_off_msg_due`).
     ho_logged: Option<fw_flight::hands_off::State>,
+    /// AUTO's waypoint index of the last "HO WP" MSG written (`None` outside AUTO's guidance).
+    wp_logged: Option<u8>,
     /// N12's M of the last "HO M" MSG written (false before the first).
     m_logged: bool,
     /// Crash rule K's would-fire of the last "K" MSG written (false before the first; `crash_msg`).
@@ -731,6 +733,7 @@ impl Stepper {
             stat: NAV_STAT.take_writer()?,
             mode_log: ModeLog::new(),
             ho_logged: None,
+            wp_logged: None,
             m_logged: false,
             k_logged: false,
             card_logged: false,
@@ -960,6 +963,17 @@ impl SampleSink for Stepper {
             })
         {
             self.ho_logged = Some(ho);
+        }
+        // AUTO's active waypoint (H3b): "HO WP <k>" at each change while the guidance runs (Start, every Arrived); a dropped
+        // one is offered again.
+        let wp = self.flight.leg_active();
+        if let Some(k) = wp
+            && wp != self.wp_logged
+            && self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &fw_flight::step::leg_msg(k)))
+        {
+            self.wp_logged = wp;
+        } else if wp.is_none() {
+            self.wp_logged = None;
         }
         // N12's M bit: a MSG at each change of M in force (set only in a hands-off state, so only after a stick loss); a
         // dropped one is offered again.

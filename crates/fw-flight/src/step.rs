@@ -6,6 +6,7 @@ use crate::alloc::CardAllocator;
 use crate::gate::{Gate, MotorCommand};
 use crate::hands_off::{self, Demand, HandsOff, LandLaw, MissionFacts, State, Tier};
 use crate::eskf::ned_from_geo;
+use crate::guidance::{self, LegGuidance, LegPhase};
 use crate::gnc::{
     Allocation, Allocator, Controller, Estimator, GeoPoint, Mode, NavState, RateLog, Refused, Saturation,
     Sensors, Setpoint, ThrustTorque, Valid,
@@ -585,6 +586,14 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     plan_id: Option<u32>,
     /// The newest target set from core 0 (`set_mission`): the mission facts at every step, and AUTO's list at Start.
     mission: GdnTargets,
+    /// AUTO's leg law (A6, section 36): entered at Start (the list copied from `mission` then), stepped on AUTO's steps,
+    /// stopped on every other step; its index survives a stop (the kept place, A10).
+    legs: LegGuidance,
+    /// AUTO: the heading at Start, held for the whole of AUTO (section 30; the guidance commands no yaw), rad.
+    leg_heading_rad: f32,
+    /// The guidance was done (the last waypoint reached, or the entry refused) at the previous step: the state
+    /// machine's `last_waypoint_reached` (it runs before the law, as the track distance).
+    leg_done: bool,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -732,6 +741,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             command_result: None,
             plan_id: None,
             mission: MISSION_OFF,
+            legs: LegGuidance::new(),
+            leg_heading_rad: 0.0,
+            leg_done: false,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -868,6 +880,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// the mission facts from the next step on; AUTO takes its list from it at Start only, never mid-leg.
     pub fn set_mission(&mut self, set: GdnTargets) {
         self.mission = set;
+    }
+
+    /// AUTO's active waypoint index while its guidance runs (on a leg or done at the last waypoint), else `None`: the
+    /// board logs [`leg_msg`] when it changes (an `Arrived` advances it).
+    pub fn leg_active(&self) -> Option<u8> {
+        matches!(self.legs.phase(), LegPhase::Leg | LegPhase::Done).then(|| self.legs.active())
     }
 
     /// The latest step's answer to its command; `None` when it had none (or the answer was taken).
@@ -1044,7 +1062,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             position_d_valid: nav.valid.position_d,
             command,
             mission,
-            last_waypoint_reached: false,
+            last_waypoint_reached: self.leg_done,
             home_reached: false,
             heading_ok: nav.valid.heading && self.heading_ok,
             battery_ok,
@@ -1134,12 +1152,58 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.shaper.target_ne = None;
             }
         }
-        let setpoint = self.shaper.setpoint(mode, &nav, t_us);
+        let mut setpoint = self.shaper.setpoint(mode, &nav, t_us);
+        // AUTO (A6, H3b): entered at the step Start is ACCEPTED, from the vehicle to waypoint 0, or to the kept index after
+        // a Pause (A10, L7); each AUTO step on Position flies the guidance's carrots (NE and D, with their rates as
+        // feed-forward) at the heading of Start with no heading rate, the cruise speed the hands-off limit in force. The
+        // shaper still runs (HOLD's law where the ladder is below Position) and is left with no NE target and the vertical
+        // carrot as its height target, so the HOLD that follows brakes, captures and keeps that height. Leaving AUTO stops
+        // the guidance.
+        let mut leg_e_m = None;
+        if ho.state != State::Auto {
+            self.legs.stop();
+            self.leg_done = false;
+        } else {
+            if was != State::Auto {
+                let start = match ho.events.start {
+                    Some(hands_off::StartAt::KeptPlace) => self.legs.active(),
+                    _ => 0,
+                };
+                let [w, _, _, z] = nav.attitude;
+                self.leg_heading_rad = 2.0 * libm::atan2f(z, w);
+                let entered = match (ho.home, self.estimator.origin()) {
+                    (Some(h), Some(origin)) => {
+                        let home = guidance::Home { ne: h.ne_m, d: h.d_m };
+                        self.legs.enter(nav.position_m, home, &origin, &self.mission, start, ho.speed_limit_xy_ms)
+                    }
+                    _ => false,
+                };
+                if !entered {
+                    self.legs.stop();
+                }
+            }
+            let lead_ok = self.legs.lead_ok(nav.position_m[2], self.shaper.pilot_alt_lead_s);
+            let leg = self.legs.step(dt_us as f32 * 1e-6, nav.position_m, nav.valid.position_ne, lead_ok);
+            self.leg_done = matches!(leg.phase, LegPhase::Done | LegPhase::Idle);
+            if leg.phase != LegPhase::Idle && !leg.held && mode == Mode::Position {
+                self.shaper.target_ne = None;
+                self.shaper.target_d = Some(leg.down_m);
+                leg_e_m = Some(leg.e_m);
+                setpoint = Setpoint::Position {
+                    position_m: [leg.position_ne[0], leg.position_ne[1], leg.down_m],
+                    velocity_ms: [leg.velocity_ne[0], leg.velocity_ne[1], leg.velocity_d_ms],
+                    heading_rad: self.leg_heading_rad,
+                    heading_rate_rads: 0.0,
+                };
+            }
+        }
         self.shaper.sticks = real;
         self.shaper.land_rate_d_ms = None;
         self.shaper.brake_only = false;
-        // H12: |p_NE - r_NE| of this step, r the target the controller gets (while unlocked, this step's position).
+        // H12: |p_NE - r_NE| of this step, r the target the controller gets (while unlocked, this step's position); in
+        // AUTO's law the guidance's e, vehicle to carrot (H13 (1) "moving target").
         self.track_error_m = match setpoint {
+            _ if leg_e_m.is_some() => leg_e_m,
             Setpoint::Position { position_m: [tn, te, _], .. } => {
                 let (dn, de) = (nav.position_m[0] - tn, nav.position_m[1] - te);
                 Some(libm::sqrtf(dn * dn + de * de))
@@ -1576,7 +1640,7 @@ pub fn hands_off_msg(state: State) -> &'static str {
         State::Pilot => "HO 1 PILOT",
         State::Takeover => "HO 2 TAKEOVER",
         State::Hold => "HO 3 HOLD",
-        State::Auto => "HO 4 AUTO (flying HOLD's law)",
+        State::Auto => "HO 4 AUTO",
         State::Return => "HO 5 RETURN (flying HOLD's law)",
         State::Land => "HO 6 LAND",
         State::Stop => "HO 7 STOP",
@@ -1605,6 +1669,14 @@ pub fn crash_msg(logged: bool, s: &CrashStatus) -> Option<[u8; 8]> {
         (true, false) => Some(*b"K 0\0\0\0\0\0"),
         _ => None,
     }
+}
+
+/// AUTO's waypoint MSG: "HO WP <k>", k the active index (0 to 99, two digits).
+pub fn leg_msg(k: u8) -> [u8; 8] {
+    let k = k.min(99);
+    let mut m = *b"HO WP 00";
+    (m[6], m[7]) = (b'0' + k / 10, b'0' + k % 10);
+    m
 }
 
 /// N14 (3): the card check's MSG text, "HOVER <pct> % of card", `pct` right-aligned in three places (at most 999).

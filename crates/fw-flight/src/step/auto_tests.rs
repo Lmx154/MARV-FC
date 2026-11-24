@@ -65,12 +65,19 @@ struct Run {
 
 impl Run {
     fn new(speed_ms: f32, set: Option<GdnTargets>) -> Run {
-        let mut nav = super::althold_tests::nav_at(0.0, POSITION);
+        Run::with(speed_ms, set, true, true)
+    }
+
+    /// As `new`; without `home` the NE position is not valid until after take-off (no home, A6); with `fs` false
+    /// FS_HOLD_EN is 0 and the stick loss gives LAND.
+    fn with(speed_ms: f32, set: Option<GdnTargets>, home: bool, fs: bool) -> Run {
+        let valid = if home { POSITION } else { Valid { position_ne: false, velocity_ne: false, ..POSITION } };
+        let mut nav = super::althold_tests::nav_at(0.0, valid);
         nav.attitude = [libm::cosf(YAW_RAD / 2.0), 0.0, 0.0, libm::sinf(YAW_RAD / 2.0)];
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav)));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         assert!(f.set_pilot_speed_xy(speed_ms));
-        f.set_fs_hold_en(true);
+        f.set_fs_hold_en(fs);
         f.set_heading_ok(true);
         f.set_battery_ok(true);
         if let Some(m) = set {
@@ -82,9 +89,10 @@ impl Run {
         for _ in 0..400 {
             r.rc(true, 0.5);
         }
-        assert!(r.f.airborne && r.f.hands_off.home().is_some());
+        assert!(r.f.airborne && r.f.hands_off.home().is_some() == home);
         let mut n = r.cell.get();
         n.position_m[2] = -10.0;
+        n.valid = POSITION;
         r.cell.set(n);
         for _ in 0..2_000 {
             r.quiet();
@@ -92,7 +100,7 @@ impl Run {
                 break;
             }
         }
-        assert_eq!(r.state(), State::Hold);
+        assert_eq!(r.state(), if fs { State::Hold } else { State::Land });
         r
     }
 
@@ -175,4 +183,163 @@ fn mission_facts_from_the_pushed_set_reach_start() {
     assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::HeightOutsideLimits));
     r.f.set_mission(MISSION_OFF);
     assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::NoWaypoints));
+}
+
+/// Horizontal distance of the vehicle from the waypoint put at (n, e), m: from where it lands after `geo`'s rounding to
+/// 1e-7 degree (up to about 1 cm), as the guidance converts it.
+fn dist_from(r: &Run, n: f32, e: f32) -> f32 {
+    let (lat_e7, lon_e7) = geo(n, e);
+    let [wn, we, _] = ned_from_geo(&ORIGIN, &GeoPoint { lat_e7, lon_e7, alt_mm: ORIGIN.alt_mm });
+    let p = r.cell.get().position_m;
+    libm::hypotf(p[0] - wn, p[1] - we)
+}
+
+/// The heading of a Position setpoint.
+fn heading(o: &StepOut) -> Option<f32> {
+    match o.setpoint {
+        Setpoint::Position { heading_rad, heading_rate_rads, .. } => {
+            assert_eq!(heading_rate_rads, 0.0);
+            Some(heading_rad)
+        }
+        _ => None,
+    }
+}
+
+/// (a) The 30 m square at 3 m/s, heights 10, 15, 10, 10 m: Start in HOLD gives AUTO; each waypoint is reached within
+/// GDN_RADIUS at its height; after the last, HOLD there with the place dropped; e stays below X; the heading is that of
+/// Start on every AUTO step.
+#[test]
+fn a_square_at_3_m_s_flies_every_waypoint_and_holds_at_the_last() {
+    let wps = [(30.0, 0.0, 10.0f32), (30.0, 30.0, 15.0), (0.0, 30.0, 10.0), (0.0, 0.0, 10.0)];
+    let mut r = Run::new(3.0, Some(square()));
+    for _ in 0..800 {
+        r.fly();
+    }
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    assert_eq!((r.state(), r.f.leg_active()), (State::Auto, Some(0)));
+    let x = hands_off::track_fault_m(r.f.speed_xy_in_force());
+    let (mut e_max, mut steps, mut reached) = (0.0f32, 0u32, std::vec::Vec::new());
+    let mut active = Some(0u8);
+    while r.state() == State::Auto && steps < 200_000 {
+        let o = r.fly();
+        steps += 1;
+        if r.state() == State::Auto {
+            if let Some(h) = heading(&o) {
+                assert!(libm::fabsf(h - YAW_RAD) < 1e-5, "heading {h}");
+            }
+            e_max = e_max.max(r.f.track_error_m.expect("e"));
+        }
+        let now = r.f.leg_active();
+        if now != active || r.state() != State::Auto {
+            let k = usize::from(active.unwrap());
+            let (n, e, z) = wps[k];
+            let h = -r.cell.get().position_m[2];
+            reached.push((k, dist_from(&r, n, e), h - z, steps as f32 * DT_US as f32 * 1e-6));
+            active = now;
+        }
+    }
+    std::println!("reached (waypoint, distance m, height error m, s): {reached:?}; e max {e_max:.3} m against X {x} m");
+    assert_eq!(reached.iter().map(|r| r.0).collect::<std::vec::Vec<_>>(), [0, 1, 2, 3]);
+    for &(k, d, dh, _) in &reached {
+        assert!(d <= 2.0, "waypoint {k}: {d} m");
+        assert!(libm::fabsf(dh) < 0.5, "waypoint {k}: height error {dh} m");
+    }
+    assert!(e_max < x && e_max <= guidance::LAG_E_MAX_M + 0.05, "e max {e_max}");
+    assert_eq!(r.state(), State::Hold);
+    for _ in 0..4_000 {
+        r.fly();
+        assert_eq!(r.state(), State::Hold);
+    }
+    let (d, h) = (dist_from(&r, 0.0, 0.0), -r.cell.get().position_m[2]);
+    std::println!("5 s after: {d:.2} m from the last waypoint at {h:.2} m");
+    assert!(d <= 2.0 && libm::fabsf(h - 10.0) < 0.5, "{d} {h}");
+    // The place was dropped: Start begins at waypoint 0.
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    assert_eq!(r.f.leg_active(), Some(0));
+}
+
+/// (b) Pause mid-leg holds with the place kept; Start resumes the same waypoint on a new first leg from the vehicle;
+/// Abort holds with the place dropped and Start begins at waypoint 0.
+#[test]
+fn b_pause_resumes_the_same_waypoint_from_the_vehicle_and_abort_starts_over() {
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    while r.f.leg_active() != Some(1) {
+        r.fly();
+    }
+    for _ in 0..4_000 {
+        r.fly();
+    }
+    assert_eq!(r.command(Command::Pause), CommandResult::Accepted);
+    assert_eq!((r.state(), r.f.leg_active()), (State::Hold, None));
+    for _ in 0..4_000 {
+        r.fly();
+    }
+    let at = r.cell.get().position_m;
+    assert!(libm::hypotf(at[0] - 30.0, at[1] - 30.0) > 5.0, "mid-leg: {at:?}");
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    assert_eq!((r.state(), r.f.leg_active()), (State::Auto, Some(1)));
+    // The first leg starts at the vehicle: the carrot of the Start step is where the vehicle was.
+    match r.last.unwrap().setpoint {
+        Setpoint::Position { position_m, .. } => {
+            assert!(libm::hypotf(position_m[0] - at[0], position_m[1] - at[1]) < 0.05, "{position_m:?} {at:?}");
+        }
+        ref s => panic!("{s:?}"),
+    }
+    for _ in 0..800 {
+        r.fly();
+    }
+    assert_eq!(r.command(Command::Abort), CommandResult::Accepted);
+    assert_eq!(r.state(), State::Hold);
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    assert_eq!((r.state(), r.f.leg_active()), (State::Auto, Some(0)));
+}
+
+/// (g) Start's answers on the real step: each case the first check that fails, in the state machine's order.
+#[test]
+fn g_start_denied_with_its_reason() {
+    let deny = |r: &mut Run| r.command(Command::Start);
+    let mut gdn_src_0 = square();
+    gdn_src_0.from_mission = false;
+    gdn_src_0.heights_ok = false;
+    let mut high = square();
+    high.heights_ok = false;
+    let far = mission(&[(30.0, 0.0, 10.0), (1_001.0, 0.0, 10.0)], 2.0, 0x5157_0002);
+    let near = mission(&[(30.0, 0.0, 10.0), (999.0, 0.0, 10.0)], 2.0, 0x5157_0003);
+    let cases: [(&str, Option<GdnTargets>, DenyReason); 4] = [
+        ("no mission", None, DenyReason::NoWaypoints),
+        ("GDN_SRC 0", Some(gdn_src_0), DenyReason::NoWaypoints),
+        ("a waypoint beyond 1 km", Some(far), DenyReason::WaypointBeyondRange),
+        ("a height outside the limits", Some(high), DenyReason::HeightOutsideLimits),
+    ];
+    for (name, set, want) in cases {
+        let mut r = Run::new(3.0, set);
+        assert_eq!(deny(&mut r), CommandResult::Denied(want), "{name}");
+        assert_eq!(r.state(), State::Hold, "{name}");
+    }
+    let mut r = Run::new(3.0, Some(near));
+    assert_eq!(deny(&mut r), CommandResult::Accepted, "999 m");
+    // The board's battery input (none on the flight core).
+    let mut r = Run::new(3.0, Some(square()));
+    r.f.set_battery_ok(false);
+    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::BatteryNotOk), "no battery input");
+    // Station absent (no radio heartbeat for 5 s).
+    let mut r = Run::new(3.0, Some(square()));
+    r.station = false;
+    for _ in 0..4_100 {
+        r.fly();
+    }
+    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::StationAbsent), "station absent");
+    // Not in HOLD: LAND.
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Land), CommandResult::Accepted);
+    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::NotInThisState), "LAND");
+    // No home: the NE position became valid only after take-off.
+    let mut r = Run::with(3.0, Some(square()), false, true);
+    assert_eq!(r.f.hands_off.home(), None);
+    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::NoHome), "no home");
+    // FS_HOLD_EN 0: the stick loss lands; Start is HandsOffDisabled.
+    let mut r = Run::with(3.0, Some(square()), true, false);
+    assert_eq!(r.state(), State::Land);
+    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::HandsOffDisabled), "FS_HOLD_EN 0");
 }

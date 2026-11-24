@@ -221,8 +221,8 @@ pub struct Inputs {
     pub battery_ok: bool,
     /// The battery is critical.
     pub battery_critical: bool,
-    /// The RETURN law exists (Amendment D). False: RETURN cannot be reached, link loss lands in place and Start and
-    /// Return are denied (`NoHome`); home still latches (N10 (v)).
+    /// The RETURN law exists (Amendment D). False: RETURN cannot be reached, link loss lands in place and Return is
+    /// denied (`NoHome`); home still latches (N10 (v)). Start does not read it (H3b: AUTO is built).
     pub return_built: bool,
     /// The horizontal distance between the navigation position and the Position target the controller tracked at the
     /// previous step, both of that step, m; `None` when the previous step tracked no Position target. Over X
@@ -260,7 +260,7 @@ pub enum DenyReason {
     NoWaypoints,
     /// Start: a stored z is outside the height limits in force.
     HeightOutsideLimits,
-    /// Start or Return: home is not set, or the RETURN law is not built (`return_built` false, N10 (v)).
+    /// Start or Return: home is not set; Return also when the RETURN law is not built (`return_built` false, N10 (v)).
     NoHome,
     /// Start: the vehicle is more than `HOME_RANGE_M` from home, or its position is not valid.
     VehicleBeyondRange,
@@ -990,7 +990,7 @@ impl HandsOff {
         if !i.mission.z_within_limits {
             return Some(DenyReason::HeightOutsideLimits);
         }
-        let Some(home) = self.home().filter(|_| i.return_built) else {
+        let Some(home) = self.home() else {
             return Some(DenyReason::NoHome);
         };
         let [n, e] = i.position_ne_m;
