@@ -530,6 +530,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: TD's (b) at the latest step, from a finite IMU sample.
     #[cfg(test)]
     still: bool,
+    /// N15 (a): the latest step flew LAND, TAKEOVER's descent or BLIND.
+    descent_prev: bool,
     /// BLIND's probe: how long (b) and (c) have held in the armed BLIND steps with no probe running, since one last
     /// failed, us.
     quiet_us: u64,
@@ -571,6 +573,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
+    /// Tests only: TD's count does not restart on entry into a descent (N15 (a) removed).
+    #[cfg(test)]
+    td_restart_off: bool,
     /// Tests only: TD's (a) is the old rule, the collective below the ground threshold (0.714 x the card's m g).
     #[cfg(test)]
     td_card_rule: bool,
@@ -653,6 +658,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
+            descent_prev: false,
             #[cfg(test)]
             still: false,
             quiet_us: 0,
@@ -685,6 +691,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             threshold_rule: false,
             #[cfg(test)]
             latch_off: false,
+            #[cfg(test)]
+            td_restart_off: false,
             #[cfg(test)]
             td_card_rule: false,
             #[cfg(test)]
@@ -1105,9 +1113,21 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             && libm::fabsf(p_rads) <= TOUCHDOWN_ROT_MAX_RADS
             && libm::fabsf(q_rads) <= TOUCHDOWN_ROT_MAX_RADS;
         let blind = self.gate.armed() && ho.state == State::Blind;
+        // N15 (a): entering LAND, TAKEOVER's descent or BLIND from a step that flew none of them restarts TD's count, so a
+        // count from PILOT or HOLD never clears the latch on the first descent step (`lost()` read the count the previous
+        // step left before the entry, so a vehicle already resting still stops there, N10 (iii)).
+        let descent = ho.landing || ho.takeover_descent || blind;
+        #[cfg(not(test))]
+        let entry = descent && !self.descent_prev;
+        #[cfg(test)]
+        let entry = descent && !self.descent_prev && !self.td_restart_off;
+        self.descent_prev = descent;
+        if entry {
+            self.still_us = 0;
+        }
         if self.gate.armed() && floor && still && level {
             self.still_us += dt_us;
-            if self.still_us >= self.land_detect_us && (ho.landing || ho.takeover_descent || blind) {
+            if self.still_us >= self.land_detect_us && descent {
                 self.airborne = false;
             }
         } else {
