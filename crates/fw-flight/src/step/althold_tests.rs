@@ -564,8 +564,10 @@ fn i6_control_ignoring_coverage_fails() {
     assert!(bad.contains(&"effective Angle from the step the flag drops"));
 }
 
+/// Amendment N, N2: in the air (the latch set) RC loss leaves PILOT for LAND at the first step past the timeout, in
+/// Altitude exactly as in Angle, the gate armed and the motors running (before N2 both stopped there).
 #[test]
-fn rc_loss_in_altitude_stops_after_the_timeout_exactly_as_in_angle() {
+fn rc_loss_in_altitude_lands_after_the_timeout_exactly_as_in_angle() {
     let tuning = Tuning::DEFAULT;
     let stop_after = |switch6: Switch3| {
         let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
@@ -580,15 +582,16 @@ fn rc_loss_in_altitude_stops_after_the_timeout_exactly_as_in_angle() {
             assert!(out.armed && out.motors.throttles().is_some());
         }
         let last_report = t;
+        assert!(f.airborne);
         for k in 1..=2_000_u64 {
             let out = f.step(&input(last_report + k * DT_US, None));
-            if !out.armed {
-                assert_eq!(out.motors, MotorCommand::STOP);
+            assert!(out.armed && out.motors.throttles().is_some(), "spinning before and after the timeout");
+            if f.hands_off_state() != crate::hands_off::State::Pilot {
+                assert_eq!(f.hands_off_state(), crate::hands_off::State::Land);
                 return k;
             }
-            assert!(out.motors.throttles().is_some(), "still spinning before the timeout");
         }
-        panic!("never stopped");
+        panic!("never left PILOT");
     };
     let angle = stop_after(Switch3::Low);
     let altitude = stop_after(Switch3::Middle);

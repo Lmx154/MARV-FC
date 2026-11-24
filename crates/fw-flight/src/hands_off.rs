@@ -176,8 +176,8 @@ pub struct MissionFacts {
 pub struct Inputs {
     /// Board time, us.
     pub now_us: u64,
-    /// FS_HOLD_EN's present value. Taken into force on disarmed steps only (B9); in force false: only PILOT and STOP,
-    /// `hands_off` always false.
+    /// FS_HOLD_EN's present value. Taken into force on disarmed steps only (B9); in force false: no HOLD and no mission
+    /// (stick loss on T3' gives LAND, Amendment N, N2; commands DENIED `HandsOffDisabled`).
     pub fs_hold_en: bool,
     /// The newest CRSF stick report (not necessarily new this step); `None` before the first. Its sticks are never
     /// read here.
@@ -527,16 +527,7 @@ impl HandsOff {
             }
         }
         self.update_tier(i.now_us, instant);
-        if self.fs_in_force {
-            self.automatic(i, fresh, &mut ev);
-        } else {
-            let state = if i.armed && fresh && i.crsf.is_some_and(|r| r.arm) {
-                State::Pilot
-            } else {
-                State::Stop
-            };
-            self.go(state, i, &mut ev);
-        }
+        self.automatic(i, fresh, &mut ev);
         let command = i.command.map(|c| self.command(c, i, fresh, &mut ev));
         let hands_off = self.state.is_hands_off();
         let demand = match instant {
@@ -674,7 +665,7 @@ impl HandsOff {
         self.was_armed = i.armed;
     }
 
-    /// The state table's exits that are not commands (FS_HOLD_EN 1).
+    /// The state table's exits that are not commands (FS_HOLD_EN 0 or 1; Amendment N, N2).
     fn automatic(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
         if !i.armed || (i.crsf.is_some_and(|r| !r.arm) && !self.arm_off_holds(i)) {
             self.go(State::Stop, i, ev);
@@ -772,7 +763,7 @@ impl HandsOff {
     }
 
     /// Sticks lost in PILOT or TAKEOVER: STOP on the ground; LAND (or BLIND) with the track fault (H14); else by the
-    /// debounced tier.
+    /// debounced tier, T3' giving LAND instead of HOLD while FS_HOLD_EN in force is 0 (Amendment N, N2).
     fn lost(&self, i: &Inputs) -> State {
         if !i.airborne {
             State::Stop
@@ -780,6 +771,7 @@ impl HandsOff {
             self.land_state()
         } else {
             match self.debounced {
+                Tier::T3 if !self.fs_in_force => State::Land,
                 Tier::T3 => State::Hold,
                 Tier::T2 => State::Land,
                 Tier::T1 => State::Blind,
@@ -2107,7 +2099,8 @@ mod tests {
         r.i.armed = false;
         r.i.airborne = false;
         assert_eq!(r.step().state, State::Stop);
-        // Re-armed with 0 in force: stick loss in the air is STOP, and commands answer HandsOffDisabled.
+        // Re-armed with 0 in force: stick loss in the air on T3' is LAND, not HOLD (Amendment N, N2), and commands answer
+        // HandsOffDisabled.
         r.i.armed = true;
         let t = r.now() + 1_000;
         assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
@@ -2116,7 +2109,7 @@ mod tests {
         r.i.fs_hold_en = true;
         let t = r.last_report() + LOSS + 1;
         let out = r.at(t);
-        assert_eq!((out.state, out.hands_off), (State::Stop, false));
+        assert_eq!((out.state, out.hands_off, out.disarm), (State::Land, true, false));
         assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::HandsOffDisabled));
         // After disarm and re-arm the 1 applies.
         r.i.armed = false;
@@ -2299,30 +2292,31 @@ mod tests {
 
     // ---- FS_HOLD_EN 0 ----
 
+    /// Amendment N, N2: with FS_HOLD_EN 0 a stick loss is handled as with 1 except that T3' gives LAND: never HOLD, AUTO
+    /// or RETURN, no mission event, no command accepted, and never STOP from a stick loss in the air.
     #[test]
-    fn hands_off_fs_hold_en_0_walk_gives_only_pilot_and_stop() {
+    fn hands_off_fs_hold_en_0_walk_gives_no_hold_and_no_mission() {
         let mut rng = Lcg(0x5eed_0000);
         let mut h = HandsOff::new(&Tuning::DEFAULT);
         let mut i = Rig::new().i;
-        let (mut pilot, mut stop) = (0u32, 0u32);
+        let mut seen = [0u32; 8];
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, false);
+            let was = h.state();
             let out = h.step(&i);
-            match out.state {
-                State::Pilot => pilot += 1,
-                State::Stop => stop += 1,
-                other => panic!("{other:?} with FS_HOLD_EN 0"),
-            }
-            assert!(!out.hands_off && !out.synthetic_sticks && !out.landing);
-            assert!(!out.arm_off_holds && !out.takeover_descent);
-            if i.crsf.is_some_and(|r| !r.arm) {
-                assert_eq!(out.state, State::Stop, "FS_HOLD_EN 0: arm OFF is STOP");
+            seen[usize::from(out.state.code() - 1)] += 1;
+            assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{:?} with FS_HOLD_EN 0", out.state);
+            if matches!(was, State::Pilot | State::Stop) && i.crsf.is_some_and(|r| !r.arm) {
+                assert_eq!(out.state, State::Stop, "FS_HOLD_EN 0: arm OFF in PILOT or STOP is STOP");
             }
             assert_eq!(out.return_height_m, None);
             assert_eq!(out.events, Events::NONE);
             assert!(matches!(out.command, None | Some(CommandResult::Denied(_))));
+            assert!(!(out.state == State::Stop && was != State::Stop && i.armed && i.airborne && i.crsf.is_some_and(|r| r.arm)), "never STOP from the stick loss in the air");
         }
-        assert!(pilot > 1_000 && stop > 1_000, "both reached: {pilot} {stop}");
+        for s in [State::Pilot, State::Stop, State::Takeover, State::Land, State::Blind] {
+            assert!(seen[usize::from(s.code() - 1)] > 100, "{s:?} reached: {seen:?}");
+        }
     }
 
     // ---- Review follow-up ----

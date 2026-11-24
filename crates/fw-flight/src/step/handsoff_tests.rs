@@ -64,9 +64,11 @@ fn digest_step(h: &mut u64, o: &StepOut) {
 }
 
 /// A scripted flight over random reports, sticks, switches, coverage, positions and silences (RC loss on the ground and
-/// in the air), with arming cycles; `setup` runs on the flight first. Returns the digest of every step and counts of
-/// what it went through (armed steps, RC-loss disarms in the air, steps per effective mode).
-fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, [u32; 5]) {
+/// in the air), with arming cycles; `setup` runs on the flight first. Returns the digest of every step, the digest of the
+/// steps before the first airborne stick loss (the first step that starts armed with the airborne latch set and the newest
+/// report older than the stick-loss time; `None` if there is none), and counts of what it went through (armed steps,
+/// RC-loss disarms in the air, steps per effective mode).
+fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, Option<u64>, [u32; 5]) {
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(0.0, ANGLE));
     let mut f = flight(&cell, handshake(), &tuning);
@@ -79,6 +81,7 @@ fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, [
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut counts = [0u32; 5];
     let mut was_armed = false;
+    let (mut newest, mut prefix) = (None::<u64>, None::<u64>);
     for _ in 0..steps {
         t += DT_US;
         if quiet == 0 && rng.chance(2) {
@@ -115,6 +118,13 @@ fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, [
             t_us: t,
         });
         let air = f.airborne;
+        if rc.is_some() {
+            newest = Some(t);
+        }
+        let lost = newest.is_none_or(|n| t - n > Tuning::DEFAULT.rc_fs_timeout_us);
+        if prefix.is_none() && was_armed && air && lost {
+            prefix = Some(h);
+        }
         let o = f.step(&input(t, rc));
         digest_step(&mut h, &o);
         counts[0] += u32::from(o.armed);
@@ -122,37 +132,54 @@ fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, [
         counts[2 + usize::from(mode_code(o.mode).saturating_sub(1)).min(2)] += 1;
         was_armed = o.armed;
     }
-    (h, counts)
+    (h, prefix, counts)
 }
 
-/// The digests of `walk` (40 000 steps) on the flight step before the hands-off wiring (commit c270814), by seed.
-const WALK_GOLDEN: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0xc20b_89fd_6881_ff30),
-    (0x5eed_0b02, 0x80ac_3c4a_1ca4_993f),
-    (0x5eed_0b03, 0x73bf_dc63_d210_a3f1),
+/// The digests of `walk` (40 000 steps) on the flight step before the hands-off wiring (commit c270814; HEAD dc08e59 gave
+/// the same), by seed: the whole walk, and the steps before its first airborne stick loss.
+const WALK_C270814: [(u64, u64, u64); 3] = [
+    (0x5eed_0b01, 0xc20b_89fd_6881_ff30, 0xe926_b5c2_a522_7ce0),
+    (0x5eed_0b02, 0x80ac_3c4a_1ca4_993f, 0x14c8_305a_51f6_5188),
+    (0x5eed_0b03, 0x73bf_dc63_d210_a3f1, 0x338c_b533_10c0_bd24),
 ];
 
-/// I2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes equal those of the step before
-/// the wiring, over three scripted flights with arming cycles, mode changes, coverage drops and RC loss in the air.
+/// The digests of the whole `walk` with Amendment N, N2 (a stick loss in the air at FS_HOLD_EN 0 lands, BLIND on T1), by
+/// seed. Every walk has an airborne stick loss, so every digest changed; the prefix before it did not.
+const WALK_GOLDEN: [(u64, u64); 3] = [
+    (0x5eed_0b01, 0x7629_5a56_9aae_7065),
+    (0x5eed_0b02, 0x46a3_bae4_d352_1f51),
+    (0x5eed_0b03, 0xef4e_8cca_25eb_2f21),
+];
+
+/// I2 as amended by N2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first
+/// airborne stick loss equal those of the step before the wiring (the prefix digest), over three scripted flights with
+/// arming cycles, mode changes, coverage drops and RC loss on the ground and in the air; the whole walk equals the
+/// re-baselined golden and differs from the old one (the change is real and starts at the loss or later).
 #[test]
 fn i2_fs_hold_en_0_is_bit_identical_to_the_step_before_the_wiring() {
-    let got = WALK_GOLDEN.map(|(seed, _)| {
-        let (h, c) = walk(seed, 40_000, |f| f.set_fs_hold_en(false));
-        std::println!("walk {seed:#x}: digest {h:#018x}, counts {c:?}");
-        assert!(c[0] > 5_000 && c[1] > 0 && c[2] > 100 && c[3] > 100 && c[4] > 100, "not vacuous: {c:?}");
-        (seed, h)
-    });
-    assert_eq!(got, WALK_GOLDEN);
+    let (mut got, mut want) = (std::vec::Vec::new(), std::vec::Vec::new());
+    for ((seed, old, old_prefix), (seed_new, golden)) in WALK_C270814.into_iter().zip(WALK_GOLDEN) {
+        assert_eq!(seed, seed_new);
+        let (h, prefix, c) = walk(seed, 40_000, |f| f.set_fs_hold_en(false));
+        std::println!("walk {seed:#x}: digest {h:#018x} (c270814 {old:#018x}), prefix {prefix:x?}, counts {c:?}");
+        assert!(c[0] > 5_000 && c[2] > 100 && c[3] > 100 && c[4] > 100, "not vacuous: {c:?}");
+        assert_eq!(prefix, Some(old_prefix), "seed {seed:#x}: the steps before the first airborne stick loss are unchanged");
+        assert_ne!(h, old, "seed {seed:#x}: the walk has an airborne stick loss, so it changed");
+        got.push((seed, h));
+        want.push((seed, golden));
+    }
+    assert_eq!(got, want);
 }
 
-/// I2's control: with FS_HOLD_EN 1 the same flights differ from the goldens (the RC losses in the air go to the
-/// hands-off states), with and without the heading monitor's verdict.
+/// I2's control as amended by N2: with FS_HOLD_EN 1 and no heading monitor (so no T3' and no HOLD) the flights equal the
+/// FS_HOLD_EN 0 goldens, since FS_HOLD_EN now gates only HOLD and missions; with the heading monitor's verdict (HOLD on
+/// T3') they differ.
 #[test]
 fn i2_control_fs_hold_en_1_changes_the_flights() {
     for (seed, golden) in WALK_GOLDEN {
-        let (h, _) = walk(seed, 40_000, |f| f.set_fs_hold_en(true));
-        assert_ne!(h, golden, "seed {seed:#x}, heading not OK");
-        let (h, _) = walk(seed, 40_000, |f| {
+        let (h, _, _) = walk(seed, 40_000, |f| f.set_fs_hold_en(true));
+        assert_eq!(h, golden, "seed {seed:#x}, heading not OK");
+        let (h, _, _) = walk(seed, 40_000, |f| {
             f.set_fs_hold_en(true);
             f.set_heading_ok(true);
         });
@@ -160,9 +187,10 @@ fn i2_control_fs_hold_en_1_changes_the_flights() {
     }
 }
 
-/// I2: with FS_HOLD_EN 0, RC loss in the air (airborne latch set, Position) disarms at exactly 1.0 s, as before.
+/// N2: with FS_HOLD_EN 0, RC loss in the air (airborne latch set, Position, T3') is LAND at the first step past 1.0 s,
+/// the gate armed and the motors running, never HOLD and never STOP.
 #[test]
-fn i2_fs_hold_en_0_rc_loss_in_the_air_disarms_at_exactly_1_0_s() {
+fn i2_fs_hold_en_0_rc_loss_in_the_air_lands_at_1_0_s_and_stays_armed() {
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(-10.0, POSITION));
     let mut f = flight(&cell, handshake(), &tuning);
@@ -184,10 +212,16 @@ fn i2_fs_hold_en_0_rc_loss_in_the_air_disarms_at_exactly_1_0_s() {
         assert!(o.armed && o.motors.throttles().is_some(), "{}", t - last);
     }
     let o = f.step(&input(last + timeout, None));
-    assert!(o.armed, "exactly 1.0 s");
-    let o = f.step(&input(last + timeout + 1, None));
-    assert!(!o.armed && o.motors.throttles().is_none(), "1.0 s + 1 us");
-    assert_eq!(f.hands_off_state(), State::Stop);
+    assert!(o.armed && f.hands_off_state() == State::Pilot, "exactly 1.0 s");
+    let mut t = last + timeout + 1;
+    let o = f.step(&input(t, None));
+    assert!(o.armed && o.motors.throttles().is_some(), "1.0 s + 1 us");
+    assert_eq!(f.hands_off_state(), State::Land);
+    for k in 0..400 {
+        t += DT_US;
+        let o = f.step(&input(t, None));
+        assert!(o.armed && o.motors.throttles().is_some() && f.hands_off_state() == State::Land, "step {k}");
+    }
 }
 
 // ---- The real step in the hands-off states ----
@@ -399,8 +433,11 @@ fn b9_fs_hold_en_written_while_armed_takes_effect_after_the_next_disarm() {
     let mut fly = Fly::new(false, true, POSITION);
     fly.f.set_fs_hold_en(true);
     let o = fly.lose();
-    assert_eq!(fly.state(), State::Stop);
-    assert!(!o.armed, "0 in force: RC loss disarms as before");
+    assert_eq!(fly.state(), State::Land);
+    assert!(o.armed, "0 in force: RC loss in the air on T3' lands (Amendment N, N2), no HOLD");
+    // The sticks back with arm ON (K), then arm OFF: disarmed.
+    fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+    assert!(!fly.rc(false, [0.0; 4], Switch3::High).armed);
     // Re-armed after a disarmed step: the 1 is in force.
     for _ in 0..10 {
         fly.rc(false, [0.0; 4], Switch3::High);
@@ -766,7 +803,7 @@ fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
 }
 
 /// PILOT: a 20 m drift from the captured point never sets the fault, and stick loss later gives HOLD; with FS_HOLD_EN 0
-/// the same (the goldens prove the outputs bit-identical).
+/// the same, except that stick loss gives LAND (Amendment N, N2).
 #[test]
 fn h12_in_pilot_and_with_fs_hold_en_0_a_drift_never_sets_it() {
     for fs in [true, false] {
@@ -779,7 +816,7 @@ fn h12_in_pilot_and_with_fs_hold_en_0_a_drift_never_sets_it() {
         }
         assert!(fly.f.track_error_m.is_some_and(|d| d > 19.0), "{:?}", fly.f.track_error_m);
         fly.lose();
-        assert_eq!(fly.state(), if fs { State::Hold } else { State::Stop });
+        assert_eq!(fly.state(), if fs { State::Hold } else { State::Land });
         assert!(!fly.track_fault());
     }
 }
@@ -1426,7 +1463,7 @@ fn e3_in_the_air_tilted_20_deg_below_the_ground_threshold_does_not_disarm() {
 // ---- E4: the board's HO MSG only while FS_HOLD_EN in force is 1 ----
 
 /// The seam the board's MSG rule reads (`Flight::fs_hold_in_force`): false at every step of a flight with FS_HOLD_EN 0,
-/// arming, mode changes and the RC-loss disarm included; a 1 written while armed comes into force at the next disarmed
+/// arming, mode changes, the RC-loss LAND (N2) and the disarm after it included; a 1 written while armed comes into force at the next disarmed
 /// step (B9) and a 0 written while armed only after the next disarm.
 #[test]
 fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9() {
@@ -1440,6 +1477,9 @@ fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9()
     }
     fly.f.set_fs_hold_en(true);
     let o = fly.lose();
+    assert!(o.armed && !fly.f.fs_hold_in_force(), "written while armed: not in force on the armed steps");
+    fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+    let o = fly.rc(false, [0.0; 4], Switch3::High);
     assert!(!o.armed && !fly.f.fs_hold_in_force(), "written while armed: not in force on the armed steps");
     fly.quiet();
     assert!(fly.f.fs_hold_in_force(), "in force after a disarmed step");
@@ -1475,7 +1515,7 @@ fn wr3_and_return_built_on_the_real_step() {
     let (mut prev_armed, mut prev_state, mut off_then_disarmed) = (false, State::Stop, false);
     let mut counts = [0u32; 6];
     let mut seen = [0u32; 8];
-    for k in 0..300_000u32 {
+    for k in 0..1_000_000u32 {
         t += DT_US;
         if rng.chance(2) {
             f.set_fs_hold_en(!rng.chance(200));
