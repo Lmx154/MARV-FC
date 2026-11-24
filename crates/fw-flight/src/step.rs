@@ -336,6 +336,9 @@ struct StickShaper {
     /// Tests only: the lead cap is off.
     #[cfg(test)]
     lead_cap_off: bool,
+    /// Tests only: N18's seat is off (the control).
+    #[cfg(test)]
+    seat_off: bool,
     /// Tests only: the position is captured at any speed.
     #[cfg(test)]
     capture_any_speed: bool,
@@ -404,6 +407,14 @@ impl StickShaper {
         let target = match self.target_d {
             None => d,
             Some(target) => {
+                // N18 (b): in the descent states the target is seated at the vehicle when the vehicle is below it (down
+                // positive), so the loop asks for v_ff from there and the lead cap cannot hold it (the fixed point
+                // d - target = v_ff / posz_p sits on the cap in the 1.5 m/s stage).
+                #[cfg(not(test))]
+                let seat = self.land_rate_d_ms.is_some();
+                #[cfg(test)]
+                let seat = self.land_rate_d_ms.is_some() && !self.seat_off;
+                let target = if seat { target.max(d) } else { target };
                 // The limit speed of the direction the target moves in: down is the descent speed.
                 let limit = if v_ff > 0.0 {
                     self.pilot_speed_dn_ms
@@ -745,6 +756,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 t_prev_us: None,
                 #[cfg(test)]
                 lead_cap_off: false,
+                #[cfg(test)]
+                seat_off: false,
                 #[cfg(test)]
                 capture_any_speed: false,
             },

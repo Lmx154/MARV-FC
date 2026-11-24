@@ -151,11 +151,12 @@ const WALK_C270814: [(u64, u64, u64); 3] = [
 /// stops at once); before N12: 0x7629_5a56_9aae_7065, 0x46a3_bae4_d352_1f51, 0xef4e_8cca_25eb_2f21. Re-baselined for
 /// N11 (2) (LAND starts from the estimated v_D); N12 alone: 0x86d2_b007_f7eb_cab0, 0xf12b_8b95_ced1_2aef,
 /// 0x03c3_c9eb_a852_01ec. Re-baselined for N14 (1) (the low mark: a stick loss after spool-up lands; seed 0b01 only);
-/// before: 0xd546_494e_cde7_4b56.
+/// before: 0xd546_494e_cde7_4b56. Re-baselined for N18 (LAND's height target is seated at the vehicle when it is below the target; these walks fly LAND after their airborne stick loss); before:
+/// 0x729d_27a8_4707_fc19, 0x4b6b_6a15_c678_b15e, 0x196e_228a_8cf2_ceab.
 const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0x729d_27a8_4707_fc19),
-    (0x5eed_0b02, 0x4b6b_6a15_c678_b15e),
-    (0x5eed_0b03, 0x196e_228a_8cf2_ceab),
+    (0x5eed_0b01, 0xe231_1a2f_6ef3_2dc8),
+    (0x5eed_0b02, 0x4bdd_53b4_54c6_6e2a),
+    (0x5eed_0b03, 0xb1d7_1062_446b_80ea),
 ];
 
 /// The digests of the whole `walk` with the heading verdict `Valid.heading` (H12 item 4 as amended by H14, the board's):
@@ -163,11 +164,12 @@ const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
 /// (no RADIO_STATUS: an arm-OFF report after a stick loss stops at once); before N12: 0x65a2_4273_a378_82ff,
 /// 0xa6c7_d3b0_eb7a_e384, 0x8b10_b43b_bafb_351a. Re-baselined for N11 (2) (LAND starts from the estimated v_D); N12
 /// alone: 0xce7a_cba4_76de_f8c5, 0x34f3_cc4f_6c55_e901, 0x942f_8427_0db8_35d6. Re-baselined for N14 (1) (the low
-/// mark; seed 0b01 only); before: 0x56bb_b0b0_9e28_c915.
+/// mark; seed 0b01 only); before: 0x56bb_b0b0_9e28_c915. Re-baselined for N18 (LAND's height target is seated at the vehicle when it is below the target; these walks fly LAND after their airborne stick loss); before:
+/// 0xb5ce_e71d_824e_7eb2, 0xfc05_671f_8228_7f0d, 0x819a_fb5f_e3c2_d65f.
 const WALK_GOLDEN: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0xb5ce_e71d_824e_7eb2),
-    (0x5eed_0b02, 0xfc05_671f_8228_7f0d),
-    (0x5eed_0b03, 0x819a_fb5f_e3c2_d65f),
+    (0x5eed_0b01, 0x5f0d_d5e8_ac91_93b3),
+    (0x5eed_0b02, 0x488f_2073_8d5f_dfe4),
+    (0x5eed_0b03, 0xa9fd_1312_aa81_3212),
 ];
 
 /// I2 as amended by N2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first
@@ -1417,15 +1419,30 @@ fn n15_estimate_drifting_down_on_the_ground_stops_within_4_s() {
     assert!(disarm - contact <= 8_000_000, "{} us", disarm - contact);
 }
 
-/// N15 (b): a single 0.7 m step down in the estimate on the ground, 4.0 s after contact (the floor reached, TD counting):
-/// one restart, then STOP.
+/// N15 (b) restated for N18: a single 0.7 m step DOWN in the estimate on the ground, 4.0 s after contact (the floor
+/// reached, TD counting): the vehicle appears below LAND's height target, which is seated at it, so the collective stays
+/// on the floor (no restart) and STOP comes within the normal time (measured 2.82 s after contact; bound 3.5 s).
 #[test]
-fn n15_a_single_0_7_m_step_in_the_estimate_on_the_ground_restarts_once_then_stops() {
+fn n15_a_single_0_7_m_step_down_in_the_estimate_on_the_ground_does_not_restart_and_stops() {
     let at = 3_200u32;
     let (contact, disarm, restarts, _) = land_with_estimate(|k| if k >= at { 0.7 } else { 0.0 }, |_| false);
     let disarm = disarm.expect("stopped");
-    std::println!("N15 0.7 m step at {} us after contact: STOP {} us after contact, floor restarts {restarts}", u64::from(at) * DT_US, disarm - contact);
-    assert_eq!(restarts, 1);
+    std::println!("N15/N18 0.7 m step down at {} us after contact: STOP {} us after contact, floor restarts {restarts}", u64::from(at) * DT_US, disarm - contact);
+    assert_eq!(restarts, 0);
+    assert!(disarm - contact <= 3_500_000, "{} us", disarm - contact);
+}
+
+/// N15 (b), the mirror for N18: a single 0.7 m step UP in the estimate on the ground, 4.0 s after contact: the vehicle
+/// appears above the target (the lag side of the cap, unchanged by N18): the loop asks for a descent the floor already
+/// gives, so it does not restart either (measured: 0 restarts, STOP 2.82 s after contact; bound 3.5 s).
+#[test]
+fn n15_a_single_0_7_m_step_up_in_the_estimate_on_the_ground() {
+    let at = 3_200u32;
+    let (contact, disarm, restarts, stray) = land_with_estimate(|k| if k >= at { -0.7 } else { 0.0 }, |_| false);
+    let disarm = disarm.expect("stopped");
+    std::println!("N15/N18 0.7 m step up at {} us after contact: STOP {} us after contact, floor restarts {restarts}, steps off the floor {stray}", u64::from(at) * DT_US, disarm - contact);
+    assert_eq!((restarts, stray), (0, 0));
+    assert!(disarm - contact <= 3_500_000, "{} us", disarm - contact);
 }
 
 /// N15 (a): HOLD (FS_HOLD_EN 1, T3') with the estimate 3 m above the target and IMU1 at rest: the collective on the floor

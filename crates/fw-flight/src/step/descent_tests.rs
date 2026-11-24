@@ -40,6 +40,8 @@ struct Plant {
     vd_frozen: Option<f32>,
     /// The station is heard on the radio link at every step.
     station: bool,
+    /// The height estimate's error, m down (the estimate is d + this).
+    d_off: f32,
 }
 
 impl Plant {
@@ -47,7 +49,7 @@ impl Plant {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, POSITION))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         f.set_heading_ok(true);
-        Plant { f, cell, t: 1_000_000, gain, tau, k, kq, d: 0.0, v: 0.0, demand: 0.0, thrust: 0.0, vd_frozen: None, station: false }
+        Plant { f, cell, t: 1_000_000, gain, tau, k, kq, d: 0.0, v: 0.0, demand: 0.0, thrust: 0.0, vd_frozen: None, station: false, d_off: 0.0 }
     }
 
     fn on_ground(&self) -> bool {
@@ -74,7 +76,7 @@ impl Plant {
             }
         }
         let mut n = self.cell.get();
-        (n.position_m[2], n.velocity_ms[2]) = (self.d, self.vd_frozen.unwrap_or(self.v));
+        (n.position_m[2], n.velocity_ms[2]) = (self.d + self.d_off, self.vd_frozen.unwrap_or(self.v));
         self.cell.set(n);
         self.t += DT_US;
         if self.station {
@@ -448,4 +450,138 @@ fn fx2_wr1_modelled_clear_agrees_with_the_real_one() {
     }
     assert_eq!(results[0], ((false, State::Stop), 1), "the modelled clear: STOP on that step");
     assert!(results[1].0 == (true, State::Hold) && results[1].1 > 1, "the latch still set: armed until it clears itself");
+}
+
+/// N18 (c): LAND from its entry to the motors stopped: (time the fall is stopped, s from the entry; the smallest height
+/// lost in a 5 s window from then to contact, m; the largest true descent rate after the stop, m/s; the smallest true
+/// v_D from 1 s after the entry, m/s; contact, s; STOP after contact, s). Asserts no stop in the air.
+struct LandRun {
+    stopped_s: f32,
+    min_drop_5s: f32,
+    v_max: f32,
+    v_min: f32,
+    contact_s: f32,
+    stop_after_s: f32,
+}
+
+fn land_to_stop(p: &mut Plant, max_s: f32, mut each: impl FnMut(&mut Plant, f32)) -> LandRun {
+    let dt = DT_US as f32 * 1e-6;
+    let (mut k, mut stopped, mut contact) = (0u32, None::<f32>, None::<f32>);
+    let (mut v_max, mut v_min, mut min_drop, mut window) = (0.0f32, f32::INFINITY, f32::INFINITY, std::vec::Vec::new());
+    loop {
+        k += 1;
+        let t = k as f32 * dt;
+        assert!(t < max_s, "no STOP within {max_s} s: {:.2} m, v_D {:.2}", -p.d, p.v);
+        each(p, t);
+        let o = p.step(None);
+        if !o.armed {
+            assert!(p.on_ground(), "a stop in the air at {:.2} m", -p.d);
+            break;
+        }
+        if p.on_ground() {
+            contact.get_or_insert(t);
+        }
+        if t >= 1.0 && contact.is_none() {
+            v_min = v_min.min(p.v);
+        }
+        if stopped.is_none() && p.v <= LAND_SPEED_HIGH_MS + 0.05 {
+            stopped = Some(t);
+        }
+        if stopped.is_some() && contact.is_none() {
+            v_max = v_max.max(p.v);
+            window.push(p.d);
+            let n = (5.0 / dt) as usize;
+            if window.len() > n {
+                min_drop = min_drop.min(window[window.len() - 1] - window[window.len() - 1 - n]);
+            }
+        }
+    }
+    let contact = contact.unwrap_or(f32::NAN);
+    LandRun { stopped_s: stopped.unwrap_or(f32::NAN), min_drop_5s: min_drop, v_max, v_min, contact_s: contact, stop_after_s: k as f32 * dt - contact }
+}
+
+/// The chop case of N18 (c) on the quadratic-drag plant: 3 s at throttle 0 in Angle from a 60 m hover, the sticks lost
+/// at about 31 m falling at 15 m/s (FS_HOLD_EN 0: LAND). With `seat_off` (the control) the target is not seated.
+fn chop_land(seat_off: bool) -> LandRun {
+    let mut p = quadratic_plant(1.0);
+    p.f.shaper.seat_off = seat_off;
+    p.hover_at(60.0, 5.0);
+    for _ in 0..2_400 {
+        p.step(Some((true, 0.0, Switch3::Low)));
+    }
+    let (h, v) = (-p.d, p.v);
+    while p.f.hands_off_state() == State::Pilot {
+        p.step(None);
+    }
+    assert_eq!(p.f.hands_off_state(), State::Land);
+    std::println!("N18 chop: sticks lost at {h:.1} m falling at {v:.2} m/s; LAND at {:.1} m, {:.2} m/s", -p.d, p.v);
+    land_to_stop(&mut p, 120.0, |_, _| {})
+}
+
+/// N18 (c): after the chop LAND stops the fall, descends at no more than 1.5 m/s, never hovers (at least 1 m lower in
+/// every 5 s window until contact), and TD stops the motors on the ground. Control: without the seat it hovers.
+#[test]
+fn n18_chop_then_stick_loss_land_stops_the_fall_descends_and_td_stops() {
+    let r = chop_land(false);
+    std::println!(
+        "N18 chop: fall stopped {:.2} s after LAND; smallest drop in 5 s {:.2} m; largest descent after {:.2} m/s; contact {:.1} s; STOP {:.2} s after contact",
+        r.stopped_s, r.min_drop_5s, r.v_max, r.contact_s, r.stop_after_s
+    );
+    assert!(r.min_drop_5s >= 1.0 && r.v_max <= LAND_SPEED_HIGH_MS + 0.15, "{} {}", r.min_drop_5s, r.v_max);
+}
+
+/// N18 (c) control: the seat removed, the chop case hovers (no STOP within 120 s).
+#[test]
+#[should_panic(expected = "no STOP within")]
+fn n18_control_without_the_seat_the_chop_case_hovers() {
+    chop_land(true);
+}
+
+/// N18 (c): LAND entered while descending at 3 m/s and at 6 m/s (Angle at throttle 0.3 from a 60 m hover, then the
+/// collective that holds that speed against the drag, then the sticks lost): v_D never negative from 1 s after the entry,
+/// touchdown, TD STOP.
+#[test]
+fn n18_land_entered_descending_at_3_and_6_m_s_never_climbs() {
+    for v_entry in [3.0f32, 6.0] {
+        let mut p = quadratic_plant(1.0);
+        p.hover_at(60.0, 5.0);
+        while p.v < v_entry {
+            assert!(p.step(Some((true, 0.3, Switch3::Low))).armed && p.d < -20.0);
+        }
+        let thr = p.f.shaper.throttle_for(MASS * (GRAVITY_MSS - p.kq * v_entry * v_entry));
+        for _ in 0..400 {
+            p.step(Some((true, thr, Switch3::Low)));
+        }
+        while p.f.hands_off_state() == State::Pilot {
+            p.step(None);
+        }
+        let (h0, v0) = (-p.d, p.v);
+        let r = land_to_stop(&mut p, 200.0, |_, _| {});
+        std::println!("N18 LAND entered at {h0:.1} m descending {v0:.2} m/s: smallest v_D from 1 s {:.3} m/s; contact {:.1} s; STOP {:.2} s after contact", r.v_min, r.contact_s, r.stop_after_s);
+        assert!(r.v_min >= 0.0, "v_entry {v_entry}: v_D {}", r.v_min);
+    }
+}
+
+/// N18 (c): a 2 m downward step of the height estimate during LAND at 15 m (from a 20 m hover, FS_HOLD_EN 0): no climb
+/// back (true v_D never negative after the step), the descent continues, touchdown, TD STOP.
+#[test]
+fn n18_a_2_m_downward_step_of_the_estimate_in_land_does_not_climb_back() {
+    let mut p = land_plant();
+    p.hover_at(20.0, 10.0);
+    while p.f.hands_off_state() == State::Pilot {
+        p.step(None);
+    }
+    let mut at = None::<f32>;
+    let mut v_after = f32::INFINITY;
+    let r = land_to_stop(&mut p, 120.0, |p, t| {
+        if at.is_none() && p.d > -15.0 {
+            p.d_off = 2.0;
+            at = Some(t);
+        }
+        if at.is_some() && !p.on_ground() {
+            v_after = v_after.min(p.v);
+        }
+    });
+    std::println!("N18 estimate step +2 m down at {:?} s: smallest true v_D after {v_after:.3} m/s; contact {:.1} s; STOP {:.2} s after contact", at, r.contact_s, r.stop_after_s);
+    assert!(at.is_some() && v_after >= 0.0, "{v_after}");
 }
