@@ -879,7 +879,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let rate = if high { LAND_SPEED_HIGH_MS } else { LAND_SPEED_MS };
         let v_d = nav.velocity_ms[2];
         let start = if nav.valid.velocity_d && v_d.is_finite() {
-            v_d.clamp(-self.shaper.pilot_speed_up_ms, self.shaper.pilot_speed_dn_ms)
+            // max/min, not clamp: clamp's panic on runtime bounds formats floats (XIP code on the flight core).
+            v_d.max(-self.shaper.pilot_speed_up_ms).min(self.shaper.pilot_speed_dn_ms)
         } else {
             rate
         };
