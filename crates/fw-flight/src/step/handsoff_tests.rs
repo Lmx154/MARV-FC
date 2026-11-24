@@ -284,6 +284,20 @@ fn is_centred(o: &StepOut) -> bool {
     }
 }
 
+/// LAND's braking law (H14 (1)): Position at this step's navigation position, no horizontal feed-forward, the LAND
+/// descent rate, no heading rate.
+fn is_braking(o: &StepOut) -> bool {
+    match o.setpoint {
+        Setpoint::Position { position_m, velocity_ms, heading_rate_rads, .. } => {
+            position_m[0] == o.nav.position_m[0]
+                && position_m[1] == o.nav.position_m[1]
+                && velocity_ms == [0.0, 0.0, LAND_SPEED_MS]
+                && heading_rate_rads == 0.0
+        }
+        _ => false,
+    }
+}
+
 #[test]
 fn hold_stick_loss_in_the_air_on_t3_prime_is_hold_with_the_position_law_and_the_gate_armed() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -620,55 +634,42 @@ impl Fly {
 }
 
 /// A vehicle that drifts away from its hold point at 1 m/s (entered at rest there: the anchor is the hold point, b 0):
-/// HOLD with the position law until the step whose position passes X, from that step the Altitude law (level: H13's
-/// anchor distance trips in the step it is measured, one step before the target distance would), and LAND, level,
-/// exactly 1.0 s after that step; the fault stays latched when the vehicle comes back.
+/// HOLD with the position law until the step whose position passes X; that step is LAND with the braking law (H14 (1):
+/// the track fault is a landing cause of its own, no debounce; H13's anchor distance trips in the step it is measured);
+/// the fault stays latched and LAND keeps braking, never captured, when the vehicle comes back and stops.
 #[test]
-fn h12_a_vehicle_that_drifts_away_in_hold_lands_level_one_debounce_after_the_distance_passes_x() {
+fn h12_a_vehicle_that_drifts_away_in_hold_lands_braking_in_the_step_its_distance_passes_x() {
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
     assert_eq!(fly.state(), State::Hold);
     let target = fly.f.shaper.target_ne.expect("the hold point");
     assert_eq!(fly.f.hands_off.anchor(), Some((target, 0.0)));
-    let mut over: Option<u64> = None;
-    let mut land: Option<u64> = None;
+    let mut over = false;
     for k in 0..20_000 {
         fly.drift(1.0);
         let o = fly.quiet();
         let p = fly.cell.get().position_m;
         let d = libm::sqrtf((p[0] - target[0]) * (p[0] - target[0]) + (p[1] - target[1]) * (p[1] - target[1]));
-        if over.is_none() {
-            if d > hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) {
-                over = Some(fly.t);
-                assert!(fly.track_fault() && fly.state() == State::Hold && o.mode == Mode::Altitude, "step {k}");
-                continue;
-            }
-            assert_eq!((fly.state(), o.mode), (State::Hold, Mode::Position), "step {k}");
-            assert!(!fly.track_fault() && fly.f.shaper.target_ne == Some(target));
-        } else if fly.state() == State::Hold {
-            assert!(fly.track_fault());
-            assert!(o.mode == Mode::Altitude && is_centred(&o), "T3' lost: level: {:?}", o.setpoint);
-        } else {
-            assert_eq!(fly.state(), State::Land);
-            land = Some(fly.t);
+        if d > hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) {
+            assert!(fly.track_fault() && fly.state() == State::Land && o.mode == Mode::Position, "step {k}");
+            assert!(is_braking(&o), "step {k}: {:?}", o.setpoint);
+            over = true;
             break;
         }
+        assert_eq!((fly.state(), o.mode), (State::Hold, Mode::Position), "step {k}");
+        assert!(!fly.track_fault() && fly.f.shaper.target_ne == Some(target));
     }
-    let (over, land) = (over.expect("the distance passed X"), land.expect("LAND"));
-    assert_eq!(land - over, hands_off::TIER_DEBOUNCE_US, "1.0 s after the step whose position passed X");
-    // Back at the hold point and stopped: still LAND, level, the fault latched.
+    assert!(over, "the distance passed X");
+    // Back at the hold point and stopped: still LAND, braking, never captured, the fault latched.
     let mut n = fly.cell.get();
     n.position_m[0] = target[0];
     n.velocity_ms = [0.0; 3];
     fly.cell.set(n);
     for _ in 0..2_000 {
         let o = fly.quiet();
-        assert_eq!((fly.state(), o.mode), (State::Land, Mode::Altitude));
+        assert_eq!((fly.state(), o.mode, fly.f.shaper.target_ne), (State::Land, Mode::Position, None));
         assert!(fly.track_fault() && o.armed);
-        match o.setpoint {
-            Setpoint::Altitude { attitude, heading_rate_rads, .. } => assert_eq!((attitude, heading_rate_rads), ([1.0, 0.0, 0.0, 0.0], 0.0)),
-            other => panic!("{other:?}"),
-        }
+        assert!(is_braking(&o), "{:?}", o.setpoint);
     }
 }
 
@@ -732,9 +733,9 @@ fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step(
     }
 }
 
-/// Case (b), TAKEOVER covered (H13 (3): it flies HOLD's law): a drift in TAKEOVER latches
-/// the fault (the Altitude law at the next step); after hand-over the latch stays, so a later stick loss gives LAND,
-/// never HOLD.
+/// Case (b), TAKEOVER covered (H13 (3): it flies HOLD's law): a drift in TAKEOVER latches the fault, and that step
+/// flies TAKEOVER's descent with the braking law (H14, ranked with battery critical: C1); after hand-over the latch
+/// stays, so a later stick loss gives LAND, braking, never HOLD.
 #[test]
 fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -746,11 +747,12 @@ fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
         fly.drift(1.0);
         let o = fly.rc(true, FULL, Switch3::Low);
         assert_eq!(fly.state(), State::Takeover);
-        if tripped {
-            assert!(o.mode == Mode::Altitude && is_centred(&o));
+        if fly.track_fault() {
+            assert!(o.mode == Mode::Position && is_braking(&o), "{:?}", o.setpoint);
+            tripped = true;
             break;
         }
-        tripped = fly.track_fault();
+        assert!(o.mode == Mode::Position && is_centred(&o));
     }
     assert!(tripped);
     fly.rc(true, FULL, Switch3::High);
@@ -758,8 +760,9 @@ fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
     fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Middle);
     assert_eq!(fly.state(), State::Pilot, "hand-over");
     assert!(fly.track_fault());
-    fly.lose();
+    let o = fly.lose();
     assert_eq!(fly.state(), State::Land);
+    assert!(is_braking(&o), "{:?}", o.setpoint);
 }
 
 /// PILOT: a 20 m drift from the captured point never sets the fault, and stick loss later gives HOLD; with FS_HOLD_EN 0
@@ -831,7 +834,7 @@ fn h13_the_controller_s_limit_is_v_ho_in_the_hands_off_states_and_x_follows_the_
 
 /// H13 brake-forever: HOLD entered moving straight away at 0.8 m/s (not below `pilot_hold_speed_ms`) and held there:
 /// never a capture (the target distance stays 0), A and b = 0.8^2 / 6 set at the entry step, and the fault in the step
-/// whose distance from A passes X + b.
+/// whose distance from A passes X + b, that step LAND braking (H14 (1)).
 #[test]
 fn h13_brake_forever_a_vehicle_that_never_slows_below_0_8_m_s_trips_at_x_plus_b() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -850,7 +853,8 @@ fn h13_brake_forever_a_vehicle_that_never_slows_below_0_8_m_s_trips_at_x_plus_b(
         assert_eq!(fly.track_fault(), over, "step {k}");
         if over {
             std::println!("tripped {} m from A (X + b {bound} m)", fly.distance_from([entry[0], entry[1]]));
-            assert_eq!((fly.state(), o.mode), (State::Hold, Mode::Altitude));
+            assert_eq!((fly.state(), o.mode), (State::Land, Mode::Position));
+            assert!(is_braking(&o), "{:?}", o.setpoint);
             return;
         }
         assert_eq!((fly.state(), o.mode, fly.f.shaper.target_ne, fly.f.track_error_m), (State::Hold, Mode::Position, None, Some(0.0)), "step {k}");

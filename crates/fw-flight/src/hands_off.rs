@@ -135,6 +135,18 @@ pub enum Demand {
     Angle,
 }
 
+/// LAND's horizontal law, chosen every step from this step's facts (decision-heading-monitor-20261123, H14 (1)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LandLaw {
+    /// No track fault and this step's T3' (so also the debounced one): hold the horizontal position (B4).
+    Hold,
+    /// The track fault and this step's T3': `Setpoint::Position` at this step's position with no velocity feed-forward,
+    /// on every step, never captured.
+    Brake,
+    /// Otherwise: level (Altitude, or Angle when the height is not covered).
+    Level,
+}
+
 /// A pending station command and the link it came on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StationCommand {
@@ -249,7 +261,7 @@ pub enum DenyReason {
     WaypointDistanceUnknown,
     /// Start: a waypoint is more than `HOME_RANGE_M` from home.
     WaypointBeyondRange,
-    /// Start: the heading monitor is not OK.
+    /// Start: the heading monitor is not OK, or the track fault is latched (H14).
     HeadingNotOk,
     /// Start: the battery is not known to be non-critical.
     BatteryNotOk,
@@ -352,12 +364,14 @@ pub struct Output {
     pub events: Events,
     /// LAND: selects the LAND law (A8) only; it triggers no disarm (WR1: the ground exit is the state machine's).
     pub landing: bool,
-    /// LAND on this step's T3': hold the horizontal position; otherwise LAND descends level (B4).
+    /// LAND flying [`LandLaw::Hold`].
     pub land_holds_position: bool,
+    /// LAND and TAKEOVER's descent: the horizontal law (H14 (1)); `None` otherwise.
+    pub land_law: Option<LandLaw>,
     /// The highest level the flight code may demand this step, from this step's flags (B5, I12).
     pub demand: Demand,
-    /// TAKEOVER after the battery was critical in it (C1): fly the LAND law (A8) with the synthetic sticks, holding
-    /// the horizontal position only when `demand` is Position (B4); hand-over stays possible.
+    /// TAKEOVER after the battery was critical in it (C1), or with the track fault (H14): fly the LAND law (A8) with
+    /// the synthetic sticks and `land_law`; hand-over stays possible.
     pub takeover_descent: bool,
     /// For the gate: a report with arm OFF must not disarm. Hands-off state, K clear and airborne (C1), after this
     /// step's report.
@@ -403,8 +417,8 @@ pub struct HandsOff {
     below_t3_since: Option<u64>,
     /// The first step of the present run of T1 steps.
     below_t2_since: Option<u64>,
-    /// H12 track_fault: `heading_ok` counts as false; set by `track_error_m` or by the distance from the anchor (H13),
-    /// cleared on a disarmed step only.
+    /// H12 track_fault, a landing cause of its own (H14 (1)); set by `track_error_m` or by the distance from the anchor
+    /// (H13), cleared on a disarmed step only.
     track_fault: bool,
     /// The previous step's state is one the check covers (H12 item 4 with H13 (3)): HOLD, AUTO, RETURN, TAKEOVER, or
     /// LAND holding position.
@@ -523,9 +537,17 @@ impl HandsOff {
             Tier::T2 => Demand::Altitude,
             Tier::T1 => Demand::Angle,
         };
+        let land_law = (self.state == State::Land || (self.state == State::Takeover && self.descent)).then_some(
+            match demand {
+                Demand::Position if self.track_fault => LandLaw::Brake,
+                Demand::Position => LandLaw::Hold,
+                Demand::Altitude | Demand::Angle => LandLaw::Level,
+            },
+        );
+        let land_holds_position = self.state == State::Land && land_law == Some(LandLaw::Hold);
         self.update_anchor(was, demand, i);
-        self.track_covered = matches!(self.state, State::Hold | State::Auto | State::Return | State::Takeover)
-            || (self.state == State::Land && demand == Demand::Position);
+        self.track_covered =
+            matches!(self.state, State::Hold | State::Auto | State::Return | State::Takeover) || land_holds_position;
         Output {
             state: self.state,
             hands_off,
@@ -535,7 +557,8 @@ impl HandsOff {
             return_height_m: self.return_height_m,
             events: ev,
             landing: self.state == State::Land,
-            land_holds_position: self.state == State::Land && demand == Demand::Position,
+            land_holds_position,
+            land_law,
             demand,
             takeover_descent: self.state == State::Takeover && self.descent,
             arm_off_holds: self.arm_off_holds(i),
@@ -573,9 +596,9 @@ impl HandsOff {
         }
     }
 
-    /// H12: heading_ok = the input AND NOT track_fault.
+    /// H14 (1): heading_ok = the input only (the track fault is a landing cause of its own).
     fn heading_ok(&self, i: &Inputs) -> bool {
-        i.heading_ok && !self.track_fault
+        i.heading_ok
     }
 
     /// This step's tier with B4's T3' (T3 needs `heading_ok`).
@@ -681,7 +704,7 @@ impl HandsOff {
                 self.lock(i);
             }
             State::Hold => {
-                if self.debounced != Tier::T3 || i.battery_critical {
+                if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
                     self.go(self.land_state(), i, ev);
                 } else if self.link_age(i) > LINK_LOSS_US {
                     let next = if self.home().is_some() {
@@ -695,7 +718,7 @@ impl HandsOff {
                 }
             }
             State::Auto => {
-                if self.debounced != Tier::T3 || i.battery_critical {
+                if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
                     self.go(self.land_state(), i, ev);
                 } else if i.mission.plan_id != self.flown_plan || i.last_waypoint_reached {
                     self.go(State::Hold, i, ev);
@@ -704,7 +727,7 @@ impl HandsOff {
                 }
             }
             State::Return => {
-                if self.debounced != Tier::T3 || i.battery_critical || i.home_reached {
+                if self.debounced != Tier::T3 || i.battery_critical || self.track_fault || i.home_reached {
                     self.go(self.land_state(), i, ev);
                 }
             }
@@ -719,7 +742,7 @@ impl HandsOff {
                 }
             }
         }
-        if self.state == State::Takeover && i.battery_critical {
+        if self.state == State::Takeover && (i.battery_critical || self.track_fault) {
             self.descent = true;
         }
     }
@@ -742,10 +765,13 @@ impl HandsOff {
         self.lock_open |= high;
     }
 
-    /// Sticks lost in PILOT or TAKEOVER: by the debounced tier when armed and airborne, else STOP.
+    /// Sticks lost in PILOT or TAKEOVER: STOP on the ground; LAND (or BLIND) with the track fault (H14); else by the
+    /// debounced tier.
     fn lost(&self, i: &Inputs) -> State {
         if !i.airborne {
             State::Stop
+        } else if self.track_fault {
+            self.land_state()
         } else {
             match self.debounced {
                 Tier::T3 => State::Hold,
@@ -936,7 +962,7 @@ impl HandsOff {
         if !waypoints_within {
             return Some(DenyReason::WaypointBeyondRange);
         }
-        if !self.heading_ok(i) {
+        if !self.heading_ok(i) || self.track_fault {
             return Some(DenyReason::HeadingNotOk);
         }
         if i.tier != Tier::T3 {
@@ -2131,7 +2157,11 @@ mod tests {
             (DenyReason::NoWaypoints, |r| r.i.mission.has_waypoints = false),
             (DenyReason::HeightOutsideLimits, |r| r.i.mission.z_within_limits = false),
             (DenyReason::NoHome, |r| r.h.home_ne = None),
-            (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_m = [2000.0, 0.0]),
+            // A move inside HOLD with the NE velocity valid would trip H13's anchor and land at once (H14).
+            (DenyReason::VehicleBeyondRange, |r| {
+                r.i.position_ne_m = [2000.0, 0.0];
+                r.i.velocity_ne_valid = false;
+            }),
             (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_valid = false),
             (DenyReason::WaypointDistanceUnknown, |r| r.i.mission.max_waypoint_distance_m = None),
             (DenyReason::WaypointDistanceUnknown, |r| r.i.mission.max_waypoint_distance_m = Some(f32::NAN)),
@@ -2139,7 +2169,10 @@ mod tests {
                 r.i.mission.max_waypoint_distance_m = Some(f32::INFINITY)
             }),
             (DenyReason::WaypointBeyondRange, |r| r.i.mission.max_waypoint_distance_m = Some(1000.5)),
-            (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_m = [f32::NAN, 0.0]),
+            (DenyReason::VehicleBeyondRange, |r| {
+                r.i.position_ne_m = [f32::NAN, 0.0];
+                r.i.velocity_ne_valid = false;
+            }),
             (DenyReason::HeadingNotOk, |r| r.i.heading_ok = false),
             (DenyReason::NotT3, |r| r.i.tier = Tier::T2),
             (DenyReason::BatteryNotOk, |r| r.i.battery_ok = false),
@@ -2951,7 +2984,8 @@ mod tests {
             }
             hold += u32::from(out.state == State::Hold);
         }
-        assert!(hold > 1_000 && start_denied > 10, "{hold} {start_denied}");
+        // H14: a track fault (the random positions trip the anchor) leaves HOLD at that step, not 1.0 s later.
+        assert!(hold > 500 && start_denied > 10, "{hold} {start_denied}");
     }
 
     struct Lcg(u64);
@@ -3039,23 +3073,24 @@ mod tests {
 
     // ---- H12: the hold-integrity distance check ----
 
-    /// One step over X, then back below: set at the step that receives the distance, kept until the disarm edge; T3' is
-    /// lost at once (the demand drops to Altitude) and LAND, level, follows after the 1.0 s debounce (I-H1, I-H2).
+    /// One step over X, then back below: set at the step that receives the distance, kept until the disarm edge; LAND
+    /// at that step (a landing cause of its own, H14 (1): no debounce), T3' kept (the demand stays Position), the braking
+    /// law at that step and every later one (I-H2).
     #[test]
-    fn h12_one_step_over_x_latches_until_the_disarm_edge_and_lands_level_after_the_debounce() {
+    fn h12_one_step_over_x_latches_until_the_disarm_edge_and_lands_braking_at_that_step() {
         let mut r = Rig::hold();
         r.i.track_error_m = Some(5.5);
         let out = r.step();
         assert!(r.h.track_fault());
-        assert_eq!((out.state, out.demand), (State::Hold, Demand::Altitude));
+        assert_eq!(
+            (out.state, out.demand, out.land_law, out.land_holds_position),
+            (State::Land, Demand::Position, Some(LandLaw::Brake), false)
+        );
         r.i.track_error_m = Some(0.0);
         let t0 = r.now();
-        assert_eq!(r.at(t0 + TIER_DEBOUNCE_US - 1).state, State::Hold, "0.99.. s: HOLD");
-        let out = r.at(t0 + TIER_DEBOUNCE_US);
-        assert_eq!((out.state, out.demand, out.land_holds_position), (State::Land, Demand::Altitude, false), "1.0 s");
         for k in 1..2_000 {
-            let out = r.at(t0 + TIER_DEBOUNCE_US + k * 1_000);
-            assert_eq!((out.state, out.land_holds_position), (State::Land, false), "step {k}");
+            let out = r.at(t0 + k * 1_000);
+            assert_eq!((out.state, out.land_law, out.land_holds_position), (State::Land, Some(LandLaw::Brake), false), "step {k}");
             assert!(r.h.track_fault(), "step {k}");
         }
         // The disarm edge clears it; the next arming starts clear.
@@ -3084,7 +3119,7 @@ mod tests {
             r.i.track_error_m = Some(d);
             let out = r.step();
             assert_eq!(r.h.track_fault(), trips, "{d}");
-            assert_eq!(out.demand == Demand::Position, !trips, "{d}");
+            assert_eq!((out.state == State::Land, out.demand), (trips, Demand::Position), "{d}");
         }
     }
 
@@ -3160,9 +3195,10 @@ mod tests {
         assert!(r.h.track_fault());
     }
 
-    /// heading_ok = the input AND NOT track_fault: Start is accepted only with the input true and no fault.
+    /// H14 (1): heading_ok = the input only: T3' (the demand) follows the input whatever the fault; the fault lands at
+    /// once, so Start meets LAND (NotInThisState); Start's own check denies a latched fault as HeadingNotOk.
     #[test]
-    fn h12_the_heading_input_and_the_fault_combine_as_and() {
+    fn h14_heading_ok_is_the_input_only_and_start_is_denied_with_the_fault() {
         for (heading, fault) in [(true, false), (true, true), (false, false), (false, true)] {
             let mut r = Rig::hold();
             r.i.heading_ok = heading;
@@ -3171,14 +3207,19 @@ mod tests {
             }
             let out = r.step();
             r.i.track_error_m = None;
-            assert_eq!(out.demand == Demand::Position, heading && !fault, "{heading} {fault}");
-            let want = if heading && !fault {
-                Some(CommandResult::Accepted)
-            } else {
-                denied(DenyReason::HeadingNotOk)
+            assert_eq!(out.demand == Demand::Position, heading, "{heading} {fault}");
+            assert_eq!(out.state, if fault { State::Land } else { State::Hold }, "{heading} {fault}");
+            let want = match (heading, fault) {
+                (_, true) => denied(DenyReason::NotInThisState),
+                (true, false) => Some(CommandResult::Accepted),
+                (false, false) => denied(DenyReason::HeadingNotOk),
             };
             assert_eq!(r.cmd(Command::Start).command, want, "{heading} {fault}");
         }
+        let mut r = Rig::hold();
+        assert_eq!(r.h.start_check(&r.i), None);
+        r.h.track_fault = true;
+        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::HeadingNotOk));
     }
 
     // ---- H13: the anchor, the braking allowance, the speed cap and X ----
@@ -3287,7 +3328,7 @@ mod tests {
             r.i.position_ne_m = [n, 0.0];
             let out = r.step();
             assert_eq!(r.h.track_fault(), trips, "{n}");
-            assert_eq!(out.demand == Demand::Position, !trips, "{n}");
+            assert_eq!(out.state == State::Land, trips, "{n}");
         }
     }
 

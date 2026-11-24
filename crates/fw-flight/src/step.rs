@@ -3,7 +3,7 @@
 //! `sensors.imu1.t_us`.
 
 use crate::gate::{Gate, MotorCommand};
-use crate::hands_off::{self, Demand, HandsOff, MissionFacts, State, Tier};
+use crate::hands_off::{self, Demand, HandsOff, LandLaw, MissionFacts, State, Tier};
 use crate::gnc::{
     Allocation, Allocator, Controller, Estimator, Mode, NavState, RateLog, Refused, Saturation,
     Sensors, Setpoint, ThrustTorque, Valid,
@@ -135,6 +135,9 @@ struct StickShaper {
     /// LAND's law (decision-mavlink-mode-20261123, A8): the height target's rate, m/s down, instead of the throttle
     /// stick's; `None` outside LAND.
     land_rate_d_ms: Option<f32>,
+    /// LAND's braking law (decision-heading-monitor-20261123, H14 (1)): the position target is this step's position at
+    /// every step, never captured; false outside it.
+    brake_only: bool,
     /// The previous step's time, us; `None` before the first.
     t_prev_us: Option<u64>,
     /// Tests only: the lead cap is off.
@@ -269,6 +272,7 @@ impl StickShaper {
         #[cfg(test)]
         let stopped = stopped || self.capture_any_speed;
         self.target_ne = match self.target_ne {
+            _ if self.brake_only => None,
             None if brake && stopped => Some([pn, pe]),
             Some(_) if !brake => None,
             other => other,
@@ -451,6 +455,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 target_d: None,
                 target_ne: None,
                 land_rate_d_ms: None,
+                brake_only: false,
                 t_prev_us: None,
                 #[cfg(test)]
                 lead_cap_off: false,
@@ -730,6 +735,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 yaw: 0.0,
             };
             self.shaper.land_rate_d_ms = (ho.landing || ho.takeover_descent).then_some(LAND_SPEED_MS);
+            self.shaper.brake_only = ho.land_law == Some(LandLaw::Brake);
             // H13 (3): the first hands-off step drops the pilot's target; capture restarts under `pilot_hold_speed_ms`.
             if matches!(was, State::Pilot | State::Stop) {
                 self.shaper.target_ne = None;
@@ -738,6 +744,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let setpoint = self.shaper.setpoint(mode, &nav, t_us);
         self.shaper.sticks = real;
         self.shaper.land_rate_d_ms = None;
+        self.shaper.brake_only = false;
         // H12: |p_NE - r_NE| of this step, r the target the controller gets (while unlocked, this step's position).
         self.track_error_m = match setpoint {
             Setpoint::Position { position_m: [tn, te, _], .. } => {
