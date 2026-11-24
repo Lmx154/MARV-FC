@@ -191,6 +191,8 @@ pub struct Inputs {
     pub armed: bool,
     /// The airborne latch.
     pub airborne: bool,
+    /// The low mark (N14 (1)): the collective has reached `EVER_AIRBORNE_G` x m g at an armed step since arming.
+    pub lifted: bool,
     /// The validity tier.
     pub tier: Tier,
     /// Steering north and east from the origin, m, and whether they may be used (`position_ne`).
@@ -421,8 +423,8 @@ pub struct HandsOff {
     home_window: bool,
     /// FS_HOLD_EN in force, taken on disarmed steps (B9).
     fs_in_force: bool,
-    /// "Ever airborne" (Amendment N, N1 and N10 (iii)): the airborne latch has been set at an armed step since arming;
-    /// cleared on a disarmed step.
+    /// "Ever airborne" (Amendment N, N1 and N10 (iii); N14 (1)): the low mark (`Inputs::lifted`) or the airborne latch has
+    /// been set at an armed step since arming; cleared on a disarmed step.
     ever_airborne: bool,
     /// The tier for exits and the stick-loss entry (B5).
     debounced: Tier,
@@ -523,7 +525,7 @@ impl HandsOff {
         if !i.armed {
             self.fs_in_force = i.fs_hold_en;
         }
-        self.ever_airborne = i.armed && (self.ever_airborne || i.airborne);
+        self.ever_airborne = i.armed && (self.ever_airborne || i.airborne || i.lifted);
         // H12: the previous step's distance against X, in the state that step flew; latched until disarmed.
         let x = track_fault_m(i.speed_xy_ms);
         if !i.armed {
@@ -795,7 +797,8 @@ impl HandsOff {
         self.lock_open |= high;
     }
 
-    /// Sticks lost in PILOT or TAKEOVER: with the latch false, STOP if never airborne since arming or TD has held, else
+    /// Sticks lost in PILOT or TAKEOVER: with the latch false, STOP if never airborne since arming (N14 (1): the low mark
+    /// or the latch) or TD has held, else
     /// LAND (or BLIND) (N10 (iii)); LAND (or BLIND) with the track fault (H14); else by the debounced tier, T3' giving
     /// LAND instead of HOLD while FS_HOLD_EN in force is 0 (Amendment N, N2).
     fn lost(&self, i: &Inputs) -> State {
@@ -1099,6 +1102,7 @@ mod tests {
                 track_error_m: None,
                 speed_xy_ms: Tuning::DEFAULT.pilot_speed_xy_ms,
                 td_held: true,
+                lifted: false,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),

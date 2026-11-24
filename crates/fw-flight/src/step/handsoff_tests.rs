@@ -149,9 +149,10 @@ const WALK_C270814: [(u64, u64, u64); 3] = [
 /// before it did not. Re-baselined for N12 (the walk feeds no RADIO_STATUS, so an arm-OFF report after a stick loss
 /// stops at once); before N12: 0x7629_5a56_9aae_7065, 0x46a3_bae4_d352_1f51, 0xef4e_8cca_25eb_2f21. Re-baselined for
 /// N11 (2) (LAND starts from the estimated v_D); N12 alone: 0x86d2_b007_f7eb_cab0, 0xf12b_8b95_ced1_2aef,
-/// 0x03c3_c9eb_a852_01ec.
+/// 0x03c3_c9eb_a852_01ec. Re-baselined for N14 (1) (the low mark: a stick loss after spool-up lands; seed 0b01 only);
+/// before: 0xd546_494e_cde7_4b56.
 const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0xd546_494e_cde7_4b56),
+    (0x5eed_0b01, 0x729d_27a8_4707_fc19),
     (0x5eed_0b02, 0x4b6b_6a15_c678_b15e),
     (0x5eed_0b03, 0x196e_228a_8cf2_ceab),
 ];
@@ -160,9 +161,10 @@ const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
 /// after the first airborne stick loss LAND holds position (or brakes) where the estimate covers it. Re-baselined for N12
 /// (no RADIO_STATUS: an arm-OFF report after a stick loss stops at once); before N12: 0x65a2_4273_a378_82ff,
 /// 0xa6c7_d3b0_eb7a_e384, 0x8b10_b43b_bafb_351a. Re-baselined for N11 (2) (LAND starts from the estimated v_D); N12
-/// alone: 0xce7a_cba4_76de_f8c5, 0x34f3_cc4f_6c55_e901, 0x942f_8427_0db8_35d6.
+/// alone: 0xce7a_cba4_76de_f8c5, 0x34f3_cc4f_6c55_e901, 0x942f_8427_0db8_35d6. Re-baselined for N14 (1) (the low
+/// mark; seed 0b01 only); before: 0x56bb_b0b0_9e28_c915.
 const WALK_GOLDEN: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0x56bb_b0b0_9e28_c915),
+    (0x5eed_0b01, 0xb5ce_e71d_824e_7eb2),
     (0x5eed_0b02, 0xfc05_671f_8228_7f0d),
     (0x5eed_0b03, 0x819a_fb5f_e3c2_d65f),
 ];
@@ -199,6 +201,7 @@ fn i2_control_fs_hold_en_1_changes_the_flights() {
                 f.set_fs_hold_en(fs);
                 f.set_heading_ok(false);
             });
+            std::println!("heading off, seed {seed:#x}, fs {fs}: {h:#018x}");
             assert_eq!(h, golden_off, "seed {seed:#x}, fs {fs}, heading forced false");
         }
         let (h, _, _) = walk(seed, 40_000, |f| f.set_fs_hold_en(true));
@@ -1703,6 +1706,7 @@ fn wr3_and_return_built_on_the_real_step() {
     // main sequence is unchanged) puts the estimate 3 m above where it was now and then (0.1 % of steps), holds IMU1 at rest
     // on hands-off steps (99 %) and also clears the latch while TD holds (2 % of those steps), keeping (d) exercised.
     let mut clears = Lcg(0x5eed_0d3c);
+    let mut hold_low = false;
     for k in 0..2_000_000u32 {
         t += DT_US;
         if radio.chance(1) {
@@ -1743,10 +1747,16 @@ fn wr3_and_return_built_on_the_real_step() {
             f.airborne = false;
         }
         let air = f.airborne;
+        // N14 (1): an arming that lifts (collective 0.34 m g) loses its sticks to LAND, so (c) needs armings held in
+        // Angle at throttle 0; the generator of its own picks a fifth of the armings for that.
+        if !f.gate.armed() {
+            hold_low = clears.chance(200);
+        }
+        let (thr_rc, sw_rc) = if hold_low { (0.0, Switch3::Low) } else { (throttle, switch6) };
         let rc = (quiet == 0).then(|| RcSample {
-            sticks: Sticks { roll: rng.unit() - 0.5, pitch: rng.unit() - 0.5, throttle, yaw: rng.unit() - 0.5 },
+            sticks: Sticks { roll: rng.unit() - 0.5, pitch: rng.unit() - 0.5, throttle: thr_rc, yaw: rng.unit() - 0.5 },
             arm,
-            switch6,
+            switch6: sw_rc,
             t_us: t,
         });
         if rc.is_some() {
@@ -1881,11 +1891,13 @@ fn n2_fs_hold_en_0_stick_loss_in_the_air_is_land_or_blind_never_hold_never_stop(
 }
 
 /// N7: armed on the ground and never airborne, a stick loss is STOP and disarms at the first step past the stick-loss
-/// time, as before Amendment N, with FS_HOLD_EN 0 and 1 (the latch false: N2 keeps this stop; IMU1 reads zero specific
+/// time, as before Amendment N, with FS_HOLD_EN 0 and 1, in Angle at throttle 0 (the collective under N14 (1)'s low mark).
+/// N14 (1): in High (Altitude on the ground, its collective about m g) the low mark sets at spool-up, so the loss gives
+/// LAND and TD stops it within 3.2 s + 1.0 s (N14's accepted cost). (The latch false: N2 keeps this stop; IMU1 reads zero specific
 /// force, so it does not rest on TD's acceleration condition).
 #[test]
 fn n2_stick_loss_on_the_ground_before_take_off_stops_in_the_same_step_as_before() {
-    for fs in [false, true] {
+    for (fs, sw) in [(false, Switch3::Low), (true, Switch3::Low), (false, Switch3::High), (true, Switch3::High)] {
         let tuning = Tuning::DEFAULT;
         let cell = Cell::new(nav_at(0.0, POSITION));
         let mut f = flight(&cell, handshake(), &tuning);
@@ -1893,9 +1905,10 @@ fn n2_stick_loss_on_the_ground_before_take_off_stops_in_the_same_step_as_before(
         let mut t = 1_000_000;
         for k in 0..400 {
             t += DT_US;
-            f.step(&input(t, Some(super::althold_tests::report(t, k >= 1, 0.0, Switch3::High))));
+            f.step(&input(t, Some(super::althold_tests::report(t, k >= 1, 0.0, sw))));
         }
         assert!(f.gate.armed() && !f.airborne, "fs {fs}: armed on the ground");
+        assert_eq!(f.lifted, sw == Switch3::High, "fs {fs} {sw:?}: the low mark");
         let last = t;
         while t + DT_US <= last + tuning.rc_fs_timeout_us {
             t += DT_US;
@@ -1903,7 +1916,19 @@ fn n2_stick_loss_on_the_ground_before_take_off_stops_in_the_same_step_as_before(
         }
         assert!(f.step(&input(last + tuning.rc_fs_timeout_us, None)).armed, "fs {fs}: exactly 1.0 s");
         let o = f.step(&input(last + tuning.rc_fs_timeout_us + 1, None));
-        assert!(!o.armed && o.motors.throttles().is_none(), "fs {fs}: 1.0 s + 1 us");
+        if sw == Switch3::High {
+            assert!(o.armed && f.hands_off_state() == State::Land, "fs {fs}: LAND at 1.0 s + 1 us");
+            let lost = t;
+            let mut at_rest = input(t, None);
+            at_rest.sensors.imu1.reading.accel_ms2 = AT_REST;
+            while f.step(&FlightInputs { sensors: Sensors { imu1: crate::imu::ImuSample { t_us: t, ..at_rest.sensors.imu1 }, ..at_rest.sensors }, ..at_rest }).armed {
+                t += DT_US;
+                assert!(t - lost <= 4_200_000, "fs {fs}: no stop within 4.2 s");
+            }
+            std::println!("N14 ground loss in High, fs {fs}: STOP {} us after the loss", t - lost);
+        } else {
+            assert!(!o.armed && o.motors.throttles().is_none(), "fs {fs}: 1.0 s + 1 us");
+        }
         assert_eq!(f.hands_off_state(), State::Stop);
     }
 }
@@ -2514,13 +2539,13 @@ fn learns(change: impl FnOnce(&mut Fly)) -> bool {
     moved
 }
 
-/// N11 (1e): each gate blocks the learner alone: the airborne latch, TD held (N13), v_D not valid, |v_D| at 0.6 m/s,
+/// N11 (1e): each gate blocks the learner alone: the low mark (N14 (1)), TD held (N13), v_D not valid, |v_D| at 0.6 m/s,
 /// roll or pitch at 5 deg; it learns just inside each bound; a disarmed step resets H to the card's m g and the time.
 #[test]
 fn n11_each_gate_condition_blocks_learning() {
     let deg = core::f32::consts::PI / 180.0;
     assert!(learns(|_| {}), "all gates pass");
-    assert!(!learns(|f| f.f.airborne = false), "latch clear");
+    assert!(!learns(|f| f.f.lifted = false), "low mark clear");
     assert!(!learns(|f| f.f.still_us = f.f.land_detect_us), "TD held");
     assert!(!learns(|f| f.set_valid(Valid { velocity_d: false, ..ALTITUDE })), "v_D not valid");
     for v in [0.6, -0.6] {

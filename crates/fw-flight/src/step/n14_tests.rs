@@ -242,3 +242,41 @@ fn n14_blind_in_the_air_probes_abort_and_never_stop() {
         assert!(probes > 0 && aborted + 1 >= probes, "gain {gain}: {probes} {aborted}");
     }
 }
+
+/// A gentle take-off in Angle at real gain `gain`: the throttle ramps at 0.2 per second up to the collective 1.03 m g /
+/// gain, to 3 m, then the hover collective m g / gain for 5 s. Returns the plant and whether the airborne latch (0.714)
+/// was ever set.
+fn gentle_take_off(gain: f32) -> (Plant, bool) {
+    let mut p = Plant::new(gain, 0.0, POSITION);
+    p.step(Some((false, 0.0, Switch3::Low)));
+    p.step(Some((true, 0.0, Switch3::Low)));
+    let (climb, hover) = (p.f.shaper.throttle_for(1.03 * MASS * GRAVITY_MSS / gain), p.f.shaper.throttle_for(MASS * GRAVITY_MSS / gain));
+    let (mut thr, mut latch) = (0.0f32, false);
+    while p.d > -3.0 {
+        thr = (thr + 0.2 * DT_US as f32 * 1e-6).min(climb);
+        assert!(p.step(Some((true, thr, Switch3::Low))).armed && p.t < 60_000_000);
+        latch |= p.f.airborne;
+    }
+    for _ in 0..4_000 {
+        assert!(p.step(Some((true, hover, Switch3::Low))).armed);
+        latch |= p.f.airborne;
+    }
+    (p, latch)
+}
+
+/// N14 (1): at real gain 1.46 a gentle take-off never sets the 0.714 latch but sets the low mark ("ever airborne"), and
+/// a stick loss in that hover gives LAND (FS_HOLD_EN 0, T3), not STOP; the vehicle stays armed and in the air for 2 s.
+#[test]
+fn n14_low_mark_sets_at_gain_1_46_and_a_stick_loss_there_lands() {
+    let (mut p, latch) = gentle_take_off(1.46);
+    assert!(!latch, "the 0.714 latch set");
+    assert!(p.f.lifted && p.f.hands_off.ever_airborne(), "the low mark");
+    for k in 0..2_400 {
+        let o = p.step(None);
+        let s = p.f.hands_off_state();
+        assert!(o.armed && s != State::Stop && p.d < -1.0, "step {k}: {s:?}, {} m", p.d);
+        if k > 1_000 {
+            assert_eq!(s, State::Land, "step {k}");
+        }
+    }
+}

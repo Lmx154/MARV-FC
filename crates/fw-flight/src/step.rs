@@ -123,6 +123,16 @@ const HOVER_SIN_PITCH_MAX: f32 = 0.087_155_74;
 const HOVER_MIN_G: f32 = 0.88;
 const HOVER_MAX_G: f32 = 1.12;
 
+/// N14 (1), (2): the strongest and the weakest real thrust gain against the card: the plant spread +-30 % (tuning.rs
+/// `ground_thrust_g`) times the measured gain range +-12 % (tune1 section 12), 1.30 x 1.12 = 1.456 and 0.70 x 0.88 =
+/// 0.616, as N14 rounds them.
+const GAIN_MAX: f32 = 1.46;
+const GAIN_MIN: f32 = 0.62;
+
+/// N14 (1): "ever airborne" latches when the commanded collective first reaches this x the card's m g after arming:
+/// ArduPilot's hover/2 (ArduCopter Attitude.cpp:120) at the strongest end of the spread, 0.5 / `GAIN_MAX` = 0.34.
+pub const EVER_AIRBORNE_G: f32 = 0.5 / GAIN_MAX;
+
 /// N11 (1a): the learned hover collective is used after this much qualifying time since arming, us.
 const HOVER_VALID_US: u64 = 10_000_000;
 
@@ -461,6 +471,10 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     airborne: bool,
     /// How long the demand has been refused or on the idle floor in the armed steps since it was last neither, us.
     low_us: u64,
+    /// The low mark (N14 (1)): an armed step's collective has reached `EVER_AIRBORNE_G` x m g since arming; false after
+    /// any disarmed step. The state machine's "ever airborne" and the hover learner read it; Position and the integrator
+    /// hold keep the airborne latch.
+    lifted: bool,
     /// The time the collective must stay low before the latch clears, us (`land_detect_us`).
     land_detect_us: u64,
     /// The previous step's time, us; `None` before the first.
@@ -615,6 +629,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             },
             airborne: false,
             low_us: 0,
+            lifted: false,
             land_detect_us: tuning.land_detect_us,
             last_us: None,
             ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
@@ -874,8 +889,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         #[cfg(not(test))]
         let battery_critical = false;
         let was = self.hands_off.state();
-        // N11 (1a): the latch and TD as the state machine reads them at this step.
-        let (air_in, td_in) = (self.airborne, self.still_us >= self.land_detect_us);
+        // N11 (1a): the low mark (N14 (1)) and TD as the state machine reads them at this step.
+        let (lifted_in, td_in) = (self.lifted, self.still_us >= self.land_detect_us);
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
             fs_hold_en: self.fs_hold_en,
@@ -884,6 +899,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             last_radio_status_us: self.last_radio_status_us,
             armed: self.gate.armed(),
             airborne: self.airborne,
+            lifted: lifted_in,
             tier,
             position_ne_m: [nav.position_m[0], nav.position_m[1]],
             position_ne_valid: nav.valid.position_ne,
@@ -1036,6 +1052,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let floor = if self.td_card_rule { !thrust_ok } else { floor };
         #[cfg(test)]
         let low = if self.threshold_rule { !thrust_ok } else { low };
+        // N14 (1): the low mark, set by an armed step's collective at `EVER_AIRBORNE_G` x m g, cleared on a disarmed step.
+        self.lifted = self.gate.armed()
+            && (self.lifted || demand.is_ok_and(|d| d.thrust_n >= EVER_AIRBORNE_G * MASS * GRAVITY_MSS));
         if !self.gate.armed() {
             self.airborne = false;
             self.low_us = 0;
@@ -1172,7 +1191,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             }
         }
         // N11 (1a): the hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with a finite
-        // commanded collective (review F2), the latch set and TD not held (as the state machine read them), not BLIND, v_D
+        // commanded collective (review F2), the low mark set (N14 (1)) and TD not held (as the state machine read them), not BLIND, v_D
         // valid below `HOVER_VD_MAX_MS`, roll and pitch
         // each under 5 deg, H follows the commanded collective with `HOVER_TC_S`, clamped; the card's m g when disarmed.
         if !self.gate.armed() {
@@ -1180,7 +1199,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.hover_us = 0;
         } else if let Ok(d) = demand
             && d.thrust_n.is_finite()
-            && air_in
+            && lifted_in
             && !td_in
             && ho.state != State::Blind
             && nav.valid.velocity_d
