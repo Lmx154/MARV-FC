@@ -78,6 +78,27 @@ const THROTTLE_CENTRE: f32 = 0.5;
 /// "land 0.5 m/s", ArduPilot LAND_SPD_MS_DEFAULT, config.h:335-336).
 pub const LAND_SPEED_MS: f32 = 0.5;
 
+/// E2's first stage, m/s down: LAND and the TAKEOVER descent above `LAND_ALT_LOW_M` over home (decision-mavlink-mode-20261123,
+/// E2, approved by the owner in section 17: the approved descent `pilot_speed_dn_ms`, tuning.rs; ArduPilot
+/// LAND_SPD_HIGH_MS, mode_land.cpp:22, mode.cpp:719-727; PX4 MPC_Z_V_AUTO_DN 1.5).
+pub const LAND_SPEED_HIGH_MS: f32 = 1.5;
+
+/// E2: the height above home from which down LAND descends at `LAND_SPEED_MS`, m (ArduPilot LAND_ALT_LOW_M 10,
+/// mode_land.cpp:31; PX4 MPC_LAND_ALT1 10, multicopter_takeoff_land_params.yaml). With no home, `LAND_SPEED_MS` all the
+/// way (E2).
+pub const LAND_ALT_LOW_M: f32 = 10.0;
+
+/// E2: how fast LAND's descent rate changes from one stage to the other, m/s^2, so the change steps neither the velocity
+/// setpoint nor the thrust (ArduPilot WP_ACC_Z default 1.0, AC_WPNav.cpp:14, the vertical acceleration LAND sets,
+/// mode_land.cpp:77).
+pub const LAND_RATE_ACC_MSS: f32 = 1.0;
+
+/// E2: the first stage ends this far above `LAND_ALT_LOW_M`, m: the height a descent that tracks the rate covers while
+/// `LAND_RATE_ACC_MSS` takes it from `LAND_SPEED_HIGH_MS` to `LAND_SPEED_MS`, so it is at `LAND_SPEED_MS` from
+/// `LAND_ALT_LOW_M` down (ArduPilot likewise slows above LAND_ALT_LOW_M, mode.cpp:732-737).
+const LAND_SLOW_MARGIN_M: f32 =
+    (LAND_SPEED_HIGH_MS * LAND_SPEED_HIGH_MS - LAND_SPEED_MS * LAND_SPEED_MS) / (2.0 * LAND_RATE_ACC_MSS);
+
 /// BLIND's collective below hover, m/s^2 (decision-mavlink-mode-20261123, Numbers "BLIND 0.3 m/s^2 below hover", PX4
 /// FlightTaskDescend.cpp:55-58). UNVERIFIED: the decision marks it UNKNOWN (U-1) and for the simulator only.
 pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
@@ -140,7 +161,7 @@ struct StickShaper {
     target_d: Option<f32>,
     /// The position target, m north and east; `None` outside Position and while the sticks move the vehicle.
     target_ne: Option<[f32; 2]>,
-    /// LAND's law (decision-mavlink-mode-20261123, A8): the height target's rate, m/s down, instead of the throttle
+    /// LAND's law (decision-mavlink-mode-20261123, A8, E2): the height target's rate, m/s down, instead of the throttle
     /// stick's; `None` outside LAND.
     land_rate_d_ms: Option<f32>,
     /// LAND's braking law (decision-heading-monitor-20261123, H14 (1)): the position target is this step's position at
@@ -413,6 +434,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     quiet_us: u64,
     /// BLIND's probe: how long its ramp has run, us; `None` when no probe runs.
     probe_us: Option<u64>,
+    /// E2: the descent rate LAND and the TAKEOVER descent flew at the latest step, m/s down; `None` outside them.
+    land_rate_ms: Option<f32>,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -434,6 +457,10 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the battery is critical (the battery monitor is on another branch; the board gives false).
     #[cfg(test)]
     battery_critical: bool,
+    /// Tests only: the state machine is told the RETURN law is built, so home latches (E2's height reference; the board
+    /// gives false).
+    #[cfg(test)]
+    return_built: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -509,6 +536,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             still: false,
             quiet_us: 0,
             probe_us: None,
+            land_rate_ms: None,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -523,6 +551,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             latch_off: false,
             #[cfg(test)]
             battery_critical: false,
+            #[cfg(test)]
+            return_built: false,
         }
     }
 
@@ -703,6 +733,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let battery_critical = self.battery_critical;
         #[cfg(not(test))]
         let battery_critical = false;
+        #[cfg(test)]
+        let return_built = self.return_built;
+        #[cfg(not(test))]
+        let return_built = false;
         let was = self.hands_off.state();
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
@@ -726,7 +760,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             heading_ok: self.heading_ok,
             battery_ok: false,
             battery_critical,
-            return_built: false,
+            return_built,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             still: self.still,
@@ -757,6 +791,22 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 BLIND_THROTTLE - ramp * (BLIND_THROTTLE - ground)
             }
         };
+        let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
+        self.last_us = Some(t_us);
+        // E2: `LAND_SPEED_HIGH_MS` while the height above home is above `LAND_ALT_LOW_M` plus the slowing margin, else (no
+        // home, no valid height) `LAND_SPEED_MS`; the first descent step takes it at once, later steps move towards it at
+        // `LAND_RATE_ACC_MSS`.
+        let high = ho
+            .home
+            .is_some_and(|h| nav.valid.position_d && h.d_m - nav.position_m[2] > LAND_ALT_LOW_M + LAND_SLOW_MARGIN_M);
+        let rate = if high { LAND_SPEED_HIGH_MS } else { LAND_SPEED_MS };
+        self.land_rate_ms = (ho.landing || ho.takeover_descent).then(|| match self.land_rate_ms {
+            None => rate,
+            Some(v) => {
+                let dv = LAND_RATE_ACC_MSS * dt_us as f32 * 1e-6;
+                if libm::fabsf(rate - v) <= dv { rate } else { v + libm::copysignf(dv, rate - v) }
+            }
+        });
         let real = self.shaper.sticks;
         if ho.synthetic_sticks {
             self.shaper.sticks = Sticks {
@@ -765,7 +815,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 throttle: if ho.state == State::Blind { blind_throttle } else { THROTTLE_CENTRE },
                 yaw: 0.0,
             };
-            self.shaper.land_rate_d_ms = (ho.landing || ho.takeover_descent).then_some(LAND_SPEED_MS);
+            self.shaper.land_rate_d_ms = self.land_rate_ms;
             self.shaper.brake_only = ho.land_law == Some(LandLaw::Brake);
             // H13 (3): the first hands-off step drops the pilot's target; capture restarts under `pilot_hold_speed_ms`.
             if matches!(was, State::Pilot | State::Stop) {
@@ -822,8 +872,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels, ho.hands_off, ho.arm_off_holds);
         // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
         // arming step.
-        let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
-        self.last_us = Some(t_us);
         // Low: the demand was refused, or the allocator put the collective on the idle floor (its `thrust_low` flag, the
         // value DMD logs as Sat bit 3). Start only above the ground threshold, end only after `land_detect_us` low.
         let thrust_ok = demand.is_ok_and(|d| d.thrust_n >= self.ground_thrust_n);
