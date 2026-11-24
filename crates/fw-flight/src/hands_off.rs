@@ -1,6 +1,6 @@
 //! The hands-off state machine (decision-mavlink-mode-20261123, section 9 Amendment A as amended by section 10: A1,
 //! A2', A3, A6, A7, A9, A10, A10' and the state table; by section 11 Amendment B, B1-B9; and by section 13 Amendment C,
-//! C1-C3). Pure: no clock, no log, no statics, no allocation; every time
+//! C1-C3; and by section 14 Amendment D, WR1, WR2 and `return_built`). Pure: no clock, no log, no statics, no allocation; every time
 //! comes in as an argument. Each flight step the caller hands it the facts ([`Inputs`]) and gets the state and what the
 //! flight code must do ([`Output`]). Not called by the flight step yet (packets H2b, H2c wire it).
 
@@ -180,6 +180,9 @@ pub struct Inputs {
     pub battery_ok: bool,
     /// The battery is critical.
     pub battery_critical: bool,
+    /// The RETURN law exists (Amendment D). False: no home latches, so RETURN cannot be reached and link loss lands
+    /// in place.
+    pub return_built: bool,
 }
 
 /// Why a command was DENIED: the first condition that failed, in this order.
@@ -315,7 +318,7 @@ pub struct Output {
     pub return_height_m: Option<f32>,
     /// Events.
     pub events: Events,
-    /// LAND and TAKEOVER: the existing landing latch disarms at touchdown (C1).
+    /// LAND: selects the LAND law (A8) only; it triggers no disarm (WR1: the ground exit is the state machine's).
     pub landing: bool,
     /// LAND on this step's T3': hold the horizontal position; otherwise LAND descends level (B4).
     pub land_holds_position: bool,
@@ -327,6 +330,8 @@ pub struct Output {
     /// For the gate: a report with arm OFF must not disarm. Hands-off state, K clear and airborne (C1), after this
     /// step's report.
     pub arm_off_holds: bool,
+    /// For the gate: disarm in this step. STOP entered this step with `armed` true (WR2).
+    pub disarm: bool,
 }
 
 /// The hands-off state machine.
@@ -408,6 +413,7 @@ impl HandsOff {
             .crsf
             .is_some_and(|r| i.now_us.saturating_sub(r.t_us) <= self.stick_loss_us);
         let mut ev = Events::NONE;
+        let was = self.state;
         self.update_home(i);
         if !i.armed {
             self.fs_in_force = i.fs_hold_en;
@@ -439,11 +445,12 @@ impl HandsOff {
             home: self.home(),
             return_height_m: self.return_height_m,
             events: ev,
-            landing: matches!(self.state, State::Land | State::Takeover),
+            landing: self.state == State::Land,
             land_holds_position: self.state == State::Land && demand == Demand::Position,
             demand,
             takeover_descent: self.state == State::Takeover && self.descent,
             arm_off_holds: self.arm_off_holds(i),
+            disarm: self.state == State::Stop && was != State::Stop && i.armed,
         }
     }
 
@@ -498,7 +505,7 @@ impl HandsOff {
             if !self.was_armed {
                 self.home_window = true;
             }
-            if self.home_window {
+            if self.home_window && i.return_built {
                 if i.airborne {
                     self.home_window = false;
                 } else {
@@ -517,6 +524,10 @@ impl HandsOff {
     /// The state table's exits that are not commands (FS_HOLD_EN 1).
     fn automatic(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
         if !i.armed || (i.crsf.is_some_and(|r| !r.arm) && !self.arm_off_holds(i)) {
+            self.go(State::Stop, i, ev);
+            return;
+        }
+        if self.state.is_hands_off() && !i.airborne {
             self.go(State::Stop, i, ev);
             return;
         }
@@ -890,6 +901,7 @@ mod tests {
                 heading_ok: true,
                 battery_ok: true,
                 battery_critical: false,
+                return_built: true,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),
@@ -1638,7 +1650,7 @@ mod tests {
                 assert!(out.arm_off_holds, "arm OFF outside STOP only while held: {out:?}");
                 held += 1;
             }
-            assert_eq!(out.landing, matches!(out.state, State::Land | State::Takeover));
+            assert_eq!(out.landing, out.state == State::Land);
             if out.takeover_descent {
                 assert_eq!(out.state, State::Takeover);
             }
@@ -2418,10 +2430,10 @@ mod tests {
     fn hands_off_c1_a7_takeover_with_battery_critical_descends_hands_over_and_touchdown_disarms() {
         let mut r = Rig::takeover();
         let out = r.step();
-        assert_eq!((out.state, out.landing, out.takeover_descent), (State::Takeover, true, false));
+        assert_eq!((out.state, out.landing, out.takeover_descent), (State::Takeover, false, false));
         r.i.battery_critical = true;
         let out = r.step();
-        assert_eq!((out.state, out.landing, out.takeover_descent), (State::Takeover, true, true));
+        assert_eq!((out.state, out.landing, out.takeover_descent), (State::Takeover, false, true));
         // Latched for this TAKEOVER, as LAND is.
         r.i.battery_critical = false;
         assert!(r.step().takeover_descent);
@@ -2431,15 +2443,15 @@ mod tests {
         let t = r.now() + 20_000;
         let out = r.report(t, Switch3::Middle);
         assert_eq!((out.state, out.landing, out.takeover_descent), (State::Pilot, false, false));
-        // Touchdown: the latch clears with `landing` set (the wiring disarms), then disarmed is STOP.
+        // Touchdown: the latch clears, STOP and disarm in that step (WR1, WR2).
         let mut r = Rig::takeover();
         r.i.battery_critical = true;
         assert!(r.step().takeover_descent);
         r.i.airborne = false;
         let out = r.step();
-        assert_eq!((out.state, out.landing, out.arm_off_holds), (State::Takeover, true, false));
+        assert_eq!((out.state, out.disarm, out.arm_off_holds), (State::Stop, true, false));
         r.i.armed = false;
-        assert_eq!(r.step().state, State::Stop);
+        assert_eq!((r.step().state, r.step().disarm), (State::Stop, false));
         // Battery critical at the step CRSF returns: the descent starts at that step.
         let mut r = Rig::hold();
         r.i.battery_critical = true;
@@ -2651,6 +2663,164 @@ mod tests {
             assert_eq!(reason.code(), *code, "{reason:?}");
             assert_eq!(usize::from(reason.code()), k + 1, "{reason:?}: 1..=18, 0 reserved");
         }
+    }
+
+    // ---- Amendment D: WR1 ground exit, WR2 disarm, return_built ----
+
+    #[test]
+    fn hands_off_wr1_every_hands_off_state_with_the_latch_false_is_stop_in_that_step() {
+        let rigs: [(&str, fn() -> Rig); 6] = [
+            ("takeover", Rig::takeover),
+            ("hold", Rig::hold),
+            ("auto", Rig::auto),
+            ("return", Rig::ret),
+            ("land", Rig::land),
+            ("blind", Rig::blind),
+        ];
+        for (name, make) in rigs {
+            let mut r = make();
+            let from = r.h.state();
+            let out = r.step();
+            assert_eq!((out.state, out.disarm), (from, false), "{name}: airborne, nothing changes");
+            r.i.airborne = false;
+            let out = r.step();
+            assert_eq!((out.state, out.hands_off, out.disarm), (State::Stop, false, true), "{name}");
+        }
+    }
+
+    #[test]
+    fn hands_off_wr1_a_takeover_or_land_entered_with_the_latch_false_stops_at_once() {
+        // CRSF returns in HOLD with the latch already false: STOP, not TAKEOVER.
+        let mut r = Rig::hold();
+        r.i.airborne = false;
+        let t = r.now() + 1_000;
+        let out = r.report(t, Switch3::Middle);
+        assert_eq!((out.state, out.disarm), (State::Stop, true));
+        // Land in HOLD with the latch false: STOP; the command finds STOP.
+        let mut r = Rig::hold();
+        r.i.airborne = false;
+        let out = r.cmd(Command::Land);
+        assert_eq!((out.state, out.disarm, out.command), (State::Stop, true, denied(DenyReason::NotInThisState)));
+        // Stick loss on T2 or T1 with the latch false: STOP, not LAND or BLIND.
+        for tier in [Tier::T2, Tier::T1] {
+            let mut r = Rig::pilot();
+            r.drop_tier(tier);
+            r.i.airborne = false;
+            let t = r.last_report() + LOSS + 1;
+            let out = r.at(t);
+            assert_eq!((out.state, out.disarm), (State::Stop, true), "{tier:?}");
+        }
+    }
+
+    #[test]
+    fn hands_off_wr1_touchdown_paths_end_in_stop() {
+        // LAND: the latch clears, STOP and disarm in that step; the next (disarmed) step stays STOP.
+        let mut r = Rig::land();
+        r.i.airborne = false;
+        let out = r.step();
+        assert_eq!((out.state, out.landing, out.disarm), (State::Stop, false, true));
+        r.i.armed = false;
+        let out = r.step();
+        assert_eq!((out.state, out.disarm), (State::Stop, false));
+        // Disarm reported by the gate first (old path): STOP, no second disarm.
+        let mut r = Rig::land();
+        r.i.armed = false;
+        r.i.airborne = false;
+        assert_eq!((r.step().state, r.h.state()), (State::Stop, State::Stop));
+    }
+
+    #[test]
+    fn hands_off_wr2_disarm_is_stop_entered_while_armed() {
+        // The review's case: a held arm-OFF report still the newest when the latch clears.
+        let (mut r, out) = returns_with(Switch3::High, false);
+        assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Takeover, true, false));
+        r.i.airborne = false;
+        let t = r.now() + 5_000;
+        let out = r.at(t);
+        assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Stop, false, true));
+        // Arm OFF in PILOT; after K in TAKEOVER; sticks lost on the ground; FS_HOLD_EN 0.
+        let mut r = Rig::pilot();
+        let t = r.now() + 1_000;
+        assert!(r.report_with(t, FULL, Switch3::High, false).disarm, "pilot arm off");
+        let (mut r, _) = returns_with(Switch3::Low, true);
+        let t = r.now() + 20_000;
+        assert!(r.report_with(t, FULL, Switch3::Low, false).disarm, "after K");
+        let mut r = Rig::pilot();
+        r.i.airborne = false;
+        let t = r.last_report() + LOSS + 1;
+        assert!(r.at(t).disarm, "sticks lost on the ground");
+        let mut r = Rig::new();
+        r.i.fs_hold_en = false;
+        r.step();
+        r.i.armed = true;
+        assert_eq!(r.report(T0 + 1_000, Switch3::High).state, State::Pilot);
+        let out = r.at(T0 + 1_000 + LOSS + 1);
+        assert_eq!((out.state, out.disarm), (State::Stop, true), "FS_HOLD_EN 0: redundant with the gate's RC loss");
+        // Not on the arming step, not while disarmed, not when STOP persists.
+        let mut r = Rig::new();
+        let out = r.step();
+        assert_eq!((out.state, out.disarm), (State::Stop, false), "disarmed");
+        r.i.armed = true;
+        r.i.crsf = None;
+        let out = r.at(T0 + 1_000);
+        assert_eq!((out.state, out.disarm), (State::Stop, false), "armed, already STOP");
+        let out = r.report(T0 + 2_000, Switch3::High);
+        assert_eq!((out.state, out.disarm), (State::Pilot, false), "arming");
+    }
+
+    fn no_mission() -> MissionFacts {
+        MissionFacts {
+            plan_id: None,
+            has_waypoints: false,
+            z_within_limits: true,
+            max_waypoint_distance_m: None,
+            return_height_m: None,
+        }
+    }
+
+    #[test]
+    fn hands_off_return_built_false_latches_no_home_and_link_loss_lands() {
+        let mut r = Rig::new();
+        r.i.return_built = false;
+        r.i.mission = no_mission();
+        r.step();
+        r.i.armed = true;
+        r.report(T0 + 1_000, Switch3::High);
+        r.i.airborne = true;
+        let out = r.report(T0 + 2_000, Switch3::High);
+        assert_eq!((out.state, out.home), (State::Pilot, None));
+        let t = r.last_report() + LOSS + 1;
+        let out = r.heartbeat(t);
+        assert_eq!((out.state, out.home), (State::Hold, None));
+        assert_eq!(r.cmd(Command::Start).command, denied(DenyReason::NoWaypoints));
+        assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::NoHome));
+        let t = r.now() + LINK_LOSS_US + 1;
+        assert_eq!(r.at(t).state, State::Land);
+    }
+
+    #[test]
+    fn hands_off_return_built_false_walk_never_reaches_return_or_auto() {
+        let mut rng = Lcg(0x5eed_00d3);
+        let mut h = HandsOff::new(&Tuning::DEFAULT);
+        let mut i = Rig::new().i;
+        let (mut hold, mut start_denied) = (0u32, 0u32);
+        for _ in 0..200_000 {
+            random_inputs(&mut rng, &mut i, true);
+            i.return_built = false;
+            i.mission = no_mission();
+            let out = h.step(&i);
+            assert!(!matches!(out.state, State::Return | State::Auto), "{out:?}");
+            assert_eq!(out.home, None);
+            assert!(out.events.start.is_none());
+            if let Some(c) = i.command
+                && c.command == Command::Start
+            {
+                assert_ne!(out.command, Some(CommandResult::Accepted));
+                start_denied += u32::from(out.command == denied(DenyReason::NoWaypoints));
+            }
+            hold += u32::from(out.state == State::Hold);
+        }
+        assert!(hold > 1_000 && start_denied > 10, "{hold} {start_denied}");
     }
 
     struct Lcg(u64);
