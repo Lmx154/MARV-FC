@@ -29,6 +29,7 @@ pub mod calib;
 pub mod dflog;
 pub mod esc;
 pub mod extring;
+pub mod flight_cmd;
 pub mod handshake;
 pub mod health;
 pub mod i2c;

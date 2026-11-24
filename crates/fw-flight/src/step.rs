@@ -520,6 +520,10 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     last_radio_heartbeat_us: Option<u64>,
     /// When the newest RADIO_STATUS arrived from the receiver, us (`set_last_radio_status_us`); `None` until set.
     last_radio_status_us: Option<u64>,
+    /// The station command for the next step (`set_command`); taken by that step.
+    command: Option<hands_off::StationCommand>,
+    /// The answer of the latest step to its command (`take_command_result`).
+    command_result: Option<hands_off::CommandResult>,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -659,6 +663,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             heading_ok: true,
             last_radio_heartbeat_us: None,
             last_radio_status_us: None,
+            command: None,
+            command_result: None,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -768,6 +774,17 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// default) never sets it, so an arm-OFF report stops at once (a plain dropout).
     pub fn set_last_radio_status_us(&mut self, t_us: Option<u64>) {
         self.last_radio_status_us = t_us;
+    }
+
+    /// A station command (link-contract section 10) for the next step, which gives it to the state machine and answers
+    /// it ([`Flight::take_command_result`]); a later call before that step replaces it.
+    pub fn set_command(&mut self, command: hands_off::StationCommand) {
+        self.command = Some(command);
+    }
+
+    /// The latest step's answer to its command; `None` when it had none (or the answer was taken).
+    pub fn take_command_result(&mut self) -> Option<hands_off::CommandResult> {
+        self.command_result.take()
     }
 
     /// N12's M in force after the latest step: a hands-off state and a RADIO_STATUS after its entry (the log's M bit).
@@ -930,7 +947,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             velocity_ne_valid: nav.valid.velocity_ne,
             position_d_m: nav.position_m[2],
             position_d_valid: nav.valid.position_d,
-            command: None,
+            command: self.command.take(),
             mission: NO_MISSION,
             last_waypoint_reached: false,
             home_reached: false,
@@ -942,6 +959,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             td_held: td_in,
         });
+        self.command_result = ho.command;
         // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
         self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
@@ -2783,3 +2801,6 @@ mod crash_tests;
 
 #[cfg(test)]
 mod n14_tests;
+
+#[cfg(test)]
+mod station_tests;

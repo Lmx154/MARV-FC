@@ -71,6 +71,7 @@ mod sd;
 #[cfg(feature = "sd-fat-probe")]
 mod sd_probe;
 mod settings;
+mod station;
 mod store;
 mod watchdog;
 #[cfg(feature = "xip-park")]

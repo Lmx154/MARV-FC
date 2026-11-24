@@ -891,6 +891,7 @@ impl SampleSink for Stepper {
         // that fails (the writer paused in mid-write) is no status: every line is missing.
         let esc = crate::esc::ESC.try_read(1);
         let erpm = esc.map_or([None; LINES], |s| s.lines.map(|l| l.erpm));
+        let command = crate::station::before_step(&mut self.flight);
         let out = self.flight.step(&FlightInputs {
             sensors: Sensors {
                 imu1: *sample,
@@ -903,6 +904,7 @@ impl SampleSink for Stepper {
             rc: fresh.then_some(report),
             erpm,
         });
+        crate::station::after_step(&mut self.flight, command);
         self.out.write(FlightOut {
             t_us: out.t_us,
             motors: out.motors,

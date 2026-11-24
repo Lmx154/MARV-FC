@@ -152,6 +152,9 @@ fn action_name(action: Action) -> &'static str {
 /// `Telemetry::command`: admits the command and starts its action. The answer is the book's
 /// (IN_PROGRESS 0 % for an admitted action; its final ACK follows through [`next_ack`]).
 pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
+    if let Some(outcome) = crate::station::command(req, link) {
+        return outcome;
+    }
     if req.command == MavCmd::MAV_CMD_DO_MOTOR_TEST {
         return motor_test(req, link, now_ms);
     }
