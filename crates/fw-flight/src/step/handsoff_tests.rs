@@ -1092,6 +1092,106 @@ fn e3_is_inactive_outside_land_and_the_takeover_descent_and_active_in_the_descen
     panic!("the TAKEOVER descent on the ground never disarmed");
 }
 
+/// [w, x, y, z] of the attitude roll `r`, pitch `p`, yaw `y` (rad; Z-Y-X, body to NED), from the half-angle formulas.
+fn euler_q(r: f32, p: f32, y: f32) -> [f32; 4] {
+    let (sr, cr) = (libm::sinf(r / 2.0), libm::cosf(r / 2.0));
+    let (sp, cp) = (libm::sinf(p / 2.0), libm::cosf(p / 2.0));
+    let (sy, cy) = (libm::sinf(y / 2.0), libm::cosf(y / 2.0));
+    [
+        cr * cp * cy + sr * sp * sy,
+        sr * cp * cy - cr * sp * sy,
+        cr * sp * cy + sr * cp * sy,
+        cr * cp * sy - sr * sp * cy,
+    ]
+}
+
+/// The specific force at rest with roll `r` and pitch `p` (rad), m/s^2 FRD: the ground's reaction to gravity in the body
+/// frame, from the rotation matrix's last row (the yaw has no part).
+fn at_rest_tilted(r: f32, p: f32) -> [f32; 3] {
+    let g = GRAVITY_MSS;
+    [g * libm::sinf(p), -g * libm::sinf(r) * libm::cosf(p), -g * libm::cosf(r) * libm::cosf(p)]
+}
+
+/// E3 on a slope (review finding F3): LAND to a touchdown on ground tilted roll 20 deg, pitch -15 deg, yaw 90 deg; at
+/// rest there the estimate's attitude is that tilt and IMU1 reads the matching specific force; the latch's timer off, so
+/// only E3 can clear it: disarmed 1.0 s (within one step) after the collective went below the ground threshold.
+#[test]
+fn e3_at_rest_on_a_slope_disarms_within_1_0_s_plus_one_step() {
+    let (r, p) = (20f32.to_radians(), (-15f32).to_radians());
+    let q = euler_q(r, p, 90f32.to_radians());
+    let f_slope = at_rest_tilted(r, p);
+    let mut fly = Fly::new(true, false, POSITION);
+    fly.lose();
+    assert_eq!(fly.state(), State::Land);
+    fly.f.timer_off = true;
+    let dt = DT_US as f32 * 1e-6;
+    let land = Tuning::DEFAULT.land_detect_us;
+    let mut since = None;
+    for k in 0..40_000u32 {
+        // The vehicle follows the target down at the descent rate and comes to rest on the slope.
+        let mut n = fly.cell.get();
+        n.position_m[2] = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
+        let ground = n.position_m[2] >= 0.0;
+        n.velocity_ms[2] = if ground { 0.0 } else { LAND_SPEED_MS };
+        if ground {
+            n.attitude = q;
+        }
+        fly.cell.set(n);
+        let o = fly.quiet_f(if ground { f_slope } else { AT_REST });
+        if !o.armed {
+            let since: u64 = since.expect("below the threshold on the ground");
+            assert_eq!(fly.state(), State::Stop);
+            std::println!("slope: disarmed {} us after the collective went below the threshold", fly.t - since);
+            assert!(fly.t - since <= land + DT_US && fly.t - since + DT_US >= land, "{} us", fly.t - since);
+            return;
+        }
+        assert_eq!(fly.state(), State::Land, "step {k}");
+        if ground && !o.demand.is_ok_and(|d| d.thrust_n >= ground_n()) {
+            since.get_or_insert(fly.t);
+        } else {
+            since = None;
+        }
+    }
+    panic!("never disarmed at rest on the slope");
+}
+
+/// E3 in the air tilted 20 deg (roll 20 deg, yaw 90 deg): LAND, the estimate's attitude tilted throughout and IMU1
+/// reading the commanded collective along the body's up axis; held where it is after 1 s of steady descent while the
+/// target descends, so the collective is below the ground threshold (the latch's timer off): the backstop's count never
+/// reaches 1.0 s and the gate stays armed.
+#[test]
+fn e3_in_the_air_tilted_20_deg_below_the_ground_threshold_does_not_disarm() {
+    let mut fly = Fly::new(true, false, POSITION);
+    fly.lose();
+    assert_eq!(fly.state(), State::Land);
+    fly.f.timer_off = true;
+    let mut n = fly.cell.get();
+    n.attitude = euler_q(20f32.to_radians(), 0.0, 90f32.to_radians());
+    fly.cell.set(n);
+    let dt = DT_US as f32 * 1e-6;
+    let mut thrust = MASS * GRAVITY_MSS;
+    for _ in 0..800 {
+        let mut n = fly.cell.get();
+        n.velocity_ms[2] = LAND_SPEED_MS;
+        n.position_m[2] += LAND_SPEED_MS * dt;
+        fly.cell.set(n);
+        thrust = fly.quiet_f([0.0, 0.0, -thrust / MASS]).demand.map_or(0.0, |d| d.thrust_n);
+    }
+    let mut n = fly.cell.get();
+    n.velocity_ms[2] = 0.0;
+    fly.cell.set(n);
+    let (mut low_steps, mut max_still) = (0u32, 0u64);
+    for k in 0..8_000 {
+        let o = fly.quiet_f([0.0, 0.0, -thrust / MASS]);
+        assert!(o.armed && fly.state() == State::Land, "step {k}");
+        thrust = o.demand.map_or(0.0, |d| d.thrust_n);
+        low_steps += u32::from(thrust < ground_n());
+        max_still = max_still.max(fly.f.still_us);
+    }
+    std::println!("tilted in the air: {low_steps} steps below the threshold, longest E3 count {max_still} us");
+    assert!(low_steps > 7_000 && max_still < Tuning::DEFAULT.land_detect_us / 2, "{low_steps} {max_still}");
+}
+
 // ---- E4: the board's HO MSG only while FS_HOLD_EN in force is 1 ----
 
 /// The seam the board's MSG rule reads (`Flight::fs_hold_in_force`): false at every step of a flight with FS_HOLD_EN 0,
