@@ -118,6 +118,8 @@ SECTIONS {
         *(.text.__aeabi_uldivmod .text.__udivmoddi4 .text.*17compiler_builtins3int19specialized_div_rem*)
         /* The shadow Eskf (packet E2): signed 64-bit division and i64-to-float; the Stepper's array compare. */
         *(.text.__aeabi_ldivmod .text.__divmoddi4 .text.__aeabi_l2f .text.memcmp)
+        /* The Stepper's target-set compare (packet H3b-1): the f32 arrays' equality, outlined. */
+        *(.text.*4core5slice3cmpfINtB5_14SlicePartialEqfE17equal_same_length*)
         *(.text.*8icm45686* .text.*11lsm6dsk320x* .text.*5dshot*)
         *(.text.*9fw_flight3imu* .text.*9fw_flight8liveness* .text.*9fw_flight3esc*)
         /* The flight step (IMU1's task calls it): fw_flight's step, gnc and gate, and the binary's Stepper; flight::stat (core 0) stays in flash. */
