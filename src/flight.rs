@@ -668,6 +668,8 @@ pub struct Stepper {
     ho_logged: Option<fw_flight::hands_off::State>,
     /// N12's M of the last "HO M" MSG written (false before the first).
     m_logged: bool,
+    /// Crash rule K's would-fire of the last "K" MSG written (false before the first; `crash_msg`).
+    k_logged: bool,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
     guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
@@ -718,6 +720,7 @@ impl Stepper {
             mode_log: ModeLog::new(),
             ho_logged: None,
             m_logged: false,
+            k_logged: false,
             guidance: Guidance::new(),
             gdn_in_force: GDN_OFF,
             gdn_pushed: GDN_OFF,
@@ -947,6 +950,14 @@ impl SampleSink for Stepper {
             })
         {
             self.m_logged = m;
+        }
+        // Crash rule K in shadow (Amendment N, N5): "K 1 <lean error accel speed>" when it would fire, "K 0" when it
+        // clears, in every configuration; a dropped one is offered again.
+        let crash = self.flight.crash_status();
+        if let Some(text) = fw_flight::step::crash_msg(self.k_logged, &crash)
+            && self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text))
+        {
+            self.k_logged = crash.would_fire();
         }
         // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
         // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).

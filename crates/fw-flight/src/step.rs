@@ -1406,6 +1406,19 @@ pub fn hands_off_msg_due(fs_hold_in_force: bool, logged: Option<State>, state: S
     logged != Some(state) && (fs_hold_in_force || hands_off(state) || logged.is_some_and(hands_off))
 }
 
+/// The MSG text the board writes for crash rule K (shadow, Amendment N, N5), `logged` the would-fire of the last one
+/// written (false before the first; a dropped MSG is not written, so it is offered again): "K 1 " and the term bits
+/// lean, error, accel, speed when K would fire and the last said not; "K 0" when it no longer would and the last said it
+/// would; `None` otherwise, in every configuration, so a flight in which K never fires logs nothing new. NUL padded.
+pub fn crash_msg(logged: bool, s: &CrashStatus) -> Option<[u8; 8]> {
+    let bit = |b: bool| if b { b'1' } else { b'0' };
+    match (logged, s.would_fire()) {
+        (false, true) => Some([b'K', b' ', b'1', b' ', bit(s.lean), bit(s.error), bit(s.accel), bit(s.speed)]),
+        (true, false) => Some(*b"K 0\0\0\0\0\0"),
+        _ => None,
+    }
+}
+
 /// When to write MODE (decision-nav-eskf-20261120, 8c, F6): at the first step and at every change of the selected or
 /// the effective mode. The caller asks [`ModeLog::pending`], writes [`encode_mode`] and only then calls
 /// [`ModeLog::done`], so a record the ring dropped is offered again at the next step.

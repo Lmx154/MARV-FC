@@ -301,3 +301,46 @@ fn k_non_finite_inputs_are_false_and_k_changes_no_output() {
     }
     assert!(a.f.crash_would_fire() && !b.f.crash_would_fire());
 }
+
+/// The board's K MSG (`crash_msg`): nothing while K would not fire and none was logged, "K 1 1111" at the step it
+/// would fire, nothing while it stays, "K 0" at the step it clears; a dropped MSG (`logged` not updated) is offered again.
+/// Over a flight with an upset and a recovery that never fires, with FS_HOLD_EN 0, no MSG at all; a crash, then
+/// level again: exactly "K 1 1111" at 2.0 s and "K 0" at the first level step. The texts fit MSG's 64 bytes.
+#[test]
+fn k_msg_is_edge_triggered_and_absent_from_a_flight_that_never_fires() {
+    let s = |held_us: u64| CrashStatus { lean: true, error: true, accel: true, speed: true, held_us };
+    let text = |m: Option<[u8; 8]>| -> Option<std::string::String> { m.map(|b| std::string::String::from_utf8_lossy(&b).trim_end_matches('\0').into()) };
+    assert_eq!(text(crash_msg(false, &s(CRASH_TRIGGER_US - 1))), None);
+    assert_eq!(text(crash_msg(false, &s(CRASH_TRIGGER_US))).as_deref(), Some("K 1 1111"));
+    assert_eq!(text(crash_msg(true, &s(CRASH_TRIGGER_US))), None);
+    assert_eq!(text(crash_msg(true, &s(0))).as_deref(), Some("K 0"));
+    assert_eq!(text(crash_msg(false, &s(0))), None);
+    let partial = CrashStatus { lean: true, error: false, accel: true, speed: false, held_us: CRASH_TRIGGER_US };
+    assert_eq!(text(crash_msg(false, &partial)).as_deref(), Some("K 1 1010"), "the bits in order");
+    let mut b = [0u8; 75];
+    assert_eq!(dflog::encode_msg(&mut b, 1, &crash_msg(false, &s(CRASH_TRIGGER_US)).unwrap()), 75);
+    assert_eq!(&b[11..20], b"K 1 1111\0", "whole, with its terminator");
+    // The board's loop over real steps.
+    let board = |c: &mut Crash, script: &[(f32, u32)]| {
+        let (mut logged, mut msgs) = (false, std::vec::Vec::new());
+        for &(deg, steps) in script {
+            for _ in 0..steps {
+                let s = c.fly(roll(deg), [0.0, 0.0, 0.5]);
+                if let Some(m) = crash_msg(logged, &s) {
+                    msgs.push((c.t, text(Some(m)).unwrap()));
+                    logged = s.would_fire();
+                }
+            }
+        }
+        msgs
+    };
+    let mut c = Crash::flown(ANGLE);
+    assert!(!c.f.fs_hold_in_force());
+    assert_eq!(board(&mut c, &[(0.0, 4_000), (60.0, 400), (0.0, 4_000), (30.0, 800), (0.0, 800)]), []);
+    let mut c = Crash::flown(ANGLE);
+    let t0 = c.t;
+    let msgs = board(&mut c, &[(0.0, 800), (180.0, 3_000), (0.0, 800)]);
+    let fire = t0 + (800 + u64::from(TRIGGER_STEPS)) * DT_US;
+    let clear = t0 + (800 + 3_000 + 1) * DT_US;
+    assert_eq!(msgs, [(fire, "K 1 1111".into()), (clear, "K 0".into())]);
+}
