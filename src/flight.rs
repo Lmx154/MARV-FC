@@ -918,9 +918,11 @@ impl SampleSink for Stepper {
             self.mode_log.done(&out);
         }
         // The hands-off state (decision-mavlink-mode-20261123, Amendment D): a MSG at the first step and at each change, a push
-        // of its own (MODE's record format is unchanged); a dropped one is offered again.
+        // of its own (MODE's record format is unchanged); a dropped one is offered again. None while FS_HOLD_EN in force is 0
+        // (Amendment E, E4), so the log of an image flown with 0 is unchanged.
         let ho = self.flight.hands_off_state();
-        if self.ho_logged != Some(ho.code())
+        if self.flight.fs_hold_in_force()
+            && self.ho_logged != Some(ho.code())
             && self.log.push_with(dflog::MSG.length.into(), |b| {
                 dflog::encode_msg(b, out.t_us, fw_flight::step::hands_off_msg(ho).as_bytes())
             })

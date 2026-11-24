@@ -557,6 +557,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.hands_off.state()
     }
 
+    /// FS_HOLD_EN in force after the latest step (B9: taken on disarmed steps). The board logs the hands-off state only
+    /// while it is true (Amendment E, E4), so the log of an image flown with 0 is unchanged.
+    pub fn fs_hold_in_force(&self) -> bool {
+        self.hands_off.fs_hold_in_force()
+    }
+
     /// The estimator, read only (the log of its own counters, packet E2).
     pub fn estimator(&self) -> &E {
         &self.estimator

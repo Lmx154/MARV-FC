@@ -428,6 +428,11 @@ impl HandsOff {
         self.track_fault
     }
 
+    /// FS_HOLD_EN in force (B9): the value of the latest disarmed step.
+    pub fn fs_hold_in_force(&self) -> bool {
+        self.fs_in_force
+    }
+
     /// One flight step.
     pub fn step(&mut self, i: &Inputs) -> Output {
         let fresh = i

@@ -942,6 +942,38 @@ fn e3_is_inactive_outside_land_and_the_takeover_descent_and_active_in_the_descen
     panic!("the TAKEOVER descent on the ground never disarmed");
 }
 
+// ---- E4: the board's HO MSG only while FS_HOLD_EN in force is 1 ----
+
+/// The seam the board's MSG rule reads (`Flight::fs_hold_in_force`): false at every step of a flight with FS_HOLD_EN 0,
+/// arming, mode changes and the RC-loss disarm included; a 1 written while armed comes into force at the next disarmed
+/// step (B9) and a 0 written while armed only after the next disarm.
+#[test]
+fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9() {
+    let mut fly = Fly::new(false, true, POSITION);
+    assert!(!fly.f.fs_hold_in_force());
+    for sw in [Switch3::Low, Switch3::Middle, Switch3::High] {
+        for _ in 0..200 {
+            fly.rc(true, [0.0, 0.0, 0.5, 0.0], sw);
+            assert!(!fly.f.fs_hold_in_force());
+        }
+    }
+    fly.f.set_fs_hold_en(true);
+    let o = fly.lose();
+    assert!(!o.armed && !fly.f.fs_hold_in_force(), "written while armed: not in force on the armed steps");
+    fly.quiet();
+    assert!(fly.f.fs_hold_in_force(), "in force after a disarmed step");
+    let mut fly = Fly::new(true, true, POSITION);
+    assert!(fly.f.fs_hold_in_force());
+    fly.f.set_fs_hold_en(false);
+    for _ in 0..200 {
+        fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+        assert!(fly.f.fs_hold_in_force(), "written while armed");
+    }
+    fly.rc(false, [0.0; 4], Switch3::High);
+    fly.rc(false, [0.0; 4], Switch3::High);
+    assert!(!fly.f.fs_hold_in_force());
+}
+
 // ---- WR3 and return_built on the real step ----
 
 /// WR3 a-d on the real `Flight` over random reports, switches, sticks, coverage, silences, FS_HOLD_EN and the heading
