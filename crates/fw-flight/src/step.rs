@@ -413,7 +413,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     hands_off: HandsOff,
     /// The newest stick report, as the gate has seen it (not necessarily new this step); `None` before the first.
     rc_newest: Option<RcSample>,
-    /// The heading monitor's verdict (`set_heading_ok`); false until set: no monitor exists on this branch.
+    /// Host tests and MARV-sim only: an override ANDed with this step's `Valid.heading` (`set_heading_ok`); true until set,
+    /// and on the board, where nothing sets it.
     heading_ok: bool,
     /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until set.
     last_radio_heartbeat_us: Option<u64>,
@@ -530,7 +531,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             fs_hold_en: false,
             hands_off: HandsOff::new(tuning),
             rc_newest: None,
-            heading_ok: false,
+            heading_ok: true,
             last_radio_heartbeat_us: None,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
@@ -601,10 +602,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.fs_hold_en = on;
     }
 
-    /// The heading monitor's verdict for the hands-off state machine (B4: T3' = position covered AND heading OK; H12: and
-    /// no track fault). No monitor exists on this branch, so on the board it stays false: T3' is unreachable and stick loss
-    /// in the air gives LAND or BLIND, never HOLD. Host tests and MARV-sim set it to exercise HOLD. Only in host tests and
-    /// with the feature `sim`, which the board image never enables: a flight image has no path that asserts heading OK (E5).
+    /// An override of the hands-off state machine's heading verdict (B4: T3' = position covered AND heading OK). The
+    /// verdict is this step's `Valid.heading` AND `ok` (H12 item 4 as amended by H14): false forces it false, true leaves
+    /// the estimate's flag (never true against it). Only in host tests and with the feature `sim`, which the board image
+    /// never enables; there the verdict is `Valid.heading` alone (E5).
     #[cfg(any(test, feature = "sim"))]
     pub fn set_heading_ok(&mut self, ok: bool) {
         self.heading_ok = ok;
@@ -760,7 +761,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             mission: NO_MISSION,
             last_waypoint_reached: false,
             home_reached: false,
-            heading_ok: self.heading_ok,
+            heading_ok: nav.valid.heading && self.heading_ok,
             battery_ok: false,
             battery_critical,
             return_built,

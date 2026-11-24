@@ -212,7 +212,7 @@ pub struct Inputs {
     pub last_waypoint_reached: bool,
     /// The guidance is within GDN_RADIUS of home (RETURN arrival).
     pub home_reached: bool,
-    /// The heading monitor reports OK.
+    /// The heading is OK: the estimate's `Valid.heading` (H12 item 4 as amended by H14).
     pub heading_ok: bool,
     /// The battery is known not to be critical.
     pub battery_ok: bool,

@@ -144,11 +144,21 @@ const WALK_C270814: [(u64, u64, u64); 3] = [
 ];
 
 /// The digests of the whole `walk` with Amendment N, N2 (a stick loss in the air at FS_HOLD_EN 0 lands, BLIND on T1), by
-/// seed. Every walk has an airborne stick loss, so every digest changed; the prefix before it did not.
-const WALK_GOLDEN: [(u64, u64); 3] = [
+/// seed, with the heading verdict forced false (`set_heading_ok(false)`; before H12/H14's wiring the board's verdict was
+/// constant false, so LAND was always level). Every walk has an airborne stick loss, so every digest changed; the prefix
+/// before it did not.
+const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
     (0x5eed_0b01, 0x7629_5a56_9aae_7065),
     (0x5eed_0b02, 0x46a3_bae4_d352_1f51),
     (0x5eed_0b03, 0xef4e_8cca_25eb_2f21),
+];
+
+/// The digests of the whole `walk` with the heading verdict `Valid.heading` (H12 item 4 as amended by H14, the board's):
+/// after the first airborne stick loss LAND holds position (or brakes) where the estimate covers it.
+const WALK_GOLDEN: [(u64, u64); 3] = [
+    (0x5eed_0b01, 0x65a2_4273_a378_82ff),
+    (0x5eed_0b02, 0xa6c7_d3b0_eb7a_e384),
+    (0x5eed_0b03, 0x8b10_b43b_bafb_351a),
 ];
 
 /// I2 as amended by N2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first
@@ -171,18 +181,21 @@ fn i2_fs_hold_en_0_is_bit_identical_to_the_step_before_the_wiring() {
     assert_eq!(got, want);
 }
 
-/// I2's control as amended by N2: with FS_HOLD_EN 1 and no heading monitor (so no T3' and no HOLD) the flights equal the
-/// FS_HOLD_EN 0 goldens, since FS_HOLD_EN now gates only HOLD and missions; with the heading monitor's verdict (HOLD on
-/// T3') they differ.
+/// I2's control as amended by N2 and H14: with the heading verdict forced false (so no T3' and no HOLD) the flights at
+/// FS_HOLD_EN 0 and 1 equal the heading-off goldens, since FS_HOLD_EN now gates only HOLD and missions; with the verdict
+/// `Valid.heading` (HOLD on T3') FS_HOLD_EN 1 differs from FS_HOLD_EN 0.
 #[test]
 fn i2_control_fs_hold_en_1_changes_the_flights() {
-    for (seed, golden) in WALK_GOLDEN {
+    for ((seed, golden), (seed_off, golden_off)) in WALK_GOLDEN.into_iter().zip(WALK_GOLDEN_HEADING_OFF) {
+        assert_eq!(seed, seed_off);
+        for fs in [false, true] {
+            let (h, _, _) = walk(seed, 40_000, |f| {
+                f.set_fs_hold_en(fs);
+                f.set_heading_ok(false);
+            });
+            assert_eq!(h, golden_off, "seed {seed:#x}, fs {fs}, heading forced false");
+        }
         let (h, _, _) = walk(seed, 40_000, |f| f.set_fs_hold_en(true));
-        assert_eq!(h, golden, "seed {seed:#x}, heading not OK");
-        let (h, _, _) = walk(seed, 40_000, |f| {
-            f.set_fs_hold_en(true);
-            f.set_heading_ok(true);
-        });
         assert_ne!(h, golden, "seed {seed:#x}, heading OK");
     }
 }
@@ -346,6 +359,45 @@ fn hold_stick_loss_in_the_air_on_t3_prime_is_hold_with_the_position_law_and_the_
         let o = fly.quiet();
         assert_eq!((fly.state(), o.mode, o.armed), (State::Hold, Mode::Position, true));
         assert!(is_centred(&o) && o.demand.is_ok());
+    }
+}
+
+/// H12 item 4 as amended by H14: the heading verdict is this step's `Valid.heading` AND the sim/test override. With the
+/// override never set (the board), a stick loss in the air on T3 gives HOLD at FS_HOLD_EN 1 and LAND holding position
+/// at FS_HOLD_EN 0; the override false gives LAND with the level law at both; the override true cannot make T3' against
+/// the estimate's flag (heading false: no HOLD, LAND level).
+#[test]
+fn h14_the_heading_verdict_is_valid_heading_and_the_override_only_forces_it_false() {
+    for (fs, ok, heading, want, law) in [
+        (true, None, true, State::Hold, None),
+        (false, None, true, State::Land, Some(Law::Hold)),
+        (true, Some(false), true, State::Land, Some(Law::Level)),
+        (false, Some(false), true, State::Land, Some(Law::Level)),
+        (true, Some(true), false, State::Land, Some(Law::Level)),
+    ] {
+        let name = (fs, ok, heading);
+        let valid = Valid { heading, ..POSITION };
+        let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, valid))));
+        let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
+        f.set_fs_hold_en(fs);
+        if let Some(ok) = ok {
+            f.set_heading_ok(ok);
+        }
+        let mut fly = Fly { f, cell, t: 1_000_000 };
+        fly.rc(false, [0.0; 4], Switch3::High);
+        fly.rc(true, [0.0; 4], Switch3::High);
+        for _ in 0..400 {
+            fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+        }
+        assert!(fly.f.airborne && fly.f.gate.armed(), "{name:?}");
+        fly.lose();
+        assert_eq!(fly.state(), want, "{name:?}");
+        let o = fly.quiet();
+        assert!(o.armed && o.motors.throttles().is_some() && o.demand.is_ok(), "{name:?}");
+        match law {
+            None => assert!(o.mode == Mode::Position && is_centred(&o), "{name:?}: {:?}", o.setpoint),
+            Some(law) => assert_eq!(law_of(&fly, &o), law, "{name:?}"),
+        }
     }
 }
 
@@ -1990,7 +2042,7 @@ fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
 }
 
 /// E2's flight: armed in Angle on the ground at d = 0 (home, the test's `return_built`), then 30 m up in Altitude, the
-/// sticks lost (FS_HOLD_EN 0, no heading monitor: LAND); a vertical point mass flies the demand. Returns per step after
+/// sticks lost (FS_HOLD_EN 0: LAND, holding position on T3'); a vertical point mass flies the demand. Returns per step after
 /// the loss (height above home m, LAND's rate m/s, the setpoint's climb-rate feed-forward m/s, collective N), down to 1 m.
 fn e2_run(return_built: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, POSITION))));
@@ -2021,6 +2073,7 @@ fn e2_run(return_built: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
         if f.hands_off_state() == State::Land {
             let vff = match o.setpoint {
                 Setpoint::Altitude { velocity_d_ms, .. } => velocity_d_ms,
+                Setpoint::Position { velocity_ms: [_, _, velocity_d_ms], .. } => velocity_d_ms,
                 ref other => panic!("{other:?}"),
             };
             out.push((-d, f.land_rate_ms.expect("descending"), vff, thrust_of(&o)));
