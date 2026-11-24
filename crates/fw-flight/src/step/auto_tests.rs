@@ -95,6 +95,8 @@ impl Run {
         n.position_m[2] = -10.0;
         n.valid = POSITION;
         r.cell.set(n);
+        // The height target the shaper captured on the ground moves with the vehicle (the fake does not fly the climb).
+        r.f.shaper.target_d = Some(-10.0);
         for _ in 0..2_000 {
             r.quiet();
             if r.state() != State::Pilot {
@@ -568,4 +570,152 @@ fn rb_above_the_return_height_no_climb_and_the_height_is_kept() {
     std::println!("RETURN from {h0:.2} m: height {lo:.3} to {hi:.3} m; LAND {:.2} m from home", dist_from(&r, 0.0, 0.0));
     assert_eq!(r.state(), State::Land);
     assert!(hi - lo < 0.05 && dist_from(&r, 0.0, 0.0) <= 2.0, "{lo} {hi}");
+}
+
+/// Steps flown until the state leaves `from` (at most `max_s` seconds); the time, s.
+fn until_not(r: &mut Run, from: State, max_s: f32) -> f32 {
+    let mut steps = 0u32;
+    while r.state() == from {
+        let o = r.fly();
+        assert!(o.armed && o.motors.throttles().is_some(), "a stop in {from:?}");
+        steps += 1;
+        assert!((steps as f32) * 1.25e-3 < max_s, "still {from:?}");
+    }
+    steps as f32 * DT_US as f32 * 1e-6
+}
+
+/// (c) Link loss (A1, table): sticks and station heartbeat both gone in HOLD: RETURN just past 10 s with home, LAND
+/// without. The station heartbeat alone stopping in AUTO: HOLD at 5 s (place kept), RETURN at 10 s (the sticks were
+/// lost long before, so the link age is the heartbeat's).
+#[test]
+fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_5_s_then_returns_at_10_s() {
+    let mut r = Run::new(3.0, Some(square()));
+    r.station = false;
+    let s = until_not(&mut r, State::Hold, 12.0);
+    assert_eq!(r.state(), State::Return);
+    assert!(s > 10.0 && s < 10.01, "{s}");
+    let mut r = Run::with(3.0, Some(square()), false, true);
+    r.station = false;
+    let s = until_not(&mut r, State::Hold, 12.0);
+    assert_eq!(r.state(), State::Land, "no home");
+    assert!(s > 10.0 && s < 10.01, "{s}");
+    let mut r = in_auto();
+    r.station = false;
+    let a = until_not(&mut r, State::Auto, 6.0);
+    assert_eq!(r.state(), State::Hold);
+    let b = until_not(&mut r, State::Hold, 6.0);
+    std::println!("station lost in AUTO: HOLD at {a:.3} s, RETURN at {:.3} s", a + b);
+    assert_eq!(r.state(), State::Return);
+    assert!(a > 5.0 && a < 5.01 && a + b > 10.0 && a + b < 10.01, "{a} {b}");
+}
+
+/// (d) Fresh sticks in RETURN: TAKEOVER; the lock as built (a report with switch6 High opens it, the next not High
+/// hands over to PILOT).
+#[test]
+fn rd_fresh_sticks_in_return_take_over_and_the_lock_hands_over() {
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+    for _ in 0..800 {
+        r.fly();
+    }
+    assert_eq!(r.state(), State::Return);
+    assert!(r.rc(true, 0.5).armed);
+    assert_eq!((r.state(), r.f.legs.phase()), (State::Takeover, LegPhase::Idle));
+    r.t += DT_US;
+    let t = r.t;
+    let report = RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 }, arm: true, switch6: Switch3::Middle, t_us: t };
+    assert!(r.f.step(&input(t, Some(report))).armed);
+    assert_eq!(r.state(), State::Pilot);
+}
+
+/// (e) In RETURN: a push the plant cannot follow on the leg home, and a push during the climb, each trip the track
+/// fault (e past X) and land braking; T3' lost lands; the height lost gives BLIND. Never a stop.
+#[test]
+fn re_track_fault_lands_braking_t3_lost_lands_height_lost_blind() {
+    // Away from home: 15 m north on AUTO's first leg.
+    let returning = |climb: bool| {
+        let mut r = in_auto();
+        while r.cell.get().position_m[0] < 15.0 {
+            r.fly();
+        }
+        assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+        if !climb {
+            while r.f.legs.phase() == LegPhase::Climb {
+                r.fly();
+            }
+            for _ in 0..1_600 {
+                r.fly();
+            }
+        }
+        assert_eq!(r.f.legs.phase(), if climb { LegPhase::Climb } else { LegPhase::HomeLeg });
+        r
+    };
+    for climb in [true, false] {
+        let mut r = returning(climb);
+        let x = hands_off::track_fault_m(r.f.speed_xy_in_force());
+        // Away from home (home is south of the vehicle; north pushes it away).
+        r.push = [15.0, 0.0];
+        let mut e_max = 0.0f32;
+        while r.state() == State::Return {
+            assert!(r.fly().armed);
+            e_max = e_max.max(r.f.track_error_m.unwrap_or(0.0));
+        }
+        std::println!("climb {climb}: e max {e_max:.3} m, X {x} m, {:?}", r.f.legs.phase());
+        assert_eq!(r.state(), State::Land);
+        assert!(r.f.hands_off.track_fault() && e_max > x);
+        let o = r.fly();
+        assert!(o.armed);
+        match o.setpoint {
+            Setpoint::Position { position_m, velocity_ms, .. } => {
+                assert_eq!([position_m[0], position_m[1], velocity_ms[0], velocity_ms[1]], [o.nav.position_m[0], o.nav.position_m[1], 0.0, 0.0]);
+            }
+            ref s => panic!("{s:?}"),
+        }
+    }
+    let mut r = returning(false);
+    r.f.set_heading_ok(false);
+    until_not(&mut r, State::Return, 1.1);
+    assert_eq!(r.state(), State::Land);
+    let mut r = returning(false);
+    let mut n = r.cell.get();
+    n.valid = super::althold_tests::ANGLE;
+    r.cell.set(n);
+    until_not(&mut r, State::Return, 1.1);
+    assert_eq!(r.state(), State::Blind);
+}
+
+/// (f) Return's answers as built: on USB NotRadioLink; FS_HOLD_EN 0 HandsOffDisabled; no home NoHome; in LAND
+/// NotInThisState; in RETURN ACCEPTED (no effect); Start in RETURN NotInThisState.
+#[test]
+fn rf_return_denied_with_its_reason() {
+    let mut r = Run::new(3.0, Some(square()));
+    r.f.set_command(StationCommand { command: Command::Return, link: Link::Usb });
+    r.fly();
+    assert_eq!(r.f.take_command_result(), Some(CommandResult::Denied(DenyReason::NotRadioLink)));
+    let mut r = Run::with(3.0, Some(square()), true, false);
+    assert_eq!(r.command(Command::Return), CommandResult::Denied(DenyReason::HandsOffDisabled));
+    let mut r = Run::with(3.0, Some(square()), false, true);
+    assert_eq!(r.command(Command::Return), CommandResult::Denied(DenyReason::NoHome));
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Land), CommandResult::Accepted);
+    assert_eq!(r.command(Command::Return), CommandResult::Denied(DenyReason::NotInThisState));
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+    assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+    assert_eq!((r.state(), r.f.legs.phase()), (State::Return, LegPhase::Climb));
+    assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::NotInThisState));
+    assert_eq!(r.state(), State::Return);
+}
+
+/// (h) N2: with FS_HOLD_EN 0 a stick loss in the air lands, and with neither sticks nor station for 15 s it never
+/// becomes RETURN.
+#[test]
+fn rh_fs_hold_en_0_stick_loss_lands_never_returns() {
+    let mut r = Run::with(3.0, Some(square()), true, false);
+    r.station = false;
+    for k in 0..12_000 {
+        let o = r.fly();
+        assert!(o.armed, "step {k}: {:?} {:?} still {} air {}", r.state(), r.cell.get().position_m, r.f.still_us, r.f.airborne);
+        assert_eq!(r.state(), State::Land);
+    }
 }
