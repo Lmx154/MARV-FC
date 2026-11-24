@@ -848,14 +848,21 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
         self.last_us = Some(t_us);
         // E2: `LAND_SPEED_HIGH_MS` while the height above home is above `LAND_ALT_LOW_M` plus the slowing margin, else (no
-        // home, no valid height) `LAND_SPEED_MS`; the first descent step takes it at once, later steps move towards it at
-        // `LAND_RATE_ACC_MSS`.
+        // home, no valid height) `LAND_SPEED_MS`; later steps move towards it at `LAND_RATE_ACC_MSS`. N11 (2): the first
+        // descent step starts from the estimated v_D when it is valid (within the pilot's climb and descent speeds, the
+        // range of the altitude law's own rate; ArduPilot AC_PosControl.cpp:852), else from the stage rate.
         let high = ho
             .home
             .is_some_and(|h| nav.valid.position_d && h.d_m - nav.position_m[2] > LAND_ALT_LOW_M + LAND_SLOW_MARGIN_M);
         let rate = if high { LAND_SPEED_HIGH_MS } else { LAND_SPEED_MS };
+        let v_d = nav.velocity_ms[2];
+        let start = if nav.valid.velocity_d && v_d.is_finite() {
+            v_d.clamp(-self.shaper.pilot_speed_up_ms, self.shaper.pilot_speed_dn_ms)
+        } else {
+            rate
+        };
         self.land_rate_ms = (ho.landing || ho.takeover_descent).then(|| match self.land_rate_ms {
-            None => rate,
+            None => start,
             Some(v) => {
                 let dv = LAND_RATE_ACC_MSS * dt_us as f32 * 1e-6;
                 if libm::fabsf(rate - v) <= dv { rate } else { v + libm::copysignf(dv, rate - v) }

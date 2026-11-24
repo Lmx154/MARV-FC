@@ -147,21 +147,24 @@ const WALK_C270814: [(u64, u64, u64); 3] = [
 /// seed, with the heading verdict forced false (`set_heading_ok(false)`; before H12/H14's wiring the board's verdict was
 /// constant false, so LAND was always level). Every walk has an airborne stick loss, so every digest changed; the prefix
 /// before it did not. Re-baselined for N12 (the walk feeds no RADIO_STATUS, so an arm-OFF report after a stick loss
-/// stops at once); before N12: 0x7629_5a56_9aae_7065, 0x46a3_bae4_d352_1f51, 0xef4e_8cca_25eb_2f21.
+/// stops at once); before N12: 0x7629_5a56_9aae_7065, 0x46a3_bae4_d352_1f51, 0xef4e_8cca_25eb_2f21. Re-baselined for
+/// N11 (2) (LAND starts from the estimated v_D); N12 alone: 0x86d2_b007_f7eb_cab0, 0xf12b_8b95_ced1_2aef,
+/// 0x03c3_c9eb_a852_01ec.
 const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0x86d2_b007_f7eb_cab0),
-    (0x5eed_0b02, 0xf12b_8b95_ced1_2aef),
-    (0x5eed_0b03, 0x03c3_c9eb_a852_01ec),
+    (0x5eed_0b01, 0xd546_494e_cde7_4b56),
+    (0x5eed_0b02, 0x4b6b_6a15_c678_b15e),
+    (0x5eed_0b03, 0x196e_228a_8cf2_ceab),
 ];
 
 /// The digests of the whole `walk` with the heading verdict `Valid.heading` (H12 item 4 as amended by H14, the board's):
 /// after the first airborne stick loss LAND holds position (or brakes) where the estimate covers it. Re-baselined for N12
 /// (no RADIO_STATUS: an arm-OFF report after a stick loss stops at once); before N12: 0x65a2_4273_a378_82ff,
-/// 0xa6c7_d3b0_eb7a_e384, 0x8b10_b43b_bafb_351a.
+/// 0xa6c7_d3b0_eb7a_e384, 0x8b10_b43b_bafb_351a. Re-baselined for N11 (2) (LAND starts from the estimated v_D); N12
+/// alone: 0xce7a_cba4_76de_f8c5, 0x34f3_cc4f_6c55_e901, 0x942f_8427_0db8_35d6.
 const WALK_GOLDEN: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0xce7a_cba4_76de_f8c5),
-    (0x5eed_0b02, 0x34f3_cc4f_6c55_e901),
-    (0x5eed_0b03, 0x942f_8427_0db8_35d6),
+    (0x5eed_0b01, 0x56bb_b0b0_9e28_c915),
+    (0x5eed_0b02, 0xfc05_671f_8228_7f0d),
+    (0x5eed_0b03, 0x819a_fb5f_e3c2_d65f),
 ];
 
 /// I2 as amended by N2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first
@@ -341,12 +344,12 @@ fn is_centred(o: &StepOut) -> bool {
 
 /// LAND's braking law (H14 (1)): Position at this step's navigation position, no horizontal feed-forward, the LAND
 /// descent rate, no heading rate.
-fn is_braking(o: &StepOut) -> bool {
+fn is_braking(o: &StepOut, fly: &Fly) -> bool {
     match o.setpoint {
         Setpoint::Position { position_m, velocity_ms, heading_rate_rads, .. } => {
             position_m[0] == o.nav.position_m[0]
                 && position_m[1] == o.nav.position_m[1]
-                && velocity_ms == [0.0, 0.0, LAND_SPEED_MS]
+                && Some(velocity_ms) == fly.f.land_rate_ms.map(|r| [0.0, 0.0, r])
                 && heading_rate_rads == 0.0
         }
         _ => false,
@@ -579,7 +582,7 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
     let mut fly = Fly::new(true, false, POSITION);
     let o = fly.lose();
     assert_eq!(fly.state(), State::Land);
-    let d0 = target_d(&o);
+    let mut d0 = target_d(&o);
     let mut first_low: Option<u64> = None;
     let mut cleared: Option<u64> = None;
     let mut disarmed: Option<u64> = None;
@@ -594,8 +597,12 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
         fly.cell.set(n);
         let air = fly.f.airborne;
         let o = fly.quiet_f(AT_REST);
+        // N11 (2): LAND starts from the hover's v_D (0) and reaches 0.5 m/s after 0.5 s (400 steps); measured from there.
+        if k == 400 {
+            d0 = target_d(&o);
+        }
         if k == 800 {
-            let rate = (target_d(&o) - d0) / (800.0 * dt);
+            let rate = (target_d(&o) - d0) / (400.0 * dt);
             assert!((rate - LAND_SPEED_MS).abs() < 0.01, "descent {rate} m/s");
             rate_checked = true;
         }
@@ -663,15 +670,22 @@ fn takeover_descent_flies_the_land_law_and_hand_over_stays_possible() {
     assert_eq!(o.mode, Mode::Position);
     match o.setpoint {
         Setpoint::Position { velocity_ms, heading_rate_rads, .. } => {
-            assert_eq!((velocity_ms, heading_rate_rads), ([0.0, 0.0, LAND_SPEED_MS], 0.0), "the LAND law, no real stick");
+            // N11 (2): LAND's rate, starting from the hover's v_D (0).
+            assert_eq!(fly.f.land_rate_ms, Some(0.0));
+            assert_eq!((velocity_ms, heading_rate_rads), ([0.0, 0.0, 0.0], 0.0), "the LAND law, no real stick");
         }
         other => panic!("{other:?}"),
     }
-    for _ in 0..800 {
-        fly.rc(true, FULL, Switch3::Low);
+    // N11 (2): the rate reaches 0.5 m/s after 0.5 s (400 steps); measured from there.
+    let mut d1 = d0;
+    for k in 0..800 {
+        let o = fly.rc(true, FULL, Switch3::Low);
+        if k == 399 {
+            d1 = target_d(&o);
+        }
     }
     let o = fly.rc(true, FULL, Switch3::High);
-    let rate = (target_d(&o) - d0) / (802.0 * DT_US as f32 * 1e-6);
+    let rate = (target_d(&o) - d1) / (401.0 * DT_US as f32 * 1e-6);
     assert!((rate - LAND_SPEED_MS).abs() < 0.01, "{rate}");
     assert_eq!(fly.state(), State::Takeover);
     let o = fly.rc(true, FULL, Switch3::Middle);
@@ -767,7 +781,7 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_braking_in_the_step_its_distance
         let d = libm::sqrtf((p[0] - target[0]) * (p[0] - target[0]) + (p[1] - target[1]) * (p[1] - target[1]));
         if d > hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) {
             assert!(fly.track_fault() && fly.state() == State::Land && o.mode == Mode::Position, "step {k}");
-            assert!(is_braking(&o), "step {k}: {:?}", o.setpoint);
+            assert!(is_braking(&o, &fly), "step {k}: {:?}", o.setpoint);
             over = true;
             break;
         }
@@ -784,7 +798,7 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_braking_in_the_step_its_distance
         let o = fly.quiet();
         assert_eq!((fly.state(), o.mode, fly.f.shaper.target_ne), (State::Land, Mode::Position, None));
         assert!(fly.track_fault() && o.armed);
-        assert!(is_braking(&o), "{:?}", o.setpoint);
+        assert!(is_braking(&o, &fly), "{:?}", o.setpoint);
     }
 }
 
@@ -863,7 +877,7 @@ fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
         let o = fly.rc(true, FULL, Switch3::Low);
         assert_eq!(fly.state(), State::Takeover);
         if fly.track_fault() {
-            assert!(o.mode == Mode::Position && is_braking(&o), "{:?}", o.setpoint);
+            assert!(o.mode == Mode::Position && is_braking(&o, &fly), "{:?}", o.setpoint);
             tripped = true;
             break;
         }
@@ -877,7 +891,7 @@ fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
     assert!(fly.track_fault());
     let o = fly.lose();
     assert_eq!(fly.state(), State::Land);
-    assert!(is_braking(&o), "{:?}", o.setpoint);
+    assert!(is_braking(&o, &fly), "{:?}", o.setpoint);
 }
 
 /// PILOT: a 20 m drift from the captured point never sets the fault, and stick loss later gives HOLD; with FS_HOLD_EN 0
@@ -969,7 +983,7 @@ fn h13_brake_forever_a_vehicle_that_never_slows_below_0_8_m_s_trips_at_x_plus_b(
         if over {
             std::println!("tripped {} m from A (X + b {bound} m)", fly.distance_from([entry[0], entry[1]]));
             assert_eq!((fly.state(), o.mode), (State::Land, Mode::Position));
-            assert!(is_braking(&o), "{:?}", o.setpoint);
+            assert!(is_braking(&o, &fly), "{:?}", o.setpoint);
             return;
         }
         assert_eq!((fly.state(), o.mode, fly.f.shaper.target_ne, fly.f.track_error_m), (State::Hold, Mode::Position, None, Some(0.0)), "step {k}");
@@ -1083,12 +1097,12 @@ enum Law {
 
 fn law_of(fly: &Fly, o: &StepOut) -> Law {
     match o.setpoint {
-        Setpoint::Position { velocity_ms, .. } if velocity_ms[2] == LAND_SPEED_MS => match fly.f.shaper.target_ne {
-            None if is_braking(o) => Law::Brake,
+        Setpoint::Position { velocity_ms, .. } if Some(velocity_ms[2]) == fly.f.land_rate_ms => match fly.f.shaper.target_ne {
+            None if is_braking(o, fly) => Law::Brake,
             Some(_) => Law::Hold,
             None => panic!("{:?}", o.setpoint),
         },
-        Setpoint::Altitude { attitude, velocity_d_ms, .. } if attitude == [1.0, 0.0, 0.0, 0.0] && velocity_d_ms == LAND_SPEED_MS => {
+        Setpoint::Altitude { attitude, velocity_d_ms, .. } if attitude == [1.0, 0.0, 0.0, 0.0] && Some(velocity_d_ms) == fly.f.land_rate_ms => {
             Law::Level
         }
         other => panic!("{other:?}"),
@@ -1674,7 +1688,7 @@ fn wr3_and_return_built_on_the_real_step() {
     let mut rest = true;
     // N12: RADIO_STATUS about once a second from a generator of its own (the main sequence is unchanged).
     let mut radio = Lcg(0x5eed_0d3b);
-    for k in 0..1_000_000u32 {
+    for k in 0..2_000_000u32 {
         t += DT_US;
         if radio.chance(1) {
             f.set_last_radio_status_us(Some(t));
@@ -2198,7 +2212,8 @@ fn e2_run(home: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
 
 /// N7, E2: with home, LAND descends at 1.5 m/s while more than 11 m (10 m plus the slowing margin) above home and at
 /// 0.5 m/s from 9.5 m down (at 10 m at most 0.75 m/s: the point mass lags the slowing); between, the rate moves at most 1.0 m/s^2 per step and the collective changes by less than
-/// 0.05 N per step (the entry step, a velocity step, changes it by more than 1 N: the measure sees a step). Without home,
+/// 0.05 N per step (N11 (2): the entry step too, LAND starting from the hover's v_D; before N11 it changed it by more than
+/// 1 N). Without home,
 /// 0.5 m/s all the way.
 #[test]
 fn e2_land_descends_1_5_above_10_m_over_home_0_5_below_and_the_change_steps_no_thrust() {
@@ -2206,11 +2221,15 @@ fn e2_land_descends_1_5_above_10_m_over_home_0_5_below_and_the_change_steps_no_t
     let dt = DT_US as f32 * 1e-6;
     let entry = (run[1].3 - run[0].3).abs().max((run[0].3 - MASS * GRAVITY_MSS).abs());
     let mut worst = 0.0f32;
+    // N11 (2): the first rate is the hover's v_D (0), then it ramps to 1.5 m/s.
+    assert_eq!(run[0].1, 0.0);
+    let mut ramped = false;
     for w in run.windows(2) {
         let ((_, r0, _, t0), (h, r1, vff, t1)) = (w[0], w[1]);
         assert_eq!(vff, r1, "the feed-forward is LAND's rate");
         assert!((r1 - r0).abs() <= LAND_RATE_ACC_MSS * dt * 1.0001, "{h} m: {r0} -> {r1}");
-        if h > LAND_ALT_LOW_M + 1.0 + 0.01 {
+        ramped |= r1 == LAND_SPEED_HIGH_MS;
+        if h > LAND_ALT_LOW_M + 1.0 + 0.01 && ramped {
             assert_eq!(r1, LAND_SPEED_HIGH_MS, "{h} m");
         }
         if h <= 9.5 {
@@ -2222,10 +2241,16 @@ fn e2_land_descends_1_5_above_10_m_over_home_0_5_below_and_the_change_steps_no_t
     }
     let at_10 = run.iter().find(|r| r.0 <= LAND_ALT_LOW_M).expect("passed 10 m");
     std::println!("E2: entry collective step {entry} N, largest per-step change 8-13 m {worst} N, rate at 10 m {} m/s", at_10.1);
-    assert!(entry > 1.0 && worst < 0.05, "{entry} {worst}");
+    // N11 (2): the entry starts from the estimated v_D (0, a hover), so the entry step is gone too.
+    assert!(entry < 0.05 && worst < 0.05, "{entry} {worst}");
     // The closed loop descends faster than the slewed rate while it slows, so the ramp ends a little below 10 m.
     assert!(at_10.1 <= LAND_SPEED_MS + 0.25, "{}", at_10.1);
-    assert!(e2_run(false).iter().all(|r| r.1 == LAND_SPEED_MS), "no home: 0.5 m/s all the way");
+    assert!(ramped, "reached 1.5 m/s");
+    // No home: from the hover's 0 to 0.5 m/s, then 0.5 m/s all the way.
+    let run = e2_run(false);
+    assert_eq!(run[0].1, 0.0);
+    assert!(run.iter().skip_while(|r| r.1 != LAND_SPEED_MS).count() > run.len() / 2);
+    assert!(run.iter().skip_while(|r| r.1 != LAND_SPEED_MS).all(|r| r.1 == LAND_SPEED_MS), "no home: 0.5 m/s all the way");
 }
 
 // ---- N1: the NS invariant walk ----
@@ -2583,4 +2608,62 @@ fn n11_closed_loop_blind_after_20_s_of_hover_descends_at_every_gain() {
         (gain, a)
     });
     assert!(got.iter().all(|&(_, a)| (0.1..=0.6).contains(&a)), "m/s^2 down by gain: {got:?}");
+}
+
+// ---- N11 (2): LAND's first step from the estimated v_D ----
+
+/// LAND entered on the point-mass plant (FS_HOLD_EN 0, no home: the stage rate is 0.5 m/s) after 4 s of altitude hold
+/// at throttle `thr` (0.5 hovers, 1.0 climbs at `pilot_speed_up_ms` 3 m/s) and the sticks lost. Over LAND's first second:
+/// (v_D at entry, LAND's first rate, lowest collective / m g, largest per-step collective change N, steps with the
+/// collective on the idle floor).
+fn land_entry(thr: f32) -> (f32, f32, f32, f32, u32) {
+    let mut fly = Fly::new(false, true, ALTITUDE);
+    let dt = DT_US as f32 * 1e-6;
+    let (mut v, mut d) = (0.0f32, -10.0f32);
+    let mut plant = |fly: &Fly, o: &StepOut| {
+        v += (GRAVITY_MSS - thrust_of(o) / MASS) * dt;
+        d += v * dt;
+        let mut n = fly.cell.get();
+        n.position_m[2] = d;
+        n.velocity_ms[2] = v;
+        fly.cell.set(n);
+    };
+    for _ in 0..3_200 {
+        let o = fly.rc(true, [0.0, 0.0, thr, 0.0], Switch3::Middle);
+        plant(&fly, &o);
+    }
+    let mut o = fly.quiet();
+    while fly.state() == State::Pilot {
+        plant(&fly, &o);
+        o = fly.quiet();
+    }
+    assert_eq!(fly.state(), State::Land);
+    let (v0, r0) = (fly.cell.get().velocity_ms[2], fly.f.land_rate_ms.expect("LAND"));
+    let (mut low, mut step, mut floor, mut prev) = (f32::MAX, 0.0f32, 0u32, thrust_of(&o));
+    for _ in 0..800 {
+        plant(&fly, &o);
+        o = fly.quiet();
+        assert_eq!(fly.state(), State::Land);
+        low = low.min(thrust_of(&o) / MG);
+        step = step.max((thrust_of(&o) - prev).abs());
+        floor += u32::from(o.allocation.is_some_and(|a| a.saturation.thrust_low));
+        prev = thrust_of(&o);
+    }
+    (v0, r0, low, step, floor)
+}
+
+/// N11 (2): LAND's rate starts from the estimated v_D and moves to the stage rate at `LAND_RATE_ACC_MSS`: from a hover the
+/// rate starts at 0 and the collective changes by less than 0.05 N per step; from a 3 m/s climb at the loss the rate
+/// starts at -3 m/s and the collective never reaches the idle floor nor goes below the ground threshold in the first
+/// second (starting at the stage rate it did; see the report of N-c).
+#[test]
+fn n11_land_starts_from_the_estimated_vertical_speed_no_entry_thrust_step() {
+    let (v0, r0, low, step, floor) = land_entry(0.5);
+    std::println!("N11 (2) hover: v_D {v0:.3}, first rate {r0:.3}, lowest {low:.3} m g, largest step {step:.4} N, floor {floor}");
+    assert!(v0.abs() < 0.05 && (r0 - v0).abs() < 1e-6, "{v0} {r0}");
+    assert!(step < 0.05 && floor == 0, "{step} {floor}");
+    let (v0, r0, low, step, floor) = land_entry(1.0);
+    std::println!("N11 (2) climb: v_D {v0:.3}, first rate {r0:.3}, lowest {low:.3} m g, largest step {step:.4} N, floor {floor}");
+    assert!((v0 + 3.0).abs() < 0.1 && (r0 - v0.max(-Tuning::DEFAULT.pilot_speed_up_ms)).abs() < 1e-6, "{v0} {r0}");
+    assert!(floor == 0 && low > Tuning::DEFAULT.ground_thrust_g, "{low} {floor}");
 }
