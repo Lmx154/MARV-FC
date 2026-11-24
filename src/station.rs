@@ -5,8 +5,9 @@
 //! command is posted to [`FLIGHT_CMD`] and the node sends no COMMAND_ACK then. Core 0 checks the command from the link's
 //! `Telemetry::acks` ([`next_ack`], every `poll_transmit` of that link's node, at least every 100 ms) and offers the one
 //! COMMAND_ACK, ACCEPTED or DENIED with the reason code in `result_param2`, to the sender on the link the command came
-//! on. The flight step has [`BOUND_US`] to take it and as long again to answer; no answer, another flight command
-//! outstanding, or parameters not in the table: DENIED, code 0. Core 1 ([`before_step`], [`after_step`], from
+//! on. The flight step has [`BOUND_US`] to take it; not taken by then (withdrawn, never applied), another flight command
+//! outstanding, or parameters not in the table: DENIED, code 0. A command taken is answered only with the flight step's
+//! answer, waited for until it comes or the link goes down (then no ACK, see [`link_lost`]). Core 1 ([`before_step`], [`after_step`], from
 //! `flight::Stepper::sample`): the request, taken at most once, for the step that follows; that step's answer back.
 //!
 //! Mode: after each step core 1 stores the state machine's mode code in [`MODE`] (0 until the first step); both nodes put
@@ -31,8 +32,9 @@ use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
 /// Core 0 -> flight step and back: the one flight command in flight.
 pub static FLIGHT_CMD: Mailbox = Mailbox::new();
 
-/// How long the flight step has to take a command, us (then as long again to answer it). The station sends again
-/// after 1.5 s without an ACK; the ACK goes out at the node's next `poll_transmit` after the answer (within 100 ms).
+/// How long the flight step has to take a command, us (its answer, given in the step that takes it, has no bound). The
+/// station sends again after 1.5 s without an ACK; the ACK goes out at the node's next `poll_transmit` after the answer
+/// (within 100 ms).
 pub const BOUND_US: u64 = 50_000;
 
 /// Flight step -> core 0: the hands-off state's mode code after the latest step; 0 before the first.
@@ -114,12 +116,11 @@ pub fn next_ack(link: u8) -> Option<LateAck> {
     })?;
     let byte = match result {
         Exchange::Answered(b) => b,
-        Exchange::Timeout { taken } => {
+        Exchange::Timeout => {
             defmt::warn!(
-                "[INFO] flight command {=u32} on link {=u8}: DENIED, no answer from the flight step (taken {=bool})",
+                "[INFO] flight command {=u32} on link {=u8}: DENIED, not taken by the flight step (withdrawn)",
                 o.command as u32,
-                link,
-                taken
+                link
             );
             0
         }

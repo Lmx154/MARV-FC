@@ -183,12 +183,8 @@ impl Mailbox {
 pub enum Exchange {
     /// The flight step answered: [`ACCEPTED`] or a reason code.
     Answered(u8),
-    /// No answer within the bound. `taken`: the flight step had taken the request (so it was applied, and its answer
-    /// was lost or late); false: it was withdrawn untaken and never applied.
-    Timeout {
-        /// The flight step had taken it.
-        taken: bool,
-    },
+    /// Not taken within the bound: withdrawn untaken, never applied.
+    Timeout,
 }
 
 /// Core 0: a command posted and not yet ended. Core 0 checks it from its normal task (no wait anywhere).
@@ -208,27 +204,22 @@ impl Pending {
     }
 
     /// The answer, if it has come, or the timeout: the flight step has `bound_us` from the post to take the request
-    /// (then it is withdrawn untaken), and a request it took has as long again for its answer (it comes in the step
-    /// that took it). `Some` ends the command (the mailbox is free for the next); `None`: still waiting.
+    /// (then it is withdrawn untaken). A request it took was applied: it is never timed out, its answer (given in the
+    /// step that took it) is waited for until it comes or [`Pending::abandon`] (its link went down). `Some` ends the
+    /// command (the mailbox is free for the next); `None`: still waiting.
     pub fn check(&mut self, mailbox: &Mailbox, now_us: u64, bound_us: u64) -> Option<Exchange> {
-        let result = if let Some(a) = mailbox.poll(self.seq) {
-            Exchange::Answered(a)
-        } else {
-            let waited = now_us.saturating_sub(self.posted_us);
-            if !self.taken && waited >= bound_us {
-                if mailbox.withdraw(self.seq, self.payload) {
-                    mailbox.end(self.seq, self.payload);
-                    return Some(Exchange::Timeout { taken: false });
-                }
-                self.taken = true;
+        if let Some(a) = mailbox.poll(self.seq) {
+            mailbox.end(self.seq, self.payload);
+            return Some(Exchange::Answered(a));
+        }
+        if !self.taken && now_us.saturating_sub(self.posted_us) >= bound_us {
+            if mailbox.withdraw(self.seq, self.payload) {
+                mailbox.end(self.seq, self.payload);
+                return Some(Exchange::Timeout);
             }
-            if waited < bound_us.saturating_mul(2) {
-                return None;
-            }
-            Exchange::Timeout { taken: true }
-        };
-        mailbox.end(self.seq, self.payload);
-        Some(result)
+            self.taken = true;
+        }
+        None
     }
 
     /// Ends the command unanswered (its link went down): withdrawn if not taken yet.
@@ -369,15 +360,9 @@ mod tests {
         let mut p = Pending::post(&m, 0x11, 1_000).unwrap();
         assert_eq!(Pending::post(&m, 0x12, 1_000), None, "one at a time");
         assert_eq!(p.check(&m, 1_099, 100), None);
-        assert_eq!(p.check(&m, 1_100, 100), Some(Exchange::Timeout { taken: false }));
+        assert_eq!(p.check(&m, 1_100, 100), Some(Exchange::Timeout));
         assert_eq!(m.take(), None, "a withdrawn request is never applied");
-        // Taken, never answered: the second bound runs out.
-        let mut p = Pending::post(&m, 0x12, 2_000).unwrap();
-        assert!(m.take().is_some());
-        assert_eq!(p.check(&m, 2_100, 100), None, "taken: wait for its answer");
-        assert_eq!(p.check(&m, 2_199, 100), None);
-        assert_eq!(p.check(&m, 2_200, 100), Some(Exchange::Timeout { taken: true }));
-        // Taken before the bound, answered in the second: the real answer.
+        // Taken before the bound, answered after it: the real answer.
         let mut p = Pending::post(&m, 0x14, 3_000).unwrap();
         let (s, _) = m.take().unwrap();
         assert_eq!(p.check(&m, 3_150, 100), None);
@@ -388,5 +373,34 @@ mod tests {
         p.abandon(&m);
         assert_eq!(m.take(), None);
         assert!(Pending::post(&m, 0x15, 4_001).is_some());
+    }
+
+    #[test]
+    fn a_taken_command_is_never_timed_out_only_answered_or_dropped_with_its_link() {
+        let m = Mailbox::new();
+        // Taken, answered long after every bound: the real answer, never a timeout.
+        let mut p = Pending::post(&m, 0x13, 0).unwrap();
+        let (s, _) = m.take().unwrap();
+        assert_eq!(p.check(&m, 100, 100), None, "taken: wait for its answer");
+        for t in [200, 10_000, 60_000_000] {
+            assert_eq!(p.check(&m, t, 100), None, "still waiting at {t}");
+        }
+        m.answer(s, ACCEPTED);
+        assert_eq!(p.check(&m, 60_000_001, 100), Some(Exchange::Answered(ACCEPTED)));
+        // Taken, never answered: waiting until the link goes down, then dropped; the mailbox is free again.
+        let mut p = Pending::post(&m, 0x14, 1_000).unwrap();
+        let (old, _) = m.take().unwrap();
+        assert_eq!(p.check(&m, 1_000_000, 100), None);
+        assert_eq!(Pending::post(&m, 0x15, 1_000_000), None, "still outstanding");
+        p.abandon(&m);
+        // The next command gets its own answer, not the old one's (late or not).
+        let mut q = Pending::post(&m, 0x15, 2_000_000).unwrap();
+        m.answer(old, 4);
+        assert_eq!(q.check(&m, 2_000_010, 100), None, "the answer to {old} is not the next command's");
+        let (s, b) = m.take().unwrap();
+        assert_eq!((b, s != old), (0x15, true));
+        m.answer(s, 9);
+        assert_eq!(q.check(&m, 2_000_020, 100), Some(Exchange::Answered(9)));
+        assert!(Pending::post(&m, 0x11, 2_000_030).is_some(), "ended: free");
     }
 }
