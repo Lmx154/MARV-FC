@@ -117,6 +117,10 @@ pub const LAND_RATE_ACC_MSS: f32 = 1.0;
 const LAND_SLOW_MARGIN_M: f32 =
     (LAND_SPEED_HIGH_MS * LAND_SPEED_HIGH_MS - LAND_SPEED_MS * LAND_SPEED_MS) / (2.0 * LAND_RATE_ACC_MSS);
 
+/// FX-2 (3): RETURN reports Home only below this vertical speed, m/s, so LAND's first rate (N11 (2), v_D) is within
+/// `LAND_SPEED_MS` of rest and E2's first stage is reached within about 2 s at `LAND_RATE_ACC_MSS`.
+const HOME_VD_MAX_MS: f32 = LAND_SPEED_MS;
+
 /// BLIND's collective below hover, m/s^2 (decision-mavlink-mode-20261123, Numbers "BLIND 0.3 m/s^2 below hover", PX4
 /// FlightTaskDescend.cpp:55-58). UNVERIFIED: the decision marks it UNKNOWN (U-1) and for the simulator only.
 pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
@@ -610,8 +614,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The guidance was done (the last waypoint reached, or the entry refused) at the previous step: the state
     /// machine's `last_waypoint_reached` (it runs before the law, as the track distance).
     leg_done: bool,
-    /// RETURN's guidance was within GDN_RADIUS of home (or its entry was refused) at the previous step: the state
-    /// machine's `home_reached` (A7: LAND at once).
+    /// RETURN's guidance was within GDN_RADIUS of home with |v_D| below `HOME_VD_MAX_MS` (or its entry was refused) at
+    /// the previous step: the state machine's `home_reached` (A7: LAND at once).
     leg_home: bool,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
@@ -1281,7 +1285,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             let leg = self.legs.step(dt_us as f32 * 1e-6, nav.position_m, nav.valid.position_ne, lead_ok);
             let auto = ho.state == State::Auto;
             self.leg_done = auto && matches!(leg.phase, LegPhase::Done | LegPhase::Idle);
-            self.leg_home = !auto && matches!(leg.phase, LegPhase::Home | LegPhase::Idle);
+            // FX-2 (3): Home is reported once the vertical speed is also below `HOME_VD_MAX_MS` (or not valid), so LAND does
+            // not start from the climb's v_D (N11 (2)) when the climb in place ends at home.
+            let v_d = nav.velocity_ms[2];
+            let settled = !(nav.valid.velocity_d && v_d.is_finite()) || libm::fabsf(v_d) < HOME_VD_MAX_MS;
+            self.leg_home = !auto && (leg.phase == LegPhase::Idle || (leg.phase == LegPhase::Home && settled));
             if leg.phase != LegPhase::Idle && !leg.held && mode == Mode::Position {
                 self.shaper.target_ne = None;
                 self.shaper.target_d = Some(leg.down_m);
@@ -3079,3 +3087,6 @@ mod auto_tests;
 
 #[cfg(test)]
 mod batt_tests;
+
+#[cfg(test)]
+mod descent_tests;
