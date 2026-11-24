@@ -86,6 +86,14 @@ pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
 /// nominal m g, the collective Angle gives at half throttle (there is no height estimate to find the real hover).
 const BLIND_THROTTLE: f32 = THROTTLE_CENTRE * (1.0 - BLIND_BELOW_HOVER_MSS / GRAVITY_MSS);
 
+/// The touchdown backstop's acceleration filter, Hz (decision-mavlink-mode-20261123, E3: ArduPilot
+/// LAND_DETECTOR_ACCEL_LPF_CUTOFF 1.0, config.h:359-372).
+const TOUCHDOWN_ACCEL_LPF_HZ: f32 = 1.0;
+
+/// The touchdown backstop's largest filtered earth-frame acceleration, gravity removed, m/s^2 (E3: ArduPilot
+/// LAND_DETECTOR_ACCEL_MAX 1.0, config.h:359-372, land_detector.cpp:127).
+const TOUCHDOWN_ACCEL_MAX_MSS: f32 = 1.0;
+
 /// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
 /// NoWaypoints and AUTO cannot be reached.
 const NO_MISSION: MissionFacts = MissionFacts {
@@ -374,6 +382,12 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
+    /// E3: the earth-frame acceleration, gravity removed, low-passed at `TOUCHDOWN_ACCEL_LPF_HZ`, m/s^2 NED, from IMU1's
+    /// specific force and the estimate's attitude; every step with a finite value.
+    accel_ef_mss: [f32; 3],
+    /// E3: how long the collective has been below the ground threshold with `accel_ef_mss` at most
+    /// `TOUCHDOWN_ACCEL_MAX_MSS`, in the armed LAND and TAKEOVER-descent steps since that last failed, us.
+    still_us: u64,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -464,6 +478,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             heading_ok: false,
             last_radio_heartbeat_us: None,
             track_error_m: None,
+            accel_ef_mss: [0.0; 3],
+            still_us: 0,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -769,6 +785,29 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             if expired {
                 self.airborne = false;
             }
+        }
+        // E3, the touchdown backstop (decision-mavlink-mode-20261123, Amendment E): in LAND and in TAKEOVER's descent, the
+        // collective below the ground threshold and the filtered acceleration at most `TOUCHDOWN_ACCEL_MAX_MSS`, both for
+        // `land_detect_us`, clear the latch, so the next step's ground exit (WR1) stops and disarms. No vertical speed.
+        if finite {
+            let f = reading.accel_ms2;
+            let q = nav.attitude;
+            let [_, n, e, d] = quat::mul(quat::mul(q, [0.0, f[0], f[1], f[2]]), quat::conj(q));
+            let a = [n, e, d + GRAVITY_MSS];
+            if a.iter().all(|v| v.is_finite()) {
+                let dt_s = dt_us as f32 * 1e-6;
+                let lpf = |k: usize| quat::pt1(self.accel_ef_mss[k], a[k], dt_s, TOUCHDOWN_ACCEL_LPF_HZ);
+                self.accel_ef_mss = [lpf(0), lpf(1), lpf(2)];
+            }
+        }
+        let still = self.accel_ef_mss.iter().map(|v| v * v).sum::<f32>() <= TOUCHDOWN_ACCEL_MAX_MSS * TOUCHDOWN_ACCEL_MAX_MSS;
+        if self.gate.armed() && (ho.landing || ho.takeover_descent) && !thrust_ok && still {
+            self.still_us += dt_us;
+            if self.still_us >= self.land_detect_us {
+                self.airborne = false;
+            }
+        } else {
+            self.still_us = 0;
         }
         #[cfg(test)]
         {

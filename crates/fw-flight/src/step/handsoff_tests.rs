@@ -766,6 +766,182 @@ fn h12_in_pilot_and_with_fs_hold_en_0_a_drift_never_sets_it() {
     }
 }
 
+// ---- E3: the touchdown backstop ----
+
+/// Specific force at rest, level, m/s^2 FRD.
+const AT_REST: [f32; 3] = [0.0, 0.0, -GRAVITY_MSS];
+
+impl Fly {
+    /// One step without a report, IMU1 reading the specific force `f`.
+    fn quiet_f(&mut self, f: [f32; 3]) -> StepOut {
+        self.t += DT_US;
+        let mut i = input(self.t, None);
+        i.sensors.imu1.reading.accel_ms2 = f;
+        self.f.step(&i)
+    }
+}
+
+/// The ground threshold, N (`ground_thrust_g` x m g).
+fn ground_n() -> f32 {
+    Tuning::DEFAULT.ground_thrust_g * MASS * GRAVITY_MSS
+}
+
+/// E3 on a touchdown whose height estimate flickers 1.5 m low for one step every 0.1 s: the airborne latch's count
+/// restarts at the flickers and never expires, and the backstop disarms 1.0 s (within one step) after the collective went
+/// below the ground threshold for good, the accelerometer at rest.
+#[test]
+fn e3_a_touchdown_with_a_flickering_height_disarms_within_1_0_s_plus_one_step() {
+    let mut fly = Fly::new(true, false, POSITION);
+    fly.lose();
+    assert_eq!(fly.state(), State::Land);
+    let dt = DT_US as f32 * 1e-6;
+    let land = Tuning::DEFAULT.land_detect_us;
+    let (mut ground, mut since, mut restarts, mut low_prev, mut disarmed) = (false, None, 0u32, false, None);
+    for k in 0..40_000u32 {
+        let mut n = fly.cell.get();
+        let d = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
+        ground |= d >= 0.0;
+        n.velocity_ms[2] = if d < 0.0 { LAND_SPEED_MS } else { 0.0 };
+        n.position_m[2] = if ground && k % 80 == 0 { 1.5 } else { d };
+        fly.cell.set(n);
+        let o = fly.quiet_f(AT_REST);
+        if !o.armed {
+            disarmed = Some(fly.t);
+            assert_eq!(fly.state(), State::Stop);
+            break;
+        }
+        assert_eq!(fly.state(), State::Land, "step {k}");
+        assert!(fly.f.low_us < land, "step {k}: the latch's own count expired");
+        if !ground {
+            continue;
+        }
+        let low = o.allocation.is_none_or(|a| a.saturation.thrust_low);
+        if o.demand.is_ok_and(|d| d.thrust_n >= ground_n()) {
+            (since, restarts) = (None, 0);
+        } else {
+            since.get_or_insert(fly.t);
+            restarts += u32::from(low_prev && !low);
+        }
+        low_prev = low;
+    }
+    let (since, disarmed) = (since.expect("below the threshold"), disarmed.expect("disarmed"));
+    std::println!("collective below the threshold from {since}, disarmed {} us later, latch count restarts {restarts}", disarmed - since);
+    assert!(restarts >= 5, "the latch's count restarted: {restarts}");
+    assert!(disarmed - since <= land + DT_US && disarmed - since + DT_US >= land, "{} us", disarmed - since);
+}
+
+/// E3 in the air: LAND descending steadily for 1 s (the accelerometer at rest), then the vehicle held where it is while
+/// the target descends, so the collective falls below the ground threshold (the airborne latch's timer off, so only E3
+/// can clear it); the accelerometer reads the commanded collective times a thrust gain of 0.88, 1.0 and 1.12 (falling at
+/// 2 m/s^2 or more below the threshold): the backstop's count never reaches 1.0 s. The same flight with the
+/// accelerometer at rest (NaN below) disarms: the condition is not vacuous.
+#[test]
+fn e3_in_the_air_below_the_ground_threshold_the_acceleration_condition_is_false_at_nominal_and_12_percent_gain() {
+    for gain in [0.88f32, 1.0, 1.12, f32::NAN] {
+        let mut fly = Fly::new(true, false, POSITION);
+        fly.lose();
+        assert_eq!(fly.state(), State::Land);
+        fly.f.timer_off = true;
+        let dt = DT_US as f32 * 1e-6;
+        let mut thrust = MASS * GRAVITY_MSS;
+        for _ in 0..800 {
+            let mut n = fly.cell.get();
+            n.velocity_ms[2] = LAND_SPEED_MS;
+            n.position_m[2] += LAND_SPEED_MS * dt;
+            fly.cell.set(n);
+            thrust = fly.quiet_f(AT_REST).demand.map_or(0.0, |d| d.thrust_n);
+        }
+        assert!(thrust > ground_n() && fly.f.accel_ef_mss.iter().all(|a| a.abs() < 0.1), "{thrust} {:?}", fly.f.accel_ef_mss);
+        let mut n = fly.cell.get();
+        n.velocity_ms[2] = 0.0;
+        fly.cell.set(n);
+        let (mut low_steps, mut max_still, mut disarmed) = (0u32, 0u64, false);
+        for _ in 0..8_000 {
+            let f = if gain.is_nan() { AT_REST } else { [0.0, 0.0, -gain * thrust / MASS] };
+            let o = fly.quiet_f(f);
+            if !o.armed {
+                disarmed = true;
+                break;
+            }
+            thrust = o.demand.map_or(0.0, |d| d.thrust_n);
+            low_steps += u32::from(thrust < ground_n());
+            max_still = max_still.max(fly.f.still_us);
+        }
+        std::println!("gain {gain}: {low_steps} steps below the threshold, longest E3 count {max_still} us, disarmed {disarmed}");
+        assert_eq!(disarmed, gain.is_nan(), "gain {gain}");
+        if !gain.is_nan() {
+            assert!(low_steps > 7_000 && max_still < Tuning::DEFAULT.land_detect_us / 2, "gain {gain}");
+        }
+    }
+}
+
+/// E3 is inactive outside LAND and the TAKEOVER descent: HOLD, TAKEOVER and PILOT with the vehicle 3 m above its
+/// height target (the collective below the threshold), the accelerometer at rest and the latch's timer off: armed.
+/// The TAKEOVER descent on the ground with the timer off: disarmed by E3 within 1.0 s plus one step.
+#[test]
+fn e3_is_inactive_outside_land_and_the_takeover_descent_and_active_in_the_descent() {
+    for name in ["hold", "takeover", "pilot"] {
+        let mut fly = Fly::new(true, true, POSITION);
+        if name != "pilot" {
+            fly.lose();
+        }
+        if name == "takeover" {
+            fly.rc(true, FULL, Switch3::Low);
+        }
+        fly.f.timer_off = true;
+        let mut n = fly.cell.get();
+        n.position_m[2] -= 3.0;
+        fly.cell.set(n);
+        let mut low_steps = 0u32;
+        for k in 0..4_000 {
+            fly.t += DT_US;
+            let mut i = input(fly.t, (name != "hold").then(|| RcSample {
+                sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 },
+                arm: true,
+                switch6: if name == "takeover" { Switch3::Low } else { Switch3::High },
+                t_us: fly.t,
+            }));
+            i.sensors.imu1.reading.accel_ms2 = AT_REST;
+            let o = fly.f.step(&i);
+            assert!(o.armed && fly.f.airborne, "{name} step {k}");
+            low_steps += u32::from(o.demand.is_ok_and(|d| d.thrust_n < ground_n()));
+        }
+        assert!(low_steps > 1_600, "{name}: {low_steps}");
+        assert_eq!(fly.f.still_us, 0, "{name}");
+    }
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    fly.rc(true, FULL, Switch3::Low);
+    fly.f.battery_critical = true;
+    fly.f.timer_off = true;
+    let dt = DT_US as f32 * 1e-6;
+    let mut since = None;
+    for k in 0..40_000 {
+        // The vehicle follows the target down at the descent rate, and stops on the ground.
+        let mut n = fly.cell.get();
+        n.position_m[2] = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
+        n.velocity_ms[2] = if n.position_m[2] < 0.0 { LAND_SPEED_MS } else { 0.0 };
+        fly.cell.set(n);
+        fly.t += DT_US;
+        let mut i = input(fly.t, Some(RcSample { sticks: Sticks { roll: 1.0, pitch: 1.0, throttle: 1.0, yaw: 1.0 }, arm: true, switch6: Switch3::Low, t_us: fly.t }));
+        i.sensors.imu1.reading.accel_ms2 = AT_REST;
+        let o = fly.f.step(&i);
+        if !o.armed {
+            let since: u64 = since.expect("below the threshold");
+            assert_eq!(fly.state(), State::Stop);
+            assert!(fly.t - since <= Tuning::DEFAULT.land_detect_us + DT_US, "{} us", fly.t - since);
+            return;
+        }
+        assert_eq!(fly.state(), State::Takeover, "step {k}");
+        if o.demand.is_ok_and(|d| d.thrust_n < ground_n()) {
+            since.get_or_insert(fly.t);
+        } else {
+            since = None;
+        }
+    }
+    panic!("the TAKEOVER descent on the ground never disarmed");
+}
+
 // ---- WR3 and return_built on the real step ----
 
 /// WR3 a-d on the real `Flight` over random reports, switches, sticks, coverage, silences, FS_HOLD_EN and the heading
