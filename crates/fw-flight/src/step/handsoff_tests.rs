@@ -2041,13 +2041,14 @@ fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
     }
 }
 
-/// E2's flight: armed in Angle on the ground at d = 0 (home, the test's `return_built`), then 30 m up in Altitude, the
+/// E2's flight (`return_built` false, as on the board): armed in Angle on the ground at d = 0 (home when `home`; else the
+/// height is not valid until airborne, so no home latches), then 30 m up in Altitude, the
 /// sticks lost (FS_HOLD_EN 0: LAND, holding position on T3'); a vertical point mass flies the demand. Returns per step after
 /// the loss (height above home m, LAND's rate m/s, the setpoint's climb-rate feed-forward m/s, collective N), down to 1 m.
-fn e2_run(return_built: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
-    let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, POSITION))));
+fn e2_run(home: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
+    let valid = if home { POSITION } else { ANGLE };
+    let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, valid))));
     let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
-    f.return_built = return_built;
     let mut t = 1_000_000u64;
     let rc = |f: &mut TestFlight, t: &mut u64, arm: bool, throttle: f32, sw: Switch3| {
         *t += DT_US;
@@ -2059,7 +2060,7 @@ fn e2_run(return_built: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
         rc(&mut f, &mut t, true, 0.5, Switch3::Low);
     }
     assert!(f.gate.armed() && f.airborne);
-    assert_eq!(f.hands_off.home().map(|h| h.d_m), if return_built { Some(0.0) } else { None });
+    assert_eq!(f.hands_off.home().map(|h| h.d_m), if home { Some(0.0) } else { None });
     cell.set(nav_at(-30.0, POSITION));
     for _ in 0..400 {
         rc(&mut f, &mut t, true, 0.5, Switch3::Middle);
@@ -2144,8 +2145,9 @@ enum Cause {
 /// arm switch, sticks (throttle 0 included), mode switch, tiers, the heading verdict, battery critical, FS_HOLD_EN
 /// (`fs`, or random), IMU1 at rest, zero or noisy, rare NaN samples, rotation above 20 deg/s, rare step gaps. Every step
 /// that stops or disarms after the first airborne latch of the arming gets exactly one cause of P, T or F (first match in
-/// `Cause`'s order); any other (the former latch-only WR1 and stick-loss stops included) panics. Returns the count per
-/// cause, then the stick losses in the air handled as hands-off states.
+/// `Cause`'s order); any other (the former latch-only WR1 and stick-loss stops included) panics. Home latches (N10 (v))
+/// but RETURN and AUTO are never reached (`return_built` false). Returns the count per cause, then the stick losses in
+/// the air handled as hands-off states.
 fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     let tuning = Tuning::DEFAULT;
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
@@ -2156,7 +2158,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     let (mut valid, mut rates, mut accel) = (POSITION, [0.0f32; 3], 0u64);
     let mut newest: Option<u64> = None;
     let (mut prev_armed, mut prev_state, mut ever) = (false, State::Stop, false);
-    let mut counts = [0u32; 6];
+    let (mut counts, mut homed) = ([0u32; 6], 0u32);
     for k in 0..steps {
         match fs {
             Some(v) => f.set_fs_hold_en(v),
@@ -2232,6 +2234,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         let newest_off = f.rc_newest.is_some_and(|r| !r.arm);
         let o = f.step(&i);
         let state = f.hands_off_state();
+        assert!(!matches!(state, State::Return | State::Auto), "seed {seed:#x} step {k}: return_built false");
+        homed += u32::from(o.armed && f.hands_off.home().is_some());
         let lost = newest.is_none_or(|n| t - n > tuning.rc_fs_timeout_us);
         let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
         if prev_armed && ever && (!o.armed || o.motors.throttles().is_none()) {
@@ -2262,6 +2266,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         prev_armed = o.armed;
         prev_state = state;
     }
+    assert!(homed > 10_000, "seed {seed:#x}: home latched (N10 (v)) on {homed} armed steps");
     counts
 }
 

@@ -218,8 +218,8 @@ pub struct Inputs {
     pub battery_ok: bool,
     /// The battery is critical.
     pub battery_critical: bool,
-    /// The RETURN law exists (Amendment D). False: no home latches, so RETURN cannot be reached and link loss lands
-    /// in place.
+    /// The RETURN law exists (Amendment D). False: RETURN cannot be reached, link loss lands in place and Start and
+    /// Return are denied (`NoHome`); home still latches (N10 (v)).
     pub return_built: bool,
     /// The horizontal distance between the navigation position and the Position target the controller tracked at the
     /// previous step, both of that step, m; `None` when the previous step tracked no Position target. Over X
@@ -257,7 +257,7 @@ pub enum DenyReason {
     NoWaypoints,
     /// Start: a stored z is outside the height limits in force.
     HeightOutsideLimits,
-    /// Start or Return: home is not set.
+    /// Start or Return: home is not set, or the RETURN law is not built (`return_built` false, N10 (v)).
     NoHome,
     /// Start: the vehicle is more than `HOME_RANGE_M` from home, or its position is not valid.
     VehicleBeyondRange,
@@ -658,7 +658,7 @@ impl HandsOff {
             if !self.was_armed {
                 self.home_window = true;
             }
-            if self.home_window && i.return_built {
+            if self.home_window {
                 if i.airborne {
                     self.home_window = false;
                 } else {
@@ -714,7 +714,7 @@ impl HandsOff {
                 if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
                     self.go(self.land_state(), i, ev);
                 } else if self.link_age(i) > LINK_LOSS_US {
-                    let next = if self.home().is_some() {
+                    let next = if i.return_built && self.home().is_some() {
                         State::Return
                     } else {
                         State::Land
@@ -934,10 +934,10 @@ impl HandsOff {
         }
     }
 
-    /// C3: Return needs home; then B2's no-bounce rule for RETURN's automatic exits (arrival excepted); the track fault
+    /// C3: Return needs home and `return_built`; then B2's no-bounce rule for RETURN's automatic exits (arrival excepted); the track fault
     /// (H14) answers NotT3.
     fn return_check(&self, i: &Inputs) -> Option<DenyReason> {
-        if self.home().is_none() {
+        if !i.return_built || self.home().is_none() {
             Some(DenyReason::NoHome)
         } else if self.debounced != Tier::T3 || self.track_fault {
             Some(DenyReason::NotT3)
@@ -960,7 +960,7 @@ impl HandsOff {
         if !i.mission.z_within_limits {
             return Some(DenyReason::HeightOutsideLimits);
         }
-        let Some(home) = self.home() else {
+        let Some(home) = self.home().filter(|_| i.return_built) else {
             return Some(DenyReason::NoHome);
         };
         let [n, e] = i.position_ne_m;
@@ -3036,8 +3036,10 @@ mod tests {
         }
     }
 
+    /// N10 (v): with `return_built` false home latches at the arming (B8), and still link loss lands, Return is denied
+    /// (`NoHome`) and RETURN is never entered.
     #[test]
-    fn hands_off_return_built_false_latches_no_home_and_link_loss_lands() {
+    fn hands_off_return_built_false_latches_home_and_link_loss_lands() {
         let mut r = Rig::new();
         r.i.return_built = false;
         r.i.mission = no_mission();
@@ -3046,10 +3048,11 @@ mod tests {
         r.report(T0 + 1_000, Switch3::High);
         r.i.airborne = true;
         let out = r.report(T0 + 2_000, Switch3::High);
-        assert_eq!((out.state, out.home), (State::Pilot, None));
+        let home = Some(Home { ne_m: HOME_NE, d_m: HOME_D });
+        assert_eq!((out.state, out.home), (State::Pilot, home));
         let t = r.last_report() + LOSS + 1;
         let out = r.heartbeat(t);
-        assert_eq!((out.state, out.home), (State::Hold, None));
+        assert_eq!((out.state, out.home), (State::Hold, home));
         assert_eq!(r.cmd(Command::Start).command, denied(DenyReason::NoWaypoints));
         assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::NoHome));
         let t = r.now() + LINK_LOSS_US + 1;
@@ -3061,14 +3064,14 @@ mod tests {
         let mut rng = Lcg(0x5eed_00d3);
         let mut h = HandsOff::new(&Tuning::DEFAULT);
         let mut i = Rig::new().i;
-        let (mut hold, mut start_denied) = (0u32, 0u32);
+        let (mut hold, mut start_denied, mut homed) = (0u32, 0u32, 0u32);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
             i.return_built = false;
             i.mission = no_mission();
             let out = h.step(&i);
             assert!(!matches!(out.state, State::Return | State::Auto), "{out:?}");
-            assert_eq!(out.home, None);
+            homed += u32::from(out.home.is_some());
             assert!(out.events.start.is_none());
             if let Some(c) = i.command
                 && c.command == Command::Start
@@ -3079,7 +3082,7 @@ mod tests {
             hold += u32::from(out.state == State::Hold);
         }
         // H14: a track fault (the random positions trip the anchor) leaves HOLD at that step, not 1.0 s later.
-        assert!(hold > 500 && start_denied > 10, "{hold} {start_denied}");
+        assert!(hold > 500 && start_denied > 10 && homed > 1_000, "{hold} {start_denied} {homed}");
     }
 
     struct Lcg(u64);

@@ -460,10 +460,6 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the battery is critical (the battery monitor is on another branch; the board gives false).
     #[cfg(test)]
     battery_critical: bool,
-    /// Tests only: the state machine is told the RETURN law is built, so home latches (E2's height reference; the board
-    /// gives false).
-    #[cfg(test)]
-    return_built: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -555,8 +551,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             latch_off: false,
             #[cfg(test)]
             battery_critical: false,
-            #[cfg(test)]
-            return_built: false,
         }
     }
 
@@ -737,10 +731,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let battery_critical = self.battery_critical;
         #[cfg(not(test))]
         let battery_critical = false;
-        #[cfg(test)]
-        let return_built = self.return_built;
-        #[cfg(not(test))]
-        let return_built = false;
         let was = self.hands_off.state();
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
@@ -764,7 +754,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             heading_ok: nav.valid.heading && self.heading_ok,
             battery_ok: false,
             battery_critical,
-            return_built,
+            return_built: false,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             td_held: self.still_us >= self.land_detect_us,
