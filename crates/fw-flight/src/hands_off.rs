@@ -500,7 +500,7 @@ impl HandsOff {
         {
             let [n, e] = i.position_ne_m;
             let d = libm::sqrtf((n - an) * (n - an) + (e - ae) * (e - ae));
-            if !(d <= x + b) {
+            if d.is_nan() || d > x + b {
                 self.track_fault = true;
             }
         }
