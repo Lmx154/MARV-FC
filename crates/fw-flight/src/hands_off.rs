@@ -406,7 +406,8 @@ pub struct HandsOff {
     /// H12 track_fault: `heading_ok` counts as false; set by `track_error_m` or by the distance from the anchor (H13),
     /// cleared on a disarmed step only.
     track_fault: bool,
-    /// The previous step's state is one H12 covers: HOLD, AUTO, RETURN, TAKEOVER, or LAND holding position.
+    /// The previous step's state is one the check covers (H12 item 4 with H13 (3)): HOLD, AUTO, RETURN, TAKEOVER, or
+    /// LAND holding position.
     track_covered: bool,
     /// H13 (1): the anchor A (NE, m) and the braking allowance b (m) of the present fixed-target segment; `None` outside
     /// one and until a step of it has a valid, finite NE position and velocity.
@@ -3087,7 +3088,7 @@ mod tests {
         }
     }
 
-    /// The states H12 covers (HOLD, AUTO, RETURN, LAND on T3') and TAKEOVER (the lead's reading: it flies HOLD's law);
+    /// The states the check covers (HOLD, AUTO, RETURN, LAND on T3', and TAKEOVER: H13 (3), it flies HOLD's law);
     /// never LAND without T3', BLIND, PILOT, STOP, a disarmed step or a step with the airborne latch false.
     #[test]
     fn h12_only_the_covered_states_armed_and_airborne_set_it() {
@@ -3177,6 +3178,211 @@ mod tests {
                 denied(DenyReason::HeadingNotOk)
             };
             assert_eq!(r.cmd(Command::Start).command, want, "{heading} {fault}");
+        }
+    }
+
+    // ---- H13: the anchor, the braking allowance, the speed cap and X ----
+
+    /// PILOT, then sticks lost at `ne` moving `v`: HOLD.
+    fn hold_from(ne: [f32; 2], v: [f32; 2]) -> Rig {
+        let mut r = Rig::pilot();
+        r.i.position_ne_m = ne;
+        r.i.velocity_ne_ms = v;
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        r
+    }
+
+    /// H13 (1): none in PILOT; at the entry step A = the position and b = |v|^2 / (2 x 3.0 m/s^2).
+    #[test]
+    fn h13_the_anchor_and_the_braking_allowance_are_set_at_the_entry_step() {
+        assert_eq!(Rig::pilot().h.anchor(), None);
+        let r = hold_from([20.0, -7.0], [3.0, -4.0]);
+        assert_eq!(r.h.anchor(), Some(([20.0, -7.0], 25.0 / 6.0)));
+        let r = hold_from([20.0, -7.0], [20.0, 0.0]);
+        assert_eq!(r.h.anchor(), Some(([20.0, -7.0], 400.0 / 6.0)), "67 m at 20 m/s");
+    }
+
+    /// AUTO and RETURN clear the anchor; entry from them to HOLD (Pause), TAKEOVER (a report) or LAND on T3' (the Land
+    /// command, RETURN's arrival) sets a new one; LAND entered without T3' sets none.
+    #[test]
+    fn h13_auto_and_return_clear_the_anchor_and_entry_from_them_sets_a_new_one() {
+        let mut r = Rig::auto();
+        assert_eq!(r.h.anchor(), None);
+        r.i.position_ne_m = [40.0, 10.0];
+        r.i.velocity_ne_ms = [0.0, 3.0];
+        assert_eq!(r.cmd(Command::Pause).state, State::Hold);
+        assert_eq!(r.h.anchor(), Some(([40.0, 10.0], 1.5)));
+        let mut r = Rig::auto();
+        r.i.position_ne_m = [41.0, 10.0];
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Low).state, State::Takeover);
+        assert_eq!(r.h.anchor(), Some(([41.0, 10.0], 0.0)));
+        let mut r = Rig::auto();
+        r.i.position_ne_m = [42.0, 10.0];
+        let out = r.cmd(Command::Land);
+        assert_eq!((out.state, out.land_holds_position), (State::Land, true));
+        assert_eq!(r.h.anchor(), Some(([42.0, 10.0], 0.0)));
+        let mut r = Rig::ret();
+        assert_eq!(r.h.anchor(), None);
+        r.i.position_ne_m = HOME_NE;
+        r.i.home_reached = true;
+        let out = r.step();
+        assert_eq!((out.state, out.land_holds_position), (State::Land, true));
+        assert_eq!(r.h.anchor(), Some((HOME_NE, 0.0)));
+        let mut r = Rig::auto();
+        r.drop_tier(Tier::T2);
+        let out = r.hold_drop();
+        assert_eq!((out.state, out.land_holds_position), (State::Land, false));
+        assert_eq!(r.h.anchor(), None);
+    }
+
+    /// H13 (1): a 0.5 s tier dip (Altitude) with the vehicle 2 m away, then HOLD -> TAKEOVER -> HOLD moved and moving:
+    /// A and b kept. A take-over and hand-back: PILOT clears it, and the next entry sets it at the new place.
+    #[test]
+    fn h13_the_anchor_is_kept_through_a_tier_dip_and_hold_takeover_hold_and_re_set_after_a_hand_back() {
+        let mut r = hold_from([10.0, 10.0], [0.0, 0.0]);
+        let a = Some(([10.0, 10.0], 0.0));
+        assert_eq!(r.h.anchor(), a);
+        r.i.position_ne_m = [12.0, 10.0];
+        r.i.tier = Tier::T2;
+        for k in 0..500 {
+            let t = r.now() + 1_000;
+            let out = r.at(t);
+            assert_eq!((out.state, out.demand), (State::Hold, Demand::Altitude), "step {k}");
+        }
+        r.i.tier = Tier::T3;
+        assert_eq!(r.step().demand, Demand::Position);
+        assert_eq!(r.h.anchor(), a);
+        r.i.position_ne_m = [13.0, 10.0];
+        r.i.velocity_ne_ms = [2.0, 0.0];
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Low).state, State::Takeover);
+        assert_eq!(r.h.anchor(), a);
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        assert_eq!(r.h.anchor(), a);
+        assert!(!r.h.track_fault());
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Takeover);
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Middle).state, State::Pilot, "hand-back");
+        assert_eq!(r.h.anchor(), None);
+        r.i.position_ne_m = [30.0, 10.0];
+        r.i.velocity_ne_ms = [0.0, 0.0];
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        assert_eq!(r.h.anchor(), Some(([30.0, 10.0], 0.0)));
+    }
+
+    /// H13 (1), v0 3 m/s (b 1.5 m): exactly X + b does not trip; one ULP over, infinity and not a number do.
+    #[test]
+    fn h13_exactly_x_plus_b_does_not_trip_one_ulp_over_and_not_a_number_do() {
+        let bound = track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) + 1.5;
+        assert_eq!(bound, 6.5);
+        let over = f32::from_bits(bound.to_bits() + 1);
+        for (n, trips) in [(bound, false), (-bound, false), (over, true), (-over, true), (f32::INFINITY, true), (f32::NAN, true)] {
+            let mut r = hold_from([0.0, 0.0], [3.0, 0.0]);
+            assert_eq!(r.h.anchor(), Some(([0.0, 0.0], 1.5)));
+            r.i.position_ne_m = [n, 0.0];
+            let out = r.step();
+            assert_eq!(r.h.track_fault(), trips, "{n}");
+            assert_eq!(out.demand == Demand::Position, !trips, "{n}");
+        }
+    }
+
+    /// H13 (1): the anchor distance is read on a T2 step (Altitude: no target distance); not on a step with the NE
+    /// velocity or position not valid, nor with the airborne latch false.
+    #[test]
+    fn h13_the_anchor_distance_is_read_on_a_tier_dip_step_and_only_with_the_ne_valid() {
+        let cases: [(bool, fn(&mut Rig)); 4] = [
+            (true, |_| {}),
+            (false, |r| r.i.velocity_ne_valid = false),
+            (false, |r| r.i.position_ne_valid = false),
+            (false, |r| r.i.airborne = false),
+        ];
+        for (k, (trips, change)) in cases.into_iter().enumerate() {
+            let mut r = hold_from([0.0, 0.0], [0.0, 0.0]);
+            r.i.tier = Tier::T2;
+            r.i.position_ne_m = [6.0, 0.0];
+            change(&mut r);
+            r.step();
+            assert_eq!(r.h.track_fault(), trips, "case {k}");
+        }
+    }
+
+    /// H13 (1): entry with the NE position or velocity not valid or not finite (the caller's tier then T2; the drop
+    /// younger than B5's debounce, so HOLD): no anchor, stale or zero; the first later step of the segment with both
+    /// valid and finite sets it, with b from that step's speed.
+    #[test]
+    fn h13_an_entry_without_a_valid_ne_sets_the_anchor_at_the_first_valid_step() {
+        let cases: [fn(&mut Rig); 4] = [
+            |r| r.i.position_ne_valid = false,
+            |r| r.i.velocity_ne_valid = false,
+            |r| r.i.position_ne_m = [f32::NAN, 0.0],
+            |r| r.i.velocity_ne_ms = [f32::INFINITY, 0.0],
+        ];
+        for (k, bad) in cases.into_iter().enumerate() {
+            let mut r = Rig::pilot();
+            r.i.position_ne_m = [20.0, 0.0];
+            r.i.tier = Tier::T2;
+            bad(&mut r);
+            let t = r.last_report() + LOSS + 1;
+            assert_eq!(r.heartbeat(t).state, State::Hold, "case {k}");
+            assert_eq!(r.h.anchor(), None, "case {k}");
+            for _ in 0..500 {
+                let t = r.now() + 1_000;
+                r.at(t);
+                assert_eq!(r.h.anchor(), None, "case {k}");
+            }
+            r.i.position_ne_valid = true;
+            r.i.velocity_ne_valid = true;
+            r.i.position_ne_m = [26.0, 0.0];
+            r.i.velocity_ne_ms = [1.2, 0.0];
+            r.i.tier = Tier::T3;
+            let out = r.step();
+            assert_eq!((out.state, out.demand), (State::Hold, Demand::Position), "case {k}");
+            assert_eq!(r.h.anchor(), Some(([26.0, 0.0], 1.2 * 1.2 / 6.0)), "case {k}");
+            assert!(!r.h.track_fault(), "case {k}");
+        }
+    }
+
+    /// H13 (2): X for PILOT_SPEED_XY 3, 5 and 20 (capped to 5) is 7, 5 and 5 m; the speed limit is v_ho in every
+    /// hands-off state and the speed in force in PILOT and STOP; the target distance and the anchor distance trip one
+    /// ULP over that X and not at it.
+    #[test]
+    fn h13_x_and_the_speed_limit_follow_the_speed_in_force_capped_at_5() {
+        for (v, x, v_ho) in [(3.0f32, 7.0f32, 3.0f32), (5.0, 5.0, 5.0), (20.0, 5.0, 5.0)] {
+            assert_eq!((track_fault_m(v), speed_limit_xy_ms(v)), (x, v_ho), "{v}");
+            let rigs: [(&str, fn() -> Rig, f32); 7] = [
+                ("pilot", Rig::pilot, v),
+                ("hold", Rig::hold, v_ho),
+                ("takeover", Rig::takeover, v_ho),
+                ("auto", Rig::auto, v_ho),
+                ("return", Rig::ret, v_ho),
+                ("land", Rig::land, v_ho),
+                ("blind", Rig::blind, v_ho),
+            ];
+            for (name, rig, want) in rigs {
+                let mut r = rig();
+                r.i.speed_xy_ms = v;
+                assert_eq!(r.step().speed_limit_xy_ms, want, "{name} {v}");
+            }
+            let mut r = Rig::new();
+            r.i.speed_xy_ms = v;
+            assert_eq!(r.step().speed_limit_xy_ms, v, "stop {v}");
+            for (d, trips) in [(x, false), (f32::from_bits(x.to_bits() + 1), true)] {
+                let mut r = Rig::hold();
+                r.i.speed_xy_ms = v;
+                r.i.track_error_m = Some(d);
+                r.step();
+                assert_eq!(r.h.track_fault(), trips, "target distance {v} {d}");
+                let mut r = hold_from([0.0, 0.0], [0.0, 0.0]);
+                r.i.speed_xy_ms = v;
+                r.i.position_ne_m = [d, 0.0];
+                r.step();
+                assert_eq!(r.h.track_fault(), trips, "anchor distance {v} {d}");
+            }
         }
     }
 }

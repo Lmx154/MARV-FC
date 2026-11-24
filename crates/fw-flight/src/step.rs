@@ -678,6 +678,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let battery_critical = self.battery_critical;
         #[cfg(not(test))]
         let battery_critical = false;
+        let was = self.hands_off.state();
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
             fs_hold_en: self.fs_hold_en,
@@ -729,6 +730,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 yaw: 0.0,
             };
             self.shaper.land_rate_d_ms = (ho.landing || ho.takeover_descent).then_some(LAND_SPEED_MS);
+            // H13 (3): the first hands-off step drops the pilot's target; capture restarts under `pilot_hold_speed_ms`.
+            if matches!(was, State::Pilot | State::Stop) {
+                self.shaper.target_ne = None;
+            }
         }
         let setpoint = self.shaper.setpoint(mode, &nav, t_us);
         self.shaper.sticks = real;
