@@ -1308,6 +1308,7 @@ async fn main(spawner: Spawner) {
     calibration::init(board);
     flight::init_speed();
     flight::init_notch();
+    flight::init_fs_hold();
     flight::init_gdn();
     flight::init_gains();
     let [imu1_offsets, imu2_offsets] = calibration::readers();

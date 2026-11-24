@@ -37,8 +37,12 @@ pub const GDN_ALT_MIN: &str = "GDN_ALT_MIN";
 /// The highest `z` above home, m, of a waypoint or the return item of an uploaded mission (checked at upload only).
 pub const GDN_ALT_MAX: &str = "GDN_ALT_MAX";
 
+/// The hands-off switch: 1 lets stick loss in the air hand the vehicle to the hands-off state machine
+/// (decision-mavlink-mode-20261123, Amendments A to D), 0 keeps today's rule (only PILOT and STOP).
+pub const FS_HOLD_EN: &str = "FS_HOLD_EN";
+
 /// The number of flight parameters.
-pub const COUNT: usize = 15 + GAIN_COUNT;
+pub const COUNT: usize = 16 + GAIN_COUNT;
 
 /// The index of [`SPEED_XY`] in the firmware's table: the one after `GPS_GNSS` (92).
 pub const SPEED_XY_AT: usize = 93;
@@ -93,6 +97,7 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::i32(GDN_SRC, 0, 0, 0, 1, Apply::Live),
     ParamDef::f32(GDN_ALT_MIN, 0, 5.0, 3.0, 120.0, Apply::Live),
     ParamDef::f32(GDN_ALT_MAX, 0, 50.0, 3.0, 120.0, Apply::Live),
+    ParamDef::i32(FS_HOLD_EN, 0, 0, 0, 1, Apply::Live),
 ];
 
 /// The index of [`GAIN_NAMES`]`[0]`, `ATC_ANG_RP_P`, in the firmware's table: the one after `GDN_LON4` (104). The other 13
@@ -104,6 +109,11 @@ pub const GDN_SRC_AT: usize = 119;
 
 /// The index of [`GDN_ALT_MIN`] in the firmware's table: the one after `GDN_SRC` (119). `GDN_ALT_MAX` is 121.
 pub const GDN_ALT_MIN_AT: usize = 120;
+
+/// The index of [`FS_HOLD_EN`] in the firmware's table: the one after `GDN_ALT_MAX` (121). `I32`, 0 or 1, default 0,
+/// `Live`, device 0: core 0 pushes the stored value to the flight core every change; the state machine takes it into force
+/// on disarmed steps only (decision-mavlink-mode-20261123, section 11, B9).
+pub const FS_HOLD_EN_AT: usize = 122;
 
 /// The definition of gain `i` of `GAIN_NAMES`: `F32`, device 0, `Live`; the default is the field of `Tuning::DEFAULT`
 /// and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own (decision-gain-params-20261123,
@@ -171,7 +181,7 @@ mod tests {
     fn the_gdn_parameters_are_appended_at_95_to_104_with_their_types_defaults_ranges_and_class() {
         use ParamValue::{F32, I32};
         assert_eq!(GDN_COUNT_AT, RPM_NOTCH_EN_AT + 1);
-        assert_eq!(GDN_COUNT_AT + 10 + GAIN_COUNT + 3, crate::COUNT);
+        assert_eq!(GDN_COUNT_AT + 10 + GAIN_COUNT + 4, crate::COUNT);
         let mut expected = std::vec![("GDN_COUNT", I32(0), I32(0), I32(4)), ("GDN_RADIUS", F32(2.0), F32(0.05), F32(10.0))];
         for k in 0..GDN_SLOTS {
             expected.push((GDN_LAT[k], I32(0), I32(-900_000_000), I32(900_000_000)));
@@ -259,8 +269,8 @@ mod tests {
     fn the_gain_parameters_are_appended_at_105_to_118_in_table_order_f32_device_0_live() {
         assert_eq!(GAINS_AT, GDN_COUNT_AT + 10);
         assert_eq!(GAINS_AT + GAIN_COUNT, GDN_SRC_AT);
-        assert_eq!(GDN_SRC_AT + 3, crate::COUNT);
-        assert_eq!(crate::COUNT, 122);
+        assert_eq!(GDN_SRC_AT + 4, crate::COUNT);
+        assert_eq!(crate::COUNT, 123);
         assert_eq!(crate::TABLE[GAINS_AT - 1].name, "GDN_LON4");
         let names = [
             "ATC_ANG_RP_P",
@@ -365,6 +375,29 @@ mod tests {
         };
         assert_eq!(record.declared_count(), crate::COUNT);
         assert_eq!(record.entries().count(), crate::COUNT);
+    }
+
+    #[test]
+    fn fs_hold_en_is_appended_at_index_122_after_gdn_alt_max_i32_0_or_1_default_0_live_device_0() {
+        use ParamValue::I32;
+        let def = &crate::TABLE[FS_HOLD_EN_AT];
+        assert_eq!(def.name, "FS_HOLD_EN");
+        assert!(def.name.len() <= 16);
+        assert_eq!((def.device, def.default, def.min, def.max, def.apply), (0, I32(0), I32(0), I32(1), Apply::Live));
+        assert!(!def.calibration && !def.read_only);
+        assert_eq!(crate::TABLE[FS_HOLD_EN_AT - 1].name, "GDN_ALT_MAX");
+        assert_eq!(FS_HOLD_EN_AT + 1, crate::COUNT);
+        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
+        assert_eq!(p.get_named(FS_HOLD_EN), Some(I32(0)));
+        let i = u16::try_from(FS_HOLD_EN_AT).unwrap();
+        for ok in [0, 1] {
+            assert_eq!(p.set(i, I32(ok)), Ok(I32(ok)));
+        }
+        for bad in [-1, 2] {
+            assert_eq!(p.set(i, I32(bad)), Err(ParamError::OutOfRange), "{bad}");
+        }
+        assert_eq!(p.get_named(FS_HOLD_EN), Some(I32(1)), "a refused value leaves the stored one");
+        assert!(p.set(i, ParamValue::F32(1.0)).is_err());
     }
 
     /// The range is the whole check: the ends are accepted, a hair outside, NaN and infinity are refused.

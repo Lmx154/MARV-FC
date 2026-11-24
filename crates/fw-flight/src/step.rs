@@ -331,6 +331,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     gains: Gains,
     /// An eRPM this old or older is missing, us (`notch_hold_us`).
     notch_hold_us: u64,
+    /// The newest value of the parameter `FS_HOLD_EN` (`set_fs_hold_en`); the hands-off state machine takes it into force
+    /// on disarmed steps only (decision-mavlink-mode-20261123, B9).
+    fs_hold_en: bool,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -411,6 +414,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             gains_pending: Gains::of(tuning),
             gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
+            fs_hold_en: false,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -460,6 +464,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.gains_pending = gains;
         }
         ok
+    }
+
+    /// The newest value of the runtime parameter `FS_HOLD_EN` (decision-mavlink-mode-20261123). Given to the hands-off state
+    /// machine every step; it takes effect on a disarmed step (B9).
+    pub fn set_fs_hold_en(&mut self, on: bool) {
+        self.fs_hold_en = on;
     }
 
     /// The estimator, read only (the log of its own counters, packet E2).
