@@ -227,6 +227,9 @@ pub struct Inputs {
     pub track_error_m: Option<f32>,
     /// `PILOT_SPEED_XY` in force (latched at arming), m/s: gives v_ho and X (H13 (2)).
     pub speed_xy_ms: f32,
+    /// The touchdown rule's acceleration condition (b) at the previous step: the 1 Hz low-passed earth-frame acceleration,
+    /// gravity removed, at most 1.0 m/s^2, from a finite IMU sample (Amendment N, N4). Guards WR1's ground exit.
+    pub still: bool,
 }
 
 /// Why a command was DENIED: the first condition that failed, in this order.
@@ -671,7 +674,8 @@ impl HandsOff {
             self.go(State::Stop, i, ev);
             return;
         }
-        if self.state.is_hands_off() && !i.airborne {
+        // WR1, guarded by the touchdown rule's acceleration condition (N4; ArduPilot accel_stationary).
+        if self.state.is_hands_off() && !i.airborne && i.still {
             self.go(State::Stop, i, ev);
             return;
         }
@@ -1056,6 +1060,7 @@ mod tests {
                 return_built: true,
                 track_error_m: None,
                 speed_xy_ms: Tuning::DEFAULT.pilot_speed_xy_ms,
+                still: true,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),
@@ -1640,6 +1645,29 @@ mod tests {
         let out = r.step();
         assert_eq!((out.state, out.hands_off, out.landing), (State::Stop, false, false));
         assert_eq!(out.home, None);
+    }
+
+    /// Amendment N, N4: WR1's ground exit needs the touchdown rule's acceleration condition (`still`): a hands-off state
+    /// that reads the latch false stays, hands-off and not disarming, while `still` is false, and stops with the disarm
+    /// at the first step it is true.
+    #[test]
+    fn hands_off_wr1_ground_exit_is_guarded_by_the_acceleration_condition() {
+        let rigs: [(&str, fn() -> Rig); 4] = [("hold", Rig::hold), ("land", Rig::land), ("blind", Rig::blind), ("takeover", Rig::takeover)];
+        for (name, make) in rigs {
+            let mut r = make();
+            let want = r.h.state();
+            r.i.airborne = false;
+            r.i.still = false;
+            for k in 1..=5u64 {
+                let t = r.now() + 1_000;
+                let out = r.at(t);
+                assert_eq!((out.state, out.hands_off, out.disarm), (want, true, false), "{name} step {k}");
+            }
+            r.i.still = true;
+            let t = r.now() + 1_000;
+            let out = r.at(t);
+            assert_eq!((out.state, out.disarm), (State::Stop, true), "{name}");
+        }
     }
 
     // ---- STOP and BLIND ----

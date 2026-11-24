@@ -731,6 +731,7 @@ mod tests {
             return_built: true,
             track_error_m: None,
             speed_xy_ms: tuning.pilot_speed_xy_ms,
+            still: true,
         };
         let (mut t, mut quiet, mut airborne) = (1_000u64, 0u64, false);
         let (mut prev_state, mut prev_armed, mut off_then_disarmed) = (State::Stop, false, false);

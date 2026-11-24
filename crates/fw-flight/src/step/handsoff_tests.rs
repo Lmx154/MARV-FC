@@ -493,9 +493,10 @@ fn target_d(o: &StepOut) -> f32 {
     }
 }
 
-/// WR1 touchdown: LAND descends (the height target at 0.5 m/s), the vehicle follows it to the ground (d = 0), the real
-/// airborne latch clears after land_detect_us on the idle floor, and the gate is disarmed within one step of that: at
-/// most land_detect_us plus one step after the first step on the idle floor.
+/// WR1 touchdown: LAND descends (the height target at 0.5 m/s), the vehicle follows it to the ground (d = 0) and IMU1
+/// reads it at rest (WR1's guard, N4 (b)), the real airborne latch clears (TD or land_detect_us on the idle floor,
+/// whichever is first: TD, which starts at the ground threshold, above the idle floor), and the gate is disarmed within
+/// one step of that: at most land_detect_us plus one step after the first step below the ground threshold.
 #[test]
 fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_step() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -515,13 +516,13 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
         n.position_m[2] = d;
         fly.cell.set(n);
         let air = fly.f.airborne;
-        let o = fly.quiet();
+        let o = fly.quiet_f(AT_REST);
         if k == 800 {
             let rate = (target_d(&o) - d0) / (800.0 * dt);
             assert!((rate - LAND_SPEED_MS).abs() < 0.01, "descent {rate} m/s");
             rate_checked = true;
         }
-        let low = o.allocation.is_none_or(|a| a.saturation.thrust_low);
+        let low = !o.demand.is_ok_and(|d| d.thrust_n >= ground_n());
         if o.armed && low {
             first_low.get_or_insert(fly.t);
         } else if o.armed {
@@ -540,7 +541,7 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
     assert!(rate_checked);
     let (low, clear, dis) = (first_low.unwrap(), cleared.expect("the latch cleared"), disarmed.expect("disarmed"));
     let land = Tuning::DEFAULT.land_detect_us;
-    std::println!("idle floor at {low}, latch clear {} us later, disarm {} us after the clear", clear - low, dis - clear);
+    std::println!("below the ground threshold at {low}, latch clear {} us later, disarm {} us after the clear", clear - low, dis - clear);
     assert!(dis - clear <= DT_US, "disarmed within one step of the clear");
     assert!(dis - low <= land + DT_US, "land_detect_us plus one step: {} us", dis - low);
 }
@@ -1501,8 +1502,9 @@ fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9()
 /// monitor's verdict; the airborne latch is the real one (it clears in LAND on the idle floor), and now and then the
 /// test clears it between steps (a modelled false "landed"): (a) armed at the end of two consecutive steps implies the
 /// second is not STOP; (b) only the switch cycle arms; (c) outside the hands-off states silence disarms at the first
-/// step past the timeout and not before; (d) a hands-off state that reads the latch false ends that step disarmed.
-/// And return_built false: never AUTO or RETURN.
+/// step past the timeout and not before; (d) a hands-off state that reads the latch false and the previous step's
+/// acceleration condition (N4 (b), WR1's guard; IMU1 reads at rest or zero specific force, at random) ends that step
+/// disarmed. And return_built false: never AUTO or RETURN.
 #[test]
 fn wr3_and_return_built_on_the_real_step() {
     let tuning = Tuning::DEFAULT;
@@ -1515,6 +1517,7 @@ fn wr3_and_return_built_on_the_real_step() {
     let (mut prev_armed, mut prev_state, mut off_then_disarmed) = (false, State::Stop, false);
     let mut counts = [0u32; 6];
     let mut seen = [0u32; 8];
+    let mut rest = true;
     for k in 0..1_000_000u32 {
         t += DT_US;
         if rng.chance(2) {
@@ -1555,7 +1558,15 @@ fn wr3_and_return_built_on_the_real_step() {
         if rc.is_some() {
             newest = Some(t);
         }
-        let o = f.step(&input(t, rc));
+        if rng.chance(2) {
+            rest = !rest;
+        }
+        let still = f.still;
+        let mut i = input(t, rc);
+        if rest {
+            i.sensors.imu1.reading.accel_ms2 = AT_REST;
+        }
+        let o = f.step(&i);
         let state = f.hands_off_state();
         let hands_off = !matches!(state, State::Pilot | State::Stop);
         assert!(!matches!(state, State::Auto | State::Return), "step {k}: return_built false");
@@ -1578,7 +1589,7 @@ fn wr3_and_return_built_on_the_real_step() {
             }
         }
         // (d)
-        if !matches!(prev_state, State::Pilot | State::Stop) && !air {
+        if !matches!(prev_state, State::Pilot | State::Stop) && !air && still {
             assert!(!o.armed, "d, step {k}: {prev_state:?} grounded, still armed");
             counts[2 + usize::from(modelled_clear)] += u32::from(prev_armed);
         }

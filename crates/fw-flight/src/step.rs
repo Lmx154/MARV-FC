@@ -94,6 +94,14 @@ const TOUCHDOWN_ACCEL_LPF_HZ: f32 = 1.0;
 /// LAND_DETECTOR_ACCEL_MAX 1.0, config.h:359-372, land_detector.cpp:127).
 const TOUCHDOWN_ACCEL_MAX_MSS: f32 = 1.0;
 
+/// The touchdown rule's largest roll rate and largest pitch rate (each axis, the estimate's body rates), rad/s
+/// (decision-mavlink-mode-20261123, Amendment N, N4 (c): PX4 LNDMC_ROT_MAX 20 deg/s, land_detector_params_mc.yaml).
+const TOUCHDOWN_ROT_MAX_RADS: f32 = 20.0 * (core::f32::consts::PI / 180.0);
+
+/// BLIND's probe (Amendment N, N4): the time over which its collective ramps linearly from BLIND's down to the ground
+/// threshold, us. No outside source; pending the owner's approval 2026-11-23.
+pub const BLIND_PROBE_RAMP_US: u64 = 1_000_000;
+
 /// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
 /// NoWaypoints and AUTO cannot be reached.
 const NO_MISSION: MissionFacts = MissionFacts {
@@ -393,9 +401,18 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// E3: the earth-frame acceleration, gravity removed, low-passed at `TOUCHDOWN_ACCEL_LPF_HZ`, m/s^2 NED, from IMU1's
     /// specific force and the estimate's attitude; every step with a finite value.
     accel_ef_mss: [f32; 3],
-    /// E3: how long the collective has been below the ground threshold with `accel_ef_mss` at most
-    /// `TOUCHDOWN_ACCEL_MAX_MSS`, in the armed LAND and TAKEOVER-descent steps since that last failed, us.
+    /// The touchdown rule TD (Amendment N, N4; replaces E3): how long (a) the collective below the ground threshold (in
+    /// BLIND: the probe at its end), (b) `accel_ef_mss` at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch rates
+    /// each at most `TOUCHDOWN_ROT_MAX_RADS` have held together, in the armed LAND, TAKEOVER-descent and BLIND steps
+    /// since one last failed, us.
     still_us: u64,
+    /// TD's (b) at the latest step, from a finite IMU sample: the state machine's WR1 guard at the next step.
+    still: bool,
+    /// BLIND's probe: how long (b) and (c) have held in the armed BLIND steps with no probe running, since one last
+    /// failed, us.
+    quiet_us: u64,
+    /// BLIND's probe: how long its ramp has run, us; `None` when no probe runs.
+    probe_us: Option<u64>,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -489,6 +506,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
+            still: false,
+            quiet_us: 0,
+            probe_us: None,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -709,6 +729,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             return_built: false,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
+            still: self.still,
         });
         // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
         self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
@@ -725,13 +746,23 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             _ => mode,
         };
         // Hands-off laws (Amendment D): centred synthetic sticks, no real stick reaching the shaper (I3); LAND's descent in
-        // LAND and in TAKEOVER's descent; BLIND's collective below hover. AUTO and RETURN (unreachable here) fly HOLD's.
+        // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4) linearly down to the ground
+        // threshold over `BLIND_PROBE_RAMP_US`. AUTO and RETURN (unreachable here) fly HOLD's.
+        let probe_end = self.probe_us.is_some_and(|p| p >= BLIND_PROBE_RAMP_US);
+        let blind_throttle = match self.probe_us {
+            None => BLIND_THROTTLE,
+            Some(p) => {
+                let ramp = p.min(BLIND_PROBE_RAMP_US) as f32 / BLIND_PROBE_RAMP_US as f32;
+                let ground = self.ground_thrust_n / (2.0 * MASS * GRAVITY_MSS);
+                BLIND_THROTTLE - ramp * (BLIND_THROTTLE - ground)
+            }
+        };
         let real = self.shaper.sticks;
         if ho.synthetic_sticks {
             self.shaper.sticks = Sticks {
                 roll: 0.0,
                 pitch: 0.0,
-                throttle: if ho.state == State::Blind { BLIND_THROTTLE } else { THROTTLE_CENTRE },
+                throttle: if ho.state == State::Blind { blind_throttle } else { THROTTLE_CENTRE },
                 yaw: 0.0,
             };
             self.shaper.land_rate_d_ms = (ho.landing || ho.takeover_descent).then_some(LAND_SPEED_MS);
@@ -817,9 +848,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.airborne = false;
             }
         }
-        // E3, the touchdown backstop (decision-mavlink-mode-20261123, Amendment E): in LAND and in TAKEOVER's descent, the
-        // collective below the ground threshold and the filtered acceleration at most `TOUCHDOWN_ACCEL_MAX_MSS`, both for
-        // `land_detect_us`, clear the latch, so the next step's ground exit (WR1) stops and disarms. No vertical speed.
+        // TD, the touchdown rule (decision-mavlink-mode-20261123, Amendment N, N4; replaces E3): in LAND, TAKEOVER's descent
+        // and BLIND, (a) the collective below the ground threshold (BLIND: its probe at the threshold), (b) the filtered
+        // acceleration at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch rates at most `TOUCHDOWN_ROT_MAX_RADS`,
+        // all for `land_detect_us`, clear the latch, so the next step's ground exit (WR1, guarded by (b)) stops and
+        // disarms. No vertical speed. A non-finite IMU sample is neither (b) nor (c).
         if finite {
             let f = reading.accel_ms2;
             let q = nav.attitude;
@@ -832,14 +865,42 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.accel_ef_mss = [lpf(yn, a[0]), lpf(ye, a[1]), lpf(yd, a[2])];
             }
         }
-        let still = self.accel_ef_mss.iter().map(|v| v * v).sum::<f32>() <= TOUCHDOWN_ACCEL_MAX_MSS * TOUCHDOWN_ACCEL_MAX_MSS;
-        if self.gate.armed() && (ho.landing || ho.takeover_descent) && !thrust_ok && still {
+        let still = finite
+            && self.accel_ef_mss.iter().map(|v| v * v).sum::<f32>() <= TOUCHDOWN_ACCEL_MAX_MSS * TOUCHDOWN_ACCEL_MAX_MSS;
+        let [p_rads, q_rads, _] = nav.rates_rads;
+        let level = finite
+            && nav.valid.rates
+            && libm::fabsf(p_rads) <= TOUCHDOWN_ROT_MAX_RADS
+            && libm::fabsf(q_rads) <= TOUCHDOWN_ROT_MAX_RADS;
+        let blind = self.gate.armed() && ho.state == State::Blind;
+        if self.gate.armed() && (ho.landing || ho.takeover_descent || blind) && (!thrust_ok || probe_end) && still && level {
             self.still_us += dt_us;
             if self.still_us >= self.land_detect_us {
                 self.airborne = false;
             }
         } else {
             self.still_us = 0;
+        }
+        self.still = still;
+        // BLIND's probe (N4): after (b) and (c) have held for `land_detect_us` it starts; (b) failing while it runs ends it
+        // at once (BLIND's collective at the next step) and a new `land_detect_us` of (b) and (c) is needed.
+        match self.probe_us {
+            _ if !blind => {
+                self.probe_us = None;
+                self.quiet_us = 0;
+            }
+            Some(p) if still => self.probe_us = Some(p + dt_us),
+            Some(_) => {
+                self.probe_us = None;
+                self.quiet_us = 0;
+            }
+            None if still && level => {
+                self.quiet_us += dt_us;
+                if self.quiet_us >= self.land_detect_us {
+                    self.probe_us = Some(0);
+                }
+            }
+            None => self.quiet_us = 0,
         }
         #[cfg(test)]
         {
