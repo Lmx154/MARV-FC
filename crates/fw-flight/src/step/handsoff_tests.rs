@@ -613,26 +613,32 @@ impl Fly {
     }
 }
 
-/// A vehicle that drifts away from its hold point at 1 m/s: HOLD with the position law until the step after the
-/// distance passes X, then the Altitude law (level), and LAND, level, exactly 1.0 s plus one step after that step; the
-/// fault stays latched when the vehicle comes back.
+/// A vehicle that drifts away from its hold point at 1 m/s (entered at rest there: the anchor is the hold point, b 0):
+/// HOLD with the position law until the step whose position passes X, from that step the Altitude law (level: H13's
+/// anchor distance trips in the step it is measured, one step before the target distance would), and LAND, level,
+/// exactly 1.0 s after that step; the fault stays latched when the vehicle comes back.
 #[test]
 fn h12_a_vehicle_that_drifts_away_in_hold_lands_level_one_debounce_after_the_distance_passes_x() {
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
     assert_eq!(fly.state(), State::Hold);
     let target = fly.f.shaper.target_ne.expect("the hold point");
+    assert_eq!(fly.f.hands_off.anchor(), Some((target, 0.0)));
     let mut over: Option<u64> = None;
     let mut land: Option<u64> = None;
     for k in 0..20_000 {
         fly.drift(1.0);
         let o = fly.quiet();
+        let p = fly.cell.get().position_m;
+        let d = libm::sqrtf((p[0] - target[0]) * (p[0] - target[0]) + (p[1] - target[1]) * (p[1] - target[1]));
         if over.is_none() {
+            if d > hands_off::TRACK_FAULT_M {
+                over = Some(fly.t);
+                assert!(fly.track_fault() && fly.state() == State::Hold && o.mode == Mode::Altitude, "step {k}");
+                continue;
+            }
             assert_eq!((fly.state(), o.mode), (State::Hold, Mode::Position), "step {k}");
             assert!(!fly.track_fault() && fly.f.shaper.target_ne == Some(target));
-            if fly.f.track_error_m.is_some_and(|d| d > hands_off::TRACK_FAULT_M) {
-                over = Some(fly.t);
-            }
         } else if fly.state() == State::Hold {
             assert!(fly.track_fault());
             assert!(o.mode == Mode::Altitude && is_centred(&o), "T3' lost: level: {:?}", o.setpoint);
@@ -643,7 +649,7 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_level_one_debounce_after_the_dis
         }
     }
     let (over, land) = (over.expect("the distance passed X"), land.expect("LAND"));
-    assert_eq!(land - over, hands_off::TIER_DEBOUNCE_US + DT_US, "1.0 s after the step that read the distance");
+    assert_eq!(land - over, hands_off::TIER_DEBOUNCE_US, "1.0 s after the step whose position passed X");
     // Back at the hold point and stopped: still LAND, level, the fault latched.
     let mut n = fly.cell.get();
     n.position_m[0] = target[0];
@@ -662,7 +668,8 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_level_one_debounce_after_the_dis
 
 /// Case (a): HOLD entered moving at 2 m/s, 57 m from the origin, with no target: until the capture the controller's
 /// target is this step's position (distance 0), the capture is at this step's position; a coverage drop (Altitude, no
-/// target: the step's SPN would log PN, PE = 0) while the position jumps 57 m, then Position again with a fresh capture:
+/// target: the step's SPN would log PN, PE = 0) while the position jumps 6 m back (more than X from the old target and
+/// from 0; within X + b of H13's anchor, which a jump of 57 m would leave), then Position again with a fresh capture:
 /// the check never sees a stale or zero target and never trips.
 #[test]
 fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step() {
@@ -697,10 +704,12 @@ fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step(
         }
     }
     assert!(captured);
-    // The coverage drop with a 57 m jump (a position reset), shorter than the debounce.
+    // The coverage drop with a 6 m jump (a position reset), shorter than the debounce.
     fly.set_valid(ALTITUDE);
     let mut n = fly.cell.get();
-    n.position_m[0] -= 57.0;
+    let stale = fly.f.shaper.target_ne.expect("captured");
+    n.position_m[0] -= 6.0;
+    assert!(stale[0] - n.position_m[0] > hands_off::TRACK_FAULT_M && n.position_m[0] > hands_off::TRACK_FAULT_M);
     fly.cell.set(n);
     for k in 0..400 {
         let o = fly.quiet();

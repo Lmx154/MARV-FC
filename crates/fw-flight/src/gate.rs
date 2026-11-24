@@ -711,6 +711,8 @@ mod tests {
             tier: Tier::T3,
             position_ne_m: [0.0, 0.0],
             position_ne_valid: true,
+            velocity_ne_ms: [0.0, 0.0],
+            velocity_ne_valid: true,
             position_d_m: -5.0,
             position_d_valid: true,
             command: None,

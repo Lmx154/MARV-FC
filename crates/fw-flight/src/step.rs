@@ -689,6 +689,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             tier,
             position_ne_m: [nav.position_m[0], nav.position_m[1]],
             position_ne_valid: nav.valid.position_ne,
+            velocity_ne_ms: [nav.velocity_ms[0], nav.velocity_ms[1]],
+            velocity_ne_valid: nav.valid.velocity_ne,
             position_d_m: nav.position_m[2],
             position_d_valid: nav.valid.position_d,
             command: None,

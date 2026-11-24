@@ -168,6 +168,10 @@ pub struct Inputs {
     pub position_ne_m: [f32; 2],
     /// `position_ne`.
     pub position_ne_valid: bool,
+    /// Velocity north and east, m/s (the estimate's), and whether they may be used (`velocity_ne`).
+    pub velocity_ne_ms: [f32; 2],
+    /// `velocity_ne`.
+    pub velocity_ne_valid: bool,
     /// Steering down from the origin, m (T3 implies it is valid).
     pub position_d_m: f32,
     /// `position_d`.
@@ -378,10 +382,16 @@ pub struct HandsOff {
     below_t3_since: Option<u64>,
     /// The first step of the present run of T1 steps.
     below_t2_since: Option<u64>,
-    /// H12 track_fault: `heading_ok` counts as false; set by `track_error_m`, cleared on a disarmed step only.
+    /// H12 track_fault: `heading_ok` counts as false; set by `track_error_m` or by the distance from the anchor (H13),
+    /// cleared on a disarmed step only.
     track_fault: bool,
     /// The previous step's state is one H12 covers: HOLD, AUTO, RETURN, TAKEOVER, or LAND holding position.
     track_covered: bool,
+    /// H13 (1): the anchor A (NE, m) and the braking allowance b (m) of the present fixed-target segment; `None` outside
+    /// one and until a step of it has a valid, finite NE position and velocity.
+    anchor: Option<([f32; 2], f32)>,
+    /// A fixed-target segment has begun and its anchor is not set yet.
+    anchor_pending: bool,
 }
 
 impl HandsOff {
@@ -407,6 +417,8 @@ impl HandsOff {
             below_t2_since: None,
             track_fault: false,
             track_covered: false,
+            anchor: None,
+            anchor_pending: false,
         }
     }
 
@@ -426,6 +438,11 @@ impl HandsOff {
     /// The H12 track fault is latched (until a disarmed step).
     pub fn track_fault(&self) -> bool {
         self.track_fault
+    }
+
+    /// H13 (1): the anchor A (NE, m) and the braking allowance b (m) in force, when set.
+    pub fn anchor(&self) -> Option<([f32; 2], f32)> {
+        self.anchor
     }
 
     /// FS_HOLD_EN in force (B9): the value of the latest disarmed step.
@@ -450,6 +467,20 @@ impl HandsOff {
         } else if self.track_covered && i.airborne && i.track_error_m.is_some_and(|d| d.is_nan() || d > TRACK_FAULT_M) {
             self.track_fault = true;
         }
+        // H13 (1): this step's distance from the anchor against X + b on every step with a valid NE velocity (and
+        // position), whatever the setpoint; not a number trips.
+        if let Some(([an, ae], b)) = self.anchor
+            && i.armed
+            && i.airborne
+            && i.position_ne_valid
+            && i.velocity_ne_valid
+        {
+            let [n, e] = i.position_ne_m;
+            let d = libm::sqrtf((n - an) * (n - an) + (e - ae) * (e - ae));
+            if !(d <= TRACK_FAULT_M + b) {
+                self.track_fault = true;
+            }
+        }
         let instant = self.instant_tier(i);
         self.update_tier(i.now_us, instant);
         if self.fs_in_force {
@@ -469,6 +500,7 @@ impl HandsOff {
             Tier::T2 => Demand::Altitude,
             Tier::T1 => Demand::Angle,
         };
+        self.update_anchor(was, demand, i);
         self.track_covered = matches!(self.state, State::Hold | State::Auto | State::Return | State::Takeover)
             || (self.state == State::Land && demand == Demand::Position);
         Output {
@@ -485,6 +517,31 @@ impl HandsOff {
             takeover_descent: self.state == State::Takeover && self.descent,
             arm_off_holds: self.arm_off_holds(i),
             disarm: self.state == State::Stop && was != State::Stop && i.armed,
+        }
+    }
+
+    /// H13 (1): a fixed-target segment begins on entry to HOLD, TAKEOVER or LAND on T3' from PILOT, AUTO or RETURN; its
+    /// anchor is set at its first step with a valid, finite NE position and velocity: A that position, b = |v_NE|^2 /
+    /// (2 `GUIDANCE_ACC_MS2`). Kept through any other change inside the segment; cleared in PILOT, STOP, AUTO and RETURN
+    /// (so at disarm, which is STOP).
+    fn update_anchor(&mut self, was: State, demand: Demand, i: &Inputs) {
+        let entry = was != self.state
+            && matches!(was, State::Pilot | State::Auto | State::Return)
+            && (matches!(self.state, State::Hold | State::Takeover)
+                || (self.state == State::Land && demand == Demand::Position));
+        if entry {
+            self.anchor = None;
+            self.anchor_pending = true;
+        }
+        if matches!(self.state, State::Pilot | State::Stop | State::Auto | State::Return) {
+            self.anchor = None;
+            self.anchor_pending = false;
+        }
+        let [vn, ve] = i.velocity_ne_ms;
+        let finite = i.position_ne_m.iter().chain(i.velocity_ne_ms.iter()).all(|v| v.is_finite());
+        if self.anchor_pending && i.position_ne_valid && i.velocity_ne_valid && finite {
+            self.anchor = Some((i.position_ne_m, (vn * vn + ve * ve) / (2.0 * Tuning::GUIDANCE_ACC_MS2)));
+            self.anchor_pending = false;
         }
     }
 
@@ -931,6 +988,8 @@ mod tests {
                 tier: Tier::T3,
                 position_ne_m: HOME_NE,
                 position_ne_valid: true,
+                velocity_ne_ms: [0.0, 0.0],
+                velocity_ne_valid: true,
                 position_d_m: HOME_D,
                 position_d_valid: true,
                 command: None,
@@ -2012,10 +2071,13 @@ mod tests {
 
     // ---- I9 ----
 
-    /// HOLD with the station present, the vehicle `vehicle_m` north of home, the farthest waypoint at `waypoint_m`.
+    /// HOLD with the station present, entered with the vehicle `vehicle_m` north of home (there, not moved inside the
+    /// hold: H13's anchor), the farthest waypoint at `waypoint_m`.
     fn start_at(vehicle_m: f32, waypoint_m: f32) -> Output {
-        let mut r = Rig::hold();
+        let mut r = Rig::pilot();
         r.i.position_ne_m = [HOME_NE[0] + vehicle_m, HOME_NE[1]];
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
         r.i.mission.max_waypoint_distance_m = Some(waypoint_m);
         r.cmd(Command::Start)
     }
