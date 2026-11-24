@@ -303,6 +303,43 @@ fn fx2_a_square_with_gdn_radius_10_m_at_3_m_s_completes_with_e_below_x() {
     assert_eq!(r.state(), State::Hold);
 }
 
+/// N18 (b), the guidance's vertical carrot: on the square's leg from 15 m down to 10 m the vehicle is put 2.5 m below the
+/// descending carrot mid-descent. The carrot stops at the lead cap (|d - carrot| >= 1.5 m), and while it stands its rate,
+/// the feed-forward, is 0, so the loop asks for P (carrot - d) only and the vehicle climbs back toward it: there is no
+/// fixed point outside the cap (unlike LAND, whose feed-forward stays 1.5 m/s). The carrot moves again and the leg
+/// completes. Nothing changed; the climb-back and the time the carrot stood are printed.
+#[test]
+fn n18_auto_vehicle_below_a_descending_carrot_climbs_back_and_the_leg_completes() {
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    while !(r.f.leg_active() == Some(2) && -r.f.legs.down_m() < 13.5) {
+        r.fly();
+        assert_eq!(r.state(), State::Auto);
+    }
+    let mut n = r.cell.get();
+    n.position_m[2] = r.f.legs.down_m() + 2.5;
+    r.cell.set(n);
+    let h_push = height(&r);
+    let (mut stood, mut prev, mut top, mut steps) = (0u32, r.f.legs.down_m(), h_push, 0u32);
+    while r.f.leg_active() == Some(2) {
+        r.fly();
+        steps += 1;
+        assert!(steps < 40_000 && r.state() == State::Auto, "the leg never completed");
+        let d = r.f.legs.down_m();
+        if d == prev && -d > 10.0 {
+            stood += 1;
+        }
+        prev = d;
+        top = top.max(height(&r));
+    }
+    std::println!("N18 AUTO: pushed to {h_push:.2} m (2.5 m below the carrot); carrot stood {:.3} s; climb-back to {top:.2} m; leg done after {:.1} s", stood as f32 * 1.25e-3, steps as f32 * 1.25e-3);
+    assert!(stood > 0 && r.f.leg_active() == Some(3));
+    while r.state() == State::Auto {
+        r.fly();
+    }
+    assert_eq!(r.state(), State::Hold);
+}
+
 /// (b) Pause mid-leg holds with the place kept; Start resumes the same waypoint on a new first leg from the vehicle;
 /// Abort holds with the place dropped and Start begins at waypoint 0.
 #[test]
