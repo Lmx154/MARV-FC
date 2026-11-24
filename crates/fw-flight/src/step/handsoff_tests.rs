@@ -1294,11 +1294,12 @@ fn e3_in_the_air_below_the_ground_threshold_the_acceleration_condition_is_false_
     }
 }
 
-/// E3 is inactive outside LAND and the TAKEOVER descent: HOLD, TAKEOVER and PILOT with the vehicle 3 m above its
-/// height target (the collective below the threshold), the accelerometer at rest and the latch's timer off: armed.
-/// The TAKEOVER descent on the ground with the timer off: disarmed by E3 within 1.0 s plus one step.
+/// N10: TD counts in every state but clears the latch only in LAND, the TAKEOVER descent and BLIND: HOLD, TAKEOVER and
+/// PILOT with the vehicle 3 m above its height target (the collective below the threshold), the accelerometer at rest
+/// and the latch's timer off: TD's count passes 1.0 s, the latch stays set and the gate armed. The TAKEOVER descent on
+/// the ground with the timer off: disarmed by TD within 1.0 s plus one step.
 #[test]
-fn e3_is_inactive_outside_land_and_the_takeover_descent_and_active_in_the_descent() {
+fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
     for name in ["hold", "takeover", "pilot"] {
         let mut fly = Fly::new(true, true, POSITION);
         if name != "pilot" {
@@ -1326,7 +1327,7 @@ fn e3_is_inactive_outside_land_and_the_takeover_descent_and_active_in_the_descen
             low_steps += u32::from(o.demand.is_ok_and(|d| d.thrust_n < ground_n()));
         }
         assert!(low_steps > 1_600, "{name}: {low_steps}");
-        assert_eq!(fly.f.still_us, 0, "{name}");
+        assert!(fly.f.still_us >= Tuning::DEFAULT.land_detect_us, "{name}: {}", fly.f.still_us);
     }
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
@@ -1502,9 +1503,9 @@ fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9()
 /// monitor's verdict; the airborne latch is the real one (it clears in LAND on the idle floor), and now and then the
 /// test clears it between steps (a modelled false "landed"): (a) armed at the end of two consecutive steps implies the
 /// second is not STOP; (b) only the switch cycle arms; (c) outside the hands-off states silence disarms at the first
-/// step past the timeout and not before; (d) a hands-off state that reads the latch false and the previous step's
-/// acceleration condition (N4 (b), WR1's guard; IMU1 reads at rest or zero specific force, at random) ends that step
-/// disarmed. And return_built false: never AUTO or RETURN.
+/// step past the timeout and not before; (d) a hands-off state that reads the latch false and TD held at the previous
+/// step (N10 (i), WR1's guard; IMU1 reads at rest or zero specific force, at random) ends that step disarmed. And
+/// return_built false: never AUTO or RETURN.
 #[test]
 fn wr3_and_return_built_on_the_real_step() {
     let tuning = Tuning::DEFAULT;
@@ -1561,7 +1562,7 @@ fn wr3_and_return_built_on_the_real_step() {
         if rng.chance(2) {
             rest = !rest;
         }
-        let still = f.still;
+        let td = f.still_us >= tuning.land_detect_us;
         let mut i = input(t, rc);
         if rest {
             i.sensors.imu1.reading.accel_ms2 = AT_REST;
@@ -1589,7 +1590,7 @@ fn wr3_and_return_built_on_the_real_step() {
             }
         }
         // (d)
-        if !matches!(prev_state, State::Pilot | State::Stop) && !air && still {
+        if !matches!(prev_state, State::Pilot | State::Stop) && !air && td {
             assert!(!o.armed, "d, step {k}: {prev_state:?} grounded, still armed");
             counts[2 + usize::from(modelled_clear)] += u32::from(prev_armed);
         }
@@ -1605,7 +1606,7 @@ fn wr3_and_return_built_on_the_real_step() {
         prev_state = state;
     }
     std::println!("armings, silence disarms, real and modelled WR1 stops, hands-off armed steps, ..: {counts:?}; states {seen:?}");
-    assert!(counts[0] > 50 && counts[1] > 10 && counts[3] > 5 && counts[4] > 10_000, "{counts:?}");
+    assert!(counts[0] > 50 && counts[1] > 10 && counts[2] + counts[3] > 5 && counts[3] > 0 && counts[4] > 10_000, "{counts:?}");
     for s in [State::Pilot, State::Takeover, State::Hold, State::Land, State::Stop, State::Blind] {
         assert!(seen[usize::from(s.code() - 1)] > 0, "{s:?} reached: {seen:?}");
     }
@@ -1781,11 +1782,11 @@ fn n4_a_non_finite_imu_sample_is_not_still() {
     }
 }
 
-/// N7, WR1's guard on the real step: LAND with the latch modelled false before every step stays LAND, armed, while
-/// IMU1 reads zero specific force (TD's (b) false); with IMU1 at rest it is STOP and disarmed exactly one step after the
-/// first step whose (b) holds.
+/// N10 (i), WR1's guard on the real step: LAND with the latch modelled false before every step stays LAND, armed, while
+/// IMU1 reads zero specific force (TD's (b) false), and while IMU1 is at rest ((b) true) with a roll rate of 30 deg/s
+/// (TD's (c) false); with the rates 0 it is STOP and disarmed exactly one step after the first step at which TD has held.
 #[test]
-fn n4_wr1_ground_exit_needs_the_acceleration_condition_on_the_real_step() {
+fn n10_wr1_ground_exit_needs_td_on_the_real_step() {
     let mut fly = Fly::new(true, false, POSITION);
     fly.lose();
     for k in 0..2_000 {
@@ -1793,20 +1794,107 @@ fn n4_wr1_ground_exit_needs_the_acceleration_condition_on_the_real_step() {
         let o = fly.quiet();
         assert!(o.armed && fly.state() == State::Land && !fly.f.still, "step {k}");
     }
-    let mut first_still: Option<u32> = None;
-    for k in 0..2_000u32 {
+    fly.set_rates([30f32.to_radians(), 0.0, 0.0]);
+    for k in 0..2_000 {
+        fly.f.airborne = false;
+        let o = fly.quiet_f(AT_REST);
+        assert!(o.armed && fly.state() == State::Land && fly.f.still_us == 0, "step {k}");
+    }
+    assert!(fly.f.still, "(b) holds; WR1 needs TD");
+    fly.set_rates([0.0; 3]);
+    let mut first_td: Option<u32> = None;
+    for k in 0..4_000u32 {
         fly.f.airborne = false;
         let o = fly.quiet_f(AT_REST);
         if !o.armed {
             assert_eq!(fly.state(), State::Stop);
-            assert_eq!(first_still.map(|s| s + 1), Some(k), "one step after (b)");
+            assert_eq!(first_td.map(|s| s + 1), Some(k), "one step after TD");
             return;
         }
-        if fly.f.still {
-            first_still.get_or_insert(k);
+        if fly.f.still_us >= Tuning::DEFAULT.land_detect_us {
+            first_td.get_or_insert(k);
         }
     }
     panic!("never stopped at rest");
+}
+
+/// A flight in Angle (switch Low) at half throttle 10 m up, FS_HOLD_EN 0, coverage `valid`, no heading verdict, with
+/// "ever airborne" set; then `chop_steps` steps of throttle 0 (the idle floor) with IMU1 reading the specific force `f`
+/// and the estimate's rates `rates`, the last of them the newest report.
+fn chopped(valid: Valid, f: [f32; 3], rates: [f32; 3], chop_steps: u32) -> Fly {
+    let mut fly = Fly::new(false, false, valid);
+    for _ in 0..400 {
+        fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
+    }
+    assert!(fly.f.airborne);
+    fly.set_rates(rates);
+    for _ in 0..chop_steps {
+        fly.t += DT_US;
+        let t = fly.t;
+        let mut i = input(t, Some(RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.0, yaw: 0.0 }, arm: true, switch6: Switch3::Low, t_us: t }));
+        i.sensors.imu1.reading.accel_ms2 = f;
+        let o = fly.f.step(&i);
+        assert!(o.armed && fly.state() == State::Pilot);
+    }
+    fly
+}
+
+/// N10 (iii): an Angle-mode throttle chop of 1.5 s in the air (the latch clears after 1.0 s on the idle floor; IMU1
+/// reads zero specific force, falling: TD's (b) false), then a stick loss: LAND on T2, BLIND on T1, never STOP; armed
+/// with the motors running for 5 s after it.
+#[test]
+fn n10_stick_loss_after_a_long_throttle_chop_in_the_air_lands_never_stops() {
+    for (valid, want) in [(ALTITUDE, State::Land), (POSITION, State::Land), (ANGLE, State::Blind)] {
+        let mut fly = chopped(valid, [0.0; 3], [0.0; 3], 1_500_000 / DT_US as u32);
+        assert!(!fly.f.airborne && fly.f.still_us == 0, "{want:?}: latch false, not still");
+        let mut left = None;
+        for k in 0..6_000u32 {
+            let o = fly.quiet_f([0.0; 3]);
+            assert!(o.armed && o.motors.throttles().is_some(), "{want:?} step {k}");
+            if fly.state() != State::Pilot {
+                left.get_or_insert(k);
+                assert_eq!(fly.state(), want, "step {k}");
+            }
+        }
+        assert!(left.is_some(), "{want:?}: the sticks were lost");
+    }
+}
+
+/// N10 (iii): a hand landing (Angle, throttle 0 on the ground, IMU1 at rest), then a stick loss: STOP at the first step
+/// past the stick-loss time when TD has held at the loss; when it has not (the vehicle rocking at 30 deg/s until 0.5 s
+/// before the loss), LAND, then STOP through TD within 2 s of the loss.
+#[test]
+fn n10_stick_loss_on_the_ground_after_a_hand_landing_stops_through_td() {
+    let timeout = Tuning::DEFAULT.rc_fs_timeout_us;
+    let mut fly = chopped(POSITION, AT_REST, [0.0; 3], 1_500_000 / DT_US as u32);
+    assert!(!fly.f.airborne && fly.f.still_us >= Tuning::DEFAULT.land_detect_us, "TD held at the loss");
+    let last = fly.t;
+    while fly.t + DT_US <= last + timeout {
+        assert!(fly.quiet_f(AT_REST).armed);
+    }
+    fly.t = last + timeout;
+    let o = fly.quiet_f(AT_REST);
+    assert!(!o.armed && fly.state() == State::Stop, "TD held: STOP at the first step past 1.0 s");
+    let mut fly = chopped(POSITION, AT_REST, [30f32.to_radians(), 0.0, 0.0], 1_500_000 / DT_US as u32);
+    let last = fly.t;
+    while fly.t + DT_US <= last + timeout / 2 {
+        assert!(fly.quiet_f(AT_REST).armed && fly.f.still_us == 0);
+    }
+    assert!(!fly.f.airborne, "latch false");
+    fly.set_rates([0.0; 3]);
+    let mut landed = false;
+    for _ in 0..10_000u32 {
+        let o = fly.quiet_f(AT_REST);
+        landed |= fly.state() == State::Land;
+        if !o.armed {
+            let since = fly.t - (last + timeout);
+            std::println!("hand landing, TD not held at the loss: STOP {since} us after the loss");
+            assert!(landed && fly.state() == State::Stop && since <= 2_000_000, "{since} us");
+            return;
+        }
+        assert!(matches!(fly.state(), State::Pilot | State::Land), "{:?}", fly.state());
+    }
+    panic!("never stopped on the ground");
 }
 
 /// BLIND on T1 after a stick loss, the estimate's rates 0; `f` gives IMU1's specific force from the previous step's

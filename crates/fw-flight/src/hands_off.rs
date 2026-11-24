@@ -227,9 +227,10 @@ pub struct Inputs {
     pub track_error_m: Option<f32>,
     /// `PILOT_SPEED_XY` in force (latched at arming), m/s: gives v_ho and X (H13 (2)).
     pub speed_xy_ms: f32,
-    /// The touchdown rule's acceleration condition (b) at the previous step: the 1 Hz low-passed earth-frame acceleration,
-    /// gravity removed, at most 1.0 m/s^2, from a finite IMU sample (Amendment N, N4). Guards WR1's ground exit.
-    pub still: bool,
+    /// The touchdown rule TD had held at the previous step: N4's three conditions together for 1.0 s, counted on every
+    /// armed step in every state (Amendment N, N10). Guards WR1's ground exit (N10 (i)) and the stick-loss STOP after
+    /// take-off (N10 (iii)).
+    pub td_held: bool,
 }
 
 /// Why a command was DENIED: the first condition that failed, in this order.
@@ -414,6 +415,9 @@ pub struct HandsOff {
     home_window: bool,
     /// FS_HOLD_EN in force, taken on disarmed steps (B9).
     fs_in_force: bool,
+    /// "Ever airborne" (Amendment N, N1 and N10 (iii)): the airborne latch has been set at an armed step since arming;
+    /// cleared on a disarmed step.
+    ever_airborne: bool,
     /// The tier for exits and the stick-loss entry (B5).
     debounced: Tier,
     /// The first step of the present run of steps below T3'.
@@ -451,6 +455,7 @@ impl HandsOff {
             home_ne: None,
             home_window: false,
             fs_in_force: false,
+            ever_airborne: false,
             debounced: Tier::T3,
             below_t3_since: None,
             below_t2_since: None,
@@ -500,6 +505,7 @@ impl HandsOff {
         if !i.armed {
             self.fs_in_force = i.fs_hold_en;
         }
+        self.ever_airborne = i.armed && (self.ever_airborne || i.airborne);
         // H12: the previous step's distance against X, in the state that step flew; latched until disarmed.
         let x = track_fault_m(i.speed_xy_ms);
         if !i.armed {
@@ -674,8 +680,8 @@ impl HandsOff {
             self.go(State::Stop, i, ev);
             return;
         }
-        // WR1, guarded by the touchdown rule's acceleration condition (N4; ArduPilot accel_stationary).
-        if self.state.is_hands_off() && !i.airborne && i.still {
+        // WR1, guarded by the touchdown rule TD (N10 (i); ArduPilot land_complete).
+        if self.state.is_hands_off() && !i.airborne && i.td_held {
             self.go(State::Stop, i, ev);
             return;
         }
@@ -766,11 +772,16 @@ impl HandsOff {
         self.lock_open |= high;
     }
 
-    /// Sticks lost in PILOT or TAKEOVER: STOP on the ground; LAND (or BLIND) with the track fault (H14); else by the
-    /// debounced tier, T3' giving LAND instead of HOLD while FS_HOLD_EN in force is 0 (Amendment N, N2).
+    /// Sticks lost in PILOT or TAKEOVER: with the latch false, STOP if never airborne since arming or TD has held, else
+    /// LAND (or BLIND) (N10 (iii)); LAND (or BLIND) with the track fault (H14); else by the debounced tier, T3' giving
+    /// LAND instead of HOLD while FS_HOLD_EN in force is 0 (Amendment N, N2).
     fn lost(&self, i: &Inputs) -> State {
         if !i.airborne {
-            State::Stop
+            if !self.ever_airborne || i.td_held {
+                State::Stop
+            } else {
+                self.land_state()
+            }
         } else if self.track_fault {
             self.land_state()
         } else {
@@ -1060,7 +1071,7 @@ mod tests {
                 return_built: true,
                 track_error_m: None,
                 speed_xy_ms: Tuning::DEFAULT.pilot_speed_xy_ms,
-                still: true,
+                td_held: true,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),
@@ -1647,27 +1658,80 @@ mod tests {
         assert_eq!(out.home, None);
     }
 
-    /// Amendment N, N4: WR1's ground exit needs the touchdown rule's acceleration condition (`still`): a hands-off state
-    /// that reads the latch false stays, hands-off and not disarming, while `still` is false, and stops with the disarm
-    /// at the first step it is true.
+    /// Amendment N, N10 (i): WR1's ground exit needs TD held (`td_held`): a hands-off state that reads the latch false
+    /// stays, hands-off and not disarming, while `td_held` is false, and stops with the disarm at the first step it is true.
     #[test]
-    fn hands_off_wr1_ground_exit_is_guarded_by_the_acceleration_condition() {
+    fn hands_off_wr1_ground_exit_is_guarded_by_td() {
         let rigs: [(&str, fn() -> Rig); 4] = [("hold", Rig::hold), ("land", Rig::land), ("blind", Rig::blind), ("takeover", Rig::takeover)];
         for (name, make) in rigs {
             let mut r = make();
             let want = r.h.state();
             r.i.airborne = false;
-            r.i.still = false;
+            r.i.td_held = false;
             for k in 1..=5u64 {
                 let t = r.now() + 1_000;
                 let out = r.at(t);
                 assert_eq!((out.state, out.hands_off, out.disarm), (want, true, false), "{name} step {k}");
             }
-            r.i.still = true;
+            r.i.td_held = true;
             let t = r.now() + 1_000;
             let out = r.at(t);
             assert_eq!((out.state, out.disarm), (State::Stop, true), "{name}");
         }
+    }
+
+    /// Amendment N, N10 (iii): sticks lost in PILOT or TAKEOVER with the latch false after take-off give LAND (BLIND on
+    /// T1, by the debounced tier) while TD has not held, at FS_HOLD_EN 0 and 1, then STOP through WR1 at the first step
+    /// TD has held; STOP at once when TD has held at the loss; STOP at once when never airborne since arming, TD or not
+    /// ("ever airborne" clears at disarm).
+    #[test]
+    fn hands_off_n10_stick_loss_with_the_latch_false_after_take_off_lands_until_td() {
+        for fs in [false, true] {
+            for (tier, want) in [(Tier::T3, State::Land), (Tier::T2, State::Land), (Tier::T1, State::Blind)] {
+                for takeover in [false, true] {
+                    let mut r = if takeover { Rig::takeover() } else { Rig::pilot() };
+                    r.h.fs_in_force = fs;
+                    r.drop_tier(tier);
+                    r.i.airborne = false;
+                    r.i.td_held = false;
+                    let t = r.last_report() + LOSS + 1;
+                    let out = r.at(t);
+                    let name = (fs, tier, takeover);
+                    assert_eq!((out.state, out.hands_off, out.disarm), (want, true, false), "{name:?}");
+                    let t = r.now() + 1_000;
+                    assert_eq!(r.at(t).state, want, "{name:?}");
+                    r.i.td_held = true;
+                    let t = r.now() + 1_000;
+                    let out = r.at(t);
+                    assert_eq!((out.state, out.disarm), (State::Stop, true), "{name:?}: TD held");
+                    // TD held at the loss: STOP at once.
+                    let mut r = if takeover { Rig::takeover() } else { Rig::pilot() };
+                    r.h.fs_in_force = fs;
+                    r.drop_tier(tier);
+                    r.i.airborne = false;
+                    let t = r.last_report() + LOSS + 1;
+                    assert_eq!(r.at(t).state, State::Stop, "{name:?}: TD held at the loss");
+                }
+            }
+        }
+        // Never airborne since arming (and after a disarm that cleared "ever airborne"): STOP at once without TD.
+        let mut r = Rig::new();
+        r.i.td_held = false;
+        r.step();
+        r.i.armed = true;
+        assert_eq!(r.report(T0 + 1_000, Switch3::High).state, State::Pilot);
+        assert_eq!(r.at(T0 + 1_000 + LOSS + 1).state, State::Stop, "never airborne");
+        let mut r = Rig::pilot();
+        r.i.armed = false;
+        r.i.airborne = false;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Stop);
+        r.i.armed = true;
+        r.i.td_held = false;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.at(t).state, State::Stop, "re-armed, never airborne since");
     }
 
     // ---- STOP and BLIND ----
