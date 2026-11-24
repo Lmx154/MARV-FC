@@ -618,8 +618,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.hands_off.state()
     }
 
-    /// FS_HOLD_EN in force after the latest step (B9: taken on disarmed steps). The board logs the hands-off state only
-    /// while it is true (Amendment E, E4), so the log of an image flown with 0 is unchanged.
+    /// FS_HOLD_EN in force after the latest step (B9: taken on disarmed steps). The board logs every change of the
+    /// hands-off state while it is true, and only the entries into and exits from a hands-off state while it is false
+    /// ([`hands_off_msg_due`], N10 (iv)), so the log of an image flown with 0 changes only after a stick loss.
     pub fn fs_hold_in_force(&self) -> bool {
         self.hands_off.fs_hold_in_force()
     }
@@ -1141,6 +1142,16 @@ pub fn hands_off_msg(state: State) -> &'static str {
         State::Stop => "HO 7 STOP",
         State::Blind => "HO 8 BLIND",
     }
+}
+
+/// Whether the board writes [`hands_off_msg`] of `state` at this step, `logged` the state of the last MSG written (`None`
+/// before the first; a dropped MSG is not written, so it is offered again). With FS_HOLD_EN in force 1, at the first
+/// step and at each change (Amendment D, E4). With 0, only at an entry into or an exit from a hands-off state (N10 (iv)):
+/// arming and disarming alone (PILOT and STOP) write nothing, so the log of an image flown with 0 changes only after a
+/// stick loss.
+pub fn hands_off_msg_due(fs_hold_in_force: bool, logged: Option<State>, state: State) -> bool {
+    let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
+    logged != Some(state) && (fs_hold_in_force || hands_off(state) || logged.is_some_and(hands_off))
 }
 
 /// When to write MODE (decision-nav-eskf-20261120, 8c, F6): at the first step and at every change of the selected or

@@ -1549,6 +1549,82 @@ fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9()
     assert!(!fly.f.fs_hold_in_force());
 }
 
+/// N10 (iv), the board's HO MSG rule (`hands_off_msg_due`) as a table: with FS_HOLD_EN in force 0 nothing at the first
+/// step or for PILOT <-> STOP; an entry into, an exit from and a change between hands-off states each write; a dropped
+/// write is offered again at the next step. With 1, the first step and every change.
+#[test]
+fn n10_hands_off_msg_due_table() {
+    use State::*;
+    for (fs, logged, state, due) in [
+        (false, None, Stop, false),
+        (false, None, Pilot, false),
+        (false, Some(Stop), Pilot, false),
+        (false, Some(Pilot), Stop, false),
+        (false, None, Land, true),
+        (false, Some(Pilot), Land, true),
+        (false, Some(Land), Land, false),
+        (false, Some(Land), Blind, true),
+        (false, Some(Land), Takeover, true),
+        (false, Some(Takeover), Pilot, true),
+        (false, Some(Land), Stop, true),
+        (true, None, Stop, true),
+        (true, Some(Stop), Pilot, true),
+        (true, Some(Pilot), Stop, true),
+        (true, Some(Pilot), Pilot, false),
+        (true, Some(Pilot), Hold, true),
+    ] {
+        assert_eq!(hands_off_msg_due(fs, logged, state), due, "fs {fs} {logged:?} -> {state:?}");
+    }
+}
+
+/// N10 (iv) on the real step, the board's loop modelled (MSG written when due, every write succeeds): a flight armed,
+/// flown with sticks in every mode, the sticks lost (LAND at FS_HOLD_EN 0, HOLD at 1), the reports back (TAKEOVER), the
+/// lock handed over (PILOT) and disarmed by the switch. FS_HOLD_EN 0: LAND, TAKEOVER, PILOT only (nothing before the
+/// loss, nothing for the disarm); 1: every change from the first step.
+#[test]
+fn n10_ho_msg_at_fs_hold_en_0_only_from_the_stick_loss() {
+    for (fs, want) in [
+        (false, &["HO 6 LAND", "HO 2 TAKEOVER", "HO 1 PILOT"][..]),
+        (true, &["HO 7 STOP", "HO 1 PILOT", "HO 3 HOLD", "HO 2 TAKEOVER", "HO 1 PILOT", "HO 7 STOP"][..]),
+    ] {
+        let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
+        let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
+        f.set_fs_hold_en(fs);
+        let mut fly = Fly { f, cell, t: 1_000_000 };
+        let (mut logged, mut texts) = (None::<State>, std::vec::Vec::new());
+        let mut log = |fly: &Fly| {
+            let state = fly.state();
+            if hands_off_msg_due(fly.f.fs_hold_in_force(), logged, state) {
+                texts.push(hands_off_msg(state));
+                logged = Some(state);
+            }
+        };
+        fly.rc(false, [0.0; 4], Switch3::High);
+        log(&fly);
+        for sw in [Switch3::High, Switch3::Low, Switch3::Middle, Switch3::High] {
+            for k in 0..400 {
+                fly.rc(true, [0.0, 0.0, if k == 0 && sw == Switch3::High { 0.0 } else { 0.5 }, 0.0], sw);
+                log(&fly);
+            }
+        }
+        assert!(fly.f.airborne && fly.state() == State::Pilot, "fs {fs}");
+        for _ in 0..2_000 {
+            fly.quiet();
+            log(&fly);
+        }
+        fly.rc(true, [0.0; 4], Switch3::High);
+        log(&fly);
+        assert_eq!(fly.state(), State::Takeover, "fs {fs}");
+        fly.rc(true, [0.0; 4], Switch3::Middle);
+        log(&fly);
+        assert_eq!(fly.state(), State::Pilot, "fs {fs}");
+        let o = fly.rc(false, [0.0; 4], Switch3::Middle);
+        log(&fly);
+        assert!(!o.armed && fly.state() == State::Stop, "fs {fs}");
+        assert_eq!(texts, want, "fs {fs}");
+    }
+}
+
 // ---- WR3 and return_built on the real step ----
 
 /// WR3 a-d on the real `Flight` over random reports, switches, sticks, coverage, silences, FS_HOLD_EN and the heading

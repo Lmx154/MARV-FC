@@ -663,8 +663,8 @@ pub struct Stepper {
     stat: SeqlockWriter<'static, NavStat>,
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
-    /// The hands-off state code of the last MSG written (`None` before the first): one MSG at each change.
-    ho_logged: Option<u8>,
+    /// The hands-off state of the last MSG written (`None` before the first; `hands_off_msg_due`).
+    ho_logged: Option<fw_flight::hands_off::State>,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
     guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
@@ -917,17 +917,16 @@ impl SampleSink for Stepper {
         {
             self.mode_log.done(&out);
         }
-        // The hands-off state (decision-mavlink-mode-20261123, Amendment D): a MSG at the first step and at each change, a push
-        // of its own (MODE's record format is unchanged); a dropped one is offered again. None while FS_HOLD_EN in force is 0
-        // (Amendment E, E4), so the log of an image flown with 0 is unchanged.
+        // The hands-off state (decision-mavlink-mode-20261123, Amendment D): a MSG when `hands_off_msg_due` says so (every
+        // change while FS_HOLD_EN in force is 1; with 0 only entries into and exits from a hands-off state, N10 (iv)), a
+        // push of its own (MODE's record format is unchanged); a dropped one is offered again.
         let ho = self.flight.hands_off_state();
-        if self.flight.fs_hold_in_force()
-            && self.ho_logged != Some(ho.code())
+        if fw_flight::step::hands_off_msg_due(self.flight.fs_hold_in_force(), self.ho_logged, ho)
             && self.log.push_with(dflog::MSG.length.into(), |b| {
                 dflog::encode_msg(b, out.t_us, fw_flight::step::hands_off_msg(ho).as_bytes())
             })
         {
-            self.ho_logged = Some(ho.code());
+            self.ho_logged = Some(ho);
         }
         // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
         // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).
