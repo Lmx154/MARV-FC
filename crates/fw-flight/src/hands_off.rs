@@ -184,7 +184,8 @@ pub struct Inputs {
     pub crsf: Option<RcSample>,
     /// When the newest station HEARTBEAT was received on the radio link, us. USB heartbeats are never given (A1).
     pub last_radio_heartbeat_us: Option<u64>,
-    /// When the newest RADIO_STATUS was received, us. Display only: it feeds no rule here (A1).
+    /// When the newest RADIO_STATUS was received, us. Sets M (N12) when newer than the entry into the present hands-off
+    /// run; no other rule reads it (A1).
     pub last_radio_status_us: Option<u64>,
     /// The gate's armed state.
     pub armed: bool,
@@ -377,8 +378,8 @@ pub struct Output {
     /// TAKEOVER after the battery was critical in it (C1), or with the track fault (H14): fly the LAND law (A8) with
     /// the synthetic sticks and `land_law`; hand-over stays possible.
     pub takeover_descent: bool,
-    /// For the gate: a report with arm OFF must not disarm. Hands-off state, K clear and airborne (C1), after this
-    /// step's report.
+    /// For the gate: a report with arm OFF must not disarm. Hands-off state, K clear and M set (C1 as amended by N12),
+    /// after this step's report.
     pub arm_off_holds: bool,
     /// For the gate: disarm in this step. STOP entered this step with `armed` true (WR2).
     pub disarm: bool,
@@ -401,6 +402,11 @@ pub struct HandsOff {
     arm_seen: bool,
     /// C1 P, "lock open": a counting report had arm ON and switch6 High. Cleared with K.
     lock_open: bool,
+    /// N12 M, "RADIO_STATUS seen": a RADIO_STATUS newer than `entry_us` arrived. Cleared with K at an entry into a
+    /// hands-off state from PILOT or STOP; kept through the changes between hands-off states.
+    radio_seen: bool,
+    /// The step time of the latest entry into a hands-off state from PILOT or STOP, us (N12).
+    entry_us: u64,
     /// C1: the battery was critical in this TAKEOVER; cleared on any state change.
     descent: bool,
     /// A mission place exists (AUTO, or HOLD after a pause that kept it).
@@ -446,6 +452,8 @@ impl HandsOff {
             pilot_latch: true,
             arm_seen: false,
             lock_open: false,
+            radio_seen: false,
+            entry_us: 0,
             descent: false,
             place: false,
             flown_plan: None,
@@ -494,6 +502,11 @@ impl HandsOff {
         self.fs_in_force
     }
 
+    /// N12's M in force: a hands-off state, and a RADIO_STATUS arrived after its entry (the log's M bit).
+    pub fn radio_status_seen(&self) -> bool {
+        self.state.is_hands_off() && self.radio_seen
+    }
+
     /// One flight step.
     pub fn step(&mut self, i: &Inputs) -> Output {
         let fresh = i
@@ -536,6 +549,10 @@ impl HandsOff {
             }
         }
         self.update_tier(i.now_us, instant);
+        // N12: M from a RADIO_STATUS newer than the entry, before this step's arm-OFF rule reads it.
+        if self.state.is_hands_off() && i.last_radio_status_us.is_some_and(|t| t > self.entry_us) {
+            self.radio_seen = true;
+        }
         self.automatic(i, fresh, &mut ev);
         let command = i.command.map(|c| self.command(c, i, fresh, &mut ev));
         let hands_off = self.state.is_hands_off();
@@ -568,7 +585,7 @@ impl HandsOff {
             land_law,
             demand,
             takeover_descent: self.state == State::Takeover && self.descent,
-            arm_off_holds: self.arm_off_holds(i),
+            arm_off_holds: self.arm_off_holds(),
             disarm: self.state == State::Stop && was != State::Stop && i.armed,
             speed_limit_xy_ms: if hands_off {
                 speed_limit_xy_ms(i.speed_xy_ms)
@@ -676,7 +693,7 @@ impl HandsOff {
 
     /// The state table's exits that are not commands (FS_HOLD_EN 0 or 1; Amendment N, N2).
     fn automatic(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
-        if !i.armed || (i.crsf.is_some_and(|r| !r.arm) && !self.arm_off_holds(i)) {
+        if !i.armed || (i.crsf.is_some_and(|r| !r.arm) && !self.arm_off_holds()) {
             self.go(State::Stop, i, ev);
             return;
         }
@@ -754,9 +771,10 @@ impl HandsOff {
         }
     }
 
-    /// C1: arm OFF withholds the disarm in a hands-off state while K is clear and the airborne latch is set.
-    fn arm_off_holds(&self, i: &Inputs) -> bool {
-        self.state.is_hands_off() && !self.arm_seen && i.airborne
+    /// C1 as amended by N12: arm OFF withholds the disarm in a hands-off state while K is clear and M is set (at both
+    /// FS_HOLD_EN values; no airborne term).
+    fn arm_off_holds(&self) -> bool {
+        self.state.is_hands_off() && !self.arm_seen && self.radio_seen
     }
 
     /// C1 with A2': this step's counting report sets K and P; after P, arm ON and switch6 not High sets the pilot latch.
@@ -835,6 +853,10 @@ impl HandsOff {
             self.pilot_latch = false;
             self.arm_seen = false;
             self.lock_open = false;
+            if !self.state.is_hands_off() {
+                self.radio_seen = false;
+                self.entry_us = i.now_us;
+            }
         }
         self.descent = false;
         self.return_height_m = None;
@@ -1869,9 +1891,18 @@ mod tests {
         // C1, tracked here from the reports: K (arm ON) and P (arm ON and High in one report) since TAKEOVER's entry.
         let (mut k, mut p) = (false, false);
         let (mut hand_overs, mut held) = (0u32, 0u32);
+        // N12, tracked here: M set by a RADIO_STATUS newer than the entry from PILOT or STOP, cleared at that entry.
+        let (mut m, mut entry) = (false, 0u64);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
+            let prev_ho = !matches!(prev, State::Pilot | State::Stop);
+            if prev_ho && i.last_radio_status_us.is_some_and(|t| t > entry) {
+                m = true;
+            }
             let out = h.step(&i);
+            if !prev_ho && out.hands_off {
+                (m, entry) = (false, i.now_us);
+            }
             // A2': TAKEOVER hands over only after a High report since its entry, on a report that is not High.
             let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
             let arm_now = i.crsf.is_some_and(|r| r.arm);
@@ -1891,7 +1922,7 @@ mod tests {
                 p |= arm_now && high_now;
             }
             let k_now = out.state == State::Takeover && k;
-            assert_eq!(out.arm_off_holds, out.hands_off && !k_now && i.airborne, "{out:?}");
+            assert_eq!(out.arm_off_holds, out.hands_off && !k_now && m, "{out:?}");
             if i.crsf.is_some_and(|r| !r.arm) && out.state != State::Stop {
                 assert!(out.arm_off_holds, "arm OFF outside STOP only while held: {out:?}");
                 held += 1;
@@ -2426,18 +2457,23 @@ mod tests {
             ("blind", Rig::blind, State::Blind),
         ];
         for (name, make, from) in rigs {
-            for airborne in [true, false] {
+            for (airborne, radio) in [(true, true), (true, false), (false, true), (false, false)] {
                 let mut r = make();
                 assert_eq!(r.h.state(), from, "{name}");
                 r.i.airborne = airborne;
+                // N12: a RADIO_STATUS after the entry (M) holds the arm-OFF report; on the ground TD stops (WR1).
+                r.i.td_held = false;
+                if radio {
+                    r.i.last_radio_status_us = Some(r.now() + 500);
+                }
                 let t = r.now() + 1_000;
                 let out = r.report_with(t, CENTRED, Switch3::High, false);
-                if airborne && from != State::Pilot {
+                if radio && from != State::Pilot {
                     assert_eq!((out.state, out.hands_off, out.arm_off_holds), (State::Takeover, true, true), "{name}");
                 } else {
                     let want = (State::Stop, false, false, false);
                     let got = (out.state, out.hands_off, out.synthetic_sticks, out.arm_off_holds);
-                    assert_eq!(got, want, "{name} airborne {airborne}");
+                    assert_eq!(got, want, "{name} airborne {airborne} radio {radio}");
                 }
             }
         }
@@ -2568,9 +2604,11 @@ mod tests {
 
     // ---- C1: the take-over lock ----
 
-    /// HOLD, then CRSF returns with this arm switch and switch6.
+    /// HOLD, a RADIO_STATUS after its entry (N12's M: the MAVLink take-over), then CRSF returns with this arm switch
+    /// and switch6.
     fn returns_with(switch6: Switch3, arm: bool) -> (Rig, Output) {
         let mut r = Rig::hold();
+        r.i.last_radio_status_us = Some(r.now() + 500);
         let t = r.now() + 1_000;
         let out = r.report_with(t, CENTRED, switch6, arm);
         (r, out)
@@ -2628,20 +2666,95 @@ mod tests {
         assert_eq!((out.state, out.arm_off_holds), (State::Stop, false));
     }
 
+    /// Armed and airborne in PILOT with FS_HOLD_EN `fs`, then sticks lost on T3: HOLD (1) or LAND (0, N2).
+    fn lost_with(fs: bool) -> Rig {
+        let mut r = Rig::new();
+        r.i.fs_hold_en = fs;
+        r.step();
+        r.i.armed = true;
+        assert_eq!(r.report(T0 + 1_000, Switch3::High).state, State::Pilot);
+        r.i.airborne = true;
+        r.report(T0 + 2_000, Switch3::High);
+        let t = r.last_report() + LOSS + 1;
+        let out = r.heartbeat(t);
+        assert_eq!(out.state, if fs { State::Hold } else { State::Land });
+        r
+    }
+
+    /// N12 (replaces N10 (ii) and the airborne term): with no RADIO_STATUS after the entry (a plain dropout, M clear) an
+    /// arm-OFF report on return stops in that step, at FS_HOLD_EN 0 and 1, in the air and on the ground (no TD).
     #[test]
-    fn hands_off_c1_a3_arm_off_with_the_airborne_latch_false_is_stop_at_once() {
-        // CRSF returns on the ground with arm OFF.
-        let mut r = Rig::hold();
-        r.i.airborne = false;
+    fn hands_off_c1_a3_arm_off_without_radio_status_after_the_entry_is_stop_at_once() {
+        for fs in [false, true] {
+            for airborne in [true, false] {
+                let mut r = lost_with(fs);
+                r.i.airborne = airborne;
+                r.i.td_held = false;
+                let t = r.now() + 1_000;
+                let out = r.report_with(t, CENTRED, Switch3::High, false);
+                assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Stop, false, true), "fs {fs} air {airborne}");
+            }
+        }
+    }
+
+    /// N12: with a RADIO_STATUS after the entry (M) an arm-OFF return is held at FS_HOLD_EN 0 and 1, in the air and on
+    /// the ground; ON then OFF stops (P); on the ground TD stops (T). A RADIO_STATUS before the entry only is not M; M is
+    /// cleared on a re-entry after a hand-back, and kept through changes between hands-off states.
+    #[test]
+    fn hands_off_n12_radio_status_after_the_entry_holds_arm_off_until_k_or_td() {
+        for fs in [false, true] {
+            for airborne in [true, false] {
+                let mut r = lost_with(fs);
+                r.i.airborne = airborne;
+                r.i.td_held = false;
+                r.i.last_radio_status_us = Some(r.now() + 1);
+                let t = r.now() + 1_000;
+                let out = r.report_with(t, CENTRED, Switch3::High, false);
+                assert_eq!((out.state, out.arm_off_holds), (State::Takeover, true), "fs {fs} air {airborne}");
+                assert!(r.h.radio_status_seen());
+                if airborne {
+                    // ON then OFF: STOP at that report.
+                    let t = r.now() + 20_000;
+                    assert_eq!(r.report_with(t, CENTRED, Switch3::Low, true).state, State::Takeover);
+                    let t = r.now() + 20_000;
+                    let out = r.report_with(t, CENTRED, Switch3::Low, false);
+                    assert_eq!((out.state, out.disarm), (State::Stop, true), "fs {fs}: ON then OFF");
+                } else {
+                    let t = r.now() + 20_000;
+                    assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Takeover, "fs {fs}");
+                    r.i.td_held = true;
+                    let out = r.step();
+                    assert_eq!((out.state, out.disarm), (State::Stop, true), "fs {fs}: TD on the ground");
+                }
+            }
+        }
+        // A RADIO_STATUS before the entry only (at the entry step's time or earlier): not M, the return stops.
+        let mut r = Rig::pilot();
+        r.i.last_radio_status_us = Some(r.now());
+        let t = r.last_report() + LOSS + 1;
+        r.i.last_radio_status_us = Some(t);
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        assert!(!r.h.radio_status_seen());
         let t = r.now() + 1_000;
-        let out = r.report_with(t, CENTRED, Switch3::High, false);
-        assert_eq!((out.state, out.arm_off_holds), (State::Stop, false));
-        // Held in TAKEOVER in the air, then the latch clears with the arm-OFF report still the newest: STOP.
-        let (mut r, _) = returns_with(Switch3::High, false);
-        r.i.airborne = false;
-        let t = r.now() + 20_000;
-        let out = r.at(t);
-        assert_eq!((out.state, out.arm_off_holds), (State::Stop, false));
+        assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Stop, "status before the entry only");
+        // M kept from HOLD through TAKEOVER and back to HOLD (a changed model gives CRSF again, no RADIO_STATUS).
+        let (mut r, out) = returns_with(Switch3::High, true);
+        assert_eq!(out.state, State::Takeover);
+        assert!(r.h.radio_status_seen());
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.at(t).state, State::Hold);
+        assert!(r.h.radio_status_seen(), "kept between hands-off states");
+        // Cleared on a re-entry after a hand-back to PILOT.
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Takeover);
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::Middle).state, State::Pilot);
+        assert!(!r.h.radio_status_seen());
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        assert!(!r.h.radio_status_seen() && !r.h.radio_seen, "cleared on the re-entry");
+        let t = r.now() + 1_000;
+        assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Stop, "re-entry without a new status");
     }
 
     #[test]
@@ -2989,12 +3102,17 @@ mod tests {
 
     #[test]
     fn hands_off_wr2_disarm_is_stop_entered_while_armed() {
-        // The review's case: a held arm-OFF report still the newest when the latch clears.
+        // The review's case: a held arm-OFF report still the newest when the latch clears: held until TD (N12, the
+        // airborne term dropped), then STOP and disarm through WR1 (T).
         let (mut r, out) = returns_with(Switch3::High, false);
         assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Takeover, true, false));
         r.i.airborne = false;
+        r.i.td_held = false;
         let t = r.now() + 5_000;
         let out = r.at(t);
+        assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Takeover, true, false));
+        r.i.td_held = true;
+        let out = r.step();
         assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Stop, false, true));
         // Arm OFF in PILOT; after K in TAKEOVER; sticks lost on the ground; FS_HOLD_EN 0.
         let mut r = Rig::pilot();

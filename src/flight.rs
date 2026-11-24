@@ -650,6 +650,7 @@ pub struct Stepper {
     fs_hold: TripleReader<'static, bool>,
     gdn: TripleReader<'static, GdnSet>,
     gains: TripleReader<'static, Gains>,
+    radio_status: TripleReader<'static, u64>,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
     step: u32,
@@ -665,6 +666,8 @@ pub struct Stepper {
     mode_log: ModeLog,
     /// The hands-off state of the last MSG written (`None` before the first; `hands_off_msg_due`).
     ho_logged: Option<fw_flight::hands_off::State>,
+    /// N12's M of the last "HO M" MSG written (false before the first).
+    m_logged: bool,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
     guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
@@ -705,6 +708,7 @@ impl Stepper {
             fs_hold: FLIGHT_FS_HOLD.take_reader()?,
             gdn: FLIGHT_GDN.take_reader()?,
             gains: FLIGHT_GAINS.take_reader()?,
+            radio_status: crate::rc::FLIGHT_RADIO_STATUS.take_reader()?,
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
@@ -713,6 +717,7 @@ impl Stepper {
             stat: NAV_STAT.take_writer()?,
             mode_log: ModeLog::new(),
             ho_logged: None,
+            m_logged: false,
             guidance: Guidance::new(),
             gdn_in_force: GDN_OFF,
             gdn_pushed: GDN_OFF,
@@ -866,6 +871,11 @@ impl SampleSink for Stepper {
         if gains_fresh && !self.flight.set_gains(gains) {
             GAINS_REFUSED.fetch_add(1, Ordering::Relaxed);
         }
+        // N12: the RC port's time of the latest RADIO_STATUS (none until the first write).
+        let (radio_status, radio_status_fresh) = self.radio_status.read();
+        if radio_status_fresh {
+            self.flight.set_last_radio_status_us(Some(radio_status));
+        }
         let (gdn, gdn_fresh) = self.gdn.read();
         if gdn_fresh {
             self.gdn_pushed = gdn;
@@ -927,6 +937,16 @@ impl SampleSink for Stepper {
             })
         {
             self.ho_logged = Some(ho);
+        }
+        // N12's M bit: a MSG at each change of M in force (set only in a hands-off state, so only after a stick loss); a
+        // dropped one is offered again.
+        let m = self.flight.radio_status_seen();
+        if m != self.m_logged
+            && self.log.push_with(dflog::MSG.length.into(), |b| {
+                dflog::encode_msg(b, out.t_us, if m { "HO M 1 RADIO_STATUS after entry" } else { "HO M 0" }.as_bytes())
+            })
+        {
+            self.m_logged = m;
         }
         // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
         // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).

@@ -418,6 +418,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     heading_ok: bool,
     /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until set.
     last_radio_heartbeat_us: Option<u64>,
+    /// When the newest RADIO_STATUS arrived from the receiver, us (`set_last_radio_status_us`); `None` until set.
+    last_radio_status_us: Option<u64>,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -529,6 +531,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             rc_newest: None,
             heading_ok: true,
             last_radio_heartbeat_us: None,
+            last_radio_status_us: None,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -611,6 +614,18 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// home (always on this branch), and Start is DENIED (no station); that fails safe.
     pub fn set_last_radio_heartbeat_us(&mut self, t_us: Option<u64>) {
         self.last_radio_heartbeat_us = t_us;
+    }
+
+    /// When the newest RADIO_STATUS arrived from the receiver, us (the RC port's time of it). A RADIO_STATUS newer than
+    /// the entry into a hands-off state sets N12's M, which holds an arm-OFF report while K is clear; `None` (the
+    /// default) never sets it, so an arm-OFF report stops at once (a plain dropout).
+    pub fn set_last_radio_status_us(&mut self, t_us: Option<u64>) {
+        self.last_radio_status_us = t_us;
+    }
+
+    /// N12's M in force after the latest step: a hands-off state and a RADIO_STATUS after its entry (the log's M bit).
+    pub fn radio_status_seen(&self) -> bool {
+        self.hands_off.radio_status_seen()
     }
 
     /// The hands-off state after the latest step (its HEARTBEAT and log code is `State::code`).
@@ -738,7 +753,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             fs_hold_en: self.fs_hold_en,
             crsf: self.rc_newest,
             last_radio_heartbeat_us: self.last_radio_heartbeat_us,
-            last_radio_status_us: None,
+            last_radio_status_us: self.last_radio_status_us,
             armed: self.gate.armed(),
             airborne: self.airborne,
             tier,

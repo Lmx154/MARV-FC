@@ -146,19 +146,22 @@ const WALK_C270814: [(u64, u64, u64); 3] = [
 /// The digests of the whole `walk` with Amendment N, N2 (a stick loss in the air at FS_HOLD_EN 0 lands, BLIND on T1), by
 /// seed, with the heading verdict forced false (`set_heading_ok(false)`; before H12/H14's wiring the board's verdict was
 /// constant false, so LAND was always level). Every walk has an airborne stick loss, so every digest changed; the prefix
-/// before it did not.
+/// before it did not. Re-baselined for N12 (the walk feeds no RADIO_STATUS, so an arm-OFF report after a stick loss
+/// stops at once); before N12: 0x7629_5a56_9aae_7065, 0x46a3_bae4_d352_1f51, 0xef4e_8cca_25eb_2f21.
 const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0x7629_5a56_9aae_7065),
-    (0x5eed_0b02, 0x46a3_bae4_d352_1f51),
-    (0x5eed_0b03, 0xef4e_8cca_25eb_2f21),
+    (0x5eed_0b01, 0x86d2_b007_f7eb_cab0),
+    (0x5eed_0b02, 0xf12b_8b95_ced1_2aef),
+    (0x5eed_0b03, 0x03c3_c9eb_a852_01ec),
 ];
 
 /// The digests of the whole `walk` with the heading verdict `Valid.heading` (H12 item 4 as amended by H14, the board's):
-/// after the first airborne stick loss LAND holds position (or brakes) where the estimate covers it.
+/// after the first airborne stick loss LAND holds position (or brakes) where the estimate covers it. Re-baselined for N12
+/// (no RADIO_STATUS: an arm-OFF report after a stick loss stops at once); before N12: 0x65a2_4273_a378_82ff,
+/// 0xa6c7_d3b0_eb7a_e384, 0x8b10_b43b_bafb_351a.
 const WALK_GOLDEN: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0x65a2_4273_a378_82ff),
-    (0x5eed_0b02, 0xa6c7_d3b0_eb7a_e384),
-    (0x5eed_0b03, 0x8b10_b43b_bafb_351a),
+    (0x5eed_0b01, 0xce7a_cba4_76de_f8c5),
+    (0x5eed_0b02, 0x34f3_cc4f_6c55_e901),
+    (0x5eed_0b03, 0x942f_8427_0db8_35d6),
 ];
 
 /// I2 as amended by N2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first
@@ -310,6 +313,11 @@ impl Fly {
         self.f.hands_off_state()
     }
 
+    /// A RADIO_STATUS from the receiver just after the latest step (N12's M at the next step: the MAVLink take-over).
+    fn radio_status(&mut self) {
+        self.f.set_last_radio_status_us(Some(self.t + 1));
+    }
+
     fn set_valid(&self, valid: Valid) {
         let mut n = self.cell.get();
         n.valid = valid;
@@ -437,6 +445,7 @@ fn i3_full_sticks_and_any_switch_in_takeover_give_the_centred_setpoint_until_the
 fn i3_control_high_with_arm_off_does_not_open_the_lock() {
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
+    fly.radio_status();
     fly.rc(false, FULL, Switch3::High);
     let o = fly.rc(true, FULL, Switch3::Middle);
     assert_eq!(fly.state(), State::Takeover, "K, no P");
@@ -445,9 +454,10 @@ fn i3_control_high_with_arm_off_does_not_open_the_lock() {
 
 #[test]
 fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot() {
-    // CRSF back with arm OFF: TAKEOVER, the gate armed, the motors run.
+    // CRSF back with arm OFF after a RADIO_STATUS (N12's M): TAKEOVER, the gate armed, the motors run.
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
+    fly.radio_status();
     for _ in 0..200 {
         let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
         assert_eq!(fly.state(), State::Takeover);
@@ -465,19 +475,34 @@ fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot()
         let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
         assert!(!o.armed, "fs {fs}");
     }
+    // N12, no RADIO_STATUS after the loss (a plain dropout): the arm-OFF return disarms in that step, in the air, FS_HOLD_EN
+    // 1 or 0.
+    for fs in [true, false] {
+        let mut fly = Fly::new(fs, true, POSITION);
+        fly.lose();
+        assert!(fly.f.airborne);
+        let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+        assert!(!o.armed && o.motors.throttles().is_none() && fly.state() == State::Stop, "fs {fs}");
+    }
 }
 
 #[test]
-fn wr2_the_held_arm_off_report_still_newest_when_the_latch_clears_disarms_in_that_step() {
+fn wr2_the_held_arm_off_report_still_newest_when_the_latch_clears_stays_held_until_td_then_disarms_in_that_step() {
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
+    fly.radio_status();
     let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
     assert!(o.armed && fly.state() == State::Takeover);
-    // The latch as the previous step left it (modelled here: the real one clears in `wr1_touchdown_...`).
+    // The latch as the previous step left it (modelled here: the real one clears in `wr1_touchdown_...`): N12 dropped the
+    // airborne term, so the held report stays held; TD held at the previous step stops and disarms (WR1, T).
     fly.f.airborne = false;
     let o = fly.quiet();
+    assert!(o.armed && fly.state() == State::Takeover, "held with the latch false");
+    fly.f.airborne = false;
+    fly.f.still_us = fly.f.land_detect_us;
+    let o = fly.quiet();
     assert_eq!(fly.state(), State::Stop);
-    assert!(!o.armed && o.motors.throttles().is_none(), "disarmed in the step the latch reads false");
+    assert!(!o.armed && o.motors.throttles().is_none(), "disarmed in the step TD reads held");
 }
 
 #[test]
@@ -1647,8 +1672,13 @@ fn wr3_and_return_built_on_the_real_step() {
     let mut counts = [0u32; 6];
     let mut seen = [0u32; 8];
     let mut rest = true;
+    // N12: RADIO_STATUS about once a second from a generator of its own (the main sequence is unchanged).
+    let mut radio = Lcg(0x5eed_0d3b);
     for k in 0..1_000_000u32 {
         t += DT_US;
+        if radio.chance(1) {
+            f.set_last_radio_status_us(Some(t));
+        }
         if rng.chance(2) {
             f.set_fs_hold_en(!rng.chance(200));
         }
@@ -2206,15 +2236,12 @@ fn e2_land_descends_1_5_above_10_m_over_home_0_5_below_and_the_change_steps_no_t
 enum Cause {
     /// F: a gap between flight steps over `FLIGHT_GAP_DISARM_US`.
     Gap,
-    /// P: this step's report has the arm switch off.
+    /// P: this step's report has the arm switch off, and it was not held (K set, M clear, or not a hands-off state).
     ArmOff,
     /// F: the estimate does not cover tilt and rates, or the IMU sample is not finite.
     Coverage,
     /// T: TD held at the previous step (its count reached `land_detect_us`), as the state machine reads it at this step.
     Touchdown,
-    /// P, counted on its own while N10 (ii) waits for the owner: C1's held arm-OFF report (the newest) released because
-    /// the latch is false (`arm_off_holds` as built).
-    LatchArmOff,
 }
 
 /// The NS walk over the real Gate + HandsOff + Flight: random reports (losses of 0.5 to 3.5 s and returns, single drops),
@@ -2222,8 +2249,10 @@ enum Cause {
 /// (`fs`, or random), IMU1 at rest, zero or noisy, rare NaN samples, rotation above 20 deg/s, rare step gaps. Every step
 /// that stops or disarms after the first airborne latch of the arming gets exactly one cause of P, T or F (first match in
 /// `Cause`'s order); any other (the former latch-only WR1 and stick-loss stops included) panics. Home latches (N10 (v))
-/// but RETURN and AUTO are never reached (`return_built` false). Returns the count per cause, then the stick losses in
-/// the air handled as hands-off states.
+/// but RETURN and AUTO are never reached (`return_built` false). N12: RADIO_STATUS about once a second during random
+/// "MAVLink model" periods (a generator of its own); an arm-OFF report that stops while K is clear in a hands-off state
+/// must have M clear (P), so with M set such a stop has a cause of T or F. Returns the count per cause, then the arm-OFF
+/// reports held with M set (armed after them), then the stick losses in the air handled as hands-off states.
 fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     let tuning = Tuning::DEFAULT;
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
@@ -2235,6 +2264,10 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     let mut newest: Option<u64> = None;
     let (mut prev_armed, mut prev_state, mut ever) = (false, State::Stop, false);
     let (mut counts, mut homed) = ([0u32; 6], 0u32);
+    // N12: the harness's own M (set by a RADIO_STATUS newer than the entry from PILOT or STOP) and K (a fresh arm-ON
+    // newest report in TAKEOVER since its entry).
+    let (mut radio, mut mavlink, mut status, mut entry, mut m, mut k_set) =
+        (Lcg(seed ^ 0xa5a5), false, None::<u64>, 0u64, false, false);
     for k in 0..steps {
         match fs {
             Some(v) => f.set_fs_hold_en(v),
@@ -2291,6 +2324,13 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         if rc.is_some() {
             newest = Some(t);
         }
+        if radio.chance(1) {
+            mavlink = !mavlink;
+        }
+        if mavlink && radio.chance(1) {
+            status = Some(t);
+            f.set_last_radio_status_us(status);
+        }
         let mut i = input(t, rc);
         i.sensors.imu1.reading.accel_ms2 = match accel {
             0 => AT_REST,
@@ -2307,24 +2347,33 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         let r = i.sensors.imu1.reading;
         let finite = r.gyro_rads.iter().chain(r.accel_ms2.iter()).all(|v| v.is_finite());
         let (air, still, td) = (f.airborne, f.still, f.still_us >= tuning.land_detect_us);
-        let newest_off = f.rc_newest.is_some_and(|r| !r.arm);
+        let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
+        if hands_off(prev_state) && status.is_some_and(|s| s > entry) {
+            m = true;
+        }
+        let held = hands_off(prev_state) && !(prev_state == State::Takeover && k_set) && m;
         let o = f.step(&i);
         let state = f.hands_off_state();
+        if state != prev_state && hands_off(state) {
+            k_set = false;
+            if !hands_off(prev_state) {
+                (m, entry) = (false, t);
+            }
+        }
+        k_set |= state == State::Takeover && f.rc_newest.is_some_and(|r| r.arm);
+        assert_eq!(f.radio_status_seen(), hands_off(state) && m, "seed {seed:#x} step {k}: M");
         assert!(!matches!(state, State::Return | State::Auto), "seed {seed:#x} step {k}: return_built false");
         homed += u32::from(o.armed && f.hands_off.home().is_some());
         let lost = newest.is_none_or(|n| t - n > tuning.rc_fs_timeout_us);
-        let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
         if prev_armed && ever && (!o.armed || o.motors.throttles().is_none()) {
             let cause = if gap {
                 Cause::Gap
-            } else if rc.is_some_and(|r| !r.arm) {
+            } else if rc.is_some_and(|r| !r.arm) && !held {
                 Cause::ArmOff
             } else if !(o.nav.valid.tilt && o.nav.valid.rates) || !finite {
                 Cause::Coverage
             } else if td {
                 Cause::Touchdown
-            } else if hands_off(prev_state) && !air && newest_off {
-                Cause::LatchArmOff
             } else {
                 panic!(
                     "seed {seed:#x} step {k}: untagged stop {prev_state:?} -> {state:?}, latch {air}, (b) {still}, lost {lost}, fs {}: {o:?}",
@@ -2333,6 +2382,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
             };
             counts[cause as usize] += 1;
         }
+        counts[4] += u32::from(held && rc.is_some_and(|r| !r.arm) && o.armed);
         counts[5] += u32::from(prev_armed && air && prev_state == State::Pilot && hands_off(state));
         if !o.armed {
             ever = false;
@@ -2348,14 +2398,14 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
 
 /// N1 as tightened by N10: the NS walk at FS_HOLD_EN 0, 1 and changing, 400 000 steps each: every stop after the first
 /// airborne latch is tagged P, T or F (no latch-only WR1 or stick-loss stop); P, T and F each occur, and stick losses in
-/// the air were handled as hands-off states. C1's held arm-OFF released by a false latch (P) is counted on its own and
-/// printed while N10 (ii) is pending.
+/// the air were handled as hands-off states. N12: arm-OFF reports held with M set occur, and none of them stops without
+/// T or F (the "held arm-OFF released" label of N10 is gone: no rule releases a held report but K, TD or F).
 #[test]
 fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     let mut total = [0u32; 6];
     for (seed, fs) in [(0x5eed_0e01, Some(false)), (0x5eed_0e02, Some(true)), (0x5eed_0e03, None)] {
         let c = ns_walk(seed, 400_000, fs);
-        std::println!("NS walk {seed:#x} fs {fs:?}: gap, arm off, coverage, touchdown, held arm off released, air losses: {c:?}");
+        std::println!("NS walk {seed:#x} fs {fs:?}: gap, arm off, coverage, touchdown, arm off held with M, air losses: {c:?}");
         assert!(c[5] > 20, "seed {seed:#x}: stick losses in the air {c:?}");
         for (a, b) in total.iter_mut().zip(c) {
             *a += b;
@@ -2364,4 +2414,5 @@ fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     for cause in [Cause::Gap, Cause::ArmOff, Cause::Coverage, Cause::Touchdown] {
         assert!(total[cause as usize] > 0, "{cause:?} never occurred: {total:?}");
     }
+    assert!(total[4] > 0, "no arm-OFF report held with M: {total:?}");
 }

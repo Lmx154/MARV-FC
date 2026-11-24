@@ -103,6 +103,10 @@ pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
     t_us: 0,
 });
 
+/// Core 0 -> flight core: the time of the latest RADIO_STATUS from the receiver, us (its `at_us`; one writer, the port's
+/// hooks; one reader, IMU1's [`crate::flight::Stepper`]). Sets the hands-off latch M (decision-mavlink-mode-20261123, N12).
+pub static FLIGHT_RADIO_STATUS: TripleBuffer<u64> = TripleBuffer::new(0);
+
 /// Bytes the UART took at the CRSF baud and at 460800 (the port writes only while locked, in the
 /// locked protocol), baud changes, and returns of `run`.
 static TX_CRSF: AtomicU32 = AtomicU32::new(0);
@@ -297,6 +301,8 @@ struct RcHooks {
     last_gps_sent_us: Option<u64>,
     /// The writer of [`FLIGHT_RC`] (`None` if it was taken already: nothing is written).
     flight: Option<TripleWriter<'static, RcSample>>,
+    /// The writer of [`FLIGHT_RADIO_STATUS`] (`None` if it was taken already: nothing is written).
+    flight_radio: Option<TripleWriter<'static, u64>>,
     /// The stick map last read from the store; `None` until the store gave one (no sample then).
     map: Option<RcMap>,
     /// CRSF stick reports seen.
@@ -323,6 +329,9 @@ impl Hooks for RcHooks {
                 _ => {}
             }
         });
+        if let (Report::RadioStatus(r), Some(w)) = (&report, &mut self.flight_radio) {
+            w.write(r.at_us);
+        }
         let Some((ch, t_us)) = crsf else {
             return;
         };
@@ -663,6 +672,7 @@ async fn rc_link(
         last_gps_us: None,
         last_gps_sent_us: None,
         flight: FLIGHT_RC.take_writer(),
+        flight_radio: FLIGHT_RADIO_STATUS.take_writer(),
         map: None,
         crsf_reports: 0,
         arm_on: false,
