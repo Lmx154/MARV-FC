@@ -1,70 +1,143 @@
-//! The station's five flight commands (link-contract section 10, Amendments A and C) between the links on core 0 and
-//! the hands-off state machine in the flight step on core 1, through one `fw_core::flight_cmd::Mailbox`.
+//! The station's flight commands, mode and heartbeat between the links on core 0 and the hands-off state machine in the
+//! flight step on core 1 (link-contract section 10, Amendments A and C).
 //!
-//! Core 0 ([`command`], from `actions::command` on either link): the decode table; a flight command is posted and its
-//! answer awaited inside the node's command hook, so the one COMMAND_ACK the contract allows ("at once", ACCEPTED or
-//! DENIED, never IN_PROGRESS, TEMPORARILY_REJECTED or FAILED) carries the flight step's answer. mavlink-device dfdb11a
-//! sends the hook's outcome as the ACK at once and has no way to send none, so the answer cannot come later as a
-//! `LateAck` without a second ACK. The wait is bounded: [`BOUND_US`] for the flight step to take the request, then as
-//! long again for its answer. No answer: DENIED, code 0. Another flight command outstanding (the other link, which can
-//! preempt this one on core 0): DENIED, code 0, at once.
+//! Commands: core 0 ([`command`], from the nodes' `Telemetry::command_deferrable` through `actions`) decodes; a flight
+//! command is posted to [`FLIGHT_CMD`] and the node sends no COMMAND_ACK then. Core 0 checks the command from the link's
+//! `Telemetry::acks` ([`next_ack`], every `poll_transmit` of that link's node, at least every 100 ms) and offers the one
+//! COMMAND_ACK, ACCEPTED or DENIED with the reason code in `result_param2`, to the sender on the link the command came
+//! on. The flight step has [`BOUND_US`] to take it and as long again to answer; no answer, another flight command
+//! outstanding, or parameters not in the table: DENIED, code 0. Core 1 ([`before_step`], [`after_step`], from
+//! `flight::Stepper::sample`): the request, taken at most once, for the step that follows; that step's answer back.
 //!
-//! Core 1 ([`before_step`], [`after_step`], from `flight::Stepper::sample`): the request, taken at most once, given to
-//! `Flight::set_command` for the step that follows; that step's answer back, tagged with the request's number.
+//! Mode: after each step core 1 stores the state machine's mode code in [`MODE`] (0 until the first step); both nodes put
+//! it in HEARTBEAT `custom_mode` ([`custom_mode`]).
+//!
+//! Heartbeat and plan: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link
+//! ([`FLIGHT_STATION_HB`], the clock of `rc::FLIGHT_RADIO_STATUS`) and the committed list's plan id ([`FLIGHT_PLAN`],
+//! 0 for no list); core 1 gives them to `Flight::set_last_radio_heartbeat_us` and `Flight::set_plan_id`.
 
-use fw_core::flight_cmd::{Decoded, Exchange, Mailbox, decode, exchange, request_byte};
+use core::cell::{Cell, RefCell};
+use core::sync::atomic::{AtomicU8, Ordering};
+
+use embassy_sync::blocking_mutex::Mutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use fw_core::flight_cmd::{Decoded, Exchange, Mailbox, Pending, decode, request_byte};
+use fw_core::xcore::{TripleBuffer, TripleReader, TripleWriter};
 use fw_flight::gnc::{Allocator, Controller, Estimator};
 use fw_flight::step::Flight;
-use mavlink_device::marv::MavResult;
-use mavlink_device::{CommandOutcome, CommandRequest};
+use mavlink_device::marv::{MavCmd, MavResult};
+use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
 
 /// Core 0 -> flight step and back: the one flight command in flight.
 pub static FLIGHT_CMD: Mailbox = Mailbox::new();
 
-/// How long core 0 waits for the flight step to take a command, us (then as long again for its answer): 3.2 IMU1 steps
-/// at 800 Hz.
-pub const BOUND_US: u64 = 4_000;
+/// How long the flight step has to take a command, us (then as long again to answer it). The station sends again
+/// after 1.5 s without an ACK; the ACK goes out at the node's next `poll_transmit` after the answer (within 100 ms).
+pub const BOUND_US: u64 = 50_000;
 
-/// Core 0: the COMMAND_ACK of one of the five flight commands; `None` for every other command (it goes on as before).
-pub fn command(req: &CommandRequest, link: u8) -> Option<CommandOutcome> {
+/// Flight step -> core 0: the hands-off state's mode code after the latest step; 0 before the first.
+pub static MODE: AtomicU8 = AtomicU8::new(0);
+
+/// Core 0 -> flight step: the RC port's time of the latest ground-station HEARTBEAT on the radio link, us (written only
+/// when it is new; nothing before the first).
+pub static FLIGHT_STATION_HB: TripleBuffer<u64> = TripleBuffer::new(0);
+
+/// Core 0 -> flight step: the plan id of the committed list; 0 when none is stored (the empty list's plan id).
+pub static FLIGHT_PLAN: TripleBuffer<u32> = TripleBuffer::new(0);
+
+/// Core 0: the flight command outstanding, its link and its COMMAND_ACK's command number and target.
+#[derive(Clone, Copy)]
+struct Outstanding {
+    pending: Pending,
+    link: u8,
+    command: MavCmd,
+    target: Peer,
+}
+
+static OUTSTANDING: Mutex<CriticalSectionRawMutex, Cell<Option<Outstanding>>> = Mutex::new(Cell::new(None));
+
+/// Core 0: the writers of [`FLIGHT_STATION_HB`] (with the last time written) and [`FLIGHT_PLAN`], taken at first use.
+struct Writers {
+    hb: Option<(TripleWriter<'static, u64>, u64)>,
+    plan: Option<TripleWriter<'static, u32>>,
+}
+
+static WRITERS: Mutex<CriticalSectionRawMutex, RefCell<Writers>> =
+    Mutex::new(RefCell::new(Writers { hb: None, plan: None }));
+
+/// Core 0: `None` for every command but the five (it goes on as before); `Some(None)`: posted, its ACK follows through
+/// [`next_ack`]; `Some(Some(ack))`: DENIED code 0 at once.
+pub fn command(req: &CommandRequest, link: u8) -> Option<Option<CommandOutcome>> {
     let c = match decode(req.command, &req.params) {
         Decoded::Other => return None,
         Decoded::BadParams => {
-            defmt::info!(
-                "[INFO] flight command {=u32} on link {=u8}: DENIED, parameters not in the table",
-                req.command as u32,
-                link
-            );
-            return Some(outcome(0));
+            defmt::info!("[INFO] flight command {=u32} on link {=u8}: DENIED, parameters not in the table", req.command as u32, link);
+            return Some(Some(outcome(0)));
         }
         Decoded::Command(c) => c,
     };
     let radio = link == crate::LINK_RADIO as u8;
-    let byte = match exchange(&FLIGHT_CMD, request_byte(c, radio), BOUND_US, crate::now_us) {
-        Exchange::Answered(b) => b,
-        Exchange::Busy => {
-            defmt::warn!("[INFO] flight command {=u32} on link {=u8}: DENIED, another one outstanding", req.command as u32, link);
-            0
+    let posted = OUTSTANDING.lock(|o| {
+        let pending = Pending::post(&FLIGHT_CMD, request_byte(c, radio), crate::now_us())?;
+        o.set(Some(Outstanding {
+            pending,
+            link,
+            command: req.command,
+            target: req.sender,
+        }));
+        Some(())
+    });
+    if posted.is_none() {
+        defmt::warn!("[INFO] flight command {=u32} on link {=u8}: DENIED, another one outstanding", req.command as u32, link);
+        return Some(Some(outcome(0)));
+    }
+    defmt::info!("[INFO] flight command {=u32} on link {=u8}: posted to the flight step", req.command as u32, link);
+    Some(None)
+}
+
+/// Core 0, from link `link`'s `Telemetry::acks`: the ACK of the flight command outstanding on that link, once it is
+/// answered or timed out.
+pub fn next_ack(link: u8) -> Option<LateAck> {
+    let (o, result) = OUTSTANDING.lock(|cell| {
+        let mut o = cell.take()?;
+        if o.link != link {
+            cell.set(Some(o));
+            return None;
         }
+        match o.pending.check(&FLIGHT_CMD, crate::now_us(), BOUND_US) {
+            Some(r) => Some((o, r)),
+            None => {
+                cell.set(Some(o));
+                None
+            }
+        }
+    })?;
+    let byte = match result {
+        Exchange::Answered(b) => b,
         Exchange::Timeout { taken } => {
             defmt::warn!(
                 "[INFO] flight command {=u32} on link {=u8}: DENIED, no answer from the flight step (taken {=bool})",
-                req.command as u32,
+                o.command as u32,
                 link,
                 taken
             );
             0
         }
     };
-    defmt::info!(
-        "[INFO] flight command {=u32} on link {=u8} from {=u8}/{=u8}: answer {=u8}",
-        req.command as u32,
-        link,
-        req.sender.system_id,
-        req.sender.component_id,
-        byte
-    );
-    Some(outcome(byte))
+    defmt::info!("[INFO] flight command {=u32} on link {=u8}: answer {=u8}", o.command as u32, link, byte);
+    Some(LateAck {
+        command: o.command,
+        target: o.target,
+        outcome: outcome(byte),
+    })
+}
+
+/// Core 0: link `link` went down; its outstanding flight command, if any, is dropped (withdrawn if not taken yet).
+pub fn link_lost(link: u8) {
+    OUTSTANDING.lock(|cell| match cell.take() {
+        Some(o) if o.link == link => o.pending.abandon(&FLIGHT_CMD),
+        other => cell.set(other),
+    });
 }
 
 fn outcome(byte: u8) -> CommandOutcome {
@@ -80,16 +153,81 @@ fn outcome(byte: u8) -> CommandOutcome {
     }
 }
 
-/// Core 1, before `Flight::step`: the waiting request, given to the flight for that step; its number.
-pub fn before_step<E: Estimator, C: Controller, A: Allocator>(flight: &mut Flight<E, C, A>) -> Option<u32> {
+/// Core 0, every node's `Telemetry::custom_mode`: the mode code after the latest flight step (0 before the first).
+pub fn custom_mode() -> u32 {
+    u32::from(MODE.load(Ordering::Relaxed))
+}
+
+/// Core 0, from the RC port's `Hooks::stats`: its time of the latest station HEARTBEAT (`None` before the first),
+/// written to the flight step when it is new.
+pub fn station_heartbeat(t_us: Option<u64>) {
+    let Some(t) = t_us else {
+        return;
+    };
+    WRITERS.lock(|w| {
+        let mut w = w.borrow_mut();
+        if w.hb.is_none() {
+            w.hb = FLIGHT_STATION_HB.take_writer().map(|wr| (wr, u64::MAX));
+        }
+        if let Some((wr, last)) = &mut w.hb
+            && *last != t
+        {
+            wr.write(t);
+            *last = t;
+        }
+    });
+}
+
+/// Core 0, on a change of the committed list: its plan id to the flight step (0 when it is empty).
+pub fn push_plan() {
+    let (_, len, _, plan_id) = crate::mission::committed();
+    WRITERS.lock(|w| {
+        let mut w = w.borrow_mut();
+        if w.plan.is_none() {
+            w.plan = FLIGHT_PLAN.take_writer();
+        }
+        if let Some(wr) = &mut w.plan {
+            wr.write(if len == 0 { 0 } else { plan_id });
+        }
+    });
+}
+
+/// Core 1: the readers of [`FLIGHT_STATION_HB`] and [`FLIGHT_PLAN`].
+pub struct Core1 {
+    hb: TripleReader<'static, u64>,
+    plan: TripleReader<'static, u32>,
+}
+
+impl Core1 {
+    /// `None` if a reader was taken already.
+    pub fn new() -> Option<Self> {
+        Some(Self {
+            hb: FLIGHT_STATION_HB.take_reader()?,
+            plan: FLIGHT_PLAN.take_reader()?,
+        })
+    }
+}
+
+/// Core 1, before `Flight::step`: the station heartbeat time and the plan id when new, and the waiting command, given to
+/// the flight for that step; the command's number.
+pub fn before_step<E: Estimator, C: Controller, A: Allocator>(io: &mut Core1, flight: &mut Flight<E, C, A>) -> Option<u32> {
+    let (hb, hb_fresh) = io.hb.read();
+    if hb_fresh {
+        flight.set_last_radio_heartbeat_us(Some(hb));
+    }
+    let (plan, plan_fresh) = io.plan.read();
+    if plan_fresh {
+        flight.set_plan_id(fw_flight::station::plan_id_of(plan));
+    }
     let (seq, c) = fw_flight::station::take(&FLIGHT_CMD)?;
     flight.set_command(c);
     Some(seq)
 }
 
-/// Core 1, after that step: its answer to request `seq`.
+/// Core 1, after that step: its answer to request `seq`, and the mode code.
 pub fn after_step<E: Estimator, C: Controller, A: Allocator>(flight: &mut Flight<E, C, A>, seq: Option<u32>) {
     if let Some(seq) = seq {
         fw_flight::station::answer(&FLIGHT_CMD, seq, flight.take_command_result());
     }
+    MODE.store(flight.hands_off_state().code(), Ordering::Relaxed);
 }

@@ -651,6 +651,7 @@ pub struct Stepper {
     gdn: TripleReader<'static, GdnSet>,
     gains: TripleReader<'static, Gains>,
     radio_status: TripleReader<'static, u64>,
+    station: crate::station::Core1,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
     step: u32,
@@ -713,6 +714,7 @@ impl Stepper {
             gdn: FLIGHT_GDN.take_reader()?,
             gains: FLIGHT_GAINS.take_reader()?,
             radio_status: crate::rc::FLIGHT_RADIO_STATUS.take_reader()?,
+            station: crate::station::Core1::new()?,
             log: LOG.take_producer()?,
             step: 0,
             esc_since_us: 0,
@@ -891,7 +893,7 @@ impl SampleSink for Stepper {
         // that fails (the writer paused in mid-write) is no status: every line is missing.
         let esc = crate::esc::ESC.try_read(1);
         let erpm = esc.map_or([None; LINES], |s| s.lines.map(|l| l.erpm));
-        let command = crate::station::before_step(&mut self.flight);
+        let command = crate::station::before_step(&mut self.station, &mut self.flight);
         let out = self.flight.step(&FlightInputs {
             sensors: Sensors {
                 imu1: *sample,

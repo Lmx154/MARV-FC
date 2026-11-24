@@ -696,6 +696,14 @@ impl Telemetry for Board {
         actions::command(req, LINK_USB as u8, now_us / 1000)
     }
 
+    fn command_deferrable(&mut self, req: &CommandRequest, now_us: u64) -> Option<CommandOutcome> {
+        actions::command_deferrable(req, LINK_USB as u8, now_us / 1000)
+    }
+
+    fn custom_mode(&mut self, _now_us: u64) -> u32 {
+        station::custom_mode()
+    }
+
     fn acks(&mut self, now_us: u64) -> Option<LateAck> {
         actions::next_ack(LINK_USB as u8, now_us / 1000)
     }
@@ -1087,6 +1095,7 @@ async fn supervise() -> ! {
         }
         // The mission's change counter moved (a commit or a clear): the shadow guidance's targets are chosen again (`GDN_SRC`).
         if mission::changed() {
+            station::push_plan();
             flight::push_gdn("mission changed");
         }
         tick = tick.wrapping_add(1);

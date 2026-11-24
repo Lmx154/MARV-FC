@@ -524,6 +524,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     command: Option<hands_off::StationCommand>,
     /// The answer of the latest step to its command (`take_command_result`).
     command_result: Option<hands_off::CommandResult>,
+    /// The plan id of the committed list (`set_plan_id`); `None` when none is stored.
+    plan_id: Option<u32>,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -665,6 +667,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             last_radio_status_us: None,
             command: None,
             command_result: None,
+            plan_id: None,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -780,6 +783,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// it ([`Flight::take_command_result`]); a later call before that step replaces it.
     pub fn set_command(&mut self, command: hands_off::StationCommand) {
         self.command = Some(command);
+    }
+
+    /// The plan id of the committed list (link-contract section 17, Amendment A: a new one is the state machine's "new
+    /// plan"); `None` when none is stored. Given to the state machine every step.
+    pub fn set_plan_id(&mut self, plan_id: Option<u32>) {
+        self.plan_id = plan_id;
     }
 
     /// The latest step's answer to its command; `None` when it had none (or the answer was taken).
@@ -948,7 +957,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             position_d_m: nav.position_m[2],
             position_d_valid: nav.valid.position_d,
             command: self.command.take(),
-            mission: NO_MISSION,
+            mission: MissionFacts { plan_id: self.plan_id, ..NO_MISSION },
             last_waypoint_reached: false,
             home_reached: false,
             heading_ok: nav.valid.heading && self.heading_ok,

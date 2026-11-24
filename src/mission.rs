@@ -14,8 +14,7 @@
 //! is dropped while one waits (the contract's "Reply pacing"). A message is handed to the slot, and the service's timers
 //! start, when the service produces it.
 //!
-//! The armed input is `settings::HANDSHAKE.armed()`, the flight core's `ARMED` flag read at each message (a `SeqCst` load of the
-//! real flag, no copy: never stale).
+//! The service's armed input is false since packet H2 (Amendment A, A4): an upload or a clear is taken while armed.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -98,7 +97,7 @@ fn publish(st: &State) {
 }
 
 /// A listed message from `link`'s node. `false` when its id is not one of the six (the caller has other listed messages).
-/// The frame's targets are checked by the service; the armed state is read now.
+/// The frame's targets are checked by the service.
 pub fn message(link: Link, m: Incoming<'_>) -> bool {
     let Some((target_system, target_component, msg)) = decode(m.message_id, m.payload) else {
         return false;
@@ -111,7 +110,9 @@ pub fn message(link: Link, m: Incoming<'_>) -> bool {
         target_component,
         msg,
     };
-    let armed = crate::settings::HANDSHAKE.armed();
+    // Amendment A (A4, packet H2): MISSION_COUNT, MISSION_CLEAR_ALL and the items of an upload are no longer refused
+    // while armed, in every state; a new plan id reaches the state machine through `station::push_plan`.
+    let armed = false;
     // The height limits in force now, read before the lock is taken (the store is never nested in it). A value that cannot be
     // read or has the wrong type is NaN: every `z` is refused (fail closed).
     let (alt_min, alt_max) = crate::store::with(|p| {

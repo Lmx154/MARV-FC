@@ -37,6 +37,11 @@ pub fn ack_of(byte: u8) -> (bool, i32) {
     if byte == ACCEPTED { (true, 0) } else { (false, i32::from(byte)) }
 }
 
+/// The state machine's plan id of a plan id from core 0: 0 is the empty list's (link-contract section 17), no list.
+pub fn plan_id_of(plan_id: u32) -> Option<u32> {
+    (plan_id != 0).then_some(plan_id)
+}
+
 /// The flight step's two calls around `Flight::step`: before, the waiting request, if any (its sequence number and the
 /// command; a byte that is no command is answered code 0 at once and not applied).
 pub fn take(mailbox: &Mailbox) -> Option<(u32, StationCommand)> {
@@ -108,6 +113,13 @@ mod tests {
         for (r, code) in reasons {
             assert_eq!(ack_of(answer_byte(Some(CommandResult::Denied(r)))), (false, code), "{r:?}");
         }
+    }
+
+    #[test]
+    fn plan_id_of_0_is_no_list_and_any_other_is_itself() {
+        assert_eq!(plan_id_of(0), None);
+        assert_eq!(plan_id_of(0x1862_F4A2), Some(0x1862_F4A2));
+        assert_eq!(plan_id_of(u32::MAX), Some(u32::MAX));
     }
 
     #[test]

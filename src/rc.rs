@@ -442,6 +442,7 @@ impl Hooks for RcHooks {
     }
 
     fn stats(&mut self, stats: &Stats) {
+        crate::station::station_heartbeat(stats.last_gcs_heartbeat_us);
         let before = SHARED.lock(|s| {
             let mut s = s.borrow_mut();
             let before = s.mode();
@@ -567,6 +568,14 @@ impl Telemetry for RadioBoard {
 
     fn command(&mut self, req: &CommandRequest, now_us: u64) -> CommandOutcome {
         crate::actions::command(req, crate::LINK_RADIO as u8, now_us / 1000)
+    }
+
+    fn command_deferrable(&mut self, req: &CommandRequest, now_us: u64) -> Option<CommandOutcome> {
+        crate::actions::command_deferrable(req, crate::LINK_RADIO as u8, now_us / 1000)
+    }
+
+    fn custom_mode(&mut self, _now_us: u64) -> u32 {
+        crate::station::custom_mode()
     }
 
     fn acks(&mut self, now_us: u64) -> Option<LateAck> {

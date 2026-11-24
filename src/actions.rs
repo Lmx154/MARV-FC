@@ -149,12 +149,18 @@ fn action_name(action: Action) -> &'static str {
     }
 }
 
+/// `Telemetry::command_deferrable`: the five flight commands go to `station` (their ACK follows through [`next_ack`]);
+/// every other command is [`command`]'s, answered at once.
+pub fn command_deferrable(req: &CommandRequest, link: u8, now_ms: u64) -> Option<CommandOutcome> {
+    match crate::station::command(req, link) {
+        Some(outcome) => outcome,
+        None => Some(command(req, link, now_ms)),
+    }
+}
+
 /// `Telemetry::command`: admits the command and starts its action. The answer is the book's
 /// (IN_PROGRESS 0 % for an admitted action; its final ACK follows through [`next_ack`]).
 pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
-    if let Some(outcome) = crate::station::command(req, link) {
-        return outcome;
-    }
     if req.command == MavCmd::MAV_CMD_DO_MOTOR_TEST {
         return motor_test(req, link, now_ms);
     }
@@ -256,6 +262,9 @@ fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
 
 /// `Telemetry::acks`: the next late ACK for link `link`.
 pub fn next_ack(link: u8, now_ms: u64) -> Option<LateAck> {
+    if let Some(ack) = crate::station::next_ack(link) {
+        return Some(ack);
+    }
     // The node sends ACKs before it takes texts from `Telemetry::texts`: hold the ACK until the
     // queued text (a calibration's result or failure) has gone out, so the text precedes it. The
     // hold lasts at most `HOLD_MAX_MS` (a flood of texts must not hold ACKs for good): after that
@@ -314,6 +323,7 @@ fn clear_hold(link: usize) {
 
 /// Link `link` went down (USB closed, or the port left MAVLink): no ACK can be delivered on it.
 pub fn link_lost(link: u8) {
+    crate::station::link_lost(link);
     BOOK.lock(|b| b.borrow_mut().link_lost(link));
 }
 
