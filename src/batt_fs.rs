@@ -6,13 +6,13 @@
 
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-use fw_core::battery::{Config, Level, Monitor, Notices, Sample as Volts};
+use fw_core::battery::{CELL_KNOWN_OK, Config, Level, Monitor, Notices, Sample as Volts};
 use mavlink_device::dialect::MavSeverity;
 
 use crate::device::{BATT, Reading, Sample};
 
-/// Core 0 -> flight core: bits 0 and 1 the level reached (`Level`), bit 2 (`CELL_DESCEND`) the descent request. 0 until
-/// armed and while disarmed.
+/// Core 0 -> flight core: bits 0 and 1 the level reached (`Level`), bit 2 (`CELL_DESCEND`) the descent request, both 0
+/// until armed and while disarmed; bit 3 (`CELL_KNOWN_OK`) the battery known not to be critical.
 pub static CELL: AtomicU8 = AtomicU8::new(0);
 
 /// Flight core -> core 0: what the descent did at the latest step (`fw_flight::step::BattDescent` as a byte).
@@ -86,7 +86,8 @@ impl Watch {
             _ => None,
         };
         let update = self.monitor.step(&cfg, now_us / 1000, armed, sample);
-        CELL.store(update.cell, Ordering::Relaxed);
+        let known_ok = if self.monitor.known_not_critical() { CELL_KNOWN_OK } else { 0 };
+        CELL.store(update.cell | known_ok, Ordering::Relaxed);
         if let Some(level) = update.rose {
             self.rose(level, update.volts, &cfg);
         }

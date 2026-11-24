@@ -135,7 +135,9 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
         let mut f = flight(&cell, handshake(), &Tuning::DEFAULT);
         f.set_fs_hold_en(true);
         f.set_mission(super::auto_tests::square());
-        f.set_battery_ok(true);
+        // BATT-M: the battery through the monitor's byte at every step, known OK at first; now and then CRITICAL with
+        // action 0 or 1, LOW, or not known, from a generator of its own (the main sequence is unchanged).
+        let (mut bat, mut batt) = (Lcg(seed ^ 0xb0b0), fw_core::battery::CELL_KNOWN_OK);
         let mut rng = Lcg(seed);
         let mut t = 1_000_000u64;
         let (mut quiet, mut arm) = (0u32, false);
@@ -175,6 +177,14 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
                 t_us: t,
             });
             f.set_last_radio_heartbeat_us(Some(t));
+            if bat.chance(1) {
+                batt = if bat.chance(100) {
+                    2 | if bat.chance(500) { fw_core::battery::CELL_DESCEND } else { 0 }
+                } else {
+                    u8::from(bat.chance(300)) | if bat.chance(100) { 0 } else { fw_core::battery::CELL_KNOWN_OK }
+                };
+            }
+            f.set_battery_cell(batt);
             let command = rng.chance(50).then(|| StationCommand {
                 command: all[(rng.next() % 5) as usize],
                 link: if rng.chance(800) { Link::Radio } else { Link::Usb },

@@ -910,9 +910,9 @@ impl SampleSink for Stepper {
         let esc = crate::esc::ESC.try_read(1);
         let erpm = esc.map_or([None; LINES], |s| s.lines.map(|l| l.erpm));
         let command = crate::station::before_step(&mut self.station, &mut self.flight);
-        // The low-battery monitor's one byte (core 0): the descent request, false unless CRITICAL is reached with
-        // `BATT_FS_CRT_ACT` 1.
-        self.flight.set_batt_descend(fw_core::battery::cell_descends(crate::batt_fs::CELL.load(Ordering::Relaxed)));
+        // The low-battery monitor's one byte (core 0): the descent request (CRITICAL with `BATT_FS_CRT_ACT` 1) and the
+        // hands-off state machine's battery_critical and battery_ok.
+        self.flight.set_battery_cell(crate::batt_fs::CELL.load(Ordering::Relaxed));
         let out = self.flight.step(&FlightInputs {
             sensors: Sensors {
                 imu1: *sample,

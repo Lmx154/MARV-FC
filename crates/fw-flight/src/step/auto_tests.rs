@@ -328,7 +328,7 @@ fn g_start_denied_with_its_reason() {
     }
     let mut r = Run::new(3.0, Some(near));
     assert_eq!(deny(&mut r), CommandResult::Accepted, "999 m");
-    // The board's battery input (none on the flight core).
+    // The battery not known OK.
     let mut r = Run::new(3.0, Some(square()));
     r.f.set_battery_ok(false);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::BatteryNotOk), "no battery input");
@@ -718,4 +718,105 @@ fn rh_fs_hold_en_0_stick_loss_lands_never_returns() {
         assert!(o.armed, "step {k}: {:?} {:?} still {} air {}", r.state(), r.cell.get().position_m, r.f.still_us, r.f.airborne);
         assert_eq!(r.state(), State::Land);
     }
+}
+
+// ---- BATT-M: the battery monitor's byte on the real step (`Flight::set_battery_cell`, as the board's Stepper) ----
+
+/// The byte core 0 hands over (`batt_fs`): the monitor's `cell` and, when it knows the battery is not critical,
+/// `CELL_KNOWN_OK`. One monitor step at `t_us` with a sample of `volts` taken `age_ms` before, armed.
+fn monitor_cell(m: &mut fw_core::battery::Monitor, cfg: &fw_core::battery::Config, t_us: u64, volts: Option<f32>, age_ms: u64) -> u8 {
+    let t_ms = t_us / 1000 + 10_000;
+    let sample = volts.map(|v| fw_core::battery::Sample { volts: v, t_ms: t_ms - age_ms });
+    let u = m.step(cfg, t_ms, true, sample);
+    u.cell | if m.known_not_critical() { fw_core::battery::CELL_KNOWN_OK } else { 0 }
+}
+
+/// Start's battery check from the monitor (decision-mavlink-mode-20261123, A10 "battery not critical", section 50;
+/// `battery_ok` = `Monitor::known_not_critical`): 12 s in HOLD with the monitor stepped at 10 Hz, then Start. ACCEPTED
+/// with the pack fine or at LOW; BatteryNotOk with the monitor off (no cells, no timer, CRITICAL at or above LOW), with
+/// no sample and with a stale one. CRITICAL lands (B1), so Start is not taken.
+#[test]
+fn batt_m_start_needs_the_battery_known_not_critical() {
+    use fw_core::battery::{Config, Level, Monitor};
+    let d = Config::DEFAULT;
+    let cases: [(&str, Config, Option<f32>, u64, Option<CommandResult>); 9] = [
+        ("fine", d, Some(16.0), 0, Some(CommandResult::Accepted)),
+        ("LOW", d, Some(14.3), 0, Some(CommandResult::Accepted)),
+        ("cells 0", Config { cells: 0, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
+        ("timer 0", Config { timer_s: 0, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
+        ("CRT = LOW", Config { crt_cell_v: 3.6, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
+        ("CRT > LOW", Config { crt_cell_v: 3.7, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
+        ("no sample", d, None, 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
+        ("stale", d, Some(16.0), 5_001, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
+        ("CRITICAL", d, Some(13.9), 0, None),
+    ];
+    for (name, cfg, volts, age_ms, want) in cases {
+        let mut r = Run::new(3.0, Some(square()));
+        let mut m = Monitor::new();
+        let mut cell = 0;
+        for k in 0..9_600u32 {
+            if k % 80 == 0 {
+                cell = monitor_cell(&mut m, &cfg, r.t, volts, age_ms);
+            }
+            r.f.set_battery_cell(cell);
+            r.fly();
+        }
+        let level = m.level();
+        match want {
+            Some(want) => {
+                assert_eq!(r.state(), State::Hold, "{name}");
+                assert_eq!(level, if name == "LOW" { Level::Low } else { Level::None }, "{name}");
+                assert_eq!(r.command(Command::Start), want, "{name}");
+            }
+            None => {
+                assert_eq!((level, r.state()), (Level::Critical, State::Land), "{name}");
+                assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::NotInThisState), "{name}");
+            }
+        }
+    }
+}
+
+/// B1 in AUTO: CRITICAL from the monitor's byte mid-leg gives LAND at the next step, holding position (the stop from
+/// 3 m/s), E2's stages, TD stops the motors on the ground and nothing stops them in the air; with action 0 and 1 every
+/// output is bit-identical to the raw input's (the descent request adds nothing, its state Off).
+#[test]
+fn batt_m_auto_critical_lands_holding_position_and_td_stops() {
+    let run = |cell: Option<u8>| {
+        let mut r = Run::new(3.0, Some(square()));
+        r.f.set_battery_cell(fw_core::battery::CELL_KNOWN_OK);
+        assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+        while r.cell.get().position_m[0] < 12.0 {
+            r.fly();
+        }
+        assert_eq!(r.state(), State::Auto);
+        let entry = r.cell.get().position_m;
+        match cell {
+            Some(c) => r.f.set_battery_cell(c),
+            None => r.f.battery_critical = true,
+        }
+        let mut out = std::vec::Vec::new();
+        let mut drift = 0.0f32;
+        let mut steps = 0u32;
+        while r.f.gate.armed() {
+            let o = r.fly();
+            steps += 1;
+            assert!(steps < 400_000, "never stopped");
+            assert!(matches!(r.state(), State::Land | State::Stop), "{:?}", r.state());
+            assert_eq!(r.f.batt_descent(), BattDescent::Off);
+            if o.armed {
+                assert!(o.motors.throttles().is_some());
+            } else {
+                assert_eq!(height(&r), 0.0, "a stop in the air");
+            }
+            drift = drift.max(libm::hypotf(o.nav.position_m[0] - entry[0], o.nav.position_m[1] - entry[1]));
+            out.push(std::format!("{o:?}"));
+        }
+        assert_eq!(r.state(), State::Stop);
+        std::println!("BATT-M AUTO -> LAND: drift {drift:.3} m, stopped after {:.1} s", steps as f32 * DT_US as f32 * 1e-6);
+        assert!(drift < 1.5, "{drift}");
+        out
+    };
+    let raw = run(None);
+    assert_eq!(run(Some((fw_core::battery::Level::Critical as u8))), raw, "action 0");
+    assert_eq!(run(Some((fw_core::battery::Level::Critical as u8) | fw_core::battery::CELL_DESCEND)), raw, "action 1");
 }

@@ -2467,7 +2467,9 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     // and then) and one of the five commands on the radio link at 0.5 % of the steps, from a generator of its own (the main
     // sequence is unchanged): AUTO is reached and flown.
     f.set_mission(super::auto_tests::square());
-    f.set_battery_ok(true);
+    // BATT-M: the battery through the monitor's byte (`set_battery_cell`) at every step, known OK at first; random bytes
+    // (CRITICAL with action 0 or 1, LOW, or not known) from a generator of its own.
+    let (mut bat, mut batt) = (Lcg(seed ^ 0xb0b0), fw_core::battery::CELL_KNOWN_OK);
     let (mut cmds, mut station, mut auto_steps, mut return_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32, 0u32);
     let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
     for k in 0..steps {
@@ -2480,8 +2482,13 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
             f.set_heading_ok(!rng.chance(300));
         }
         if rng.chance(1) {
-            f.battery_critical = rng.chance(100);
+            batt = if rng.chance(100) {
+                2 | if bat.chance(500) { fw_core::battery::CELL_DESCEND } else { 0 }
+            } else {
+                u8::from(bat.chance(300)) | if bat.chance(100) { 0 } else { fw_core::battery::CELL_KNOWN_OK }
+            };
         }
+        f.set_battery_cell(batt);
         let gap = rng.next() % 50_000 == 0;
         t += if gap { crate::gate::FLIGHT_GAP_DISARM_US + 1 + rng.next() % 100_000 } else { DT_US };
         if quiet == 0 && rng.chance(2) {
@@ -3061,4 +3068,131 @@ fn n13_on_the_ground_the_correction_lowers_by_0_3_m_once_and_the_probe_still_sto
     let want = MG - 2.0 * MASS * BLIND_BELOW_HOVER_MSS + MASS * GRAVITY_MSS / 800.0;
     std::println!("N13 ground: corrected {prev:?} N (want {want}), changes {changes}, stopped {stopped}");
     assert!(prev.is_some_and(|c| (c - want).abs() <= 1e-3 * MG) && changes == 1 && stopped);
+}
+
+// ---- BATT-M: the battery monitor's byte (`Flight::set_battery_cell`, as the board's Stepper feeds it) ----
+
+/// The monitor's byte at CRITICAL with `BATT_FS_CRT_ACT` 0 (warn) and 1 (the PILOT-side descent request); the known-OK
+/// bit is never set with CRITICAL.
+const CRIT_WARN: u8 = fw_core::battery::Level::Critical as u8;
+const CRIT_DESCEND: u8 = CRIT_WARN | fw_core::battery::CELL_DESCEND;
+
+/// How a run is told the battery is critical: not at all, the state machine's raw input (as the tests above), or the
+/// monitor's byte.
+#[derive(Clone, Copy, Debug)]
+enum Batt {
+    None,
+    Raw,
+    Cell(u8),
+}
+
+impl Fly {
+    fn batt(&mut self, b: Batt) {
+        match b {
+            Batt::None => {}
+            Batt::Raw => self.f.battery_critical = true,
+            Batt::Cell(c) => self.f.set_battery_cell(c),
+        }
+    }
+}
+
+/// B1 in HOLD: CRITICAL from the monitor's byte gives LAND at the next step, holding position, exactly as the raw input;
+/// with action 1 the descent request adds nothing (every output bit-identical, the descent Off).
+#[test]
+fn batt_m_hold_critical_lands_and_the_action_1_request_adds_nothing() {
+    let run = |b: Batt| {
+        let mut fly = Fly::new(true, true, POSITION);
+        fly.lose();
+        assert_eq!(fly.state(), State::Hold);
+        fly.batt(b);
+        let mut out = std::vec::Vec::new();
+        for _ in 0..4_000 {
+            let o = fly.quiet();
+            assert!(o.armed && o.motors.throttles().is_some(), "{b:?}");
+            assert_eq!(fly.f.batt_descent(), BattDescent::Off, "{b:?}");
+            out.push((std::format!("{o:?}"), fly.state()));
+        }
+        out
+    };
+    let raw = run(Batt::Raw);
+    assert!(raw.iter().all(|(_, s)| *s == State::Land));
+    assert_eq!(run(Batt::Cell(CRIT_WARN)), raw, "action 0");
+    assert_eq!(run(Batt::Cell(CRIT_DESCEND)), raw, "action 1");
+}
+
+/// C1 in TAKEOVER: CRITICAL from the monitor's byte flies TAKEOVER's descent and the hand-over stays possible, exactly
+/// as the raw input, with action 0 or 1. The request seen in TAKEOVER is cancelled by the lock's switch moves (a ch6
+/// change, B-I5), so after the hand-over the pilot flies his sticks. A level first reached in PILOT after a hand-over
+/// gets the PILOT-side descent as on batt.
+#[test]
+fn batt_m_takeover_critical_descends_and_hand_over_stays_possible() {
+    let run = |b: Batt| {
+        let mut fly = Fly::new(true, true, POSITION);
+        fly.lose();
+        fly.rc(true, FULL, Switch3::Low);
+        assert_eq!(fly.state(), State::Takeover);
+        fly.batt(b);
+        let mut out = std::vec::Vec::new();
+        for _ in 0..800 {
+            let o = fly.rc(true, FULL, Switch3::Low);
+            assert!(o.armed && fly.f.land_rate_ms.is_some(), "{b:?}: the LAND law");
+            assert_eq!(fly.f.batt_descent(), BattDescent::Off, "{b:?}");
+            out.push((std::format!("{o:?}"), fly.state()));
+        }
+        let o = fly.rc(true, FULL, Switch3::High);
+        out.push((std::format!("{o:?}"), fly.state()));
+        let o = fly.rc(true, FULL, Switch3::Middle);
+        assert_eq!(fly.state(), State::Pilot, "{b:?}: hand-over");
+        assert!(!is_centred(&o));
+        out.push((std::format!("{o:?}"), fly.state()));
+        let want = if matches!(b, Batt::Cell(CRIT_DESCEND)) { BattDescent::Cancelled } else { BattDescent::Off };
+        assert_eq!(fly.f.batt_descent(), want, "{b:?}");
+        out
+    };
+    let raw = run(Batt::Raw);
+    assert!(raw[..800].iter().all(|(_, s)| *s == State::Takeover));
+    assert_eq!(run(Batt::Cell(CRIT_WARN)), raw, "action 0");
+    assert_eq!(run(Batt::Cell(CRIT_DESCEND)), raw, "action 1");
+    // Handed over with the battery fine, then CRITICAL with action 1 in PILOT (Altitude): the descent at F2's speed.
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    fly.rc(true, FULL, Switch3::Low);
+    fly.rc(true, FULL, Switch3::High);
+    fly.rc(true, [0.0, 0.0, 0.7, 0.0], Switch3::Middle);
+    assert_eq!(fly.state(), State::Pilot);
+    fly.f.set_battery_cell(CRIT_DESCEND);
+    for _ in 0..10 {
+        let o = fly.rc(true, [0.0, 0.0, 0.7, 0.0], Switch3::Middle);
+        assert_eq!((fly.state(), o.mode, fly.f.batt_descent()), (State::Pilot, Mode::Altitude, BattDescent::Descending));
+        match o.setpoint {
+            Setpoint::Altitude { velocity_d_ms, .. } => assert_eq!(velocity_d_ms, Tuning::DEFAULT.pilot_speed_dn_ms),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+/// B6: BLIND does not change on CRITICAL, from the raw input or the monitor's byte with action 0 or 1: every output
+/// bit-identical to a run with no battery input.
+#[test]
+fn batt_m_blind_is_unchanged_by_critical() {
+    let run = |b: Batt| {
+        let mut fly = Fly::new(true, true, ANGLE);
+        for _ in 0..800 {
+            fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+        }
+        fly.lose();
+        assert_eq!(fly.state(), State::Blind);
+        fly.batt(b);
+        let mut out = std::vec::Vec::new();
+        for _ in 0..2_000 {
+            let o = fly.quiet();
+            assert_eq!((fly.state(), fly.f.batt_descent()), (State::Blind, BattDescent::Off), "{b:?}");
+            out.push(std::format!("{o:?}"));
+        }
+        out
+    };
+    let none = run(Batt::None);
+    for b in [Batt::Raw, Batt::Cell(CRIT_WARN), Batt::Cell(CRIT_DESCEND)] {
+        assert_eq!(run(b), none, "{b:?}");
+    }
 }

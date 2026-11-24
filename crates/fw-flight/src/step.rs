@@ -689,12 +689,10 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: TD's (a) is the old rule, the collective below the ground threshold (0.714 x the card's m g).
     #[cfg(test)]
     td_card_rule: bool,
-    /// Tests only: the battery is critical (the battery monitor is on another branch; the board gives false).
-    #[cfg(test)]
+    /// The state machine's battery critical (B1): the monitor's CRITICAL level (`set_battery_cell`); false until set.
     battery_critical: bool,
-    /// Host tests and MARV-sim only: the battery is known not to be critical (`set_battery_ok`); false until set. The
-    /// board has no battery input on the flight core and gives false (Start answers BatteryNotOk).
-    #[cfg(any(test, feature = "sim"))]
+    /// The state machine's `battery_ok` (Start): the monitor knows the battery is not critical (`set_battery_cell`, or
+    /// `set_battery_ok` in host tests and MARV-sim); false until set (Start answers BatteryNotOk).
     battery_ok: bool,
 }
 
@@ -824,9 +822,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             td_restart_off: false,
             #[cfg(test)]
             td_card_rule: false,
-            #[cfg(test)]
             battery_critical: false,
-            #[cfg(any(test, feature = "sim"))]
             battery_ok: false,
         }
     }
@@ -882,8 +878,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.heading_ok = ok;
     }
 
-    /// The state machine's `battery_ok` (Start's battery check): only in host tests and with the feature `sim`; the board
-    /// gives false until a battery input reaches the flight core.
+    /// The state machine's `battery_ok` (Start's battery check) alone: only in host tests and with the feature `sim`; the
+    /// board sets it with [`Flight::set_battery_cell`].
     #[cfg(any(test, feature = "sim"))]
     pub fn set_battery_ok(&mut self, ok: bool) {
         self.battery_ok = ok;
@@ -973,6 +969,15 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// cap); false changes nothing, bit for bit.
     pub fn set_batt_descend(&mut self, on: bool) {
         self.batt_request = on;
+    }
+
+    /// The low-battery monitor's byte from core 0 (`fw_core::battery`'s cell byte), every step: the descent request
+    /// ([`Flight::set_batt_descend`]), the state machine's battery critical (CRITICAL reached, whatever `BATT_FS_CRT_ACT`)
+    /// and its `battery_ok` (`CELL_KNOWN_OK`).
+    pub fn set_battery_cell(&mut self, cell: u8) {
+        self.set_batt_descend(fw_core::battery::cell_descends(cell));
+        self.battery_critical = fw_core::battery::cell_critical(cell);
+        self.battery_ok = fw_core::battery::cell_known_ok(cell);
     }
 
     /// What the descent did at the latest step, read only.
@@ -1099,14 +1104,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         } else {
             Tier::T1
         };
-        #[cfg(test)]
-        let battery_critical = self.battery_critical;
-        #[cfg(not(test))]
-        let battery_critical = false;
-        #[cfg(any(test, feature = "sim"))]
-        let battery_ok = self.battery_ok;
-        #[cfg(not(any(test, feature = "sim")))]
-        let battery_ok = false;
+        let (battery_critical, battery_ok) = (self.battery_critical, self.battery_ok);
         let was = self.hands_off.state();
         // N11 (1a): the low mark (N14 (1)) and TD as the state machine reads them at this step.
         let (lifted_in, td_in) = (self.lifted, self.still_us >= self.land_detect_us);
@@ -1144,9 +1142,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.command_result = ho.command;
         // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
         self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
-        // In a hands-off state the state machine is the only actor: the low-battery descent changes nothing there (its
-        // request, edge and cancel still run, so it acts again in PILOT as before).
-        let batt_on = batt_on && !ho.synthetic_sticks;
+        // Outside PILOT the state machine is the only actor: the low-battery descent changes nothing there (its request,
+        // edge and cancel still run, so it acts again in PILOT as before; STOP included, the touchdown step's disarm).
+        let batt_on = batt_on && ho.state == State::Pilot;
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
         // The low-battery descent lifts Angle to Altitude (when covered); Position stays under its own rule.
         let selected = if ho.synthetic_sticks {

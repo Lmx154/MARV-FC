@@ -28,6 +28,9 @@ pub const PLAUSIBLE_MARGIN: f32 = 1.05;
 /// Bit 2 of the cell byte: the critical action is "descend" and the critical level is reached.
 pub const CELL_DESCEND: u8 = 4;
 
+/// Bit 3 of the cell byte, added by core 0: [`Monitor::known_not_critical`] (the hands-off state machine's `battery_ok`).
+pub const CELL_KNOWN_OK: u8 = 8;
+
 /// The level reached; only rises while armed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Level {
@@ -142,6 +145,16 @@ pub struct Update {
 /// Whether the flight core's cell byte asks for the descent.
 pub const fn cell_descends(cell: u8) -> bool {
     cell & CELL_DESCEND != 0
+}
+
+/// Whether the flight core's cell byte says CRITICAL is reached (armed, latched until disarm; whatever the action).
+pub const fn cell_critical(cell: u8) -> bool {
+    cell & 3 == Level::Critical as u8
+}
+
+/// Whether the flight core's cell byte carries [`CELL_KNOWN_OK`].
+pub const fn cell_known_ok(cell: u8) -> bool {
+    cell & CELL_KNOWN_OK != 0
 }
 
 /// The monitor's state.
