@@ -684,4 +684,158 @@ mod tests {
         }
         assert!(armed_steps > 10_000 && spins > 10_000, "{armed_steps} {spins}");
     }
+
+    /// Amendment D, WR3: the real gate driven by the real hands-off machine. Each step the machine runs first with the
+    /// armed state and the airborne latch the previous step left; its `disarm` goes through the gate's disarm path,
+    /// then `apply` takes this step's report and the Output's `hands_off` and `arm_off_holds`. The airborne latch lives
+    /// in step.rs (land_detect_us on the idle floor): here it is a modelled input, cleared after any disarmed step and
+    /// otherwise set and cleared at random, so (d) is checked from the step the latch reads false.
+    #[test]
+    fn gate_and_hands_off_joint_walk_wr3() {
+        use crate::hands_off::{Command, HandsOff, Inputs, Link, MissionFacts, State, StationCommand, Tier};
+        static HS_JOINT: Handshake = Handshake::new();
+        HS_JOINT.set_permit(true);
+        let tuning = Tuning::DEFAULT;
+        let mut gate = Gate::new(&tuning, &HS_JOINT);
+        let mut h = HandsOff::new(&tuning);
+        let mut rng = Rng(0x5eed_00d4);
+        let mut i = Inputs {
+            now_us: 0,
+            fs_hold_en: true,
+            crsf: None,
+            last_radio_heartbeat_us: None,
+            last_radio_status_us: None,
+            armed: false,
+            airborne: false,
+            tier: Tier::T3,
+            position_ne_m: [0.0, 0.0],
+            position_ne_valid: true,
+            position_d_m: -5.0,
+            position_d_valid: true,
+            command: None,
+            mission: MissionFacts {
+                plan_id: Some(7),
+                has_waypoints: true,
+                z_within_limits: true,
+                max_waypoint_distance_m: Some(100.0),
+                return_height_m: Some(20.0),
+            },
+            last_waypoint_reached: false,
+            home_reached: false,
+            heading_ok: true,
+            battery_ok: true,
+            battery_critical: false,
+            return_built: true,
+        };
+        let (mut t, mut quiet, mut airborne) = (1_000u64, 0u64, false);
+        let (mut prev_state, mut prev_armed, mut off_then_disarmed) = (State::Stop, false, false);
+        let mut seen = [0u32; 8];
+        let (mut armings, mut wr1_stops, mut silence_disarms) = (0u32, 0u32, 0u32);
+        for k in 0..400_000 {
+            let mut hs_cleared = false;
+            if rng.chance(1) {
+                HS_JOINT.disarm();
+                hs_cleared = true;
+            }
+            let dt = match rng.next() % 1000 {
+                0 => FLIGHT_GAP_DISARM_US + 1 + rng.next() % 100_000,
+                1..=2 => TIMEOUT / 2 + rng.next() % TIMEOUT,
+                _ => 1 + rng.next() % 20_000,
+            };
+            t += dt;
+            if quiet == 0 && rng.chance(5) {
+                quiet = 1 + rng.next() % 300;
+            }
+            quiet = quiet.saturating_sub(1);
+            let rc = (quiet == 0 && rng.chance(600)).then(|| RcSample {
+                sticks: Sticks {
+                    roll: 0.0,
+                    pitch: 0.0,
+                    throttle: [0.0, 0.0, 0.05, 0.5][(rng.next() % 4) as usize],
+                    yaw: 0.0,
+                },
+                arm: !rng.chance(50),
+                switch6: [Switch3::Low, Switch3::Middle, Switch3::High][(rng.next() % 3) as usize],
+                t_us: t,
+            });
+            let levels = if rng.chance(2) { None } else { LEVELS };
+            if rng.chance(5) {
+                i.fs_hold_en = !i.fs_hold_en;
+            }
+            if rng.chance(50) {
+                i.tier = [Tier::T3, Tier::T3, Tier::T3, Tier::T2, Tier::T1][(rng.next() % 5) as usize];
+            }
+            i.heading_ok = !rng.chance(20);
+            i.battery_ok = !rng.chance(20);
+            i.battery_critical = rng.chance(3);
+            if quiet == 0 && rng.chance(200) {
+                i.last_radio_heartbeat_us = Some(t);
+            }
+            i.command = rng.chance(100).then(|| StationCommand {
+                command: [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return]
+                    [(rng.next() % 5) as usize],
+                link: Link::Radio,
+            });
+            i.home_reached = rng.chance(5);
+            i.last_waypoint_reached = rng.chance(5);
+            i.now_us = t;
+            if rc.is_some() {
+                i.crsf = rc;
+            }
+            i.armed = gate.armed();
+            i.airborne = airborne;
+
+            let out = h.step(&i);
+            if out.disarm {
+                gate.disarm();
+            }
+            let cmd = step_flags(&mut gate, t, rc, levels, out.hands_off, out.arm_off_holds);
+            let armed = gate.armed();
+
+            // (a) armed at the end of two consecutive steps: the second is not STOP.
+            assert!(!(prev_armed && armed && out.state == State::Stop), "a, step {k}: {out:?}");
+            // (b) only the switch cycle arms.
+            if !prev_armed && armed {
+                let r = rc.expect("b: arming needs a report");
+                assert!(r.arm && r.sticks.throttle <= tuning.arm_thr_max && levels.is_some(), "b, step {k}");
+                assert!(off_then_disarmed, "b, step {k}: arming without a switch cycle");
+                armings += 1;
+            }
+            // (c) outside hands-off states (always, with FS_HOLD_EN not in force) silence disarms exactly as the old
+            // gate: at the first step the newest report is older than the timeout, and not before.
+            if prev_armed && !out.hands_off && rc.is_none() {
+                let age = i.crsf.map_or(u64::MAX, |r| t.saturating_sub(r.t_us));
+                if age > TIMEOUT {
+                    assert!(!armed, "c, step {k}: silence did not disarm");
+                    silence_disarms += 1;
+                } else if dt <= FLIGHT_GAP_DISARM_US && levels.is_some() && !out.disarm && !hs_cleared {
+                    assert!(armed, "c, step {k}: disarmed before the timeout");
+                }
+            }
+            // (d) a hands-off state that reads the latch false: disarmed at the end of that step.
+            if !matches!(prev_state, State::Pilot | State::Stop) && !i.airborne {
+                assert!(!armed, "d, step {k}: {prev_state:?} grounded, still armed");
+                wr1_stops += u32::from(prev_armed);
+            }
+            assert_eq!(cmd.throttles().is_some(), armed && levels.is_some());
+
+            if let Some(slot) = seen.get_mut(usize::from(out.state.code() - 1)) {
+                *slot += 1;
+            }
+            if let Some(r) = rc {
+                off_then_disarmed = !r.arm && !armed;
+            }
+            airborne = if !armed {
+                false
+            } else if airborne {
+                !rng.chance(3)
+            } else {
+                rng.chance(100)
+            };
+            prev_state = out.state;
+            prev_armed = armed;
+        }
+        assert!(seen.iter().all(|&n| n > 0), "every state reached: {seen:?}");
+        assert!(armings > 100 && wr1_stops > 20 && silence_disarms > 20, "{armings} {wr1_stops} {silence_disarms}");
+    }
 }
