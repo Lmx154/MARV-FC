@@ -2080,23 +2080,20 @@ enum Cause {
     ArmOff,
     /// F: the estimate does not cover tilt and rates, or the IMU sample is not finite.
     Coverage,
-    /// T: TD held at the previous step (its count reached `land_detect_us`).
+    /// T: TD held at the previous step (its count reached `land_detect_us`), as the state machine reads it at this step.
     Touchdown,
-    /// Outside N1's list: WR1 with its guard (b) after the latch was cleared by the idle-floor timer, not TD (N4).
-    LatchWr1,
-    /// Outside N1's list: C1's held arm-OFF report released because the latch is false.
+    /// P, counted on its own while N10 (ii) waits for the owner: C1's held arm-OFF report (the newest) released because
+    /// the latch is false (`arm_off_holds` as built).
     LatchArmOff,
-    /// Outside N1's list: a stick loss in PILOT or TAKEOVER with the latch false (N2 keeps this STOP).
-    LatchLoss,
 }
 
 /// The NS walk over the real Gate + HandsOff + Flight: random reports (losses of 0.5 to 3.5 s and returns, single drops),
 /// arm switch, sticks (throttle 0 included), mode switch, tiers, the heading verdict, battery critical, FS_HOLD_EN
 /// (`fs`, or random), IMU1 at rest, zero or noisy, rare NaN samples, rotation above 20 deg/s, rare step gaps. Every step
-/// that stops or disarms after the first airborne latch of the arming gets exactly one cause (first match in `Cause`'s
-/// order); an untagged one panics. Returns the count per cause, then the stick losses in the air handled as hands-off
-/// states.
-fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 8] {
+/// that stops or disarms after the first airborne latch of the arming gets exactly one cause of P, T or F (first match in
+/// `Cause`'s order); any other (the former latch-only WR1 and stick-loss stops included) panics. Returns the count per
+/// cause, then the stick losses in the air handled as hands-off states.
+fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     let tuning = Tuning::DEFAULT;
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
     let mut f = flight(cell, handshake(), &tuning);
@@ -2106,7 +2103,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 8] {
     let (mut valid, mut rates, mut accel) = (POSITION, [0.0f32; 3], 0u64);
     let mut newest: Option<u64> = None;
     let (mut prev_armed, mut prev_state, mut ever) = (false, State::Stop, false);
-    let mut counts = [0u32; 8];
+    let mut counts = [0u32; 6];
     for k in 0..steps {
         match fs {
             Some(v) => f.set_fs_hold_en(v),
@@ -2193,12 +2190,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 8] {
                 Cause::Coverage
             } else if td {
                 Cause::Touchdown
-            } else if hands_off(prev_state) && !air && still {
-                Cause::LatchWr1
             } else if hands_off(prev_state) && !air && newest_off {
                 Cause::LatchArmOff
-            } else if matches!(prev_state, State::Pilot | State::Takeover) && !air && lost {
-                Cause::LatchLoss
             } else {
                 panic!(
                     "seed {seed:#x} step {k}: untagged stop {prev_state:?} -> {state:?}, latch {air}, (b) {still}, lost {lost}, fs {}: {o:?}",
@@ -2207,7 +2200,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 8] {
             };
             counts[cause as usize] += 1;
         }
-        counts[7] += u32::from(prev_armed && air && prev_state == State::Pilot && hands_off(state));
+        counts[5] += u32::from(prev_armed && air && prev_state == State::Pilot && hands_off(state));
         if !o.armed {
             ever = false;
         } else if f.airborne {
@@ -2219,17 +2212,17 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 8] {
     counts
 }
 
-/// N1: the NS walk at FS_HOLD_EN 0, 1 and changing, 400 000 steps each: every stop after the first airborne latch is
-/// tagged; P, T and F each occur, and stick losses in the air were handled as hands-off states. The latch-based stops
-/// that N1's list does not name (WR1 after an idle-floor clear, C1's released arm-OFF, N2's stick loss with the latch
-/// false) are counted and printed: they are the open reading of this packet.
+/// N1 as tightened by N10: the NS walk at FS_HOLD_EN 0, 1 and changing, 400 000 steps each: every stop after the first
+/// airborne latch is tagged P, T or F (no latch-only WR1 or stick-loss stop); P, T and F each occur, and stick losses in
+/// the air were handled as hands-off states. C1's held arm-OFF released by a false latch (P) is counted on its own and
+/// printed while N10 (ii) is pending.
 #[test]
 fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
-    let mut total = [0u32; 8];
+    let mut total = [0u32; 6];
     for (seed, fs) in [(0x5eed_0e01, Some(false)), (0x5eed_0e02, Some(true)), (0x5eed_0e03, None)] {
         let c = ns_walk(seed, 400_000, fs);
-        std::println!("NS walk {seed:#x} fs {fs:?}: gap, arm off, coverage, touchdown, latch WR1, latch arm off, latch loss, air losses: {c:?}");
-        assert!(c[7] > 20, "seed {seed:#x}: stick losses in the air {c:?}");
+        std::println!("NS walk {seed:#x} fs {fs:?}: gap, arm off, coverage, touchdown, held arm off released, air losses: {c:?}");
+        assert!(c[5] > 20, "seed {seed:#x}: stick losses in the air {c:?}");
         for (a, b) in total.iter_mut().zip(c) {
             *a += b;
         }
