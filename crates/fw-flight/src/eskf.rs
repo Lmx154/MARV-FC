@@ -1610,6 +1610,17 @@ impl<const R: usize> EskfN<R> {
             && self.p.iter().flatten().all(|v| v.is_finite())
     }
 
+    /// `Valid.velocity_ne` (and `position_ne`) of the published state: the flag the heading monitor's R5 needs.
+    fn velocity_ne_valid(&self) -> bool {
+        self.armed
+            && self.tilt_aligned
+            && self.yaw_aligned
+            && self.origin.is_some()
+            && self.started
+            && self.horizon().saturating_sub(self.last_pos_us) < self.t.nav_aid_timeout_us
+            && self.latest_ok
+    }
+
     fn nav(&self) -> NavState {
         let n = &self.nom;
         let horizon = self.horizon();
@@ -1622,13 +1633,7 @@ impl<const R: usize> EskfN<R> {
             && !self.global_off
             && sqrtf(self.p[ATT + 2][ATT + 2].max(0.0)) <= self.t.nav_heading_valid_sigma_rad
             && horizon.saturating_sub(self.last_mag_acc_us) < aid_to;
-        let ne = self.armed
-            && al
-            && self.yaw_aligned
-            && self.origin.is_some()
-            && self.started
-            && horizon.saturating_sub(self.last_pos_us) < aid_to
-            && self.latest_ok;
+        let ne = self.velocity_ne_valid();
         let q = if n.q[0] < 0.0 { n.q.map(|x| -x) } else { n.q };
         // Variances from the diagonal floored at 0.
         let v = |i: usize| self.p[i][i].max(0.0);
@@ -1742,9 +1747,9 @@ impl<const R: usize> Estimator for EskfN<R> {
         // HM2: the heading monitor at the horizon time; nothing below reads it.
         let mut hm_pair = Pair::None;
         if self.hm_on() {
-            let (t_hm, air) = (self.horizon() as u32, self.airborne);
+            let (t_hm, air, ne) = (self.horizon() as u32, self.airborne, self.velocity_ne_valid());
             match hm_epoch {
-                Some(Some([vn, ve])) => hm_pair = self.hmon.accepted_epoch(t_hm, vn, ve, air),
+                Some(Some([vn, ve])) => hm_pair = self.hmon.accepted_epoch(t_hm, vn, ve, air, ne),
                 Some(None) => self.hmon.chain_broken(t_hm, air),
                 None => self.hmon.tick(t_hm, air),
             }
@@ -1854,11 +1859,6 @@ impl<const R: usize> EskfN<R> {
     pub fn sim_rotate_yaw(&mut self, dpsi: f32) {
         let turn = [cosf(0.5 * dpsi), 0.0, 0.0, sinf(0.5 * dpsi)];
         self.nom.q = normalized(qmul(&turn, &self.nom.q));
-    }
-
-    /// The heading monitor's R2' off for the next accepted epoch ([`HeadingMonitor::sim_clear_r2_prime`]).
-    pub fn sim_hm_clear_r2_prime(&mut self) {
-        self.hmon.sim_clear_r2_prime();
     }
 }
 

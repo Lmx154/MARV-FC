@@ -13,8 +13,11 @@
 //! Sc = lam Sc + (A_N B_E - A_E B_N), Sd = lam Sd + A.B, Saa = lam Saa + |A|^2; d_hat = atan2(Sc, Sd), sig = sigB / sqrt(Saa).
 //!
 //! Rules (all from the decision text): R1 a pair needs two consecutive accepted epochs, A is zeroed at each accepted epoch,
-//! a broken chain gives no pair (H7). R2 no pair when ||B| - |A|| > GATE x sigB (H7), R2' a pair screened by R2 also breaks
-//! the chain, so the bad epoch leaves both differences it enters (H8 (2)). R3 fault = informed AND |d_hat| > D_TOL AND
+//! a broken chain gives no pair (H7). R2 no pair when ||B| - |A|| > GATE x sigB (H7); the pair is skipped and counted, the
+//! chain is kept and the next pair is evaluated (H11 (1) dropped H8's R2', which also broke the chain). R5 (H11 (2)) a pair
+//! is evaluated only if the filter's NE-velocity validity flag (`Valid.velocity_ne` of the published navigation state) was
+//! true at BOTH of its epochs, else the chain breaks: `sig` assumes a GNSS-aided tilt (about 2 deg); without GNSS fusion the
+//! tilt is unaided (5-9 deg) and d_hat measures the tilt, not the heading. R3 fault = informed AND |d_hat| > D_TOL AND
 //! |d_hat| > GATE x sig on every evaluated epoch for T_FAULT; a screened pair neither counts nor resets the count (H7, H8).
 //! H10 (1): confirmed = informed AND |d_hat| + CONF_SIGMA x sig <= D_TOL on every evaluated epoch for T_FAULT (same
 //! accumulated-time rule), latched. H10 (2): `blind` = airborne and no pair evaluated for `nav_aid_timeout_us`; cleared by the
@@ -23,8 +26,8 @@
 //! `nav_gps_min_rate_hz`, 245 ms) is not evaluated and breaks the chain.
 //! R4 sums and tests run only while airborne and armed, the sums are cleared at take-off (H8 (2)) and by every epoch that is
 //! not airborne, a non-finite one included. Both latches and the sums clear at the arming edge (H3). `heading_ok` = the
-//! filter's heading flag AND confirmed AND NOT fault AND NOT blind (H0, H10 (2)), where confirmed needs the H10 (1) margin
-//! |d_hat| + CONF_SIGMA x sig <= D_TOL for T_FAULT, not |d_hat| <= D_TOL alone. The blind timer runs on every call that
+//! filter's heading flag AND NOT fault AND NOT blind (H11 O1, owner's decision pending: `confirmed` stays an output but no
+//! longer enters; see `HEADING_OK_NEEDS_CONFIRMED`). The blind timer runs on every call that
 //! carries a time (`accepted_epoch`, `chain_broken`, `tick`) with the caller's airborne flag of that call; it starts at the
 //! first airborne call after a ground, disarmed or arming-edge state, so a caller that stops delivering epochs still turns
 //! blind as long as it calls `tick`.
@@ -55,10 +58,14 @@ pub const MAX_DT_US: u32 = (1.0e6 / Tuning::DEFAULT.nav_gps_min_rate_hz + 0.5) a
 /// Time without an evaluated pair, airborne, after which the monitor is blind, us: `nav_aid_timeout_us` (H10 (2)).
 pub const BLIND_US: u32 = Tuning::DEFAULT.nav_aid_timeout_us as u32;
 
+/// H11 O1 (the owner's decision is pending; built to the default, "no"): whether `heading_ok` and `ok` also need `confirmed`.
+/// Set to `true` to revert to the H10 confirmation rule (the one line to change; the truth-table test follows it).
+pub const HEADING_OK_NEEDS_CONFIRMED: bool = false;
+
 /// The monitor's output.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HeadingMon {
-    /// confirmed AND NOT fault AND NOT blind (the monitor's own part of `heading_ok`).
+    /// NOT fault AND NOT blind, and confirmed if `HEADING_OK_NEEDS_CONFIRMED` (the monitor's own part of `heading_ok`; H11 O1).
     pub ok: bool,
     /// Since the arming edge, informed evaluated epochs with |d_hat| + CONF_SIGMA x sig <= D_TOL have run without a break
     /// for T_FAULT (H10 (1); any other evaluated epoch restarts the count, a screened pair does not count); latched.
@@ -73,8 +80,8 @@ pub struct HeadingMon {
     pub info: f32,
     /// Pairs screened by R2 since the arming edge.
     pub screened_r2: u32,
-    /// Pairs dropped because the previous pair was screened by R2 (R2'), since the arming edge.
-    pub dropped_r2p: u32,
+    /// Airborne accepted epochs with the NE-velocity flag false (R5: each breaks the chain), since the arming edge.
+    pub ne_invalid: u32,
     /// Epochs or increments with a non-finite value (chain broken), since the arming edge.
     pub non_finite: u32,
     /// Pairs not evaluated because the epochs were more than `MAX_DT_US` apart, since the arming edge.
@@ -86,12 +93,12 @@ pub struct HeadingMon {
 /// What one accepted epoch did, for the caller's NKI Src 13 record (H3: one per evaluated epoch; H7 R2: Ok bit 16).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Pair {
-    /// Neither evaluated nor screened: on the ground or disarmed, the first epoch of a chain, out of interval, dropped by
-    /// R2', or non-finite.
+    /// Neither evaluated nor screened: on the ground or disarmed, the first epoch of a chain, out of interval, NE flag
+    /// false (R5), or non-finite.
     None,
     /// A pair entered the sums: d_hat, sig and the tests are new.
     Evaluated,
-    /// The pair was screened by R2 (and breaks the chain, R2').
+    /// The pair was screened by R2 (skipped and counted; the chain is kept).
     Screened,
 }
 
@@ -118,11 +125,10 @@ pub struct HeadingMonitor {
     /// The airborne flag of the previous call that ran the blind timer.
     blind_air: bool,
     screened: u32,
-    dropped: u32,
+    ne_invalid: u32,
     armed: bool,
     have_prev: bool,
     prev_air: bool,
-    prev_bad: bool,
     confirmed: bool,
     fault: bool,
 }
@@ -156,11 +162,10 @@ impl HeadingMonitor {
             blind: false,
             blind_air: false,
             screened: 0,
-            dropped: 0,
+            ne_invalid: 0,
             armed: false,
             have_prev: false,
             prev_air: false,
-            prev_bad: false,
             confirmed: false,
             fault: false,
         }
@@ -185,7 +190,6 @@ impl HeadingMonitor {
     /// the blind timer runs.
     pub fn chain_broken(&mut self, t_us: u32, airborne: bool) {
         self.have_prev = false;
-        self.prev_bad = false;
         self.a_n = 0.0;
         self.a_e = 0.0;
         self.advance_blind(t_us, airborne && self.armed);
@@ -211,14 +215,14 @@ impl HeadingMonitor {
 
     fn break_chain_at(&mut self, t_us: u32, air: bool) {
         self.have_prev = false;
-        self.prev_bad = false;
         self.prev_air = air;
         self.advance_blind(t_us, air);
     }
 
     /// An epoch the GNSS job accepted: velocity (N, E) m/s at `t_us` (wrapping microseconds), with the caller's airborne
-    /// flag. Takes and zeroes A. Returns whether a pair was evaluated or screened by R2 (the caller's Src 13 record).
-    pub fn accepted_epoch(&mut self, t_us: u32, vn: f32, ve: f32, airborne: bool) -> Pair {
+    /// flag and the filter's NE-velocity validity flag `ne_valid` of this step (R5). Takes and zeroes A. Returns whether a
+    /// pair was evaluated or screened by R2 (the caller's Src 13 record).
+    pub fn accepted_epoch(&mut self, t_us: u32, vn: f32, ve: f32, airborne: bool, ne_valid: bool) -> Pair {
         let air = airborne && self.armed;
         let (an, ae) = (self.a_n, self.a_e);
         self.a_n = 0.0;
@@ -232,7 +236,6 @@ impl HeadingMonitor {
             self.sigma = f32::INFINITY;
             self.flagged_us = 0;
             self.confirm_us = 0;
-            self.prev_bad = false;
         }
         if !(vn.is_finite() && ve.is_finite() && an.is_finite() && ae.is_finite()) {
             self.non_finite = self.non_finite.wrapping_add(1);
@@ -252,27 +255,25 @@ impl HeadingMonitor {
         if !air {
             return Pair::None;
         }
+        if !ne_valid {
+            // R5: the pair needs the flag at both epochs; this epoch is not a start of a chain either.
+            self.ne_invalid = self.ne_invalid.wrapping_add(1);
+            self.have_prev = false;
+            return Pair::None;
+        }
         if !had {
-            self.prev_bad = false;
             return Pair::None;
         }
         if dt_us > MAX_DT_US {
             self.out_of_interval = self.out_of_interval.wrapping_add(1);
-            self.prev_bad = false;
             return Pair::None;
         }
         let (bn, be) = (vn - pvn, ve - pve);
         let nb = libm::sqrtf(bn * bn + be * be);
         let na = libm::sqrtf(an * an + ae * ae);
         if (nb - na).abs() > GATE_SIGMA * self.sig_b {
-            self.prev_bad = true;
             self.screened = self.screened.wrapping_add(1);
             return Pair::Screened;
-        }
-        if self.prev_bad {
-            self.prev_bad = false;
-            self.dropped = self.dropped.wrapping_add(1);
-            return Pair::None;
         }
         let lam = libm::expf(-(dt_us as f32) * 1e-6 / TAU_S);
         let sc = lam * self.sc + (an * be - ae * bn);
@@ -314,34 +315,24 @@ impl HeadingMonitor {
     /// The monitor's output.
     pub fn output(&self) -> HeadingMon {
         HeadingMon {
-            ok: self.confirmed && !self.fault && !self.blind,
+            ok: (!HEADING_OK_NEEDS_CONFIRMED || self.confirmed) && !self.fault && !self.blind,
             confirmed: self.confirmed,
             fault: self.fault,
             delta_rad: self.delta,
             sigma_rad: self.sigma,
             info: self.saa,
             screened_r2: self.screened,
-            dropped_r2p: self.dropped,
+            ne_invalid: self.ne_invalid,
             non_finite: self.non_finite,
             out_of_interval: self.out_of_interval,
             blind: self.blind,
         }
     }
 
-    /// `heading_ok` = the filter's heading flag AND confirmed (with the H10 (1) margin) AND NOT fault AND NOT blind (H0, H10).
+    /// `heading_ok` = the filter's heading flag AND NOT fault AND NOT blind (H11 O1: `confirmed` does not enter unless
+    /// `HEADING_OK_NEEDS_CONFIRMED`).
     pub fn heading_ok(&self, heading_flag: bool) -> bool {
-        heading_flag && self.confirmed && !self.fault && !self.blind
-    }
-}
-
-/// Simulator test hook (feature `sim-fault`; the flight image is built without it). Placed after the flight code so that
-/// the flight image is byte-identical without the feature (panic locations keep their line numbers).
-#[cfg(feature = "sim-fault")]
-impl HeadingMonitor {
-    /// R2' off for the next accepted epoch (HM3b, decision H10): forgets that the previous pair was screened by R2, so the
-    /// pair out of a glitch epoch is evaluated instead of dropped. Called before every step it turns R2' off.
-    pub fn sim_clear_r2_prime(&mut self) {
-        self.prev_bad = false;
+        heading_flag && (!HEADING_OK_NEEDS_CONFIRMED || self.confirmed) && !self.fault && !self.blind
     }
 }
 
@@ -361,6 +352,8 @@ mod tests {
         t: u32,
         v: (f32, f32),
         k: usize,
+        /// The NE-velocity flag the next epochs carry (R5).
+        ne: bool,
     }
 
     fn rot(a: (f32, f32), d: f32) -> (f32, f32) {
@@ -382,15 +375,15 @@ mod tests {
         fn new() -> Self {
             let mut m = HeadingMonitor::default();
             m.set_armed(true);
-            Rig { m, t: 1_000_000, v: (0.0, 0.0), k: 0 }
+            Rig { m, t: 1_000_000, v: (0.0, 0.0), k: 0, ne: true }
         }
         /// One accepted epoch with the increment `a` and the velocity change `b`.
-        fn ep(&mut self, a: (f32, f32), b: (f32, f32), air: bool) {
+        fn ep(&mut self, a: (f32, f32), b: (f32, f32), air: bool) -> Pair {
             self.t = self.t.wrapping_add(DT_US);
             self.v = (self.v.0 + b.0, self.v.1 + b.1);
             self.m.add_increment(a.0 * 0.4, a.1 * 0.4);
             self.m.add_increment(a.0 * 0.6, a.1 * 0.6);
-            self.m.accepted_epoch(self.t, self.v.0, self.v.1, air);
+            self.m.accepted_epoch(self.t, self.v.0, self.v.1, air, self.ne)
         }
         /// `n` airborne epochs with B = A rotated by `d` rad, |A| = `mag`.
         fn run(&mut self, n: usize, mag: f32, d: f32) {
@@ -449,7 +442,7 @@ mod tests {
             let o = r.m.output();
             assert!(o.sigma_rad.is_infinite());
             assert_eq!(o.info, 0.0);
-            assert!(!o.confirmed && !o.fault && !o.ok);
+            assert!(!o.confirmed && !o.fault);
         }
         // a large B with A = 0 is screened (R2), also without effect
         for _ in 0..20 {
@@ -503,9 +496,9 @@ mod tests {
         assert!(o.sigma_rad <= SIG_CONF_RAD && o.confirmed);
         // a pair on the ground, or before arming, confirms nothing
         let mut m = HeadingMonitor::default();
-        m.accepted_epoch(1, 0.0, 0.0, true);
+        m.accepted_epoch(1, 0.0, 0.0, true, true);
         m.add_increment(0.5, 0.0);
-        m.accepted_epoch(200_001, 0.5, 0.0, true);
+        m.accepted_epoch(200_001, 0.5, 0.0, true, true);
         assert!(!m.output().confirmed && m.output().info == 0.0);
     }
 
@@ -550,11 +543,16 @@ mod tests {
                     }
                     let o = r.m.output();
                     assert_eq!((o.confirmed, o.fault, o.blind), (conf, fault, blind));
+                    // H11 O1: `confirmed` does not enter (HEADING_OK_NEEDS_CONFIRMED false); the expression follows the const
+                    let needs = HEADING_OK_NEEDS_CONFIRMED;
                     for flag in [false, true] {
-                        let want = flag && conf && !fault && !blind;
+                        let want = flag && (conf || !needs) && !fault && !blind;
                         assert_eq!(r.m.heading_ok(flag), want, "flag {flag} conf {conf} fault {fault} blind {blind}");
+                        if !needs {
+                            assert_eq!(r.m.heading_ok(flag), flag && !fault && !blind);
+                        }
                     }
-                    assert_eq!(o.ok, conf && !fault && !blind);
+                    assert_eq!(o.ok, (conf || !needs) && !fault && !blind);
                 }
             }
         }
@@ -582,7 +580,7 @@ mod tests {
                 0 => {
                     r.t += DT_US;
                     r.m.add_increment(0.5, 0.0);
-                    r.m.accepted_epoch(r.t, f32::NAN, 0.0, true);
+                    r.m.accepted_epoch(r.t, f32::NAN, 0.0, true, true);
                 }
                 1 => {
                     r.m.add_increment(f32::INFINITY, 0.0);
@@ -774,7 +772,7 @@ mod tests {
         // landing: the only ground epoch is non-finite
         r.t += DT_US;
         r.m.add_increment(0.5, 0.0);
-        assert_eq!(r.m.accepted_epoch(r.t, f32::NAN, 0.0, false), Pair::None);
+        assert_eq!(r.m.accepted_epoch(r.t, f32::NAN, 0.0, false, true), Pair::None);
         let o = r.m.output();
         assert_eq!(o.non_finite, 1);
         assert!(o.info == 0.0 && o.sigma_rad.is_infinite() && o.delta_rad == 0.0, "{o:?}");
@@ -794,13 +792,13 @@ mod tests {
         let mut ep = |m: &mut HeadingMonitor, a: f32, v: f32, air: bool| {
             t += DT_US;
             m.add_increment(a, 0.0);
-            m.accepted_epoch(t, v, 0.0, air)
+            m.accepted_epoch(t, v, 0.0, air, true)
         };
         assert_eq!(ep(&mut m, 0.0, 0.0, false), Pair::None); // ground
         assert_eq!(ep(&mut m, 0.0, 0.0, true), Pair::None); // first airborne: no pair
         assert_eq!(ep(&mut m, 0.5, 0.5, true), Pair::Evaluated);
         assert_eq!(ep(&mut m, 0.5, 3.0, true), Pair::Screened); // R2
-        assert_eq!(ep(&mut m, 0.5, 3.5, true), Pair::None); // R2'
+        assert_eq!(ep(&mut m, 0.5, 3.5, true), Pair::Evaluated); // no R2' (H11): the pair out of a screened one is evaluated
         assert_eq!(ep(&mut m, 0.5, 4.0, true), Pair::Evaluated);
     }
 
@@ -828,49 +826,103 @@ mod tests {
         r.m.add_increment(0.5, 0.0);
         r.v = (r.v.0 + 0.7, r.v.1 + 0.7);
         r.t += 2 * DT_US;
-        r.m.accepted_epoch(r.t, r.v.0, r.v.1, true);
+        r.m.accepted_epoch(r.t, r.v.0, r.v.1, true, true);
         let o = r.m.output();
         assert_eq!(o.info, info);
-        assert_eq!((o.screened_r2, o.dropped_r2p), (0, 0));
+        assert_eq!((o.screened_r2, o.ne_invalid), (0, 0));
         // the epoch after it pairs again, from the catch-up epoch's velocity
         r.run(1, 0.5, 0.0);
         assert!(r.m.output().info > info * 0.99);
         assert_ne!(r.m.output().info, info);
     }
 
+    /// The "glitch in and out" case of H8 (278 at 203.4 s), now under H11 (1): R2 screens the pair into the glitch epoch
+    /// (|B| 3 x |A|) and the pair out of it (B = A rotated by 112 deg, passes R2) is evaluated, no longer dropped. One
+    /// epoch gives d_hat = 112 deg at sig 12.4 deg (flagged); the normal pairs after it pull d_hat back below 5 sig within
+    /// two epochs; the fault needs 1.0 s of consecutive flagged epochs, so no FAULT follows.
     #[test]
-    fn a_glitch_epoch_removes_the_pair_into_it_and_the_pair_out_of_it() {
+    fn a_screened_pair_no_longer_removes_the_pair_out_of_it_and_one_bad_epoch_gives_no_fault() {
         let mut r = Rig::new();
         r.ep((0.0, 0.0), (0.0, 0.0), true);
         let a = (0.5, 0.0);
         // the glitch epoch: B into it is 3 x A (screened by R2), B out of it is A rotated by 112 deg (passes R2)
-        r.ep(a, (1.5, 0.0), true);
+        assert_eq!(r.ep(a, (1.5, 0.0), true), Pair::Screened);
         assert_eq!(r.m.output().screened_r2, 1);
-        r.ep(a, rot(a, 112.0 * D2R), true);
+        assert_eq!(r.ep(a, rot(a, 112.0 * D2R), true), Pair::Evaluated);
         let o = r.m.output();
-        assert_eq!((o.screened_r2, o.dropped_r2p), (1, 1));
-        assert_eq!(o.info, 0.0);
-        assert!(!o.confirmed && !o.fault);
-        // the pair after that is normal
-        r.ep(a, a, true);
-        let o = r.m.output();
-        assert!((o.info - 0.25).abs() < 1e-6 && o.delta_rad.abs() < 1e-3);
+        assert_eq!(o.screened_r2, 1);
+        assert!((o.info - 0.25).abs() < 1e-6 && (o.delta_rad - 112.0 * D2R).abs() < 1e-3, "{o:?}");
+        assert!(o.sigma_rad <= SIG_CONF_RAD && !o.fault);
+        // the pairs after that are normal: d_hat falls back, never a fault
+        let mut trace = std::vec![o.delta_rad / D2R];
+        let mut flagged = 1;
+        let mut longest = 1;
+        for _ in 0..20 {
+            r.ep(a, a, true);
+            let o = r.m.output();
+            trace.push(o.delta_rad / D2R);
+            if o.sigma_rad <= SIG_CONF_RAD && o.delta_rad.abs() > D_TOL_RAD && o.delta_rad.abs() > GATE_SIGMA * o.sigma_rad {
+                flagged += 1;
+                longest = longest.max(flagged);
+            } else {
+                flagged = 0;
+            }
+            assert!(!o.fault, "{trace:?}");
+        }
+        std::println!("glitch in and out: d_hat per epoch (deg) {:?}; longest flagged run {longest} epochs", &trace[..6]);
+        assert_eq!(longest, 2);
+        assert!(trace[5].abs() < 15.0 && r.m.output().delta_rad.abs() < 2.0 * D2R);
     }
 
-    /// The sim-fault hook (HM3b): with R2' cleared after the glitch epoch, the pair out of it is evaluated (R2 still
-    /// screens the pair into it).
-    #[cfg(feature = "sim-fault")]
+    /// R5 (H11 (2)): the flag false at either epoch of a pair gives no pair and breaks the chain, counted.
     #[test]
-    fn sim_clear_r2_prime_evaluates_the_pair_out_of_a_glitch() {
+    fn ne_false_at_either_epoch_gives_no_pair_and_breaks_the_chain() {
         let mut r = Rig::new();
         r.ep((0.0, 0.0), (0.0, 0.0), true);
-        let a = (0.5, 0.0);
-        r.ep(a, (1.5, 0.0), true);
-        r.m.sim_clear_r2_prime();
-        r.ep(a, rot(a, 112.0 * D2R), true);
+        r.run(5, 0.5, 0.0);
+        let info = r.m.output().info;
+        assert!(info > 0.0 && r.m.output().ne_invalid == 0);
+        // false at the later epoch of the pair
+        r.ne = false;
+        assert_eq!(r.ep(a_of(0, 0.5), a_of(0, 0.5), true), Pair::None);
         let o = r.m.output();
-        assert_eq!((o.screened_r2, o.dropped_r2p), (1, 0));
-        assert!((o.info - 0.25).abs() < 1e-6 && (o.delta_rad - 112.0 * D2R).abs() < 1e-3, "{o:?}");
+        assert_eq!((o.info, o.ne_invalid), (info, 1));
+        // true again: that epoch is the first of a new chain (the earlier epoch's flag was false), no pair
+        r.ne = true;
+        assert_eq!(r.ep(a_of(1, 0.5), a_of(1, 0.5), true), Pair::None);
+        assert_eq!(r.m.output().info, info);
+        // the next pair has the flag at both epochs
+        assert_eq!(r.ep(a_of(2, 0.5), a_of(2, 0.5), true), Pair::Evaluated);
+        assert_ne!(r.m.output().info, info);
+        // false at the earlier epoch only: the pair after a false epoch is never formed, however short the false spell
+        r.ne = false;
+        r.ep(a_of(3, 0.5), a_of(3, 0.5), true);
+        r.ne = true;
+        let info = r.m.output().info;
+        assert_eq!(r.ep(a_of(0, 0.5), a_of(0, 0.5), true), Pair::None);
+        assert_eq!(r.m.output().info, info);
+        assert_eq!(r.m.output().ne_invalid, 2);
+        // a false flag on the ground is not counted, and does not matter
+        let mut r = Rig::new();
+        r.ne = false;
+        r.ep((0.0, 0.0), (0.0, 0.0), false);
+        assert_eq!(r.m.output().ne_invalid, 0);
+    }
+
+    /// Control for R5: a tilt-like rotation of B (90 deg, a long spell with the flag false) never faults with R5; with R5
+    /// removed (every epoch carries `true`, which is what the monitor was fed before) the same stream faults.
+    #[test]
+    fn control_r5_removed_a_tilt_like_rotation_with_ne_false_faults() {
+        for (ne, want_fault) in [(false, false), (true, true)] {
+            let mut r = Rig::new();
+            r.ep((0.0, 0.0), (0.0, 0.0), true);
+            r.run(10, 0.5, 0.0);
+            r.ne = ne;
+            r.run(60, 0.5, 90.0 * D2R);
+            let o = r.m.output();
+            assert_eq!(o.fault, want_fault, "ne {ne}: {o:?}");
+            assert_eq!(o.ne_invalid, if ne { 0 } else { 60 });
+        }
     }
 
     #[test]
@@ -899,7 +951,7 @@ mod tests {
         let mut m = HeadingMonitor::default();
         for k in 0..10u32 {
             m.add_increment(0.5, 0.0);
-            m.accepted_epoch(k * DT_US, 0.5 * k as f32, 0.0, true);
+            m.accepted_epoch(k * DT_US, 0.5 * k as f32, 0.0, true, true);
         }
         assert_eq!(m.output().info, 0.0);
     }
@@ -1007,13 +1059,13 @@ mod tests {
         // |A| 0.5 at 90 deg is informed and beyond 5 sig from the first pair: one flagged epoch
         r.run(1, 0.5, 90.0 * D2R);
         assert!(r.m.output().delta_rad.abs() > 5.0 * r.m.output().sigma_rad);
-        // two more (three counted), then a glitch pair (and the pair after it, R2'), then two more
+        // two more (three counted), then a glitch pair (screened), then the pair after it (90 deg, evaluated and flagged: the
+        // fourth), then the fifth
         r.run(2, 0.5, 90.0 * D2R);
         assert!(!r.m.output().fault);
-        r.ep((0.5, 0.0), (2.0, 0.0), true);
-        r.ep((0.5, 0.0), (0.0, 0.5), true);
+        assert_eq!(r.ep((0.5, 0.0), (2.0, 0.0), true), Pair::Screened);
         assert!(!r.m.output().fault);
-        r.run(1, 0.5, 90.0 * D2R);
+        assert_eq!(r.ep((0.5, 0.0), (0.0, 0.5), true), Pair::Evaluated);
         assert!(!r.m.output().fault);
         r.run(1, 0.5, 90.0 * D2R);
         assert!(r.m.output().fault);
@@ -1024,7 +1076,7 @@ mod tests {
     }
 
     /// Replays a fixture; returns (max |d_hat diff|, max sig diff, evaluated count, first-session time to confirmed).
-    fn replay(csv: &str) -> (f32, f32, usize, Vec<f32>, bool, bool) {
+    fn replay(csv: &str) -> (f32, f32, usize, Vec<f32>, bool, bool, f32) {
         let mut m = HeadingMonitor::default();
         let (mut max_d, mut max_s, mut n_ev, mut faulted) = (0.0f32, 0.0f32, 0usize, false);
         let mut sess = u32::MAX;
@@ -1033,6 +1085,10 @@ mod tests {
         let mut conf_seen = false;
         let mut blind_seen = false;
         let mut air0: Vec<f64> = Vec::new();
+        // H11 window margin: the history of (dt, |d_hat| / max(D_TOL, 5 sig)) of the evaluated epochs since the last chain break
+        let mut hist: Vec<(f32, f32)> = Vec::new();
+        let mut t_last = 0u64;
+        let mut margin = 0.0f32;
         for line in csv.lines().filter(|l| l.starts_with("#air,")) {
             air0.push(field(line)[2].parse().unwrap());
         }
@@ -1058,8 +1114,27 @@ mod tests {
             }
             m.add_increment(an, ae);
             let scr0 = m.output().screened_r2;
-            m.accepted_epoch(t as u32, vn, ve, air);
+            let dt_s = (t - t_last) as f32 * 1e-6;
+            t_last = t;
+            let pair = m.accepted_epoch(t as u32, vn, ve, air, true);
             let o = m.output();
+            match pair {
+                Pair::Evaluated => {
+                    let ratio = if o.sigma_rad.is_finite() { o.delta_rad.abs() / D_TOL_RAD.max(GATE_SIGMA * o.sigma_rad) } else { 0.0 };
+                    hist.push((dt_s, ratio));
+                    let (mut acc, mut mn) = (0.0f32, f32::INFINITY);
+                    for &(d, q) in hist.iter().rev() {
+                        acc += d;
+                        mn = mn.min(q);
+                        if acc >= 1.0 - 1e-6 {
+                            margin = margin.max(mn);
+                            break;
+                        }
+                    }
+                }
+                Pair::Screened => {}
+                Pair::None => hist.clear(),
+            }
             assert_eq!(o.screened_r2 - scr0, u32::from(f[11] == "1"), "R2 flag at t {t}");
             blind_seen |= o.blind;
             if ev {
@@ -1076,17 +1151,19 @@ mod tests {
         if !conf_seen {
             tconf.push(f32::INFINITY);
         }
-        (max_d, max_s, n_ev, tconf, faulted, blind_seen)
+        (max_d, max_s, n_ev, tconf, faulted, blind_seen, margin)
     }
 
     #[test]
     fn recorded_log_311_reproduces_the_python_monitor() {
-        let (max_d, max_s, n_ev, tconf, faulted, blind) = replay(include_str!("../testdata/headmon_311.csv"));
-        std::println!("311: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?} blind seen {blind}");
+        let (max_d, max_s, n_ev, tconf, faulted, blind, margin) = replay(include_str!("../testdata/headmon_311.csv"));
+        std::println!("311: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?} blind seen {blind} window margin {margin}");
         assert!(n_ev > 1000);
+        // H11 window margin (hm3c.py: 0.2461, 0.5357, 0.2303 per session): the maximum is 0.5357, below 1
+        assert!((margin - 0.5357).abs() < 0.01, "{margin}");
         assert!(max_d < 2e-3 && max_s < 1e-4, "{max_d} {max_s}");
         assert!(!faulted);
-        // H10 (1) rule, Python (hm3b.py) per session: 70.664, 13.944, 9.064 s after take-off (round 3, old rule: 4.262, 3.363,
+        // H10 (1) rule, Python (hm3c.py, HM1': no R2', R5 true while airborne) per session: 70.664, 13.944, 9.064 s after take-off (round 3, old rule: 4.262, 3.363,
         // 1.296 s; t7_round3.out reports 4.3 for the first)
         assert_eq!(tconf.len(), 3);
         for (a, b) in tconf.iter().zip([70.6634, 13.9444, 9.0640]) {
@@ -1096,12 +1173,14 @@ mod tests {
 
     #[test]
     fn recorded_log_291_reproduces_the_python_monitor() {
-        let (max_d, max_s, n_ev, tconf, faulted, blind) = replay(include_str!("../testdata/headmon_291.csv"));
-        std::println!("291: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?} blind seen {blind}");
+        let (max_d, max_s, n_ev, tconf, faulted, blind, margin) = replay(include_str!("../testdata/headmon_291.csv"));
+        std::println!("291: evaluated {n_ev} max|d_hat diff| {max_d} rad max|sig diff| {max_s} rad tconf {tconf:?} blind seen {blind} window margin {margin}");
         assert!(n_ev > 500);
+        // H11 window margin (hm3c.py: 0.1972, 0.1215 per session): the maximum is 0.1972, below 1
+        assert!((margin - 0.1972).abs() < 0.01, "{margin}");
         assert!(max_d < 2e-3 && max_s < 1e-4, "{max_d} {max_s}");
         assert!(!faulted);
-        // H10 (1) rule, Python (hm3b.py) per session: 12.970, 2.623 s after take-off (round 3, old rule: 5.193, 1.621 s;
+        // H10 (1) rule, Python (hm3c.py, HM1': no R2', R5 true while airborne) per session: 12.970, 2.623 s after take-off (round 3, old rule: 5.193, 1.621 s;
         // t7_round3.out reports 5.2 for the first)
         assert_eq!(tconf.len(), 2);
         for (a, b) in tconf.iter().zip([12.9699, 2.6231]) {

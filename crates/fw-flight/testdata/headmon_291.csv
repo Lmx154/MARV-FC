@@ -1,4 +1,4 @@
-# HM1 fixture: log 291, per accepted GNSS epoch: sess, t_us, A_N, A_E (m/s, strapdown increment since the previous accepted epoch), vN, vE (m/s), airborne, chain_break, then Python (hm3.run, tau 5 s, sigB 0.1085) reference: evaluated, d_hat (rad), sig (rad), r2_screened. Velocities and increments only.
+# HM1 fixture: log 291, per accepted GNSS epoch: sess, t_us, A_N, A_E (m/s, strapdown increment since the previous accepted epoch), vN, vE (m/s), airborne, chain_break, then Python (hm3c.run = HM1-prime: no R2-prime, R5 NE valid at every airborne epoch; tau 5 s, sigB 0.1085) reference: evaluated, d_hat (rad), sig (rad), r2_screened. Velocities and increments only.
 #air,0,60.231446
 #air,1,113.981084
 sess,t_us,an,ae,vn,ve,air,brk,ref_ev,ref_dh,ref_sig,ref_scr
