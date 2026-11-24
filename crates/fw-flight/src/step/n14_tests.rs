@@ -52,7 +52,7 @@ impl Plant {
     /// One step: the plant moves under the previous step's collective, then the flight steps with report `rc`.
     fn step(&mut self, rc: Option<(bool, f32, Switch3)>) -> StepOut {
         let dt = DT_US as f32 * 1e-6;
-        let lift = self.gain * self.thrust / MASS - self.k * self.v;
+        let lift = self.gain * self.thrust / MASS + self.k * self.v;
         let mut a = GRAVITY_MSS - lift;
         if self.on_ground() && a >= 0.0 {
             (self.d, self.v, a) = (0.0, 0.0, 0.0);
@@ -189,11 +189,34 @@ fn n14_blind_on_the_ground_probes_to_the_floor_and_stops() {
     panic!("BLIND never stopped on the ground");
 }
 
-/// One BLIND flight in the air from a hover at 50 m: thrust gain `gain`, vertical drag; 60 s or down to 5 m above the
-/// ground. Returns (stopped, probes, aborted, mean height lost per probe m, highest rise above the entry after 5 s m, net
-/// acceleration down at the first step after the one-shot correction m/s^2, the lowest net acceleration down after it,
-/// reached the ground).
-fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, f32, f32, bool) {
+/// One BLIND flight in the air from a hover at 50 m (60 s, H learned): thrust gain `gain`, vertical drag; with `climb`,
+/// then 4 s at full throttle in Altitude (a 3 m/s climb) before the loss. With `sticks_first` the sticks are lost first
+/// (LAND, FS_HOLD_EN 0, T3) and T1 comes at LAND's entry, so the tier debounce before BLIND is flown hands-off in Angle
+/// (N16 (b)); else sticks and T1 are lost together, and the second before BLIND is PILOT with the last report held (the
+/// pilot's Angle, untouched by N16 (b)). 60 s or down to 5 m above the ground.
+struct BlindAir {
+    stopped: bool,
+    probes: u32,
+    aborted: u32,
+    /// Mean height lost per probe, m.
+    per: f32,
+    /// Highest rise above BLIND's entry after 5 s, m.
+    rise_5s: f32,
+    /// Highest rise above BLIND's entry, m.
+    rise: f32,
+    /// Net acceleration down at the first step after the one-shot correction, and the lowest after it, m/s^2.
+    a_corr: f32,
+    a_min: f32,
+    /// Net acceleration down of the corrected collective alone (no drag), g - gain c / m, m/s^2.
+    a_trim: f32,
+    ground: bool,
+    /// v_D at T1's start and at BLIND's entry, and 15 s after BLIND's entry, m/s.
+    v_loss: f32,
+    v_entry: f32,
+    v_15s: f32,
+}
+
+fn blind_air(gain: f32, climb: bool, sticks_first: bool) -> BlindAir {
     let mut p = Plant::new(gain, 0.197 / 0.914, POSITION);
     p.step(Some((false, 0.0, Switch3::Middle)));
     p.step(Some((true, 0.0, Switch3::Middle)));
@@ -203,14 +226,27 @@ fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, f32, f32, bool) {
     for _ in 0..48_000 {
         p.step(Some((true, 0.5, Switch3::Middle)));
     }
+    if climb {
+        for _ in 0..3_200 {
+            p.step(Some((true, 1.0, Switch3::Middle)));
+        }
+    }
+    if sticks_first {
+        while p.f.hands_off_state() == State::Pilot {
+            assert!(p.step(None).armed && p.t < 1_000_000_000);
+        }
+        assert_eq!(p.f.hands_off_state(), State::Land);
+    }
+    let v_loss = p.v;
     p.cell.set(NavState { valid: super::althold_tests::ANGLE, ..p.cell.get() });
     while p.f.hands_off_state() != State::Blind {
         assert!(p.step(None).armed && p.t < 1_000_000_000);
     }
-    std::println!("N14 BLIND gain {gain}: H {:.3} m g, entry v_D {:.2} m/s", p.f.hover_n / (MASS * GRAVITY_MSS), p.v);
-    let d0 = p.d;
+    std::println!("N14 BLIND gain {gain} climb {climb} sticks first {sticks_first}: H {:.3} m g, v_D at T1 {v_loss:.2}, at entry {:.2} m/s", p.f.hover_n / (MASS * GRAVITY_MSS), p.v);
+    let (d0, v_entry) = (p.d, p.v);
     let (mut probes, mut aborted, mut was, mut lost, mut d_start) = (0u32, 0u32, None::<u64>, Vec::new(), 0.0f32);
-    let (mut rise, mut a_corr, mut a_min, mut stopped) = (f32::NEG_INFINITY, f32::NAN, f32::INFINITY, false);
+    let (mut rise_5s, mut rise, mut a_corr, mut a_min, mut stopped) = (f32::NEG_INFINITY, f32::NEG_INFINITY, f32::NAN, f32::INFINITY, false);
+    let (mut v_15s, mut a_trim) = (f32::NAN, f32::NAN);
     let per = |lost: &Vec<f32>| if lost.is_empty() { 0.0 } else { lost.iter().sum::<f32>() / lost.len() as f32 };
     for k in 0..48_000u32 {
         let o = p.step(None);
@@ -221,13 +257,18 @@ fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, f32, f32, bool) {
         if p.d > -5.0 {
             break;
         }
+        rise = rise.max(d0 - p.d);
         if k >= 4_000 {
-            rise = rise.max(d0 - p.d);
+            rise_5s = rise_5s.max(d0 - p.d);
+        }
+        if k == 12_000 {
+            v_15s = p.v;
         }
         if p.f.blind_trim_n.is_some() && p.f.probe_us.is_none() {
-            let a = GRAVITY_MSS - (gain * p.thrust / MASS - p.k * p.v);
+            let a = GRAVITY_MSS - (gain * p.thrust / MASS + p.k * p.v);
             if a_corr.is_nan() {
                 a_corr = a;
+                a_trim = p.f.blind_trim_n.map_or(f32::NAN, |c| GRAVITY_MSS - gain * c / MASS);
             }
             a_min = a_min.min(a);
         }
@@ -242,27 +283,55 @@ fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, f32, f32, bool) {
         }
         was = now;
     }
-    (stopped, probes, aborted, per(&lost), rise, a_corr, a_min, p.on_ground())
+    let ground = p.on_ground();
+    BlindAir { stopped, probes, aborted, per: per(&lost), rise_5s, rise, a_corr, a_min, a_trim, ground, v_loss, v_entry, v_15s }
 }
 
-/// N14 (1), (2), BLIND in the air at real gains 0.62 to 1.46 with vertical drag, entered from a hover (H learned): every
-/// probe aborts ((b) fails), no stop, no fall to the ground; never above the entry + 1 m after 5 s at gains up to 1.0.
-/// NOT MET above 1.0 (reported, not asserted; with the architect): the second before BLIND flies Angle at the centred
-/// stick, the card's m g, so at 1.12-1.46 BLIND starts climbing at 1.3-5 m/s and the drag in the correction's first
-/// second makes it under-cut (N14 (2)'s residual). The net acceleration after the correction and the height lost per
-/// probe reported.
+/// N14 (1), (2), N16, BLIND in the air at real gains 0.62 to 1.46 with vertical drag, entered from a hover (H learned),
+/// the sticks lost first and T1 at LAND's entry: every probe aborts ((b) fails), no stop, no fall to the ground; never
+/// above the entry + 1 m after 5 s at every gain (N16 (b): the tier debounce before BLIND flies Angle at H, not the card's
+/// m g). Reported, not asserted: the same with sticks and T1 lost together (the second before BLIND is PILOT's Angle at
+/// the held half-throttle report, the card's m g). The net acceleration after the correction, v_D at the entry and the
+/// height lost per probe reported.
 #[test]
 fn n14_blind_in_the_air_probes_abort_and_never_stop() {
+    for gain in [0.62f32, 0.88, 1.0, 1.12, 1.3, 1.46] {
+        let r = blind_air(gain, false, false);
+        std::println!("N16 BLIND together gain {gain} (reported): highest above entry after 5 s {:.2} m, v_D at entry {:.2} m/s, net down after the correction {:.3} m/s^2 (lowest {:.3}), of the corrected collective alone {:.3}, stopped {}, ground {}", r.rise_5s, r.v_entry, r.a_corr, r.a_min, r.a_trim, r.stopped, r.ground);
+    }
     let got = [0.62f32, 0.88, 1.0, 1.12, 1.3, 1.46].map(|gain| {
-        let (stopped, probes, aborted, per, rise, a_corr, a_min, ground) = blind_air(gain);
-        std::println!("N14 BLIND gain {gain}: stopped {stopped}, ground {ground}, probes {probes}, aborted {aborted}, mean height lost per probe {per:.3} m, highest above entry after 5 s {rise:.2} m, net down after the correction {a_corr:.3} m/s^2 (lowest {a_min:.3})");
-        (gain, stopped, probes, aborted, rise, ground)
+        let r = blind_air(gain, false, true);
+        std::println!("N16 BLIND gain {gain}: stopped {}, ground {}, probes {}, aborted {}, mean height lost per probe {:.3} m, highest above entry after 5 s {:.2} m, v_D at entry {:.2} m/s, net down after the correction {:.3} m/s^2 (lowest {:.3}), of the corrected collective alone {:.3}", r.stopped, r.ground, r.probes, r.aborted, r.per, r.rise_5s, r.v_entry, r.a_corr, r.a_min, r.a_trim);
+        (gain, r)
     });
-    for (gain, stopped, probes, aborted, rise, ground) in got {
-        assert!(!stopped && !ground, "gain {gain}");
-        assert!(probes > 0 && aborted + 1 >= probes, "gain {gain}: {probes} {aborted}");
-        if gain <= 1.0 {
-            assert!(rise <= 1.0, "gain {gain}: {rise} m above the entry");
+    for (gain, r) in got {
+        assert!(!r.stopped && !r.ground, "gain {gain}");
+        assert!(r.probes > 0 && r.aborted + 1 >= r.probes, "gain {gain}: {} {}", r.probes, r.aborted);
+        assert!(r.rise_5s <= 1.0, "gain {gain}: {} m above the entry", r.rise_5s);
+    }
+}
+
+/// N16: BLIND entered from a 3 m/s climb (H learned in a 60 s hover, then 4 s at full throttle in Altitude, then the sticks
+/// lost and T1 at LAND's entry): at gains 0.62 to 1.12 the rise above BLIND's entry is at most 15 m (v^2 / (2 x 0.3)) and
+/// it is descending 15 s after the entry; at 1.3 and 1.46 the same reported, not asserted (N16 Tests). Reported: the same
+/// with sticks and T1 lost together (PILOT's Angle at the held full-throttle report for the second before BLIND).
+#[test]
+fn n16_blind_from_a_3_m_s_climb_rises_at_most_15_m_and_descends_by_15_s() {
+    for gain in [0.62f32, 1.0, 1.46] {
+        let r = blind_air(gain, true, false);
+        std::println!("N16 BLIND climbing together gain {gain} (reported): v_D at T1 {:.2}, at entry {:.2}, 15 s after {:.2} m/s; highest above entry {:.2} m; net down after the correction {:.3} m/s^2, of the corrected collective alone {:.3}; stopped {}, ground {}", r.v_loss, r.v_entry, r.v_15s, r.rise, r.a_corr, r.a_trim, r.stopped, r.ground);
+    }
+    let got = [0.62f32, 0.88, 1.0, 1.12, 1.3, 1.46].map(|gain| {
+        let r = blind_air(gain, true, true);
+        std::println!("N16 BLIND climbing gain {gain}: v_D at T1 {:.2}, at entry {:.2}, 15 s after {:.2} m/s; highest above entry {:.2} m; net down after the correction {:.3} m/s^2 (lowest {:.3}), of the corrected collective alone {:.3}; stopped {}, ground {}", r.v_loss, r.v_entry, r.v_15s, r.rise, r.a_corr, r.a_min, r.a_trim, r.stopped, r.ground);
+        (gain, r)
+    });
+    for (gain, r) in got {
+        assert!(r.v_loss < -2.9, "gain {gain}: a 3 m/s climb at T1, v_D {}", r.v_loss);
+        if gain <= 1.12 {
+            assert!(!r.stopped && !r.ground, "gain {gain}");
+            assert!(r.rise <= 15.0, "gain {gain}: {} m above the entry", r.rise);
+            assert!(r.v_15s > 0.0, "gain {gain}: v_D {} m/s 15 s after the entry", r.v_15s);
         }
     }
 }

@@ -2913,25 +2913,108 @@ fn blind_plant(h: f32, gain: f32, steps: u32) -> (f32, Option<f32>, u32, f32) {
     (after, prev, changes, c_after)
 }
 
-/// N13: with the first second's collective 15 % above, at and 10 % below the true hover (H injected, plant gain 1) and
-/// with a plant gain of 0.9 at H = m g, with N14 (5)'s H errors of -40 % and +40 % (H 0.6 and 1.4 m g, gain 1), and
-/// with the card 40 % off at the spread's ends (H learned right: m g / 0.62 at gain 0.62, m g / 1.46 at gain 1.46), the
-/// net acceleration after the correction is 0.3 +- 0.1 m/s^2 down; the correction is made once (8 s of BLIND); N14 (2):
-/// only the allocator's physical range bounds it (the idle floor at gain 3). Reported, not asserted: H at the card's m g
-/// with gain 0.6 (the correction assumes the card's thrust per newton, so it leaves (1 - gain) of the error).
+/// N13, N16 (a): the correction only cuts. With the first second's collective 15 % and 13 % above, and at, the true hover
+/// (H injected, plant gain 1), with N14 (5)'s H error of +40 % (H 1.4 m g, gain 1), and with the card 40 % off at the
+/// weak end of the spread (H learned right: m g / 0.62 at gain 0.62), the net acceleration after the correction is
+/// 0.3 +- 0.1 m/s^2 down. Where the first second already descends faster than 0.3 (H 10 % below the true hover, plant
+/// gain 0.9 at H = m g, H -40 %, H learned right at gain 1.46) the collective is unchanged (the first second's) and the
+/// net acceleration stays the first second's. The correction is made once (8 s of BLIND); N14 (2): only the allocator's
+/// physical range bounds it (the idle floor at gain 3). Reported, not asserted: H at the card's m g with gain 0.6.
 #[test]
 fn n13_blind_correction_gives_0_3_down_once_and_is_clamped() {
     let (a, _, _, c) = blind_plant(MG, 0.6, 6_400);
     std::println!("N13 H 1.000 m g, gain 0.6 (reported): after the correction {a:.3} m/s^2 down, collective {:.4} m g", c / MG);
-    for (h, gain) in [(1.15 * MG, 1.0f32), (MG, 1.0), (0.9 * MG, 1.0), (MG, 0.9), (0.6 * MG, 1.0), (1.4 * MG, 1.0), (MG / 0.62, 0.62), (MG / 1.46, 1.46)] {
+    for (h, gain, cut) in [
+        (1.15 * MG, 1.0f32, true),
+        (1.13 * MG, 1.0, true),
+        (MG, 1.0, true),
+        (1.4 * MG, 1.0, true),
+        (MG / 0.62, 0.62, true),
+        (0.9 * MG, 1.0, false),
+        (MG, 0.9, false),
+        (0.6 * MG, 1.0, false),
+        (MG / 1.46, 1.46, false),
+    ] {
         let (a, trim, changes, c) = blind_plant(h, gain, 6_400);
-        std::println!("N13 H {:.3} m g, gain {gain}: after the correction {a:.3} m/s^2 down, collective {:.4} m g, changes {changes}", h / MG, c / MG);
-        assert!((a - 0.3).abs() <= 0.1, "H {h} gain {gain}: {a}");
+        let first = h - MASS * BLIND_BELOW_HOVER_MSS;
+        std::println!("N16 H {:.3} m g, gain {gain}: after the correction {a:.3} m/s^2 down, collective {:.4} m g (first second's {:.4}), changes {changes}", h / MG, c / MG, first / MG);
+        if cut {
+            assert!((a - 0.3).abs() <= 0.1, "H {h} gain {gain}: {a}");
+        } else {
+            assert!((c - first).abs() <= 1e-5 * MG, "H {h} gain {gain}: collective unchanged, {c} vs {first}");
+            let want = GRAVITY_MSS - gain * first / MASS;
+            assert!((a - want).abs() <= 1e-3 && a > 0.4, "H {h} gain {gain}: {a} vs {want}");
+        }
+        assert!(c <= first + 1e-5 * MG, "H {h} gain {gain}: never above the first second's");
         assert!(trim.is_some() && changes == 1, "one correction: {changes}");
         assert!((c - trim.expect("made")).abs() <= 1e-5 * MG, "the probe ramps from the corrected collective");
     }
     let (_, lo, _, _) = blind_plant(MG, 3.0, 1_000);
     assert_eq!(lo, Some(CardAllocator::new().collective_range().0), "clamped at the idle floor");
+}
+
+/// N16 (a), property: in a BLIND episode the commanded collective never exceeds its value at BLIND's entry (H injected at
+/// the entry, valid). Random entries: H over the learner's range, plant gain 0.6-1.5, a net acceleration bias -2 to +2
+/// m/s^2 down (drag of a climbing or descending entry, accelerometer bias), in the air or at rest on the ground (where the
+/// probe then ramps down); 3 s of BLIND each, past the correction. Counted: the entries where a two-sided correction would
+/// have raised the collective (the first second descending faster than 0.3), so the property is not vacuous.
+#[test]
+fn n16_blind_collective_never_exceeds_its_entry_value() {
+    let mut rng = Lcg(0x5eed_0016);
+    let (mut raised, mut cases) = (0u32, 0u32);
+    for _ in 0..48 {
+        let h = (HOVER_MIN_G + (HOVER_MAX_G - HOVER_MIN_G) * rng.unit()) * MG;
+        let gain = 0.6 + 0.9 * rng.unit();
+        let bias = 4.0 * rng.unit() - 2.0;
+        let ground = rng.chance(250);
+        let mut fly = blind_with(h, HOVER_VALID_US);
+        let mut thrust = h - MASS * BLIND_BELOW_HOVER_MSS;
+        let mut entry = None::<f32>;
+        let (mut sum, mut n) = (0.0f32, 0u32);
+        for k in 0..2_400 {
+            let f = if ground { AT_REST } else { [0.0, 0.0, -gain * thrust / MASS + bias] };
+            if k < 800 {
+                sum += GRAVITY_MSS + f[2];
+                n += 1;
+            }
+            let o = fly.quiet_f(f);
+            if fly.state() != State::Blind {
+                break;
+            }
+            thrust = thrust_of(&o);
+            let e = *entry.get_or_insert(thrust);
+            assert!(thrust <= e + 1e-5 * MG, "H {h} gain {gain} bias {bias} ground {ground} step {k}: {thrust} above the entry's {e}");
+        }
+        cases += 1;
+        raised += u32::from(sum / n as f32 > BLIND_BELOW_HOVER_MSS + 0.05);
+    }
+    std::println!("N16 property: {cases} entries, {raised} where a two-sided correction would have raised the collective");
+    assert!(raised >= 10, "{raised}");
+}
+
+/// N16 (b): a hands-off state flying Angle with synthetic sticks (LAND at FS_HOLD_EN 0 on T2, then T1: Angle during the
+/// 1.0 s tier debounce before BLIND) commands H when H is valid and the card's m g when it is not; the pilot's own Angle
+/// at half throttle (real sticks) is the card's m g whatever H.
+#[test]
+fn n16_synthetic_angle_collective_is_h_when_valid_else_the_card() {
+    for (h, us) in [(HOVER_MIN_G * MG, HOVER_VALID_US), (1.2 * MG, HOVER_VALID_US), (HOVER_MAX_G * MG, HOVER_VALID_US), (1.2 * MG, HOVER_VALID_US - 1)] {
+        let mut fly = Fly::new(false, true, ALTITUDE);
+        fly.lose();
+        assert_eq!(fly.state(), State::Land);
+        fly.set_valid(ANGLE);
+        (fly.f.hover_n, fly.f.hover_us) = (h, us);
+        let want = if us >= HOVER_VALID_US { h } else { MG };
+        for k in 0..700 {
+            let o = fly.quiet();
+            assert_eq!(fly.state(), State::Land, "step {k}: the debounce");
+            assert!((thrust_of(&o) - want).abs() <= 1e-4 * MG, "H {h} us {us} step {k}: {} vs {want}", thrust_of(&o));
+        }
+        let mut fly = Fly::new(false, true, ANGLE);
+        (fly.f.hover_n, fly.f.hover_us) = (h, us);
+        let o = fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
+        assert_eq!(fly.state(), State::Pilot);
+        assert!((thrust_of(&o) - MG).abs() <= 1e-4 * MG, "the pilot's Angle: {}", thrust_of(&o));
+    }
 }
 
 /// N13 on the ground (the floor carries the vehicle: IMU1 at rest, net acceleration 0): the correction lowers the

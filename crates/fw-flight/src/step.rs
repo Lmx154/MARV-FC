@@ -1033,7 +1033,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.shaper.sticks = Sticks {
                 roll: 0.0,
                 pitch: 0.0,
-                throttle: if ho.state == State::Blind { blind_throttle } else { THROTTLE_CENTRE },
+                throttle: match ho.state {
+                    State::Blind => blind_throttle,
+                    // N16 (b): flown in Angle, the centred synthetic throttle is the hover collective H once valid.
+                    _ if mode == Mode::Angle && hover_valid => self.shaper.throttle_for(self.hover_n),
+                    _ => THROTTLE_CENTRE,
+                },
                 yaw: 0.0,
             };
             self.shaper.land_rate_d_ms = self.land_rate_ms;
@@ -1220,7 +1225,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                     let mg = MASS * GRAVITY_MSS;
                     let first = if hover_valid { self.hover_n } else { mg } - MASS * BLIND_BELOW_HOVER_MSS;
                     let c = first - MASS * (BLIND_BELOW_HOVER_MSS - a_m);
-                    self.blind_trim_n = c.is_finite().then(|| c.max(self.floor_n).min(self.full_n));
+                    // N16 (a): one-sided, min(c, c - m (0.3 - a_m)): it can only cut the collective.
+                    self.blind_trim_n = c.is_finite().then(|| c.min(first).max(self.floor_n).min(self.full_n));
                 }
             }
         }
