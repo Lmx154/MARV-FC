@@ -1845,6 +1845,23 @@ impl<const R: usize> Estimator for EskfN<R> {
     }
 }
 
+/// Simulator test hooks (feature `sim-fault`, not in the flight image; HM3b, decision-heading-monitor H5 (ii)). Placed after
+/// the flight code so that the flight image is byte-identical without the feature (panic locations keep their lines).
+#[cfg(feature = "sim-fault")]
+impl<const R: usize> EskfN<R> {
+    /// `yaw_inject`: the nominal attitude turned about down by `dpsi` rad (yaw + dpsi). P, the monitor and the events are
+    /// not touched.
+    pub fn sim_rotate_yaw(&mut self, dpsi: f32) {
+        let turn = [cosf(0.5 * dpsi), 0.0, 0.0, sinf(0.5 * dpsi)];
+        self.nom.q = normalized(qmul(&turn, &self.nom.q));
+    }
+
+    /// The heading monitor's R2' off for the next accepted epoch ([`HeadingMonitor::sim_clear_r2_prime`]).
+    pub fn sim_hm_clear_r2_prime(&mut self) {
+        self.hmon.sim_clear_r2_prime();
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     extern crate std;

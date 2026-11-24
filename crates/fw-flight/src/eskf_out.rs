@@ -680,6 +680,39 @@ steer_mix_estimator!(crate::eskf::RING);
 #[cfg(test)]
 steer_mix_estimator!(1);
 
+/// Simulator test hook (feature `sim-fault`, not in the flight image; HM3b, decision H5 (ii) `yaw_inject`): the core's
+/// nominal attitude and the output's current state and ring all turned about down by `dpsi` rad, so the output does not
+/// see a step against the core; the core's monitor R2' switch. Placed after the flight code (panic locations keep
+/// their lines without the feature).
+#[cfg(feature = "sim-fault")]
+impl EskfSteer<'_> {
+    /// The core's and the output's yaw + `dpsi` rad.
+    pub fn sim_rotate_yaw(&mut self, dpsi: f32) {
+        self.core.sim_rotate_yaw(dpsi);
+        let turn = [libm::cosf(0.5 * dpsi), 0.0, 0.0, libm::sinf(0.5 * dpsi)];
+        self.out.nom.q = normalise(mul(turn, self.out.nom.q));
+        self.out.buf.for_each(|e| e.q = normalise(mul(turn, e.q)));
+    }
+    /// The core's heading monitor: R2' off for the next accepted epoch.
+    pub fn sim_hm_clear_r2_prime(&mut self) {
+        self.core.sim_hm_clear_r2_prime();
+    }
+}
+
+/// Simulator test hook (feature `sim-fault`): [`EskfSteer::sim_rotate_yaw`] and the monitor's R2' switch through the
+/// composite.
+#[cfg(feature = "sim-fault")]
+impl<const RV: usize> SteerMix<'_, RV> {
+    /// [`EskfSteer::sim_rotate_yaw`] of the steering part.
+    pub fn sim_rotate_yaw(&mut self, dpsi: f32) {
+        self.h.sim_rotate_yaw(dpsi);
+    }
+    /// [`EskfSteer::sim_hm_clear_r2_prime`] of the steering part.
+    pub fn sim_hm_clear_r2_prime(&mut self) {
+        self.h.sim_hm_clear_r2_prime();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

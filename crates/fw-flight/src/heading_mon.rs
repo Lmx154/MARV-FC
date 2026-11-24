@@ -334,6 +334,17 @@ impl HeadingMonitor {
     }
 }
 
+/// Simulator test hook (feature `sim-fault`; the flight image is built without it). Placed after the flight code so that
+/// the flight image is byte-identical without the feature (panic locations keep their line numbers).
+#[cfg(feature = "sim-fault")]
+impl HeadingMonitor {
+    /// R2' off for the next accepted epoch (HM3b, decision H10): forgets that the previous pair was screened by R2, so the
+    /// pair out of a glitch epoch is evaluated instead of dropped. Called before every step it turns R2' off.
+    pub fn sim_clear_r2_prime(&mut self) {
+        self.prev_bad = false;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -844,6 +855,22 @@ mod tests {
         r.ep(a, a, true);
         let o = r.m.output();
         assert!((o.info - 0.25).abs() < 1e-6 && o.delta_rad.abs() < 1e-3);
+    }
+
+    /// The sim-fault hook (HM3b): with R2' cleared after the glitch epoch, the pair out of it is evaluated (R2 still
+    /// screens the pair into it).
+    #[cfg(feature = "sim-fault")]
+    #[test]
+    fn sim_clear_r2_prime_evaluates_the_pair_out_of_a_glitch() {
+        let mut r = Rig::new();
+        r.ep((0.0, 0.0), (0.0, 0.0), true);
+        let a = (0.5, 0.0);
+        r.ep(a, (1.5, 0.0), true);
+        r.m.sim_clear_r2_prime();
+        r.ep(a, rot(a, 112.0 * D2R), true);
+        let o = r.m.output();
+        assert_eq!((o.screened_r2, o.dropped_r2p), (1, 0));
+        assert!((o.info - 0.25).abs() < 1e-6 && (o.delta_rad - 112.0 * D2R).abs() < 1e-3, "{o:?}");
     }
 
     #[test]

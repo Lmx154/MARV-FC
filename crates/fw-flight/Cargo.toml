@@ -27,3 +27,6 @@ libm = "0.2"
 [features]
 # The N0 bench's arithmetic (src/eskf_n0.rs), for the bench binary eskf_bench only; not in the flight image.
 eskf-n0 = []
+# Simulator test hooks (MARV-sim marv-run, HM3b): a rotation of the filter's yaw and the heading monitor's R2/R2' switch.
+# Never in the flight image: the board binary does not enable it.
+sim-fault = []
