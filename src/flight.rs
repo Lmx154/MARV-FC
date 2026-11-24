@@ -663,6 +663,8 @@ pub struct Stepper {
     stat: SeqlockWriter<'static, NavStat>,
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
+    /// The hands-off state code of the last MSG written (`None` before the first): one MSG at each change.
+    ho_logged: Option<u8>,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
     guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
@@ -710,6 +712,7 @@ impl Stepper {
             corrected: 0,
             stat: NAV_STAT.take_writer()?,
             mode_log: ModeLog::new(),
+            ho_logged: None,
             guidance: Guidance::new(),
             gdn_in_force: GDN_OFF,
             gdn_pushed: GDN_OFF,
@@ -913,6 +916,16 @@ impl SampleSink for Stepper {
                 .push_with(dflog::MODE.length.into(), |b| encode_mode(&out, b))
         {
             self.mode_log.done(&out);
+        }
+        // The hands-off state (decision-mavlink-mode-20261123, Amendment D): a MSG at the first step and at each change, a push
+        // of its own (MODE's record format is unchanged); a dropped one is offered again.
+        let ho = self.flight.hands_off_state();
+        if self.ho_logged != Some(ho.code())
+            && self.log.push_with(dflog::MSG.length.into(), |b| {
+                dflog::encode_msg(b, out.t_us, fw_flight::step::hands_off_msg(ho).as_bytes())
+            })
+        {
+            self.ho_logged = Some(ho.code());
         }
         // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
         // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).

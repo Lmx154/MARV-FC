@@ -153,8 +153,9 @@ impl Gate {
     }
 
     /// Disarmed, and the switch must be cycled. Clears the handshake's `ARMED` only when leaving armed, so a flag
-    /// the gate did not set (feature `fake-armed`) is left alone.
-    fn disarm(&mut self) {
+    /// the gate did not set (feature `fake-armed`) is left alone. `Flight::step` calls it before `apply` when the hands-off
+    /// state machine enters STOP from an armed step (decision-mavlink-mode-20261123, WR2).
+    pub(crate) fn disarm(&mut self) {
         if self.armed {
             self.handshake.disarm();
         }

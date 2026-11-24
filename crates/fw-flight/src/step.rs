@@ -3,6 +3,7 @@
 //! `sensors.imu1.t_us`.
 
 use crate::gate::{Gate, MotorCommand};
+use crate::hands_off::{self, Demand, HandsOff, MissionFacts, State, Tier};
 use crate::gnc::{
     Allocation, Allocator, Controller, Estimator, Mode, NavState, RateLog, Refused, Saturation,
     Sensors, Setpoint, ThrustTorque, Valid,
@@ -73,6 +74,28 @@ const NOTCH_POLES_RANGE: core::ops::RangeInclusive<i32> = 2..=64;
 /// (ArduPilot `Attitude.cpp:97-112`, the centre fixed at half travel).
 const THROTTLE_CENTRE: f32 = 0.5;
 
+/// LAND's descent, m/s down: the height target integrates at this rate (decision-mavlink-mode-20261123, A8 and Numbers
+/// "land 0.5 m/s", ArduPilot LAND_SPD_MS_DEFAULT, config.h:335-336).
+pub const LAND_SPEED_MS: f32 = 0.5;
+
+/// BLIND's collective below hover, m/s^2 (decision-mavlink-mode-20261123, Numbers "BLIND 0.3 m/s^2 below hover", PX4
+/// FlightTaskDescend.cpp:55-58). UNVERIFIED: the decision marks it UNKNOWN (U-1) and for the simulator only.
+pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
+
+/// BLIND's synthetic throttle: Angle's collective at it is m (g - `BLIND_BELOW_HOVER_MSS`), "hover" being the card's
+/// nominal m g, the collective Angle gives at half throttle (there is no height estimate to find the real hover).
+const BLIND_THROTTLE: f32 = THROTTLE_CENTRE * (1.0 - BLIND_BELOW_HOVER_MSS / GRAVITY_MSS);
+
+/// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
+/// NoWaypoints and AUTO cannot be reached.
+const NO_MISSION: MissionFacts = MissionFacts {
+    plan_id: None,
+    has_waypoints: false,
+    z_within_limits: true,
+    max_waypoint_distance_m: None,
+    return_height_m: None,
+};
+
 /// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle mode (decision-first-pair-20261119, section 4), altitude
 /// hold (decision-nav-eskf-20261120, F1, F2) and position hold (Amendment P, P1).
 struct StickShaper {
@@ -101,6 +124,9 @@ struct StickShaper {
     target_d: Option<f32>,
     /// The position target, m north and east; `None` outside Position and while the sticks move the vehicle.
     target_ne: Option<[f32; 2]>,
+    /// LAND's law (decision-mavlink-mode-20261123, A8): the height target's rate, m/s down, instead of the throttle
+    /// stick's; `None` outside LAND.
+    land_rate_d_ms: Option<f32>,
     /// The previous step's time, us; `None` before the first.
     t_prev_us: Option<u64>,
     /// Tests only: the lead cap is off.
@@ -169,7 +195,9 @@ impl StickShaper {
     /// Down is positive.
     fn height_target(&mut self, nav: &NavState, dt_s: f32) -> (f32, f32) {
         let d = nav.position_m[2];
-        let v_ff = self.stick_rate_d(self.sticks.throttle);
+        let v_ff = self
+            .land_rate_d_ms
+            .unwrap_or_else(|| self.stick_rate_d(self.sticks.throttle));
         let target = match self.target_d {
             None => d,
             Some(target) => {
@@ -334,6 +362,15 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The newest value of the parameter `FS_HOLD_EN` (`set_fs_hold_en`); the hands-off state machine takes it into force
     /// on disarmed steps only (decision-mavlink-mode-20261123, B9).
     fs_hold_en: bool,
+    /// The hands-off state machine (decision-mavlink-mode-20261123, Amendments A to D), stepped before the shaper and the
+    /// gate (WR3).
+    hands_off: HandsOff,
+    /// The newest stick report, as the gate has seen it (not necessarily new this step); `None` before the first.
+    rc_newest: Option<RcSample>,
+    /// The heading monitor's verdict (`set_heading_ok`); false until set: no monitor exists on this branch.
+    heading_ok: bool,
+    /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until set.
+    last_radio_heartbeat_us: Option<u64>,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -389,6 +426,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 pilot_hold_speed_ms: tuning.pilot_hold_speed_ms,
                 target_d: None,
                 target_ne: None,
+                land_rate_d_ms: None,
                 t_prev_us: None,
                 #[cfg(test)]
                 lead_cap_off: false,
@@ -415,6 +453,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
             fs_hold_en: false,
+            hands_off: HandsOff::new(tuning),
+            rc_newest: None,
+            heading_ok: false,
+            last_radio_heartbeat_us: None,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -472,6 +514,24 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.fs_hold_en = on;
     }
 
+    /// The heading monitor's verdict for the hands-off state machine (B4: T3' = position covered AND heading OK). No monitor
+    /// exists on this branch, so the board never calls this and it stays false: T3' is unreachable and stick loss in the
+    /// air gives LAND or BLIND, never HOLD, until the monitor is merged. Host tests and MARV-sim set it to exercise HOLD.
+    pub fn set_heading_ok(&mut self, ok: bool) {
+        self.heading_ok = ok;
+    }
+
+    /// When the newest station HEARTBEAT arrived on the radio link, us (A1's link age). `None` (the default, and the board's
+    /// value until the station link is wired) makes the link age run from the newest stick report alone.
+    pub fn set_last_radio_heartbeat_us(&mut self, t_us: Option<u64>) {
+        self.last_radio_heartbeat_us = t_us;
+    }
+
+    /// The hands-off state after the latest step (its HEARTBEAT and log code is `State::code`).
+    pub fn hands_off_state(&self) -> State {
+        self.hands_off.state()
+    }
+
     /// The estimator, read only (the log of its own counters, packet E2).
     pub fn estimator(&self) -> &E {
         &self.estimator
@@ -523,6 +583,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.controller.set_gains(&self.gains);
         }
         if let Some(rc) = inputs.rc {
+            self.rc_newest = Some(rc);
             self.shaper.sticks = rc.sticks;
             self.selected = match rc.switch6 {
                 Switch3::Low => Mode::Angle,
@@ -565,12 +626,64 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             altitude_covered(&nav.valid),
             position_covered(&nav.valid) && self.airborne,
         );
-        let mode = match self.selected {
+        // The hands-off state machine (WR3): the step time and the newest report as the gate sees them, the armed state and
+        // the airborne latch the previous step left, this step's tier.
+        let tier = if position_covered(&nav.valid) {
+            Tier::T3
+        } else if altitude_covered(&nav.valid) {
+            Tier::T2
+        } else {
+            Tier::T1
+        };
+        let ho = self.hands_off.step(&hands_off::Inputs {
+            now_us: t_us,
+            fs_hold_en: self.fs_hold_en,
+            crsf: self.rc_newest,
+            last_radio_heartbeat_us: self.last_radio_heartbeat_us,
+            last_radio_status_us: None,
+            armed: self.gate.armed(),
+            airborne: self.airborne,
+            tier,
+            position_ne_m: [nav.position_m[0], nav.position_m[1]],
+            position_ne_valid: nav.valid.position_ne,
+            position_d_m: nav.position_m[2],
+            position_d_valid: nav.valid.position_d,
+            command: None,
+            mission: NO_MISSION,
+            last_waypoint_reached: false,
+            home_reached: false,
+            heading_ok: self.heading_ok,
+            battery_ok: false,
+            battery_critical: false,
+            return_built: false,
+        });
+        // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
+        let selected = if ho.synthetic_sticks { Mode::Position } else { self.selected };
+        let mode = match selected {
             Mode::Position if position_ok => Mode::Position,
             Mode::Altitude | Mode::Position if covered => Mode::Altitude,
             _ => Mode::Angle,
         };
+        let mode = match (ho.synthetic_sticks, ho.demand, mode) {
+            (true, Demand::Angle, _) => Mode::Angle,
+            (true, Demand::Altitude, Mode::Position) => Mode::Altitude,
+            _ => mode,
+        };
+        // Hands-off laws (Amendment D): centred synthetic sticks, no real stick reaching the shaper (I3); LAND's descent in
+        // LAND and in TAKEOVER's descent; BLIND's collective below hover. AUTO and RETURN (unreachable here) fly HOLD's.
+        let real = self.shaper.sticks;
+        if ho.synthetic_sticks {
+            self.shaper.sticks = Sticks {
+                roll: 0.0,
+                pitch: 0.0,
+                throttle: if ho.state == State::Blind { BLIND_THROTTLE } else { THROTTLE_CENTRE },
+                yaw: 0.0,
+            };
+            self.shaper.land_rate_d_ms = (ho.landing || ho.takeover_descent).then_some(LAND_SPEED_MS);
+        }
         let setpoint = self.shaper.setpoint(mode, &nav, t_us);
+        self.shaper.sticks = real;
+        self.shaper.land_rate_d_ms = None;
         // The rotor frequencies, f1 = eRPM x 2 / (poles x 60) Hz by DShot line, for the controller's notch; an eRPM
         // missing or `notch_hold_us` or more old is `None`.
         let (notch_on, poles) = self.notch;
@@ -602,7 +715,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.limited = a.saturation;
         }
         let levels = allocation.as_ref().map(|a| &a.levels);
-        let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels, false, false);
+        // WR2: STOP entered from an armed step disarms in this step, before the gate's own rules.
+        if ho.disarm {
+            self.gate.disarm();
+        }
+        let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels, ho.hands_off, ho.arm_off_holds);
         // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
         // arming step.
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
@@ -807,6 +924,22 @@ pub fn mode_code(mode: Mode) -> u8 {
         Mode::Angle => 1,
         Mode::Altitude => 2,
         Mode::Position => 3,
+    }
+}
+
+/// The MSG text logged at the first step and at each change of the hands-off state (decision-mavlink-mode-20261123,
+/// Amendment D: "Every state's code is logged at each change"): "HO", the `State::code`, the name. AUTO and RETURN cannot
+/// be reached on this branch; if one ever is, the step flies HOLD's law and the text says so.
+pub fn hands_off_msg(state: State) -> &'static str {
+    match state {
+        State::Pilot => "HO 1 PILOT",
+        State::Takeover => "HO 2 TAKEOVER",
+        State::Hold => "HO 3 HOLD",
+        State::Auto => "HO 4 AUTO (flying HOLD's law)",
+        State::Return => "HO 5 RETURN (flying HOLD's law)",
+        State::Land => "HO 6 LAND",
+        State::Stop => "HO 7 STOP",
+        State::Blind => "HO 8 BLIND",
     }
 }
 
@@ -2085,3 +2218,6 @@ mod notch_tests;
 
 #[cfg(test)]
 mod gain_tests;
+
+#[cfg(test)]
+mod handsoff_tests;

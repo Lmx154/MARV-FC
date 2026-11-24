@@ -144,6 +144,9 @@ SECTIONS {
         *(.text.*7fw_core5dflog11encode_nkf1* .text.*7fw_core5dflog11encode_nkf2* .text.*7fw_core5dflog10encode_nki*)
         /* MODE and SPN (decision-nav-eskf-20261120, 8c, F1, F6). */
         *(.text.*7fw_core5dflog11encode_mode* .text.*7fw_core5dflog10encode_spn*)
+        /* The hands-off state machine (decision-mavlink-mode-20261123, H2b-2b), stepped by Flight::step, and the MSG record
+         * the Stepper writes at each change of its state. */
+        *(.text.*9fw_flight9hands_off* .text.*7fw_core5dflog10encode_msg*)
         /* The RPM notch and its two records (decision-rpm-notch-20261123): fw_flight::notch, PIDT and NTCH. sinf and cosf are
          * libm::math (above). */
         *(.text.*9fw_flight5notch* .text.*7fw_core5dflog11encode_pidt* .text.*7fw_core5dflog11encode_ntch*)

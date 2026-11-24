@@ -272,3 +272,22 @@ fn set_gains_leaves_the_integrators_and_the_filter_memories_alone() {
     let every = drive(&mut CascadedPid::new(&Tuning::DEFAULT, 800.0), 1_000, |_, p| p.set_gains(&defaults()));
     assert_eq!(base, every);
 }
+
+/// The digest of `script` (every step's `Debug` text and its step block) on the flight step before the hands-off wiring
+/// (commit c270814).
+const SCRIPT_GOLDEN: u64 = 0x2ed6_7fa3_9e94_9fb8;
+
+/// Decision-mavlink-mode-20261123, I2: with FS_HOLD_EN 0 (the default) the scripted flight is bit-identical to the step
+/// before the hands-off wiring.
+#[test]
+fn the_script_is_bit_identical_to_the_step_before_the_hands_off_wiring() {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for (text, bytes, _) in script(|_, _| {}) {
+        for &b in text.as_bytes().iter().chain(bytes.iter()) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    std::println!("script digest {h:#018x}");
+    assert_eq!(h, SCRIPT_GOLDEN);
+}
