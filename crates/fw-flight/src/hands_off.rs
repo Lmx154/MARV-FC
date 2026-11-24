@@ -505,8 +505,16 @@ impl HandsOff {
             self.track_fault = true;
         }
         // H13 (1): this step's distance from the anchor against X + b on every step with a valid NE velocity (and
-        // position), whatever the setpoint; not a number trips.
+        // position); not a number trips. H14 (2): in HOLD and TAKEOVER whatever the setpoint; in LAND only on a step
+        // that flies the hold (no fault, this step's T3'), never in a level or braking descent (nor BLIND).
+        let instant = self.instant_tier(i);
+        let anchor_read = match self.state {
+            State::Hold | State::Takeover => true,
+            State::Land => !self.track_fault && instant == Tier::T3,
+            _ => false,
+        };
         if let Some(([an, ae], b)) = self.anchor
+            && anchor_read
             && i.armed
             && i.airborne
             && i.position_ne_valid
@@ -518,7 +526,6 @@ impl HandsOff {
                 self.track_fault = true;
             }
         }
-        let instant = self.instant_tier(i);
         self.update_tier(i.now_us, instant);
         if self.fs_in_force {
             self.automatic(i, fresh, &mut ev);
@@ -545,7 +552,7 @@ impl HandsOff {
             },
         );
         let land_holds_position = self.state == State::Land && land_law == Some(LandLaw::Hold);
-        self.update_anchor(was, demand, i);
+        self.update_anchor(was, land_holds_position, i);
         self.track_covered =
             matches!(self.state, State::Hold | State::Auto | State::Return | State::Takeover) || land_holds_position;
         Output {
@@ -571,15 +578,14 @@ impl HandsOff {
         }
     }
 
-    /// H13 (1): a fixed-target segment begins on entry to HOLD, TAKEOVER or LAND on T3' from PILOT, AUTO or RETURN; its
-    /// anchor is set at its first step with a valid, finite NE position and velocity: A that position, b = |v_NE|^2 /
-    /// (2 `GUIDANCE_ACC_MS2`). Kept through any other change inside the segment; cleared in PILOT, STOP, AUTO and RETURN
-    /// (so at disarm, which is STOP).
-    fn update_anchor(&mut self, was: State, demand: Demand, i: &Inputs) {
+    /// H13 (1): a fixed-target segment begins on entry to HOLD, TAKEOVER or LAND holding position (`land_hold`) from
+    /// PILOT, AUTO or RETURN; its anchor is set at its first step with a valid, finite NE position and velocity: A that
+    /// position, b = |v_NE|^2 / (2 `GUIDANCE_ACC_MS2`). Kept through any other change inside the segment (never re-set
+    /// inside LAND, H14 (2)); cleared in PILOT, STOP, AUTO and RETURN (so at disarm, which is STOP).
+    fn update_anchor(&mut self, was: State, land_hold: bool, i: &Inputs) {
         let entry = was != self.state
             && matches!(was, State::Pilot | State::Auto | State::Return)
-            && (matches!(self.state, State::Hold | State::Takeover)
-                || (self.state == State::Land && demand == Demand::Position));
+            && (matches!(self.state, State::Hold | State::Takeover) || land_hold);
         if entry {
             self.anchor = None;
             self.anchor_pending = true;

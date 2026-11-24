@@ -865,7 +865,9 @@ fn h13_brake_forever_a_vehicle_that_never_slows_below_0_8_m_s_trips_at_x_plus_b(
 /// H13 (1): HOLD entered at rest, then a creep at 0.5 m/s with a one-step heading drop every 0.5 s (the Altitude law:
 /// the target is dropped and re-captured at the next Position step): the target distance stays below 0.3 m, A is never
 /// re-set, and the fault comes in the step whose distance from A passes X, which the test makes a heading-drop step
-/// (an Altitude setpoint: d_A is read whatever the setpoint).
+/// (an Altitude setpoint: d_A is read in HOLD whatever the setpoint), that step LAND, level (no T3'). The station's
+/// heartbeat keeps the link (the trip comes about 10 s after the loss: link loss would land first, and a level LAND does
+/// not read d_A, H14 (2)).
 #[test]
 fn h13_a_creep_with_tier_dips_and_re_captures_keeps_the_anchor_and_trips_on_a_dip_step() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -881,14 +883,16 @@ fn h13_a_creep_with_tier_dips_and_re_captures_keeps_the_anchor_and_trips_on_a_di
         fly.drift(0.5);
         let over = fly.distance_from(a) > x;
         fly.set_valid(if over || k % 400 == 399 { dip } else { POSITION });
+        fly.f.set_last_radio_heartbeat_us(Some(fly.t));
         let o = fly.quiet();
         assert_eq!(fly.f.hands_off.anchor(), anchor, "step {k}");
         if over {
             assert!(fly.track_fault() && matches!(o.setpoint, Setpoint::Altitude { .. }), "step {k}: {:?}", o.setpoint);
+            assert_eq!(fly.state(), State::Land, "step {k}");
             assert!(captures.len() >= 10, "re-captures {}", captures.len());
             return;
         }
-        assert!(!fly.track_fault(), "step {k}");
+        assert!(!fly.track_fault() && fly.state() == State::Hold, "step {k}");
         if let Some(t) = fly.f.shaper.target_ne {
             captures.insert((t[0].to_bits(), t[1].to_bits()));
             assert!(fly.f.track_error_m.is_some_and(|d| d < 0.3), "step {k}: {:?}", fly.f.track_error_m);
