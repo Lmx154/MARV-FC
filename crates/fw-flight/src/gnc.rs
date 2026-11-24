@@ -328,8 +328,8 @@ pub trait Controller {
     /// Clears integrators and filter memory. The step calls it on every step while the vehicle is disarmed.
     fn reset(&mut self);
     /// The largest horizontal velocity setpoint of `Setpoint::Position`, m/s: the pilot's horizontal speed in force
-    /// (Amendment P, P2, P9). `Flight::step` calls it on every disarmed step, so the value cannot change in flight. The
-    /// default ignores it.
+    /// (Amendment P, P2, P9), capped at `hands_off::SPEED_XY_CAP_MS` in the hands-off states (H13 (2)). `Flight::step`
+    /// calls it on every step; the value in force changes only on disarmed steps. The default ignores it.
     fn set_speed_limit_xy(&mut self, _ms: f32) {}
     /// The 14 gains of the runtime parameters (decision-gain-params-20261123). `Flight::step` calls it on every disarmed
     /// step, so the values cannot change in flight. Gains only: integrator and filter memories are not touched. The

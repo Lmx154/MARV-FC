@@ -702,7 +702,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             battery_critical,
             return_built: false,
             track_error_m: self.track_error_m,
+            speed_xy_ms: self.shaper.pilot_speed_xy_ms,
         });
+        // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
+        self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
         let selected = if ho.synthetic_sticks { Mode::Position } else { self.selected };
         let mode = match selected {

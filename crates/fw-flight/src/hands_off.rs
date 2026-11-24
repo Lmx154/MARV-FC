@@ -24,11 +24,27 @@ pub const HOME_RANGE_M: f32 = 1000.0;
 /// EKF_CHECK_ITERATIONS_MAX, "1 second ... of bad variances", ekf_check.cpp:10-11 (owner's approval pending, Q-B1).
 pub const TIER_DEBOUNCE_US: u64 = 1_000_000;
 
-/// The hold-integrity bound X, m: a horizontal distance between the navigation position and the target the position
-/// controller tracks above this sets the track fault (decision-heading-monitor-20261123, H12 item 4). X = D_max - v_xy
-/// t_B5 = 10 - 5.0 x 1.0 = 5 m: D_max 10 m (Q-H1), v_xy 5.0 m/s the largest horizontal speed any hands-off state
-/// commands (`Tuning::pilot_speed_xy_ms`), t_B5 the 1.0 s debounce (`TIER_DEBOUNCE_US`). Recompute if v_xy differs.
-pub const TRACK_FAULT_M: f32 = 5.0;
+/// D_max, m: the largest horizontal excursion at which LAND must have started (decision-heading-monitor-20261123, Q-H1;
+/// H12 item 4, H13 (2)).
+pub const D_MAX_M: f32 = 10.0;
+
+/// The cap on the horizontal speed limit of every hands-off state, m/s: the owner-approved default of `PILOT_SPEED_XY`
+/// (`Tuning::pilot_speed_xy_ms`; H13 (2)).
+pub const SPEED_XY_CAP_MS: f32 = Tuning::DEFAULT.pilot_speed_xy_ms;
+
+/// The horizontal speed limit of the hands-off states for `PILOT_SPEED_XY` in force `in_force_ms`, m/s: v_ho =
+/// min(`in_force_ms`, `SPEED_XY_CAP_MS`) (H13 (2)).
+pub fn speed_limit_xy_ms(in_force_ms: f32) -> f32 {
+    in_force_ms.min(SPEED_XY_CAP_MS)
+}
+
+/// The hold-integrity bound X for `PILOT_SPEED_XY` in force `in_force_ms`, m: a horizontal distance between the
+/// navigation position and the target the position controller tracks above this sets the track fault, and so does a
+/// distance from the anchor above X + b (H12 item 4, H13 (1), (2)). X = D_max - v_ho t_B5: `D_MAX_M`, v_ho
+/// [`speed_limit_xy_ms`], t_B5 the 1.0 s debounce (`TIER_DEBOUNCE_US`); 7 m at 3 m/s, 5 m at 5 m/s and above.
+pub fn track_fault_m(in_force_ms: f32) -> f32 {
+    D_MAX_M - speed_limit_xy_ms(in_force_ms) * (TIER_DEBOUNCE_US as f32 / 1e6)
+}
 
 /// The effective mode (link-contract section 10 codes 1 to 7; BLIND 8, not yet in the contract).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -194,9 +210,11 @@ pub struct Inputs {
     /// in place.
     pub return_built: bool,
     /// The horizontal distance between the navigation position and the Position target the controller tracked at the
-    /// previous step, both of that step, m; `None` when the previous step tracked no Position target. Over
-    /// `TRACK_FAULT_M`, or not a number, it sets the track fault when that step's state was covered (H12).
+    /// previous step, both of that step, m; `None` when the previous step tracked no Position target. Over X
+    /// ([`track_fault_m`]), or not a number, it sets the track fault when that step's state was covered (H12).
     pub track_error_m: Option<f32>,
+    /// `PILOT_SPEED_XY` in force (latched at arming), m/s: gives v_ho and X (H13 (2)).
+    pub speed_xy_ms: f32,
 }
 
 /// Why a command was DENIED: the first condition that failed, in this order.
@@ -346,6 +364,9 @@ pub struct Output {
     pub arm_off_holds: bool,
     /// For the gate: disarm in this step. STOP entered this step with `armed` true (WR2).
     pub disarm: bool,
+    /// The horizontal speed limit for the position controller, m/s: v_ho ([`speed_limit_xy_ms`]) in a hands-off state,
+    /// `PILOT_SPEED_XY` in force otherwise (H13 (2)).
+    pub speed_limit_xy_ms: f32,
 }
 
 /// The hands-off state machine.
@@ -462,9 +483,10 @@ impl HandsOff {
             self.fs_in_force = i.fs_hold_en;
         }
         // H12: the previous step's distance against X, in the state that step flew; latched until disarmed.
+        let x = track_fault_m(i.speed_xy_ms);
         if !i.armed {
             self.track_fault = false;
-        } else if self.track_covered && i.airborne && i.track_error_m.is_some_and(|d| d.is_nan() || d > TRACK_FAULT_M) {
+        } else if self.track_covered && i.airborne && i.track_error_m.is_some_and(|d| d.is_nan() || d > x) {
             self.track_fault = true;
         }
         // H13 (1): this step's distance from the anchor against X + b on every step with a valid NE velocity (and
@@ -477,7 +499,7 @@ impl HandsOff {
         {
             let [n, e] = i.position_ne_m;
             let d = libm::sqrtf((n - an) * (n - an) + (e - ae) * (e - ae));
-            if !(d <= TRACK_FAULT_M + b) {
+            if !(d <= x + b) {
                 self.track_fault = true;
             }
         }
@@ -517,6 +539,11 @@ impl HandsOff {
             takeover_descent: self.state == State::Takeover && self.descent,
             arm_off_holds: self.arm_off_holds(i),
             disarm: self.state == State::Stop && was != State::Stop && i.armed,
+            speed_limit_xy_ms: if hands_off {
+                speed_limit_xy_ms(i.speed_xy_ms)
+            } else {
+                i.speed_xy_ms
+            },
         }
     }
 
@@ -1001,6 +1028,7 @@ mod tests {
                 battery_critical: false,
                 return_built: true,
                 track_error_m: None,
+                speed_xy_ms: Tuning::DEFAULT.pilot_speed_xy_ms,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),
@@ -3042,10 +3070,11 @@ mod tests {
 
     #[test]
     fn h12_exactly_x_does_not_trip_a_hair_above_and_not_a_number_do() {
-        let above = f32::from_bits(TRACK_FAULT_M.to_bits() + 1);
+        let x = track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms);
+        let above = f32::from_bits(x.to_bits() + 1);
         for (d, trips) in [
             (0.0, false),
-            (TRACK_FAULT_M, false),
+            (x, false),
             (above, true),
             (f32::NAN, true),
             (f32::INFINITY, true),

@@ -632,7 +632,7 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_level_one_debounce_after_the_dis
         let p = fly.cell.get().position_m;
         let d = libm::sqrtf((p[0] - target[0]) * (p[0] - target[0]) + (p[1] - target[1]) * (p[1] - target[1]));
         if over.is_none() {
-            if d > hands_off::TRACK_FAULT_M {
+            if d > hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) {
                 over = Some(fly.t);
                 assert!(fly.track_fault() && fly.state() == State::Hold && o.mode == Mode::Altitude, "step {k}");
                 continue;
@@ -709,7 +709,7 @@ fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step(
     let mut n = fly.cell.get();
     let stale = fly.f.shaper.target_ne.expect("captured");
     n.position_m[0] -= 6.0;
-    assert!(stale[0] - n.position_m[0] > hands_off::TRACK_FAULT_M && n.position_m[0] > hands_off::TRACK_FAULT_M);
+    assert!(stale[0] - n.position_m[0] > hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) && n.position_m[0] > hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms));
     fly.cell.set(n);
     for k in 0..400 {
         let o = fly.quiet();
