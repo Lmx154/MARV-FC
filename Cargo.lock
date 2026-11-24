@@ -1133,7 +1133,7 @@ dependencies = [
 [[package]]
 name = "mavlink-device"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/mavlink-device.git?rev=dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c#dfdb11a03ac3c8a28792c4f23ee3cd6ca045a93c"
+source = "git+https://github.com/Lmx154/mavlink-device.git?rev=d1ac8e615c40e172be5dcb2087eb6edffea0a777#d1ac8e615c40e172be5dcb2087eb6edffea0a777"
 dependencies = [
  "defmt",
  "embedded-hal-async",
@@ -1450,7 +1450,7 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 [[package]]
 name = "rc-port"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/rc-port.git?rev=fe5560259d2588f12b66d36fe9aaae719a95f2eb#fe5560259d2588f12b66d36fe9aaae719a95f2eb"
+source = "git+https://github.com/Lmx154/rc-port.git?rev=a55df65c9bfa02898c5e13af4bbbf17f969fe5c2#a55df65c9bfa02898c5e13af4bbbf17f969fe5c2"
 dependencies = [
  "crsf-codec",
  "embassy-rp",
