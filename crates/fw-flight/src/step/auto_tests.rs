@@ -2,7 +2,8 @@
 //! the mission facts from the pushed target set, Start, the leg law and its exits. The estimator is the fake of
 //! `althold_tests` (origin `ORIGIN`); the plant, where one is needed, is a point mass: the horizontal velocity follows
 //! the acceleration of the step's attitude setpoint (as `handsoff_tests::brake_run`), plus a steady push when a test
-//! sets one; the height follows the setpoint's vertical target, v_D = its rate + 1.0/s x (target - D).
+//! sets one; the height follows the setpoint's vertical target, v_D = its rate + 1.0/s x (target - D), down to the
+//! ground at D 0, where it stops; IMU1 reads at rest (so TD can hold on the ground).
 
 extern crate std;
 
@@ -118,7 +119,9 @@ impl Run {
         if self.station {
             self.f.set_last_radio_heartbeat_us(Some(self.t));
         }
-        let o = self.f.step(&input(self.t, None));
+        let mut i = input(self.t, None);
+        i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -GRAVITY_MSS];
+        let o = self.f.step(&i);
         self.last = Some(o);
         o
     }
@@ -145,6 +148,10 @@ impl Run {
             }
             n.velocity_ms[2] = vd;
             n.position_m[2] += vd * dt;
+            if n.position_m[2] >= 0.0 {
+                n.position_m[2] = 0.0;
+                n.velocity_ms = [0.0; 3];
+            }
         }
         self.cell.set(n);
         self.quiet()
@@ -462,4 +469,103 @@ fn f_t3_lost_lands_height_lost_blind_and_sticks_take_over() {
     let o = r.rc(true, 0.5);
     assert!(o.armed);
     assert_eq!((r.state(), r.f.leg_active()), (State::Takeover, None));
+}
+
+// ---- RETURN (A7, H3b-2) ----
+
+/// Height above home (D 0), m.
+fn height(r: &Run) -> f32 {
+    -r.cell.get().position_m[2]
+}
+
+/// (a) Return in AUTO mid-leg at 10 m, return height 20 m: the climb in place to 20 m, the leg home, LAND at home
+/// within GDN_RADIUS holding position, the descent at 1.5 m/s above 10 m and 0.5 m/s below, TD stops the motors on the
+/// ground; no stop in the air.
+#[test]
+fn ra_return_in_auto_climbs_in_place_flies_home_lands_and_td_stops() {
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    while r.cell.get().position_m[0] < 12.0 {
+        r.fly();
+    }
+    assert!(libm::fabsf(height(&r) - 10.0) < 0.1);
+    let entry = r.cell.get().position_m;
+    assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+    assert_eq!((r.state(), r.f.legs.phase()), (State::Return, LegPhase::Climb));
+    let mut steps = 0u32;
+    let mut drift = 0.0f32;
+    while r.f.legs.phase() == LegPhase::Climb {
+        let o = r.fly();
+        steps += 1;
+        drift = drift.max(libm::hypotf(o.nav.position_m[0] - entry[0], o.nav.position_m[1] - entry[1]));
+        if let Some(h) = heading(&o) {
+            assert!(libm::fabsf(h - YAW_RAD) < 1e-5);
+        }
+    }
+    let climb_s = steps as f32 * DT_US as f32 * 1e-6;
+    let h_top = height(&r);
+    std::println!("climb {climb_s:.2} s to {h_top:.2} m, horizontal drift {drift:.3} m");
+    // The drift is the stop from 3 m/s: the carrot stands at the entry point.
+    assert!(libm::fabsf(h_top - 20.0) < 0.1 && drift < 1.5, "{h_top} {drift}");
+    let mut e_max = 0.0f32;
+    while r.state() == State::Return {
+        r.fly();
+        steps += 1;
+        e_max = e_max.max(r.f.track_error_m.unwrap_or(0.0));
+        assert!(steps < 200_000);
+    }
+    let at_land = dist_from(&r, 0.0, 0.0);
+    std::println!("LAND {at_land:.2} m from home at {:.2} m after {:.1} s; e max {e_max:.3} m", height(&r), steps as f32 * 1.25e-3);
+    assert_eq!(r.state(), State::Land);
+    assert!(at_land <= 2.0 && libm::fabsf(height(&r) - 20.0) < 0.2);
+    let (mut v_high, mut v_low) = (None, None);
+    while r.f.gate.armed() {
+        let o = r.fly();
+        steps += 1;
+        assert!(steps < 400_000, "never stopped");
+        let h = height(&r);
+        if o.armed {
+            assert!(o.motors.throttles().is_some());
+        } else {
+            assert_eq!(h, 0.0, "a stop in the air");
+        }
+        if h < 15.0 && v_high.is_none() {
+            v_high = Some(r.cell.get().velocity_ms[2]);
+        }
+        if h < 5.0 && v_low.is_none() {
+            v_low = Some(r.cell.get().velocity_ms[2]);
+        }
+        assert!(matches!(r.state(), State::Land | State::Stop), "{:?}", r.state());
+    }
+    let (v_high, v_low) = (v_high.unwrap(), v_low.unwrap());
+    let total = steps as f32 * DT_US as f32 * 1e-6;
+    let touch = dist_from(&r, 0.0, 0.0);
+    std::println!("descent {v_high:.3} m/s at 15 m, {v_low:.3} m/s at 5 m; stopped after {total:.1} s, {touch:.2} m from home");
+    assert!(libm::fabsf(v_high - LAND_SPEED_HIGH_MS) < 0.05 && libm::fabsf(v_low - LAND_SPEED_MS) < 0.05);
+    assert!(touch <= 2.0 && r.state() == State::Stop);
+}
+
+/// (b) Already above the return height (return 12 m, the vehicle at 15 m): no climb, the height is kept on the leg home.
+#[test]
+fn rb_above_the_return_height_no_climb_and_the_height_is_kept() {
+    let mut m = square();
+    m.return_m = 12.0;
+    let mut r = Run::new(3.0, Some(m));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    while r.f.leg_active() != Some(1) || height(&r) < 14.99 {
+        r.fly();
+    }
+    let h0 = height(&r);
+    assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+    r.fly();
+    assert_eq!(r.f.legs.phase(), LegPhase::HomeLeg, "no climb");
+    let (mut lo, mut hi) = (h0, h0);
+    while r.state() == State::Return {
+        r.fly();
+        lo = lo.min(height(&r));
+        hi = hi.max(height(&r));
+    }
+    std::println!("RETURN from {h0:.2} m: height {lo:.3} to {hi:.3} m; LAND {:.2} m from home", dist_from(&r, 0.0, 0.0));
+    assert_eq!(r.state(), State::Land);
+    assert!(hi - lo < 0.05 && dist_from(&r, 0.0, 0.0) <= 2.0, "{lo} {hi}");
 }

@@ -1936,8 +1936,8 @@ fn hands_off_msg_names_every_state_with_its_code() {
         assert!(text.starts_with(&std::format!("HO {} ", s.code())), "{text}");
         assert!(text.len() <= 64);
     }
-    // H3b: AUTO flies its own law; RETURN (not reachable) still names HOLD's.
-    assert!(!hands_off_msg(State::Auto).contains("HOLD's law") && hands_off_msg(State::Return).contains("HOLD's law"));
+    // H3b: AUTO and RETURN fly their own laws.
+    assert!(!hands_off_msg(State::Auto).contains("HOLD's law") && !hands_off_msg(State::Return).contains("HOLD's law"));
 }
 
 // ---- Amendment N: no motor stop in the air (N2, N4, E2, the NS walk of N1) ----
@@ -2468,7 +2468,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     // sequence is unchanged): AUTO is reached and flown.
     f.set_mission(super::auto_tests::square());
     f.set_battery_ok(true);
-    let (mut cmds, mut station, mut auto_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32);
+    let (mut cmds, mut station, mut auto_steps, mut return_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32, 0u32);
     let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
     for k in 0..steps {
         match fs {
@@ -2573,8 +2573,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         }
         k_set |= state == State::Takeover && f.rc_newest.is_some_and(|r| r.arm);
         assert_eq!(f.radio_status_seen(), hands_off(state) && m, "seed {seed:#x} step {k}: M");
-        assert!(state != State::Return, "seed {seed:#x} step {k}: return_built false");
         auto_steps += u32::from(state == State::Auto);
+        return_steps += u32::from(state == State::Return);
         homed += u32::from(o.armed && f.hands_off.home().is_some());
         let lost = newest.is_none_or(|n| t - n > tuning.rc_fs_timeout_us);
         if prev_armed && ever && (!o.armed || o.motors.throttles().is_none()) {
@@ -2605,9 +2605,12 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         prev_state = state;
     }
     assert!(homed > 10_000, "seed {seed:#x}: home latched (N10 (v)) on {homed} armed steps");
-    std::println!("NS walk {seed:#x}: AUTO steps {auto_steps}");
-    // Required at FS_HOLD_EN 1; with it changing (in force only from a disarmed step) the walk seldom gets there.
-    assert!(fs != Some(true) || auto_steps > 500, "seed {seed:#x}: AUTO reached ({auto_steps} steps)");
+    std::println!("NS walk {seed:#x}: AUTO steps {auto_steps}, RETURN steps {return_steps}");
+    // Required at FS_HOLD_EN 1; with it changing (in force only from a disarmed step) the walk seldom gets there; never
+    // at FS_HOLD_EN 0 (N2: a stick loss lands, no HOLD, so no RETURN).
+    assert!(fs != Some(true) || auto_steps > 200, "seed {seed:#x}: AUTO reached ({auto_steps} steps)");
+    assert!(fs != Some(true) || return_steps > 500, "seed {seed:#x}: RETURN reached ({return_steps} steps)");
+    assert!(fs != Some(false) || auto_steps + return_steps == 0, "seed {seed:#x}: FS_HOLD_EN 0");
     counts
 }
 

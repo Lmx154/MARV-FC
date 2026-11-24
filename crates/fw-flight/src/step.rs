@@ -218,10 +218,11 @@ const NO_MISSION: MissionFacts = MissionFacts {
     return_height_m: None,
 };
 
-/// The target set before the first `set_mission`: off, not the mission.
+/// The target set before the first `set_mission`: off, not the mission; GDN_RADIUS's default (the board's `GDN_OFF`), so
+/// a RETURN before any push still arrives.
 const MISSION_OFF: GdnTargets = GdnTargets {
     count: 0,
-    radius_m: 0.0,
+    radius_m: 2.0,
     targets: [(0, 0); GDN_TARGETS],
     alts_m: [0.0; GDN_TARGETS],
     return_m: 0.0,
@@ -594,6 +595,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The guidance was done (the last waypoint reached, or the entry refused) at the previous step: the state
     /// machine's `last_waypoint_reached` (it runs before the law, as the track distance).
     leg_done: bool,
+    /// RETURN's guidance was within GDN_RADIUS of home (or its entry was refused) at the previous step: the state
+    /// machine's `home_reached` (A7: LAND at once).
+    leg_home: bool,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -744,6 +748,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             legs: LegGuidance::new(),
             leg_heading_rad: 0.0,
             leg_done: false,
+            leg_home: false,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -1063,11 +1068,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             command,
             mission,
             last_waypoint_reached: self.leg_done,
-            home_reached: false,
+            home_reached: self.leg_home,
             heading_ok: nav.valid.heading && self.heading_ok,
             battery_ok,
             battery_critical,
-            return_built: false,
+            return_built: true,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             td_held: td_in,
@@ -1158,23 +1163,33 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // feed-forward) at the heading of Start with no heading rate, the cruise speed the hands-off limit in force. The
         // shaper still runs (HOLD's law where the ladder is below Position) and is left with no NE target and the vertical
         // carrot as its height target, so the HOLD that follows brakes, captures and keeps that height. Leaving AUTO stops
-        // the guidance.
+        // the guidance. RETURN (A7, H3b-2) is flown the same way from its entry (from HOLD or AUTO): H_r as the state
+        // machine latched it, the climb in place, then the leg home with GDN_RADIUS of the target set in force; the
+        // heading of the entry; Home (or a refused entry) is the state machine's `home_reached` at the next step (LAND).
         let mut leg_e_m = None;
-        if ho.state != State::Auto {
+        if !matches!(ho.state, State::Auto | State::Return) {
             self.legs.stop();
             self.leg_done = false;
+            self.leg_home = false;
         } else {
-            if was != State::Auto {
+            if was != ho.state {
                 let start = match ho.events.start {
                     Some(hands_off::StartAt::KeptPlace) => self.legs.active(),
                     _ => 0,
                 };
                 let [w, _, _, z] = nav.attitude;
                 self.leg_heading_rad = 2.0 * libm::atan2f(z, w);
+                let speed = ho.speed_limit_xy_ms;
                 let entered = match (ho.home, self.estimator.origin()) {
+                    (Some(h), _) if ho.state == State::Return => {
+                        let home = guidance::Home { ne: h.ne_m, d: h.d_m };
+                        // A non-finite H_r is the present height (`enter_return`); the machine always latches one.
+                        let h_r = ho.return_height_m.unwrap_or(f32::NAN);
+                        self.legs.enter_return(nav.position_m, home, h_r, self.mission.radius_m, speed)
+                    }
                     (Some(h), Some(origin)) => {
                         let home = guidance::Home { ne: h.ne_m, d: h.d_m };
-                        self.legs.enter(nav.position_m, home, &origin, &self.mission, start, ho.speed_limit_xy_ms)
+                        self.legs.enter(nav.position_m, home, &origin, &self.mission, start, speed)
                     }
                     _ => false,
                 };
@@ -1184,7 +1199,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             }
             let lead_ok = self.legs.lead_ok(nav.position_m[2], self.shaper.pilot_alt_lead_s);
             let leg = self.legs.step(dt_us as f32 * 1e-6, nav.position_m, nav.valid.position_ne, lead_ok);
-            self.leg_done = matches!(leg.phase, LegPhase::Done | LegPhase::Idle);
+            let auto = ho.state == State::Auto;
+            self.leg_done = auto && matches!(leg.phase, LegPhase::Done | LegPhase::Idle);
+            self.leg_home = !auto && matches!(leg.phase, LegPhase::Home | LegPhase::Idle);
             if leg.phase != LegPhase::Idle && !leg.held && mode == Mode::Position {
                 self.shaper.target_ne = None;
                 self.shaper.target_d = Some(leg.down_m);
@@ -1633,15 +1650,14 @@ pub fn mode_code(mode: Mode) -> u8 {
 }
 
 /// The MSG text logged at the first step and at each change of the hands-off state (decision-mavlink-mode-20261123,
-/// Amendment D: "Every state's code is logged at each change"): "HO", the `State::code`, the name. AUTO and RETURN cannot
-/// be reached on this branch; if one ever is, the step flies HOLD's law and the text says so.
+/// Amendment D: "Every state's code is logged at each change"): "HO", the `State::code`, the name.
 pub fn hands_off_msg(state: State) -> &'static str {
     match state {
         State::Pilot => "HO 1 PILOT",
         State::Takeover => "HO 2 TAKEOVER",
         State::Hold => "HO 3 HOLD",
         State::Auto => "HO 4 AUTO",
-        State::Return => "HO 5 RETURN (flying HOLD's law)",
+        State::Return => "HO 5 RETURN",
         State::Land => "HO 6 LAND",
         State::Stop => "HO 7 STOP",
         State::Blind => "HO 8 BLIND",
