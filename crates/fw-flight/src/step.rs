@@ -1075,13 +1075,15 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.airborne = true;
             }
         }
-        // N11 (1a): the hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with the latch set
-        // and TD not held (as the state machine read them), not BLIND, v_D valid below `HOVER_VD_MAX_MS`, roll and pitch
+        // N11 (1a): the hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with a finite
+        // commanded collective (review F2), the latch set and TD not held (as the state machine read them), not BLIND, v_D
+        // valid below `HOVER_VD_MAX_MS`, roll and pitch
         // each under 5 deg, H follows the commanded collective with `HOVER_TC_S`, clamped; the card's m g when disarmed.
         if !self.gate.armed() {
             self.hover_n = MASS * GRAVITY_MSS;
             self.hover_us = 0;
         } else if let Ok(d) = demand
+            && d.thrust_n.is_finite()
             && air_in
             && !td_in
             && ho.state != State::Blind

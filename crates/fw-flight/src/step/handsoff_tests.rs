@@ -2511,6 +2511,55 @@ fn n11_each_gate_condition_blocks_learning() {
     assert!(!o.armed && fly.f.hover_n == MG && fly.f.hover_us == 0, "disarmed: card value, time cleared");
 }
 
+/// The real controller, whose demand's collective is NaN while `nan` is set (the real one never gives NaN: its
+/// `max(0.0)` turns one into 0).
+struct NanThrust<'a> {
+    pid: crate::pid::CascadedPid,
+    nan: &'a Cell<bool>,
+}
+
+impl Controller for NanThrust<'_> {
+    fn update(&mut self, nav: &NavState, sp: &Setpoint, limited: &Saturation) -> Result<ThrustTorque, Refused> {
+        let d = self.pid.update(nav, sp, limited)?;
+        Ok(if self.nan.get() { ThrustTorque { thrust_n: f32::NAN, ..d } } else { d })
+    }
+
+    fn reset(&mut self) {
+        self.pid.reset();
+    }
+}
+
+/// Review F2: a NaN commanded collective on a step that passes every other gate of the learner leaves H and the
+/// qualifying time unchanged; H stays finite and learns again on the next finite step.
+#[test]
+fn n11_a_nan_commanded_collective_leaves_h_unchanged() {
+    let tuning = Tuning::DEFAULT;
+    let cell = Cell::new(nav_at(-10.0, ALTITUDE));
+    let nan = Cell::new(false);
+    let pid = crate::pid::CascadedPid::new(&tuning, 800.0);
+    let mut f = Flight::new(super::althold_tests::Fake(&cell), NanThrust { pid, nan: &nan }, crate::alloc::CardAllocator::new(), &tuning, handshake());
+    let mut t = 1_000_000;
+    let mut step = |f: &mut Flight<super::althold_tests::Fake, NanThrust, crate::alloc::CardAllocator>, arm: bool, thr: f32| {
+        t += DT_US;
+        f.step(&input(t, Some(super::althold_tests::report(t, arm, thr, Switch3::Low))))
+    };
+    step(&mut f, false, 0.0);
+    step(&mut f, true, 0.0);
+    for _ in 0..400 {
+        step(&mut f, true, 0.52);
+    }
+    assert!(f.gate.armed() && f.airborne && f.hover_us > 0 && f.hover_n != MG, "learning");
+    let (h, us) = (f.hover_n, f.hover_us);
+    nan.set(true);
+    let o = step(&mut f, true, 0.52);
+    assert!(o.demand.is_ok_and(|d| d.thrust_n.is_nan()), "the demand's collective is NaN");
+    assert!(f.hover_n.is_finite(), "H finite: {}", f.hover_n);
+    assert_eq!((f.hover_n, f.hover_us), (h, us), "NaN collective: H and its time unchanged");
+    nan.set(false);
+    step(&mut f, true, 0.52);
+    assert!(f.hover_n.is_finite() && f.hover_us > us, "learns again");
+}
+
 /// N11 (1e): from the card's m g, a step of the collective to 1.11 m g reaches 63 % at 10 s of qualifying steps and has
 /// not at 9.9 s; the clamp holds at m g x 1.12 and x 0.88.
 #[test]
