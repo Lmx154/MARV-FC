@@ -24,6 +24,12 @@ pub const HOME_RANGE_M: f32 = 1000.0;
 /// EKF_CHECK_ITERATIONS_MAX, "1 second ... of bad variances", ekf_check.cpp:10-11 (owner's approval pending, Q-B1).
 pub const TIER_DEBOUNCE_US: u64 = 1_000_000;
 
+/// The hold-integrity bound X, m: a horizontal distance between the navigation position and the target the position
+/// controller tracks above this sets the track fault (decision-heading-monitor-20261123, H12 item 4). X = D_max - v_xy
+/// t_B5 = 10 - 5.0 x 1.0 = 5 m: D_max 10 m (Q-H1), v_xy 5.0 m/s the largest horizontal speed any hands-off state
+/// commands (`Tuning::pilot_speed_xy_ms`), t_B5 the 1.0 s debounce (`TIER_DEBOUNCE_US`). Recompute if v_xy differs.
+pub const TRACK_FAULT_M: f32 = 5.0;
+
 /// The effective mode (link-contract section 10 codes 1 to 7; BLIND 8, not yet in the contract).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -183,6 +189,10 @@ pub struct Inputs {
     /// The RETURN law exists (Amendment D). False: no home latches, so RETURN cannot be reached and link loss lands
     /// in place.
     pub return_built: bool,
+    /// The horizontal distance between the navigation position and the Position target the controller tracked at the
+    /// previous step, both of that step, m; `None` when the previous step tracked no Position target. Over
+    /// `TRACK_FAULT_M`, or not a number, it sets the track fault when that step's state was covered (H12).
+    pub track_error_m: Option<f32>,
 }
 
 /// Why a command was DENIED: the first condition that failed, in this order.
@@ -368,6 +378,10 @@ pub struct HandsOff {
     below_t3_since: Option<u64>,
     /// The first step of the present run of T1 steps.
     below_t2_since: Option<u64>,
+    /// H12 track_fault: `heading_ok` counts as false; set by `track_error_m`, cleared on a disarmed step only.
+    track_fault: bool,
+    /// The previous step's state is one H12 covers: HOLD, AUTO, RETURN, TAKEOVER, or LAND holding position.
+    track_covered: bool,
 }
 
 impl HandsOff {
@@ -391,6 +405,8 @@ impl HandsOff {
             debounced: Tier::T3,
             below_t3_since: None,
             below_t2_since: None,
+            track_fault: false,
+            track_covered: false,
         }
     }
 
@@ -407,6 +423,11 @@ impl HandsOff {
         }
     }
 
+    /// The H12 track fault is latched (until a disarmed step).
+    pub fn track_fault(&self) -> bool {
+        self.track_fault
+    }
+
     /// One flight step.
     pub fn step(&mut self, i: &Inputs) -> Output {
         let fresh = i
@@ -418,7 +439,13 @@ impl HandsOff {
         if !i.armed {
             self.fs_in_force = i.fs_hold_en;
         }
-        let instant = Self::instant_tier(i);
+        // H12: the previous step's distance against X, in the state that step flew; latched until disarmed.
+        if !i.armed {
+            self.track_fault = false;
+        } else if self.track_covered && i.airborne && i.track_error_m.is_some_and(|d| d.is_nan() || d > TRACK_FAULT_M) {
+            self.track_fault = true;
+        }
+        let instant = self.instant_tier(i);
         self.update_tier(i.now_us, instant);
         if self.fs_in_force {
             self.automatic(i, fresh, &mut ev);
@@ -437,6 +464,8 @@ impl HandsOff {
             Tier::T2 => Demand::Altitude,
             Tier::T1 => Demand::Angle,
         };
+        self.track_covered = matches!(self.state, State::Hold | State::Auto | State::Return | State::Takeover)
+            || (self.state == State::Land && demand == Demand::Position);
         Output {
             state: self.state,
             hands_off,
@@ -454,10 +483,15 @@ impl HandsOff {
         }
     }
 
+    /// H12: heading_ok = the input AND NOT track_fault.
+    fn heading_ok(&self, i: &Inputs) -> bool {
+        i.heading_ok && !self.track_fault
+    }
+
     /// This step's tier with B4's T3' (T3 needs `heading_ok`).
-    fn instant_tier(i: &Inputs) -> Tier {
+    fn instant_tier(&self, i: &Inputs) -> Tier {
         match i.tier {
-            Tier::T3 if i.heading_ok => Tier::T3,
+            Tier::T3 if self.heading_ok(i) => Tier::T3,
             Tier::T3 | Tier::T2 => Tier::T2,
             Tier::T1 => Tier::T1,
         }
@@ -812,7 +846,7 @@ impl HandsOff {
         if !waypoints_within {
             return Some(DenyReason::WaypointBeyondRange);
         }
-        if !i.heading_ok {
+        if !self.heading_ok(i) {
             return Some(DenyReason::HeadingNotOk);
         }
         if i.tier != Tier::T3 {
@@ -902,6 +936,7 @@ mod tests {
                 battery_ok: true,
                 battery_critical: false,
                 return_built: true,
+                track_error_m: None,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),
@@ -2904,5 +2939,148 @@ mod tests {
         i.heading_ok = !rng.chance(50);
         i.battery_ok = !rng.chance(50);
         i.battery_critical = rng.chance(3);
+    }
+
+    // ---- H12: the hold-integrity distance check ----
+
+    /// One step over X, then back below: set at the step that receives the distance, kept until the disarm edge; T3' is
+    /// lost at once (the demand drops to Altitude) and LAND, level, follows after the 1.0 s debounce (I-H1, I-H2).
+    #[test]
+    fn h12_one_step_over_x_latches_until_the_disarm_edge_and_lands_level_after_the_debounce() {
+        let mut r = Rig::hold();
+        r.i.track_error_m = Some(5.5);
+        let out = r.step();
+        assert!(r.h.track_fault());
+        assert_eq!((out.state, out.demand), (State::Hold, Demand::Altitude));
+        r.i.track_error_m = Some(0.0);
+        let t0 = r.now();
+        assert_eq!(r.at(t0 + TIER_DEBOUNCE_US - 1).state, State::Hold, "0.99.. s: HOLD");
+        let out = r.at(t0 + TIER_DEBOUNCE_US);
+        assert_eq!((out.state, out.demand, out.land_holds_position), (State::Land, Demand::Altitude, false), "1.0 s");
+        for k in 1..2_000 {
+            let out = r.at(t0 + TIER_DEBOUNCE_US + k * 1_000);
+            assert_eq!((out.state, out.land_holds_position), (State::Land, false), "step {k}");
+            assert!(r.h.track_fault(), "step {k}");
+        }
+        // The disarm edge clears it; the next arming starts clear.
+        r.i.armed = false;
+        assert_eq!(r.step().state, State::Stop);
+        assert!(!r.h.track_fault());
+        r.i.armed = true;
+        r.i.airborne = false;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        assert!(!r.h.track_fault());
+    }
+
+    #[test]
+    fn h12_exactly_x_does_not_trip_a_hair_above_and_not_a_number_do() {
+        let above = f32::from_bits(TRACK_FAULT_M.to_bits() + 1);
+        for (d, trips) in [
+            (0.0, false),
+            (TRACK_FAULT_M, false),
+            (above, true),
+            (f32::NAN, true),
+            (f32::INFINITY, true),
+        ] {
+            let mut r = Rig::hold();
+            r.i.track_error_m = Some(d);
+            let out = r.step();
+            assert_eq!(r.h.track_fault(), trips, "{d}");
+            assert_eq!(out.demand == Demand::Position, !trips, "{d}");
+        }
+    }
+
+    /// The states H12 covers (HOLD, AUTO, RETURN, LAND on T3') and TAKEOVER (the lead's reading: it flies HOLD's law);
+    /// never LAND without T3', BLIND, PILOT, STOP, a disarmed step or a step with the airborne latch false.
+    #[test]
+    fn h12_only_the_covered_states_armed_and_airborne_set_it() {
+        let land_t2 = || {
+            let mut r = Rig::land();
+            r.i.tier = Tier::T2;
+            assert!(!r.step().land_holds_position);
+            r
+        };
+        let cases: [(&str, fn() -> Rig, bool); 8] = [
+            ("hold", Rig::hold, true),
+            ("auto", Rig::auto, true),
+            ("return", Rig::ret, true),
+            ("takeover", Rig::takeover, true),
+            ("land on T3'", Rig::land, true),
+            ("land without T3'", land_t2, false),
+            ("blind", Rig::blind, false),
+            ("pilot", Rig::pilot, false),
+        ];
+        for (name, rig, covered) in cases {
+            for d in [100.0, f32::NAN] {
+                let mut r = rig();
+                r.i.track_error_m = Some(d);
+                r.step();
+                assert_eq!(r.h.track_fault(), covered, "{name} {d}");
+            }
+        }
+        // The airborne latch false: the ground exit, never the fault.
+        let mut r = Rig::hold();
+        r.i.airborne = false;
+        r.i.track_error_m = Some(100.0);
+        assert_eq!(r.step().state, State::Stop);
+        assert!(!r.h.track_fault());
+        // Disarmed.
+        let mut r = Rig::new();
+        r.i.track_error_m = Some(f32::NAN);
+        for _ in 0..10 {
+            r.step();
+            assert!(!r.h.track_fault());
+        }
+    }
+
+    /// PILOT: any distance changes nothing, and stick loss later still gives HOLD.
+    #[test]
+    fn h12_in_pilot_the_distance_never_sets_it_and_never_changes_an_output() {
+        let (mut a, mut b) = (Rig::pilot(), Rig::pilot());
+        b.i.track_error_m = Some(f32::NAN);
+        for k in 0..500u64 {
+            let t = a.now() + 1_000;
+            b.i.track_error_m = Some(if k % 2 == 0 { f32::NAN } else { 50.0 });
+            assert_eq!(a.report(t, Switch3::High), b.report(t, Switch3::High), "step {k}");
+            assert!(!b.h.track_fault());
+        }
+        let t = b.last_report() + LOSS + 1;
+        assert_eq!(b.heartbeat(t).state, State::Hold);
+    }
+
+    /// The distance belongs to the step it was measured in: the input of the step that enters HOLD is PILOT's and is
+    /// not checked; the next step's is HOLD's.
+    #[test]
+    fn h12_the_entry_step_checks_the_previous_state_s_distance() {
+        let mut r = Rig::pilot();
+        r.i.track_error_m = Some(100.0);
+        let t = r.last_report() + LOSS + 1;
+        let out = r.heartbeat(t);
+        assert_eq!((out.state, out.demand), (State::Hold, Demand::Position));
+        assert!(!r.h.track_fault());
+        r.step();
+        assert!(r.h.track_fault());
+    }
+
+    /// heading_ok = the input AND NOT track_fault: Start is accepted only with the input true and no fault.
+    #[test]
+    fn h12_the_heading_input_and_the_fault_combine_as_and() {
+        for (heading, fault) in [(true, false), (true, true), (false, false), (false, true)] {
+            let mut r = Rig::hold();
+            r.i.heading_ok = heading;
+            if fault {
+                r.i.track_error_m = Some(6.0);
+            }
+            let out = r.step();
+            r.i.track_error_m = None;
+            assert_eq!(out.demand == Demand::Position, heading && !fault, "{heading} {fault}");
+            let want = if heading && !fault {
+                Some(CommandResult::Accepted)
+            } else {
+                denied(DenyReason::HeadingNotOk)
+            };
+            assert_eq!(r.cmd(Command::Start).command, want, "{heading} {fault}");
+        }
     }
 }

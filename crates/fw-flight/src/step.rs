@@ -371,6 +371,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     heading_ok: bool,
     /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until set.
     last_radio_heartbeat_us: Option<u64>,
+    /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
+    /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
+    track_error_m: Option<f32>,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -460,6 +463,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             rc_newest: None,
             heading_ok: false,
             last_radio_heartbeat_us: None,
+            track_error_m: None,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -665,6 +669,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             battery_ok: false,
             battery_critical,
             return_built: false,
+            track_error_m: self.track_error_m,
         });
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
         let selected = if ho.synthetic_sticks { Mode::Position } else { self.selected };
@@ -693,6 +698,14 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let setpoint = self.shaper.setpoint(mode, &nav, t_us);
         self.shaper.sticks = real;
         self.shaper.land_rate_d_ms = None;
+        // H12: |p_NE - r_NE| of this step, r the target the controller gets (while unlocked, this step's position).
+        self.track_error_m = match setpoint {
+            Setpoint::Position { position_m: [tn, te, _], .. } => {
+                let (dn, de) = (nav.position_m[0] - tn, nav.position_m[1] - te);
+                Some(libm::sqrtf(dn * dn + de * de))
+            }
+            _ => None,
+        };
         // The rotor frequencies, f1 = eRPM x 2 / (poles x 60) Hz by DShot line, for the controller's notch; an eRPM
         // missing or `notch_hold_us` or more old is `None`.
         let (notch_on, poles) = self.notch;
