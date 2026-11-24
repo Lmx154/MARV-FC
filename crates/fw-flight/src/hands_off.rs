@@ -3434,4 +3434,184 @@ mod tests {
             }
         }
     }
+
+    // ---- H14: what happens after a track fault ----
+
+    /// H14 (1): the track fault is a landing cause ranked with battery critical (B1): with each other automatic exit of
+    /// HOLD, AUTO and RETURN in the same step it gives LAND, as battery critical does (with the braking law, where battery
+    /// critical holds); a fresh report still gives TAKEOVER, which flies its descent (C1), braking; disarm gives STOP and
+    /// clears it.
+    #[test]
+    fn h14_the_track_fault_lands_like_battery_critical_over_every_other_exit() {
+        let cases: [(&str, fn() -> Rig, fn(&mut Rig) -> u64); 5] = [
+            ("hold: link > 10 s with home", Rig::hold, |r| r.now() + LINK_LOSS_US + 1),
+            ("auto: new plan", Rig::auto, |r| {
+                r.i.mission.plan_id = Some(PLAN + 1);
+                r.now() + 1_000
+            }),
+            ("auto: last waypoint", Rig::auto, |r| {
+                r.i.last_waypoint_reached = true;
+                r.now() + 1_000
+            }),
+            ("auto: station lost", Rig::auto, |r| r.now() + STATION_LOST_US + 1),
+            ("return: arrival", Rig::ret, |r| {
+                r.i.home_reached = true;
+                r.now() + 1_000
+            }),
+        ];
+        for (name, rig, other) in cases {
+            for (cause, law) in [("fault", LandLaw::Brake), ("battery", LandLaw::Hold)] {
+                let mut r = rig();
+                if cause == "fault" {
+                    r.i.track_error_m = Some(6.0);
+                } else {
+                    r.i.battery_critical = true;
+                }
+                let t = other(&mut r);
+                let out = r.at(t);
+                assert_eq!((out.state, out.land_law, out.events.place_kept), (State::Land, Some(law), false), "{name}, {cause}");
+                assert_eq!(r.h.track_fault(), cause == "fault", "{name}, {cause}");
+            }
+        }
+        let mut r = Rig::hold();
+        r.i.track_error_m = Some(6.0);
+        let t = r.now() + 1_000;
+        let out = r.report(t, Switch3::Low);
+        assert_eq!((out.state, out.takeover_descent, out.land_law), (State::Takeover, true, Some(LandLaw::Brake)), "CRSF over fault");
+        let mut r = Rig::hold();
+        r.i.track_error_m = Some(6.0);
+        r.i.armed = false;
+        assert_eq!(r.step().state, State::Stop, "disarm over fault");
+        assert!(!r.h.track_fault());
+    }
+
+    /// H14 (2): d_A is read in TAKEOVER on a T2 step (an Altitude setpoint; TAKEOVER then flies its descent, level); in
+    /// LAND only on a step that holds (no fault, this step's T3'), where a trip gives braking at that step; never in a level
+    /// LAND (this step's T2, the drop fresh or held 3 s) nor once braking; the anchor is never re-set in LAND.
+    #[test]
+    fn h14_the_anchor_is_read_in_takeover_on_a_t2_step_and_in_land_only_while_it_holds() {
+        let a = Some(([10.0, 10.0], 0.0));
+        let mut r = Rig::takeover();
+        assert_eq!(r.h.anchor(), a);
+        r.i.tier = Tier::T2;
+        r.i.position_ne_m = [16.0, 10.0];
+        let t = r.now() + 1_000;
+        let out = r.report(t, Switch3::Low);
+        assert!(r.h.track_fault());
+        assert_eq!(
+            (out.state, out.takeover_descent, out.land_law, out.demand),
+            (State::Takeover, true, Some(LandLaw::Level), Demand::Altitude)
+        );
+        let mut r = Rig::land();
+        assert_eq!(r.h.anchor(), a);
+        r.i.tier = Tier::T2;
+        r.i.position_ne_m = [16.0, 10.0];
+        for k in 0..3_000 {
+            let t = r.now() + 1_000;
+            let out = r.at(t);
+            assert_eq!((out.state, out.land_law), (State::Land, Some(LandLaw::Level)), "step {k}");
+            assert!(!r.h.track_fault(), "step {k}");
+        }
+        r.i.tier = Tier::T3;
+        let out = r.step();
+        assert!(r.h.track_fault());
+        assert_eq!((out.state, out.land_law, out.land_holds_position), (State::Land, Some(LandLaw::Brake), false));
+        assert_eq!(r.h.anchor(), a);
+        let mut r = Rig::land();
+        r.i.position_ne_m = [15.0, 10.0];
+        let out = r.step();
+        assert_eq!((out.land_law, r.h.track_fault()), (Some(LandLaw::Hold), false), "exactly X + b");
+        r.i.position_ne_m = [16.0, 10.0];
+        let out = r.step();
+        assert_eq!((out.land_law, r.h.track_fault()), (Some(LandLaw::Brake), true), "6 m");
+        r.i.position_ne_m = [100.0, 10.0];
+        for k in 0..100 {
+            let t = r.now() + 1_000;
+            let out = r.at(t);
+            assert_eq!((out.state, out.land_law, r.h.anchor()), (State::Land, Some(LandLaw::Brake), a), "step {k}");
+        }
+    }
+
+    /// H14 with H12 item 4: once latched, no hands-off state holds a point again until disarm. Abort from LAND is DENIED
+    /// NotT3 (LAND at this step and the next); Start meets LAND; a report gives TAKEOVER flying its descent, braking; the
+    /// hand-over through the lock gives PILOT with the normal laws; a later stick loss on T3' gives LAND, braking, with no
+    /// anchor, never HOLD. Into HOLD or RETURN by command: NotT3; Start's check: HeadingNotOk. After the disarm edge the
+    /// next arming holds again.
+    #[test]
+    fn h14_a_latched_fault_resolves_every_hands_off_entry_to_land_until_disarm() {
+        let mut r = Rig::hold();
+        r.i.track_error_m = Some(6.0);
+        assert_eq!(r.step().state, State::Land);
+        r.i.track_error_m = None;
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::NotT3)));
+        assert_eq!(r.step().state, State::Land);
+        assert_eq!(r.cmd(Command::Start).command, denied(DenyReason::NotInThisState));
+        assert_eq!(r.h.hold_entry_check(&r.i), Some(DenyReason::NotT3));
+        assert_eq!(r.h.return_check(&r.i), Some(DenyReason::NotT3));
+        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::HeadingNotOk));
+        let t = r.now() + 1_000;
+        let out = r.report(t, Switch3::Low);
+        assert_eq!((out.state, out.takeover_descent, out.land_law), (State::Takeover, true, Some(LandLaw::Brake)));
+        let t = r.now() + 1_000;
+        r.report(t, Switch3::High);
+        let t = r.now() + 1_000;
+        let out = r.report(t, Switch3::Middle);
+        assert_eq!(
+            (out.state, out.hands_off, out.landing, out.takeover_descent, out.land_law),
+            (State::Pilot, false, false, false, None)
+        );
+        assert!(r.h.track_fault());
+        let t = r.last_report() + LOSS + 1;
+        let out = r.heartbeat(t);
+        assert_eq!((out.state, out.land_law, out.demand), (State::Land, Some(LandLaw::Brake), Demand::Position));
+        assert_eq!(r.h.anchor(), None);
+        r.i.armed = false;
+        assert_eq!(r.step().state, State::Stop);
+        assert!(!r.h.track_fault());
+        assert_eq!(r.h.hold_entry_check(&r.i), None);
+        r.i.armed = true;
+        r.i.airborne = false;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        r.i.airborne = true;
+        let t = r.now() + 1_000;
+        r.report(t, Switch3::High);
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+    }
+
+    /// H14 with H12 item 4 over random inputs (the random positions trip the anchor): with the fault latched the state is
+    /// never HOLD, AUTO or RETURN, TAKEOVER flies its descent, LAND never holds, and the law is Brake exactly when the
+    /// demand is Position; the fault clears only on a disarmed step.
+    #[test]
+    fn h14_walk_a_latched_fault_never_holds_a_point() {
+        let mut rng = Lcg(0x5eed_0014);
+        let mut h = HandsOff::new(&Tuning::DEFAULT);
+        let mut i = Rig::new().i;
+        let (mut was, mut faulted, mut land, mut brake, mut takeover) = (false, 0u32, 0u32, 0u32, 0u32);
+        for _ in 0..200_000 {
+            random_inputs(&mut rng, &mut i, true);
+            let out = h.step(&i);
+            let fault = h.track_fault();
+            assert!(!was || fault || !i.armed, "cleared while armed: {out:?}");
+            was = fault;
+            if !fault {
+                continue;
+            }
+            faulted += 1;
+            assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{out:?}");
+            assert!(!out.land_holds_position && out.land_law != Some(LandLaw::Hold), "{out:?}");
+            if out.state == State::Takeover {
+                assert!(out.takeover_descent, "{out:?}");
+                takeover += 1;
+            }
+            if out.land_law.is_some() {
+                assert_eq!(out.land_law == Some(LandLaw::Brake), out.demand == Demand::Position, "{out:?}");
+                brake += u32::from(out.land_law == Some(LandLaw::Brake));
+            }
+            land += u32::from(out.state == State::Land);
+        }
+        assert!(faulted > 1_000 && land > 100 && brake > 100 && takeover > 10, "{faulted} {land} {brake} {takeover}");
+    }
 }

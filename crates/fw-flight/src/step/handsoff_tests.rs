@@ -924,6 +924,229 @@ fn h13_a_stale_pilot_target_5_5_m_away_at_stick_loss_does_not_trip() {
     }
 }
 
+// ---- H14: what happens after a track fault ----
+
+impl Fly {
+    /// HOLD (stick loss on T3'), then a drift at 1 m/s until the trip; the vehicle at rest after it. LAND.
+    fn tripped() -> Fly {
+        let mut fly = Fly::new(true, true, POSITION);
+        fly.lose();
+        assert_eq!(fly.state(), State::Hold);
+        while !fly.track_fault() {
+            fly.drift(1.0);
+            fly.quiet();
+        }
+        assert_eq!(fly.state(), State::Land);
+        fly.drift(0.0);
+        fly
+    }
+
+    /// [`Fly::drift`] and, in LAND, down at the LAND rate: the vehicle follows the descent, so neither the airborne latch
+    /// nor E3 ends the flight.
+    fn drift_landing(&self, v_n: f32) {
+        self.drift(v_n);
+        let land = self.state() == State::Land;
+        let mut n = self.cell.get();
+        n.velocity_ms[2] = if land { LAND_SPEED_MS } else { 0.0 };
+        if land {
+            n.position_m[2] += LAND_SPEED_MS * DT_US as f32 * 1e-6;
+        }
+        self.cell.set(n);
+    }
+}
+
+/// LAND's horizontal law as the real step flies it, read from the setpoint.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Law {
+    /// [`is_braking`] with no target kept.
+    Brake,
+    /// Position with a captured target.
+    Hold,
+    /// Altitude, level.
+    Level,
+}
+
+fn law_of(fly: &Fly, o: &StepOut) -> Law {
+    match o.setpoint {
+        Setpoint::Position { velocity_ms, .. } if velocity_ms[2] == LAND_SPEED_MS => match fly.f.shaper.target_ne {
+            None if is_braking(o) => Law::Brake,
+            Some(_) => Law::Hold,
+            None => panic!("{:?}", o.setpoint),
+        },
+        Setpoint::Altitude { attitude, velocity_d_ms, .. } if attitude == [1.0, 0.0, 0.0, 0.0] && velocity_d_ms == LAND_SPEED_MS => {
+            Law::Level
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+/// H14 (1): LAND's horizontal law over the 16 rows track fault x Valid.heading x Valid.velocity_ne x debounced T3' on the
+/// real step, the heading input true. LAND with the fault: a trip in HOLD; without: battery critical in HOLD. A row with
+/// the debounced T3' true and a flag down is the first step of the drop; with it false the drop has lasted 1.0 s; with
+/// both flags up it can be false only through another flag (position_ne down 1.0 s), so Position is not covered (I12).
+/// Brake: fault and T3'; Hold: no fault and T3' (this step's, so also the debounced); otherwise Level.
+#[test]
+fn h14_land_law_table_over_16_rows_on_the_real_step() {
+    let debounce = (hands_off::TIER_DEBOUNCE_US / DT_US) as usize + 1;
+    for row in 0..16u32 {
+        let (fault, heading, velocity_ne, debounced) = (row & 8 != 0, row & 4 != 0, row & 2 != 0, row & 1 != 0);
+        let mut fly = if fault {
+            Fly::tripped()
+        } else {
+            let mut fly = Fly::new(true, true, POSITION);
+            fly.lose();
+            fly.f.battery_critical = true;
+            fly.quiet();
+            fly.f.battery_critical = false;
+            fly
+        };
+        for _ in 0..10 {
+            fly.quiet();
+        }
+        assert_eq!((fly.state(), fly.track_fault()), (State::Land, fault), "row {row}");
+        let position_ne = !(heading && velocity_ne && !debounced);
+        fly.set_valid(Valid { heading, velocity_ne, position_ne, ..POSITION });
+        let mut o = fly.quiet();
+        for _ in 1..if debounced { 1 } else { debounce } {
+            o = fly.quiet();
+        }
+        assert_eq!(fly.state(), State::Land, "row {row}");
+        let want = match (fault, heading && velocity_ne && debounced) {
+            (true, true) => Law::Brake,
+            (false, true) => Law::Hold,
+            _ => Law::Level,
+        };
+        let law = law_of(&fly, &o);
+        std::println!("row {row:2}: fault {fault:5} heading {heading:5} velocity_ne {velocity_ne:5} debounced T3' {debounced:5}: {law:?}");
+        assert_eq!(law, want, "row {row}: fault {fault} heading {heading} velocity_ne {velocity_ne} debounced T3' {debounced}");
+    }
+}
+
+/// H14 (1): the braking setpoint on the real step after a trip, at 3.0 m/s, just below `pilot_hold_speed_ms`, 0.3 m/s
+/// and at rest: every step Position at that step's navigation position, no horizontal feed-forward, no target kept
+/// (never captured). A trip in LAND holding position (its point captured) drops that point at the trip step.
+#[test]
+fn h14_the_braking_setpoint_is_this_step_s_position_with_no_feed_forward_never_captured() {
+    let mut fly = Fly::tripped();
+    for v in [3.0, Tuning::DEFAULT.pilot_hold_speed_ms - 0.01, 0.3, 0.0] {
+        for k in 0..800 {
+            fly.drift_landing(v);
+            let o = fly.quiet();
+            assert_eq!((fly.state(), o.mode, law_of(&fly, &o)), (State::Land, Mode::Position, Law::Brake), "{v} m/s, step {k}");
+        }
+    }
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    let a = fly.f.hands_off.anchor().expect("the anchor").0;
+    fly.f.battery_critical = true;
+    fly.quiet();
+    assert_eq!(fly.state(), State::Land);
+    let captured = fly.f.shaper.target_ne.expect("the hold point");
+    let x = hands_off::track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms);
+    for k in 0..20_000 {
+        fly.drift_landing(1.0);
+        let over = fly.distance_from(a) > x;
+        let o = fly.quiet();
+        if over {
+            assert!(fly.track_fault(), "step {k}");
+            assert_eq!((fly.state(), law_of(&fly, &o)), (State::Land, Law::Brake), "step {k}");
+            return;
+        }
+        assert_eq!((fly.track_fault(), law_of(&fly, &o), fly.f.shaper.target_ne), (false, Law::Hold, Some(captured)), "step {k}");
+    }
+    panic!("LAND holding never tripped");
+}
+
+/// H14 (2), the simulator's G5 case on the real step: HOLD, then the heading flag down (NE valid) beyond the debounce:
+/// LAND, level, while the vehicle drifts 8 m from A (X + b = 5 m): d_A is not read, no fault. The heading back: that step
+/// LAND would hold, so d_A is read and trips: braking from that step on, never level again while Position is covered.
+#[test]
+fn h14_a_level_land_does_not_read_the_anchor_and_the_flags_back_give_braking() {
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    let a = fly.f.hands_off.anchor().expect("the anchor").0;
+    fly.set_valid(Valid { heading: false, ..POSITION });
+    for k in 0..8_000 {
+        fly.drift_landing(0.8);
+        let o = fly.quiet();
+        assert!(!fly.track_fault(), "step {k}: {} m from A in {:?}", fly.distance_from(a), fly.state());
+        assert_eq!(o.mode, Mode::Altitude, "step {k}");
+    }
+    assert_eq!(fly.state(), State::Land);
+    assert!(fly.distance_from(a) > 7.9, "{}", fly.distance_from(a));
+    fly.set_valid(POSITION);
+    for k in 0..800 {
+        fly.drift_landing(0.8);
+        let o = fly.quiet();
+        assert!(fly.track_fault(), "step {k}");
+        assert_eq!((fly.state(), law_of(&fly, &o)), (State::Land, Law::Brake), "step {k}");
+    }
+}
+
+/// The horizontal acceleration (north, east) of a point mass held at the weight's vertical share by attitude `q`.
+fn accel_ne(q: [f32; 4]) -> [f32; 2] {
+    let [w, x, y, z] = q;
+    let col = [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), w * w - x * x - y * y + z * z];
+    [-GRAVITY_MSS * col[0] / col[2], -GRAVITY_MSS * col[1] / col[2]]
+}
+
+/// H14 (1) on a point-mass plant: HOLD, the vehicle drifting away at 1 m/s (as the drift tests) until the trip; from the
+/// trip step the plant is closed: the acceleration of the step's attitude setpoint (taken at once) plus the drag of a
+/// steady 5 m/s north wind, k (w - v) with k = 0.197 N/(m/s) / 0.914 kg (H14's numbers, U-H6), while it descends at the
+/// LAND rate from 10 m to 1 m (18 s). Returns the horizontal speed at each step after the trip and the distance from the
+/// LAND start at the end.
+fn brake_run() -> (std::vec::Vec<f32>, f32) {
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    let mut o = loop {
+        fly.drift(1.0);
+        let o = fly.quiet();
+        if fly.track_fault() {
+            break o;
+        }
+    };
+    assert_eq!(fly.state(), State::Land);
+    let start = fly.cell.get().position_m;
+    let (k, wind, dt) = (0.197 / 0.914, 5.0, DT_US as f32 * 1e-6);
+    let mut speeds = std::vec::Vec::new();
+    for _ in 0..(18_000_000 / DT_US) {
+        let a = match o.setpoint {
+            Setpoint::Position { .. } => accel_ne(o.attitude_sp),
+            Setpoint::Altitude { attitude, .. } => accel_ne(attitude),
+            ref other => panic!("{other:?}"),
+        };
+        let mut n = fly.cell.get();
+        let [vn, ve, _] = n.velocity_ms;
+        let (vn, ve) = (vn + (a[0] + k * (wind - vn)) * dt, ve + (a[1] - k * ve) * dt);
+        n.velocity_ms = [vn, ve, LAND_SPEED_MS];
+        n.position_m = [n.position_m[0] + vn * dt, n.position_m[1] + ve * dt, n.position_m[2] + LAND_SPEED_MS * dt];
+        fly.cell.set(n);
+        o = fly.quiet();
+        assert_eq!(fly.state(), State::Land);
+        speeds.push(libm::sqrtf(vn * vn + ve * ve));
+    }
+    (speeds, fly.distance_from([start[0], start[1]]))
+}
+
+/// The bound: from 2 s after the trip to the end the horizontal speed stays at or below 0.3 m/s, half of what the
+/// velocity loop's P alone would leave against this wind (1.08 m/s^2 / 1.8 = 0.6 m/s, H14), so the integrator must hold
+/// the trim; it never exceeds the speed at the trip; and the vehicle ends within D_max of the LAND start (H14's
+/// simulator pass rule). The level law (the old behaviour) lets the wind take it: towards 5 m/s with time constant
+/// 1/k = 4.6 s, about 2.4 m/s at 2 s, tens of metres by the end.
+#[test]
+fn h14_after_a_trip_in_wind_land_brakes_and_the_speed_stays_near_zero() {
+    let (speeds, drift) = brake_run();
+    let per_s = (1_000_000 / DT_US) as usize;
+    for (s, v) in speeds.iter().step_by(per_s).enumerate() {
+        std::println!("{s:2} s after the trip: {v:.3} m/s");
+    }
+    let late = speeds[2 * per_s..].iter().copied().fold(0.0f32, f32::max);
+    std::println!("largest speed from 2 s on {late:.3} m/s; 1 m above ground {drift:.2} m from the LAND start");
+    assert!(speeds.iter().all(|&v| v <= 1.0 + 1e-3), "faster than at the trip");
+    assert!(late <= 0.3, "{late} m/s");
+    assert!(drift <= hands_off::D_MAX_M, "{drift} m");
+}
+
 // ---- E3: the touchdown backstop ----
 
 /// Specific force at rest, level, m/s^2 FRD.
