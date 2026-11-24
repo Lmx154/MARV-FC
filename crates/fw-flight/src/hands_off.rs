@@ -240,8 +240,8 @@ pub enum DenyReason {
     HandsOffDisabled,
     /// The state does not take this command.
     NotInThisState,
-    /// A command into HOLD or RETURN (and Abort in BLIND): the debounced tier is not T3' (B2, B6, C3). Start: this
-    /// step's tier is not T3 (checked after `HeadingNotOk`, B4).
+    /// A command into HOLD or RETURN (and Abort in BLIND): the debounced tier is not T3' (B2, B6, C3), or the track
+    /// fault is latched (H14). Start: this step's tier is not T3 (checked after `HeadingNotOk`, B4).
     NotT3,
     /// A command into HOLD or RETURN: the battery is critical, so the state would land at once (B2, C3).
     BatteryCritical,
@@ -913,9 +913,10 @@ impl HandsOff {
         }
     }
 
-    /// B2: a command into HOLD is DENIED when one of HOLD's automatic exits would fire on this step's facts.
+    /// B2: a command into HOLD is DENIED when one of HOLD's automatic exits would fire on this step's facts; the track
+    /// fault (H14) answers NotT3.
     fn hold_entry_check(&self, i: &Inputs) -> Option<DenyReason> {
-        if self.debounced != Tier::T3 {
+        if self.debounced != Tier::T3 || self.track_fault {
             Some(DenyReason::NotT3)
         } else if i.battery_critical {
             Some(DenyReason::BatteryCritical)
@@ -926,11 +927,12 @@ impl HandsOff {
         }
     }
 
-    /// C3: Return needs home; then B2's no-bounce rule for RETURN's automatic exits (arrival excepted).
+    /// C3: Return needs home; then B2's no-bounce rule for RETURN's automatic exits (arrival excepted); the track fault
+    /// (H14) answers NotT3.
     fn return_check(&self, i: &Inputs) -> Option<DenyReason> {
         if self.home().is_none() {
             Some(DenyReason::NoHome)
-        } else if self.debounced != Tier::T3 {
+        } else if self.debounced != Tier::T3 || self.track_fault {
             Some(DenyReason::NotT3)
         } else if i.battery_critical {
             Some(DenyReason::BatteryCritical)
