@@ -4108,4 +4108,181 @@ mod tests {
         }
         assert!(faulted > 1_000 && land > 100 && brake > 100 && takeover > 10, "{faulted} {land} {brake} {takeover}");
     }
+
+    // ---- N19: the mission switch (decision-mavlink-mode-20261123, section 67) ----
+
+    /// One report at `t` of N19's column `col` (1 to 5; 6: no report, the step past the stick-loss time).
+    fn column(r: &mut Rig, col: u8) -> Output {
+        let t = r.now() + 1_000;
+        match col {
+            1 => r.report_full(t, CENTRED, Switch3::High, true, true),
+            2 => r.report_full(t, CENTRED, Switch3::High, true, false),
+            3 => r.report_full(t, CENTRED, Switch3::Middle, true, false),
+            4 => r.report_full(t, CENTRED, Switch3::High, false, true),
+            5 => r.report_full(t, CENTRED, Switch3::High, false, false),
+            _ => {
+                let t = (r.last_report() + LOSS + 1).max(t);
+                r.at(t)
+            }
+        }
+    }
+
+    /// N19 section 2: each of the six columns in each state of a MAVLink flight (airborne, T3', home set, the station
+    /// heard): the state after that step.
+    #[test]
+    fn n19_each_column_in_each_state() {
+        use State::{Auto, Blind, Hold, Land, Pilot, Return, Stop, Takeover};
+        let rows: [(&str, fn() -> Rig, [State; 6]); 7] = [
+            ("pilot", Rig::pilot, [Hold, Pilot, Pilot, Land, Stop, Hold]),
+            ("takeover", Rig::takeover, [Takeover, Pilot, Takeover, Land, Stop, Hold]),
+            ("hold", Rig::hold, [Hold, Pilot, Takeover, Land, Stop, Hold]),
+            ("auto", Rig::auto, [Auto, Pilot, Takeover, Land, Stop, Auto]),
+            ("return", Rig::ret, [Return, Pilot, Takeover, Land, Stop, Return]),
+            ("land", Rig::land, [Land, Pilot, Takeover, Land, Stop, Land]),
+            ("blind", Rig::blind, [Blind, Pilot, Takeover, Blind, Stop, Blind]),
+        ];
+        for (name, make, want) in rows {
+            for col in 1..=6u8 {
+                let mut r = make();
+                assert!(r.h.mavlink_flight(), "{name}");
+                let out = column(&mut r, col);
+                assert_eq!(out.state, want[usize::from(col - 1)], "{name}, column {col}");
+                assert_eq!(out.disarm, out.state == Stop, "{name}, column {col}");
+                assert_eq!(out.hands_off, !matches!(out.state, Pilot | Stop), "{name}, column {col}");
+                // Column 4 holds the arm-OFF report (the gate keeps the motors) wherever it lands.
+                assert_eq!(out.arm_off_holds, col == 4 && out.hands_off, "{name}, column {col}");
+            }
+        }
+    }
+
+    /// N19 section 2, the priority order: disarmed, the arm columns, WR1, columns 2 and 3, each state's own exits,
+    /// column 1, commands.
+    #[test]
+    fn n19_the_priority_order() {
+        // Disarmed before everything.
+        let mut r = Rig::hold();
+        r.i.armed = false;
+        assert_eq!(column(&mut r, 1).state, State::Stop);
+        // The arm column before WR1, then WR1 in that step: column 4 on the ground with TD held is STOP (from PILOT: its
+        // "ground"; from HOLD: LAND, then WR1).
+        for make in [Rig::pilot as fn() -> Rig, Rig::hold] {
+            let mut r = make();
+            r.i.airborne = false;
+            let out = column(&mut r, 4);
+            assert_eq!((out.state, out.disarm), (State::Stop, true));
+        }
+        // WR1 before columns 2 and 3.
+        for col in [2, 3] {
+            let mut r = Rig::hold();
+            r.i.airborne = false;
+            assert_eq!(column(&mut r, col).state, State::Stop, "column {col}");
+        }
+        // Columns 2 and 3 before HOLD's own exits (battery critical): PILOT; TAKEOVER flying the descent.
+        let mut r = Rig::hold();
+        r.i.battery_critical = true;
+        assert_eq!(column(&mut r, 2).state, State::Pilot);
+        let mut r = Rig::hold();
+        r.i.battery_critical = true;
+        let out = column(&mut r, 3);
+        assert_eq!((out.state, out.takeover_descent), (State::Takeover, true));
+        // The own exits before column 1.
+        let mut r = Rig::hold();
+        r.i.battery_critical = true;
+        assert_eq!(column(&mut r, 1).state, State::Land);
+        let mut r = Rig::auto();
+        r.i.last_waypoint_reached = true;
+        assert_eq!(column(&mut r, 1).state, State::Hold);
+        // Column 1 before the command: PILOT to HOLD, then Start in that HOLD.
+        let mut r = Rig::pilot();
+        r.i.last_radio_heartbeat_us = Some(r.now());
+        r.i.command = Some(StationCommand { command: Command::Start, link: Link::Radio });
+        let out = column(&mut r, 1);
+        assert_eq!((out.state, out.command), (State::Auto, Some(CommandResult::Accepted)));
+    }
+
+    /// N19 section 2: every conjunct of column 1's entry from PILOT false gives PILOT (Position, the airborne latch,
+    /// hold_entry_check's tier, track fault and battery; and the mission switch itself). The link-age conjunct cannot be
+    /// false with a live report (the report itself is the link).
+    #[test]
+    fn n19_every_conjunct_of_the_column_1_entry_false_gives_pilot() {
+        let cases: [(&str, fn(&mut Rig)); 5] = [
+            ("not Position", |_| {}),
+            ("latch false", |r| {
+                r.i.airborne = false;
+                r.i.td_held = false;
+            }),
+            ("tier T2 for 1 s", |r| {
+                r.i.tier = Tier::T2;
+                r.step();
+                let t = r.now() + TIER_DEBOUNCE_US;
+                assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+            }),
+            ("track fault", |r| r.h.track_fault = true),
+            ("battery critical", |r| r.i.battery_critical = true),
+        ];
+        for (name, set) in cases {
+            let mut r = Rig::pilot();
+            set(&mut r);
+            let t = r.now() + 1_000;
+            let switch6 = if name == "not Position" { Switch3::Middle } else { Switch3::High };
+            let out = r.report_full(t, CENTRED, switch6, true, true);
+            assert_eq!((out.state, out.hands_off), (State::Pilot, false), "{name}");
+        }
+        let mut r = Rig::pilot();
+        assert_eq!(column(&mut r, 2).state, State::Pilot, "the mission switch OFF");
+        let mut r = Rig::pilot();
+        assert_eq!(column(&mut r, 1).state, State::Hold, "control: all met");
+    }
+
+    /// N19 section 2: columns 4 and 5 read the newest report even when it is stale.
+    #[test]
+    fn n19_the_arm_columns_read_a_stale_report() {
+        for (make, name) in [(Rig::pilot as fn() -> Rig, "pilot"), (Rig::hold, "hold"), (Rig::auto, "auto"), (Rig::ret, "return")] {
+            for (mission, want) in [(true, State::Land), (false, State::Stop)] {
+                let mut r = make();
+                let old = r.now().saturating_sub(5 * S);
+                r.i.crsf = r.i.crsf.map(|c| RcSample { arm: false, mission, t_us: old, ..c });
+                let t = r.now() + 1_000;
+                let out = r.at(t);
+                assert_eq!(out.state, want, "{name}, mission switch {mission}");
+                assert_eq!(out.arm_off_holds, mission, "{name}");
+            }
+        }
+    }
+
+    /// N19 section 2 (LAND from arm OFF with the mission switch ON) and section 4 (B2): Abort is refused with code 15
+    /// while the newest report has arm OFF; arm ON again changes nothing (Q1) and Abort is taken; the mission switch OFF
+    /// with arm OFF stops, with arm ON and Position hands back.
+    #[test]
+    fn n19_abort_from_an_arm_off_land_is_refused_with_code_15() {
+        let mut r = Rig::hold();
+        assert_eq!(column(&mut r, 4).state, State::Land);
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Land, denied(DenyReason::ArmSwitchOff)));
+        assert_eq!(DenyReason::ArmSwitchOff.code(), 15);
+        assert_eq!(column(&mut r, 1).state, State::Land, "Q1: the landing continues");
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.state, out.command), (State::Hold, Some(CommandResult::Accepted)));
+        let mut r = Rig::hold();
+        column(&mut r, 4);
+        assert_eq!(column(&mut r, 5).state, State::Stop);
+        let mut r = Rig::hold();
+        column(&mut r, 4);
+        assert_eq!(column(&mut r, 2).state, State::Pilot);
+    }
+
+    /// N19 1(5) and section 3: a CRSF flight at FS_HOLD_EN 1 never enters HOLD, AUTO or RETURN: a stick loss on T3' lands,
+    /// a radio command is refused with code 2 while its report is fresh and 3 after, a USB command with 1.
+    #[test]
+    fn n19_a_crsf_flight_at_fs_hold_en_1_has_no_hands_off_path() {
+        let mut r = Rig::crsf_pilot();
+        assert!(!r.h.mavlink_flight() && r.h.fs_hold_in_force());
+        assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::CrsfFresh));
+        let mut r = Rig::crsf_land();
+        for c in [Command::Start, Command::Abort, Command::Return] {
+            assert_eq!(r.cmd(c).command, denied(DenyReason::HandsOffDisabled), "{c:?}");
+            assert_eq!(r.cmd_on(c, Link::Usb).command, denied(DenyReason::NotRadioLink), "{c:?}");
+        }
+        assert_eq!(r.h.state(), State::Land);
+    }
 }

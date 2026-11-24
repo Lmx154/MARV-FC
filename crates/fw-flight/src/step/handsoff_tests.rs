@@ -3274,3 +3274,56 @@ fn batt_m_blind_is_unchanged_by_critical() {
         assert_eq!(run(b), none, "{b:?}");
     }
 }
+
+// ---- N19: the mission switch on the real step ----
+
+/// N19 1(3): a report of the other source on a MAVLink flight (and the reverse) leaves the gate, the sticks, the mode
+/// switch and the state alone, an arm-OFF one included; only such reports for longer than the stick-loss time are a stick
+/// loss of the flight's own source (HOLD on the MAVLink flight, LAND on the CRSF one).
+#[test]
+fn n19_the_source_latch_on_the_real_step() {
+    use fw_core::rc::RcSource::{Crsf, Receiver};
+    for (own, other, lost) in [(Receiver, Crsf, State::Hold), (Crsf, Receiver, State::Land)] {
+        let mut fly = Fly::build(true, true, POSITION, Tuning::DEFAULT.pilot_speed_xy_ms, own);
+        fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+        let before = (fly.f.shaper.sticks, fly.f.selected, fly.f.rc_newest);
+        fly.source = other;
+        for k in 0..2_000 {
+            let o = fly.rc(false, FULL, Switch3::Low);
+            assert!(o.armed && o.motors.throttles().is_some(), "{own:?} step {k}");
+            assert_eq!((fly.f.shaper.sticks, fly.f.selected, fly.f.rc_newest), before, "{own:?} step {k}");
+            if fly.state() != State::Pilot {
+                break;
+            }
+        }
+        assert_eq!(fly.state(), lost, "{own:?}");
+    }
+}
+
+/// N19 section 3 and I1 as amended: a receiver report never arms at FS_HOLD_EN 0, nor with the mission switch ON; with
+/// FS_HOLD_EN 1 and the switch OFF it arms. Control: CRSF arms at either value (the mission switch is not read on CRSF).
+#[test]
+fn n19_a_receiver_report_arms_only_at_fs_hold_en_1_with_the_mission_switch_off() {
+    use fw_core::rc::RcSource::{Crsf, Receiver};
+    for (source, fs, mission, arms) in [
+        (Receiver, false, false, false),
+        (Receiver, false, true, false),
+        (Receiver, true, true, false),
+        (Receiver, true, false, true),
+        (Crsf, false, false, true),
+        (Crsf, true, true, true),
+    ] {
+        let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
+        let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
+        f.set_fs_hold_en(fs);
+        let mut fly = Fly { f, cell, t: 1_000_000, source };
+        let mut armed = false;
+        for _ in 0..5 {
+            fly.rc_ms(false, [0.0; 4], Switch3::High, mission);
+            for _ in 0..10 {
+                armed |= fly.rc_ms(true, [0.0; 4], Switch3::High, mission).armed;
+            }
+        }
+        assert_eq!(armed, arms, "{source:?} FS_HOLD_EN {fs} mission switch {mission}");
+    }
+}

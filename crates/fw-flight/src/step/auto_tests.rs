@@ -937,3 +937,49 @@ fn batt_m_auto_critical_lands_holding_position_and_td_stops() {
     assert_eq!(run(Some((fw_core::battery::Level::Critical as u8))), raw, "action 0");
     assert_eq!(run(Some((fw_core::battery::Level::Critical as u8) | fw_core::battery::CELL_DESCEND)), raw, "action 1");
 }
+
+/// N19 section 7: the hand-back (column 2: the mission switch OFF, arm ON, Position, centred sticks) from AUTO at 3 m/s
+/// and from LAND: PILOT at that step; the vehicle brakes and holds; the height stays within the lead cap of the
+/// hand-back height (`pilot_alt_lead_s` x the smaller of the pilot's climb and descent speeds, 1.5 m).
+#[test]
+fn n19_hand_back_from_auto_at_3_m_s_and_from_land_brakes_and_holds() {
+    let t = Tuning::DEFAULT;
+    let cap = t.pilot_alt_lead_s * t.pilot_speed_up_ms.min(t.pilot_speed_dn_ms);
+    for from in [State::Auto, State::Land] {
+        let mut r = if from == State::Auto {
+            in_auto()
+        } else {
+            let mut r = Run::new(3.0, Some(square()));
+            assert_eq!(r.command(Command::Land), CommandResult::Accepted);
+            for _ in 0..1_600 {
+                r.fly();
+            }
+            r
+        };
+        assert_eq!(r.state(), from);
+        let speed = |r: &Run| libm::hypotf(r.cell.get().velocity_ms[0], r.cell.get().velocity_ms[1]);
+        let (v0, h0) = (speed(&r), height(&r));
+        assert!(r.rc(true, 0.5).armed);
+        assert_eq!(r.state(), State::Pilot, "{from:?}");
+        let (mut dh, mut held_at) = (0.0f32, [0.0f32; 2]);
+        let steps = 8_000u32;
+        for k in 0..steps {
+            let o = if k % 100 == 0 { r.rc(true, 0.5) } else { r.fly() };
+            assert!(o.armed && o.mode == Mode::Position, "{from:?} step {k}");
+            assert_eq!(r.state(), State::Pilot, "{from:?} step {k}");
+            dh = dh.max(libm::fabsf(height(&r) - h0));
+            if k == steps - 800 {
+                let p = r.cell.get().position_m;
+                held_at = [p[0], p[1]];
+            }
+        }
+        let p = r.cell.get().position_m;
+        let moved = libm::hypotf(p[0] - held_at[0], p[1] - held_at[1]);
+        std::println!("N19 hand-back from {from:?} at {v0:.2} m/s: height change {dh:.3} m (cap {cap} m), speed after 10 s {:.3} m/s, moved {moved:.3} m in the last 1 s", speed(&r));
+        if from == State::Auto {
+            assert!(v0 > 2.5, "{v0}");
+        }
+        assert!(speed(&r) < 0.2 && moved < 0.2, "{from:?}: braked and holding");
+        assert!(dh <= cap, "{from:?}: {dh} m");
+    }
+}
