@@ -1450,7 +1450,7 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 [[package]]
 name = "rc-port"
 version = "0.1.0"
-source = "git+https://github.com/Lmx154/rc-port.git?rev=a55df65c9bfa02898c5e13af4bbbf17f969fe5c2#a55df65c9bfa02898c5e13af4bbbf17f969fe5c2"
+source = "git+https://github.com/Lmx154/rc-port.git?rev=b2e996088ddccdc10b6703513d28f07193552db1#b2e996088ddccdc10b6703513d28f07193552db1"
 dependencies = [
  "crsf-codec",
  "embassy-rp",
