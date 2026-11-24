@@ -26,7 +26,7 @@ fn handshake() -> &'static Handshake {
 
 /// Latitude and longitude (1e-7 degree) of the point `n`, `e` metres from the fake's origin (`ned_from_geo` is linear in
 /// the differences).
-fn geo(n: f32, e: f32) -> (i32, i32) {
+pub(super) fn geo(n: f32, e: f32) -> (i32, i32) {
     let probe = ned_from_geo(&ORIGIN, &GeoPoint { lat_e7: ORIGIN.lat_e7 + 100_000, lon_e7: ORIGIN.lon_e7 + 100_000, alt_mm: ORIGIN.alt_mm });
     let (kn, ke) = (probe[0] / 100_000.0, probe[1] / 100_000.0);
     (ORIGIN.lat_e7 + libm::roundf(n / kn) as i32, ORIGIN.lon_e7 + libm::roundf(e / ke) as i32)
@@ -34,7 +34,7 @@ fn geo(n: f32, e: f32) -> (i32, i32) {
 
 /// The uploaded mission (`GDN_SRC` 1) of waypoints (north, east, z above home), GDN_RADIUS `radius_m`, return height
 /// 20 m, heights checked by core 0.
-fn mission(wps: &[(f32, f32, f32)], radius_m: f32, plan_id: u32) -> GdnTargets {
+pub(super) fn mission(wps: &[(f32, f32, f32)], radius_m: f32, plan_id: u32) -> GdnTargets {
     let mut m = GdnTargets { from_mission: true, heights_ok: true, return_m: 20.0, plan_id, radius_m, count: wps.len() as u8, ..MISSION_OFF };
     for (k, &(n, e, z)) in wps.iter().enumerate() {
         m.targets[k] = geo(n, e);
@@ -44,7 +44,7 @@ fn mission(wps: &[(f32, f32, f32)], radius_m: f32, plan_id: u32) -> GdnTargets {
 }
 
 /// The 30 m square at 10, 15, 10, 10 m.
-fn square() -> GdnTargets {
+pub(super) fn square() -> GdnTargets {
     mission(&[(30.0, 0.0, 10.0), (30.0, 30.0, 15.0), (0.0, 30.0, 10.0), (0.0, 0.0, 10.0)], 2.0, 0x5157_0001)
 }
 
@@ -342,4 +342,124 @@ fn g_start_denied_with_its_reason() {
     let mut r = Run::with(3.0, Some(square()), true, false);
     assert_eq!(r.state(), State::Land);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::HandsOffDisabled), "FS_HOLD_EN 0");
+}
+
+/// A run in AUTO on the square, 3 s after Start.
+fn in_auto() -> Run {
+    let mut r = Run::new(3.0, Some(square()));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    for _ in 0..2_400 {
+        r.fly();
+    }
+    assert_eq!(r.state(), State::Auto);
+    r
+}
+
+/// (c) A new plan id in AUTO gives HOLD at that step with the place dropped; Start then begins at waypoint 0 of the new
+/// list.
+#[test]
+fn c_a_new_plan_in_auto_holds_with_the_place_dropped() {
+    let mut r = in_auto();
+    while r.f.leg_active() != Some(1) {
+        r.fly();
+    }
+    let mut next = square();
+    next.plan_id = 0x5157_00ff;
+    r.f.set_mission(next);
+    r.fly();
+    assert_eq!((r.state(), r.f.leg_active()), (State::Hold, None));
+    for _ in 0..2_400 {
+        r.fly();
+        assert_eq!(r.state(), State::Hold);
+    }
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    assert_eq!(r.f.leg_active(), Some(0));
+}
+
+/// (d) No station heartbeat for 5 s in AUTO: HOLD with the place kept (Start resumes the same waypoint).
+#[test]
+fn d_station_lost_5_s_in_auto_holds_with_the_place_kept() {
+    let mut r = in_auto();
+    r.station = false;
+    let mut steps = 0u64;
+    while r.state() == State::Auto {
+        r.fly();
+        steps += 1;
+    }
+    let s = steps * DT_US;
+    assert!(s > hands_off::STATION_LOST_US && s <= hands_off::STATION_LOST_US + 2 * DT_US, "{s} us");
+    assert_eq!(r.state(), State::Hold);
+    r.station = true;
+    r.fly();
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    assert_eq!(r.f.leg_active(), Some(0), "the kept place: still waypoint 0");
+}
+
+/// (e) A plant that cannot follow (a steady push of 15 m/s^2 south, more than the tilt limit gives): e grows to E_MAX
+/// and the carrot stops; the vehicle is pushed on, and at the step after e passes X the track fault lands with the
+/// braking law, armed with the motors running; never STOP.
+#[test]
+fn e_a_vehicle_that_cannot_follow_stops_the_carrot_then_lands_braking() {
+    let mut r = in_auto();
+    let x = hands_off::track_fault_m(r.f.speed_xy_in_force());
+    r.push = [-15.0, 0.0];
+    let (mut frozen, mut prev, mut e_seen) = (0u32, None::<[f32; 3]>, 0.0f32);
+    loop {
+        let o = r.fly();
+        assert!(o.armed && o.motors.throttles().is_some(), "never a stop");
+        if r.state() != State::Auto {
+            break;
+        }
+        let e = r.f.track_error_m.unwrap();
+        e_seen = e_seen.max(e);
+        if let Setpoint::Position { position_m, .. } = o.setpoint {
+            if e >= guidance::LAG_E_MAX_M && prev.is_some_and(|p| p[0] == position_m[0] && p[1] == position_m[1]) {
+                frozen += 1;
+            }
+            prev = Some(position_m);
+        }
+    }
+    std::println!("carrot frozen on {frozen} steps with e >= E_MAX; e max in AUTO {e_seen:.3} m, X {x} m");
+    assert!(frozen > 100 && e_seen > x, "{frozen} {e_seen}");
+    assert_eq!(r.state(), State::Land);
+    assert!(r.f.hands_off.track_fault());
+    for _ in 0..800 {
+        let o = r.fly();
+        assert!(o.armed && o.motors.throttles().is_some());
+        assert_eq!(r.state(), State::Land);
+        match o.setpoint {
+            Setpoint::Position { position_m, velocity_ms, .. } => {
+                assert_eq!([position_m[0], position_m[1]], [o.nav.position_m[0], o.nav.position_m[1]], "braking");
+                assert_eq!([velocity_ms[0], velocity_ms[1]], [0.0, 0.0]);
+            }
+            ref s => panic!("{s:?}"),
+        }
+    }
+}
+
+/// (f) T3' lost in AUTO gives LAND after the debounce; the height lost gives BLIND; a stick report gives TAKEOVER; the
+/// motors run throughout.
+#[test]
+fn f_t3_lost_lands_height_lost_blind_and_sticks_take_over() {
+    let mut r = in_auto();
+    r.f.set_heading_ok(false);
+    let mut steps = 0;
+    while r.state() == State::Auto {
+        assert!(r.fly().armed);
+        steps += 1;
+    }
+    assert_eq!(r.state(), State::Land);
+    assert!(steps as u64 * DT_US >= hands_off::TIER_DEBOUNCE_US, "{steps}");
+    let mut r = in_auto();
+    let mut n = r.cell.get();
+    n.valid = super::althold_tests::ANGLE;
+    r.cell.set(n);
+    while r.state() == State::Auto {
+        assert!(r.fly().armed);
+    }
+    assert_eq!(r.state(), State::Blind);
+    let mut r = in_auto();
+    let o = r.rc(true, 0.5);
+    assert!(o.armed);
+    assert_eq!((r.state(), r.f.leg_active()), (State::Takeover, None));
 }

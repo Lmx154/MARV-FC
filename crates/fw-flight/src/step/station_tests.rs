@@ -123,15 +123,18 @@ impl Lcg {
 /// N: no command stops the motors. A random walk (reports, silences, coverage, motion, arming cycles; FS_HOLD_EN 1, the
 /// station heard on the radio link) with one of the five commands on a random link at 5 % of the steps, in whatever
 /// state the walk is in. Every disarm must have the pilot's switch (a report with arm OFF at that step), the touchdown
-/// rule (TD held at the previous step) or a stick loss on the ground as its cause.
+/// rule (TD held at the previous step) or a stick loss on the ground as its cause. H3b: the 30 m square is uploaded and
+/// the battery known OK, so Start is ACCEPTED in HOLD and AUTO is flown (counted, required).
 #[test]
 fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
     let mut accepted = std::collections::BTreeMap::<(u8, u8), u32>::new();
-    let mut disarms = 0u32;
+    let (mut disarms, mut auto_steps) = (0u32, 0u32);
     for seed in [0x5eed_0001u64, 0x5eed_0002, 0x5eed_0003] {
         let cell = Cell::new(nav_at(0.0, ANGLE));
         let mut f = flight(&cell, handshake(), &Tuning::DEFAULT);
         f.set_fs_hold_en(true);
+        f.set_mission(super::auto_tests::square());
+        f.set_battery_ok(true);
         let mut rng = Lcg(seed);
         let mut t = 1_000_000u64;
         let (mut quiet, mut arm) = (0u32, false);
@@ -185,6 +188,7 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
                 f.set_command(c);
             }
             let o = f.step(&input(t, report));
+            auto_steps += u32::from(f.hands_off_state() == State::Auto);
             let result = f.take_command_result();
             assert_eq!(result.is_some(), command.is_some(), "an answer exactly for a step with a command");
             if let (Some(c), Some(CommandResult::Accepted)) = (command, result) {
@@ -203,7 +207,8 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
             }
         }
     }
-    std::println!("accepted (command, state code): {accepted:?}; disarms {disarms}");
+    std::println!("accepted (command, state code): {accepted:?}; disarms {disarms}; AUTO steps {auto_steps}");
+    assert!(accepted.contains_key(&(Command::Start as u8, State::Hold.code())) && auto_steps > 1_000, "AUTO flown");
     assert!(accepted.keys().any(|&(_, s)| s == State::Hold.code()), "the walk took commands in HOLD");
     assert!(accepted.keys().any(|&(_, s)| s == State::Land.code() || s == State::Blind.code()), "and in LAND or BLIND");
     assert!(disarms > 0, "the walk disarms");

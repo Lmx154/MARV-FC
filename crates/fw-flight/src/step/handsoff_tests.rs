@@ -6,6 +6,7 @@ extern crate std;
 
 use super::althold_tests::{ALTITUDE, ANGLE, DT_US, TestFlight, flight, input, nav_at};
 use super::*;
+use crate::hands_off::{Command, Link, StationCommand};
 use core::cell::Cell;
 
 /// Everything Position needs.
@@ -2462,6 +2463,13 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     // newest report in TAKEOVER since its entry).
     let (mut radio, mut mavlink, mut status, mut entry, mut m, mut k_set) =
         (Lcg(seed ^ 0xa5a5), false, None::<u64>, 0u64, false, false);
+    // H3b: the 30 m square uploaded, the battery known OK, the station heard on the radio link (dropped for a while now
+    // and then) and one of the five commands on the radio link at 0.5 % of the steps, from a generator of its own (the main
+    // sequence is unchanged): AUTO is reached and flown.
+    f.set_mission(super::auto_tests::square());
+    f.set_battery_ok(true);
+    let (mut cmds, mut station, mut auto_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32);
+    let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
     for k in 0..steps {
         match fs {
             Some(v) => f.set_fs_hold_en(v),
@@ -2525,6 +2533,15 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
             status = Some(t);
             f.set_last_radio_status_us(status);
         }
+        if cmds.chance(1) {
+            station = !station || cmds.chance(500);
+        }
+        if station {
+            f.set_last_radio_heartbeat_us(Some(t));
+        }
+        if cmds.chance(5) {
+            f.set_command(StationCommand { command: all[(cmds.next() % 5) as usize], link: Link::Radio });
+        }
         let mut i = input(t, rc);
         i.sensors.imu1.reading.accel_ms2 = match accel {
             0 => AT_REST,
@@ -2556,7 +2573,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         }
         k_set |= state == State::Takeover && f.rc_newest.is_some_and(|r| r.arm);
         assert_eq!(f.radio_status_seen(), hands_off(state) && m, "seed {seed:#x} step {k}: M");
-        assert!(!matches!(state, State::Return | State::Auto), "seed {seed:#x} step {k}: return_built false");
+        assert!(state != State::Return, "seed {seed:#x} step {k}: return_built false");
+        auto_steps += u32::from(state == State::Auto);
         homed += u32::from(o.armed && f.hands_off.home().is_some());
         let lost = newest.is_none_or(|n| t - n > tuning.rc_fs_timeout_us);
         if prev_armed && ever && (!o.armed || o.motors.throttles().is_none()) {
@@ -2587,6 +2605,9 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
         prev_state = state;
     }
     assert!(homed > 10_000, "seed {seed:#x}: home latched (N10 (v)) on {homed} armed steps");
+    std::println!("NS walk {seed:#x}: AUTO steps {auto_steps}");
+    // Required at FS_HOLD_EN 1; with it changing (in force only from a disarmed step) the walk seldom gets there.
+    assert!(fs != Some(true) || auto_steps > 500, "seed {seed:#x}: AUTO reached ({auto_steps} steps)");
     counts
 }
 
