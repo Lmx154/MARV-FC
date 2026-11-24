@@ -502,6 +502,11 @@ impl HandsOff {
         self.fs_in_force
     }
 
+    /// "Ever airborne" in force (N1, N10 (iii)): the latch set at an armed step since arming, as of the latest step.
+    pub fn ever_airborne(&self) -> bool {
+        self.ever_airborne
+    }
+
     /// N12's M in force: a hands-off state, and a RADIO_STATUS arrived after its entry (the log's M bit).
     pub fn radio_status_seen(&self) -> bool {
         self.state.is_hands_off() && self.radio_seen

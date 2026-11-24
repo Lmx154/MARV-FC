@@ -146,6 +146,49 @@ pub const BLIND_PROBE_RAMP_US: u64 = 1_000_000;
 /// over that time. Approved by the owner 2026-11-24, no outside source.
 pub const BLIND_CORRECT_US: u64 = 1_000_000;
 
+/// Crash rule K (decision-mavlink-mode-20261123, Amendment N, N5, shadow): K would fire when its four terms have held
+/// together this long, us (ArduPilot CRASH_CHECK_TRIGGER_SEC 2, ArduCopter crash_check.cpp:4).
+pub const CRASH_TRIGGER_US: u64 = 2_000_000;
+
+/// K's lean term: the tilt from vertical over 15 deg, as its cosine (ArduPilot CRASH_CHECK_ANGLE_MIN_DEG 15,
+/// crash_check.cpp:6).
+const CRASH_COS_LEAN_MIN: f32 = 0.965_925_8;
+
+/// K's error term: the angle between the thrust axis of the attitude setpoint and that of the estimate over 30 deg, as its
+/// cosine (ArduPilot CRASH_CHECK_ANGLE_DEVIATION_DEG 30, crash_check.cpp:5; `get_att_error_angle_deg` is the thrust
+/// error angle, AC_AttitudeControl.h:345).
+const CRASH_COS_ERROR_MIN: f32 = 0.866_025_4;
+
+/// K's acceleration term: the 1 Hz filtered earth-frame acceleration (gravity removed) under this, m/s^2 (ArduPilot
+/// CRASH_CHECK_ACCEL_MAX 3.0, crash_check.cpp:8).
+const CRASH_ACCEL_MAX_MSS: f32 = 3.0;
+
+/// K's speed term: |v| under this when the velocity is valid, m/s (ArduPilot CRASH_CHECK_SPEED_MAX 10, crash_check.cpp:7).
+const CRASH_SPEED_MAX_MS: f32 = 10.0;
+
+/// Crash rule K's state after a step (Amendment N, N5, shadow: it reaches no output, the gate, the latch or the state
+/// machine). The four terms are false on a step K does not watch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CrashStatus {
+    /// The lean over 15 deg.
+    pub lean: bool,
+    /// The setpoint's thrust axis more than 30 deg from the estimate's.
+    pub error: bool,
+    /// The filtered acceleration under 3 m/s^2.
+    pub accel: bool,
+    /// |v| under 10 m/s, or the velocity not valid.
+    pub speed: bool,
+    /// How long the four have held together, us.
+    pub held_us: u64,
+}
+
+impl CrashStatus {
+    /// K would fire: the four terms have held together for `CRASH_TRIGGER_US`.
+    pub fn would_fire(&self) -> bool {
+        self.held_us >= CRASH_TRIGGER_US
+    }
+}
+
 /// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
 /// NoWaypoints and AUTO cannot be reached.
 const NO_MISSION: MissionFacts = MissionFacts {
@@ -488,6 +531,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// N13: the correction was made (or skipped) in this BLIND episode; BLIND's collective after it, N, when made.
     blind_done: bool,
     blind_trim_n: Option<f32>,
+    /// Crash rule K, shadow (Amendment N, N5): its terms and timer after the latest step.
+    crash: CrashStatus,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -595,6 +640,13 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             blind_steps: 0,
             blind_done: false,
             blind_trim_n: None,
+            crash: CrashStatus {
+                lean: false,
+                error: false,
+                accel: false,
+                speed: false,
+                held_us: 0,
+            },
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -693,6 +745,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// ([`hands_off_msg_due`], N10 (iv)), so the log of an image flown with 0 changes only after a stick loss.
     pub fn fs_hold_in_force(&self) -> bool {
         self.hands_off.fs_hold_in_force()
+    }
+
+    /// Crash rule K after the latest step (Amendment N, N5, shadow): the four terms and how long they have held.
+    pub fn crash_status(&self) -> CrashStatus {
+        self.crash
+    }
+
+    /// K would fire after the latest step (shadow: nothing acts on it but the board's log).
+    pub fn crash_would_fire(&self) -> bool {
+        self.crash.would_fire()
     }
 
     /// The estimator, read only (the log of its own counters, packet E2).
@@ -1020,6 +1082,28 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         {
             self.still = still;
         }
+        // Crash rule K, shadow (Amendment N, N5; ArduPilot crash_check.cpp:60-95): on an armed step, ever airborne since
+        // arming, TD not held, tilt and rates valid, the four terms; their time together. The setpoint's attitude is the
+        // one the controller tracked this step: Angle's and Altitude's from the setpoint, Position's from the controller;
+        // none when the demand was refused (Rates and Waypoint never fly here). Nothing reads it but `crash_status`.
+        let q_sp = match setpoint {
+            _ if demand.is_err() => None,
+            Setpoint::Attitude { attitude, .. } | Setpoint::Altitude { attitude, .. } => Some(attitude),
+            Setpoint::Position { .. } => Some(attitude_sp),
+            Setpoint::Rates { .. } | Setpoint::Waypoint { .. } => None,
+        };
+        let watch = self.gate.armed()
+            && self.hands_off.ever_airborne()
+            && self.still_us < self.land_detect_us
+            && nav.valid.tilt
+            && nav.valid.rates;
+        let (lean, error, accel, speed) = if watch {
+            crash_terms(&nav, q_sp, self.accel_ef_mss)
+        } else {
+            (false, false, false, false)
+        };
+        let held_us = if lean && error && accel && speed { self.crash.held_us.saturating_add(dt_us) } else { 0 };
+        self.crash = CrashStatus { lean, error, accel, speed, held_us };
         // N13: BLIND's one-shot correction, before the probe can start: the mean of the unfiltered earth-frame net
         // acceleration down (the TD filter's input, gravity removed) over the episode's first `BLIND_CORRECT_US`, non-finite
         // samples skipped; with at least half of them finite the collective becomes, once, the first second's collective
@@ -1140,6 +1224,28 @@ fn position_covered(valid: &Valid) -> bool {
         heading_rate_rads: 0.0,
     };
     valid.covers(&probe.requires())
+}
+
+/// Crash rule K's terms (lean, error, accel, speed; Amendment N, N5) for the estimate `nav`, the attitude setpoint `q_sp`
+/// the controller tracked (`None`: no error term) and the filtered earth-frame acceleration `accel_mss`. The angles are
+/// those of the thrust axes, compared as cosines; a zero or non-finite quaternion, acceleration or valid velocity makes
+/// the terms it enters false.
+fn crash_terms(nav: &NavState, q_sp: Option<[f32; 4]>, accel_mss: [f32; 3]) -> (bool, bool, bool, bool) {
+    // The thrust axis (body down) of [w, x, y, z] in NED, times |q|^2, and |q|^2.
+    let axis = |[w, x, y, z]: [f32; 4]| {
+        let a = [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), w * w - x * x - y * y + z * z];
+        (a, w * w + x * x + y * y + z * z)
+    };
+    let (a, n) = axis(nav.attitude);
+    let lean = a[2] < CRASH_COS_LEAN_MIN * n;
+    let error = q_sp.is_some_and(|q| {
+        let (b, m) = axis(q);
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2] < CRASH_COS_ERROR_MIN * n * m
+    });
+    let accel = accel_mss.iter().map(|v| v * v).sum::<f32>() < CRASH_ACCEL_MAX_MSS * CRASH_ACCEL_MAX_MSS;
+    let speed = !(nav.valid.velocity_ne && nav.valid.velocity_d)
+        || nav.velocity_ms.iter().map(|v| v * v).sum::<f32>() < CRASH_SPEED_MAX_MS * CRASH_SPEED_MAX_MS;
+    (lean, error, accel, speed)
 }
 
 /// What the log writes at one flight step (decision-flight-logging-20261119, section 1).
@@ -2578,3 +2684,6 @@ mod gain_tests;
 
 #[cfg(test)]
 mod handsoff_tests;
+
+#[cfg(test)]
+mod crash_tests;
