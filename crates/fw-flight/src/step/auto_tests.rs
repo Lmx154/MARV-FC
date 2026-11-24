@@ -983,3 +983,31 @@ fn n19_hand_back_from_auto_at_3_m_s_and_from_land_brakes_and_holds() {
         assert!(dh <= cap, "{from:?}: {dh} m");
     }
 }
+
+/// Review of N19, item 4: in AUTO, the stick reports lost for 3 s (more than 1.0 s, less than the station's 5 s), then
+/// the first fresh report: the mission switch ON with arm ON carries AUTO on at the same waypoint; the mission switch OFF
+/// with arm ON and Position hands back to PILOT.
+#[test]
+fn n19_the_first_report_after_a_stick_loss_in_auto_is_its_own_column() {
+    // `in_auto`: Start's step carried the last report, then 2 400 steps without one.
+    assert!(2_400 * DT_US > Tuning::DEFAULT.rc_fs_timeout_us && 2_400 * DT_US < hands_off::STATION_LOST_US);
+    for mission in [true, false] {
+        let mut r = in_auto();
+        let wp = r.f.leg_active();
+        assert!(wp.is_some());
+        r.t += DT_US;
+        let t = r.t;
+        r.f.set_last_radio_heartbeat_us(Some(t));
+        let report = RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 }, arm: true, switch6: Switch3::High, source: r.source, mission, t_us: t };
+        assert!(r.f.step(&input(t, Some(report))).armed);
+        if mission {
+            assert_eq!((r.state(), r.f.leg_active()), (State::Auto, wp));
+            for _ in 0..400 {
+                r.fly();
+            }
+            assert_eq!((r.state(), r.f.leg_active()), (State::Auto, wp), "flying on");
+        } else {
+            assert_eq!((r.state(), r.f.leg_active()), (State::Pilot, None));
+        }
+    }
+}

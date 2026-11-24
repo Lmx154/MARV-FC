@@ -4285,4 +4285,95 @@ mod tests {
         }
         assert_eq!(r.h.state(), State::Land);
     }
+
+    /// Review of N19, item 1: the walk of `hands_off_i8_i12_walk_...` on a CRSF flight at FS_HOLD_EN 1 (every report
+    /// from CRSF, the mission switch never read): never a MAVLink flight, never HOLD, AUTO or RETURN, and the old C1
+    /// formula of 4552d4f holds: A2' and C1's hand-over only after P on a report not High with arm ON, and arm_off_holds =
+    /// hands-off, K clear, M set. Counted so it cannot pass vacuously.
+    #[test]
+    fn n19_crsf_walk_at_fs_hold_en_1_keeps_the_c1_lock() {
+        let mut rng = Lcg(0x5eed_0001);
+        let mut h = HandsOff::new(&Tuning::DEFAULT);
+        let mut i = Rig::crsf().i;
+        let mut seen = [0u32; 8];
+        let (mut prev, mut high_seen) = (State::Stop, false);
+        let (mut k, mut p) = (false, false);
+        let (mut hand_overs, mut held, mut armed_steps) = (0u32, 0u32, 0u32);
+        let (mut m, mut entry) = (false, 0u64);
+        for _ in 0..200_000 {
+            random_inputs(&mut rng, &mut i, true);
+            i.crsf = i.crsf.map(|c| RcSample { source: RcSource::Crsf, mission: false, ..c });
+            let prev_ho = !matches!(prev, State::Pilot | State::Stop);
+            if prev_ho && i.last_radio_status_us.is_some_and(|t| t > entry) {
+                m = true;
+            }
+            let out = h.step(&i);
+            assert!(!h.mavlink_flight());
+            assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{out:?}");
+            if !prev_ho && out.hands_off {
+                (m, entry) = (false, i.now_us);
+            }
+            let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
+            let arm_now = i.crsf.is_some_and(|r| r.arm);
+            if prev == State::Takeover && out.state == State::Pilot {
+                assert!(high_seen && !high_now, "hand-over: seen {high_seen}, now High {high_now}");
+                assert!(p && !high_now && arm_now, "hand-over: P {p}, now High {high_now}, arm {arm_now}");
+                hand_overs += 1;
+            }
+            if out.state == State::Takeover {
+                if prev != State::Takeover {
+                    high_seen = false;
+                    (k, p) = (false, false);
+                }
+                high_seen |= high_now;
+                k |= arm_now;
+                p |= arm_now && high_now;
+            }
+            let k_now = out.state == State::Takeover && k;
+            assert_eq!(out.arm_off_holds, out.hands_off && !k_now && m, "{out:?}");
+            if i.crsf.is_some_and(|r| !r.arm) && out.state != State::Stop {
+                assert!(out.arm_off_holds, "arm OFF outside STOP only while held: {out:?}");
+                held += 1;
+            }
+            assert_eq!(out.hands_off, !matches!(out.state, State::Pilot | State::Stop));
+            if !i.armed {
+                assert_eq!(out.state, State::Stop);
+            }
+            armed_steps += u32::from(i.armed);
+            seen[usize::from(out.state.code() - 1)] += 1;
+            prev = out.state;
+        }
+        for s in [State::Pilot, State::Takeover, State::Land, State::Blind, State::Stop] {
+            assert!(seen[usize::from(s.code() - 1)] > 100, "{s:?} reached: {seen:?}");
+        }
+        assert!(hand_overs > 20 && held > 20 && armed_steps > 10_000, "lock exercised: {hand_overs} hand-overs, {held} held, {armed_steps} armed steps");
+    }
+
+    /// Review of N19, items 2 and 3: on a MAVLink flight never airborne since arming, PILOT with arm OFF and the mission
+    /// switch ON is STOP (the "never airborne" half of column 4's ground), and so is a stick loss (`lost()`); ever
+    /// airborne with the latch false and TD not held it is LAND, then STOP at the step TD holds.
+    #[test]
+    fn n19_pilot_arm_off_with_the_mission_switch_on_on_the_ground() {
+        for loss in [false, true] {
+            let mut r = Rig::new();
+            r.i.td_held = false;
+            r.step();
+            r.i.armed = true;
+            assert_eq!(r.report(T0 + 1_000, Switch3::High).state, State::Pilot);
+            assert!(r.h.mavlink_flight() && !r.h.ever_airborne());
+            let out = if loss { r.at(T0 + 1_000 + LOSS + 1) } else { column(&mut r, 4) };
+            assert_eq!((out.state, out.disarm, out.arm_off_holds), (State::Stop, true, false), "stick loss {loss}");
+        }
+        let mut r = Rig::pilot();
+        assert!(r.h.ever_airborne());
+        r.i.airborne = false;
+        r.i.td_held = false;
+        let out = column(&mut r, 4);
+        assert_eq!((out.state, out.disarm, out.arm_off_holds), (State::Land, false, true));
+        let t = r.now() + 1_000;
+        assert_eq!(r.at(t).state, State::Land, "TD not held");
+        r.i.td_held = true;
+        let out = r.step();
+        assert_eq!((out.state, out.disarm), (State::Stop, true), "TD held");
+    }
 }

@@ -2507,6 +2507,12 @@ enum Cause {
 /// "MAVLink model" periods (a generator of its own); an arm-OFF report that stops while K is clear in a hands-off state
 /// must have M clear (P), so with M set such a stop has a cause of T or F. Returns the count per cause, then the arm-OFF
 /// reports held with M set (armed after them), then the stick losses in the air handled as hands-off states.
+/// N19, the NS walk's oracle on a MAVLink flight: the newest report the flight took (stale included) has arm OFF and the
+/// mission switch OFF (column 5, P).
+fn arm_off_ms_off(newest: Option<RcSample>) -> bool {
+    newest.is_some_and(|r| !r.arm && !r.mission)
+}
+
 fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSource) -> [u32; 6] {
     let receiver = source == fw_core::rc::RcSource::Receiver;
     // N19: the mission switch (receiver reports only), OFF while disarmed (a report with it ON never arms), mostly ON in
@@ -2660,7 +2666,7 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSou
         if prev_armed && ever && (!o.armed || o.motors.throttles().is_none()) {
             let cause = if gap {
                 Cause::Gap
-            } else if rc.is_some_and(|r| !r.arm) && !held {
+            } else if if receiver { arm_off_ms_off(f.rc_newest) } else { rc.is_some_and(|r| !r.arm) && !held } {
                 Cause::ArmOff
             } else if !(o.nav.valid.tilt && o.nav.valid.rates) || !finite {
                 Cause::Coverage
@@ -2674,7 +2680,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSou
             };
             counts[cause as usize] += 1;
         }
-        counts[4] += u32::from(held && rc.is_some_and(|r| !r.arm) && o.armed);
+        let held_now = if receiver { f.rc_newest.is_some_and(|r| !r.arm && r.mission) } else { held && rc.is_some_and(|r| !r.arm) };
+        counts[4] += u32::from(held_now && o.armed);
         counts[5] += u32::from(prev_armed && air && prev_state == State::Pilot && hands_off(state));
         if !o.armed {
             ever = false;
