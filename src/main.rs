@@ -1097,9 +1097,10 @@ async fn supervise() -> ! {
             xip_probe::stat(now);
         }
         // The mission's change counter moved (a commit or a clear): the shadow guidance's targets are chosen again (`GDN_SRC`).
+        // The list first, then the plan id: a commit between them leaves `changed` true, so both go again next tick.
         if mission::changed() {
-            station::push_plan();
             flight::push_gdn("mission changed");
+            station::push_plan();
         }
         tick = tick.wrapping_add(1);
     }
