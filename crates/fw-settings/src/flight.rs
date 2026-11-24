@@ -151,7 +151,7 @@ mod tests {
         assert_eq!(def.apply, Apply::Live);
         assert!(!def.calibration && !def.read_only);
         assert_eq!(crate::TABLE[SPEED_XY_AT - 1].name, "GPS_GNSS");
-        assert_eq!(SPEED_XY_AT + COUNT, crate::COUNT);
+        assert_eq!(SPEED_XY_AT + COUNT + crate::batt::FS_COUNT, crate::COUNT);
     }
 
     #[test]
@@ -181,7 +181,7 @@ mod tests {
     fn the_gdn_parameters_are_appended_at_95_to_104_with_their_types_defaults_ranges_and_class() {
         use ParamValue::{F32, I32};
         assert_eq!(GDN_COUNT_AT, RPM_NOTCH_EN_AT + 1);
-        assert_eq!(GDN_COUNT_AT + 10 + GAIN_COUNT + 4, crate::COUNT);
+        assert_eq!(GDN_COUNT_AT + 10 + GAIN_COUNT + 4 + crate::batt::FS_COUNT, crate::COUNT);
         let mut expected = std::vec![("GDN_COUNT", I32(0), I32(0), I32(4)), ("GDN_RADIUS", F32(2.0), F32(0.05), F32(10.0))];
         for k in 0..GDN_SLOTS {
             expected.push((GDN_LAT[k], I32(0), I32(-900_000_000), I32(900_000_000)));
@@ -269,8 +269,8 @@ mod tests {
     fn the_gain_parameters_are_appended_at_105_to_118_in_table_order_f32_device_0_live() {
         assert_eq!(GAINS_AT, GDN_COUNT_AT + 10);
         assert_eq!(GAINS_AT + GAIN_COUNT, GDN_SRC_AT);
-        assert_eq!(GDN_SRC_AT + 4, crate::COUNT);
-        assert_eq!(crate::COUNT, 123);
+        assert_eq!(GDN_SRC_AT + 4 + crate::batt::FS_COUNT, crate::COUNT);
+        assert_eq!(crate::COUNT, 128);
         assert_eq!(crate::TABLE[GAINS_AT - 1].name, "GDN_LON4");
         let names = [
             "ATC_ANG_RP_P",
@@ -353,7 +353,7 @@ mod tests {
         }
     }
 
-    /// All 120 parameters stored as non-default values (the worst case of a record) fit one record in one sector.
+    /// All 128 parameters stored as non-default values (the worst case of a record) fit one record in one sector.
     #[test]
     fn all_120_parameters_as_non_default_values_fit_one_record_and_one_sector() {
         use fw_core::record::{self, Boot, ENTRY_LEN, Entry, HEADER_LEN, MAX_ENTRIES, SECTOR_LEN};
@@ -386,7 +386,7 @@ mod tests {
         assert_eq!((def.device, def.default, def.min, def.max, def.apply), (0, I32(0), I32(0), I32(1), Apply::Live));
         assert!(!def.calibration && !def.read_only);
         assert_eq!(crate::TABLE[FS_HOLD_EN_AT - 1].name, "GDN_ALT_MAX");
-        assert_eq!(FS_HOLD_EN_AT + 1, crate::COUNT);
+        assert_eq!(FS_HOLD_EN_AT + 1, crate::batt::FS_AT);
         let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
         assert_eq!(p.get_named(FS_HOLD_EN), Some(I32(0)));
         let i = u16::try_from(FS_HOLD_EN_AT).unwrap();

@@ -11,7 +11,7 @@ It has no flight functionality.
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
   `fw_core::sys_status`: BOOT while a row is Starting in the first 3 s, then STANDBY), SYS_STATUS at 1 Hz
   (the three sensor masks from the device rows), `MARV_DEVICE_STATUS` (42421) for every device row once per
-  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 92 parameters of BARO, MAG (with the compass calibration's soft-iron matrix and record), BATT, GNSS (its fix interval), the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
+  second, ESC_STATUS and ESC_INFO (see ESC telemetry), the parameter protocol over the 128 parameters of BARO, MAG (with the compass calibration's soft-iron matrix and record), BATT, GNSS (its fix interval), the two IMUs' calibration offsets and chip settings, the SD card's `LOG_BACKEND_TYPE`, the RC stick mapping, the sensor orientation, the motors' pole count and the status LED's brightness (see Parameters),
   STATUSTEXTs from the supervisor and from refused parameter writes, and the commands (see Commands).
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
@@ -456,7 +456,7 @@ Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
 ## Parameters
 
-The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (92 entries: 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1 + 1 + 1 + 11: `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` are appended at indices 76, 77, 78, 79 and 80, and the compass calibration's eleven `MAG_DIAG*` to `MAG_HLT_INC` last, indices 81 to 91). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
+The parameter tables: BARO (below), MAG, BATT, the IMUs' offsets, SD, RC and the IMU chip settings (after it); `fw_settings::TABLE` joins them in that order (128 entries, the first 92 being 5 + 5 + 3 + 12 + 1 + 44 + 6 + 1 + 1 + 1 + 1 + 1 + 11: `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT` and `GPS_RATE_MS` are appended at indices 76, 77, 78, 79 and 80, and the compass calibration's eleven `MAG_DIAG*` to `MAG_HLT_INC` last, indices 81 to 91; then the 31 flight parameters at 92 to 122 and the five low-battery parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` at 123 to 127, see BATT parameters). The barometer's (`crates/fw-settings/src/baro.rs`, a `static [ParamDef; 5]`), all `I32`, device BARO,
 apply class Configure. The values are plain integers; the defaults are what `bmp581::Config::new()` ran
 before:
 
@@ -513,7 +513,7 @@ through the driver's `Config::validate` before the value is stored); the three o
 
 ### BATT parameters
 
-`crates/fw-settings/src/batt.rs`, device BATT, all `F32`, `Live`: applied to the next sample, no validator. The defaults are the
+`crates/fw-settings/src/batt.rs`, device BATT, `Live`: applied to the next sample, no validator; the first three are `F32`, the five low-battery rows after them are in the same table below. The defaults are the
 `adc-battery` bench program's configuration.
 
 | Name | Default | Range | Means |
@@ -521,6 +521,11 @@ through the driver's `Config::validate` before the value is stored); the three o
 | `BATT_V_SCALE` | 1.0 | 0.1 to 10 | gain on the battery voltage (100k / 10k divider, 3.3 V reference): the crate's `gain_ppm` is `(scale - 1) * 1e6`; 2.0 doubles the voltage; the bench's one-point trim for this board would be 1.007603 (not applied) |
 | `BATT_A_SCALE` | 0.02 | 0 to 10 | volts at the pin per ampere of the ESC's current output; the default is the crate's PLACEHOLDER, not calibrated; 0 reads 0 A |
 | `BATT_A_OFFSET` | 0.0 | -3.3 to 3.3 | volts at the pin with no current (the crate's `zero_uv`) |
+| `BATT_CELLS` | 4 (`I32`) | 0 to 12 | cells in series; 0 turns the low-battery monitor off (Amendment BATT, indices 123 to 127, core 0 reads them at 10 Hz) |
+| `BATT_LOW_CELL` | 3.6 | 3.0 to 4.2 | LOW threshold in volts per cell; the pack voltage is compared with this times `BATT_CELLS` |
+| `BATT_CRT_CELL` | 3.5 | 3.0 to 4.2 | CRITICAL threshold in volts per cell; at or above `BATT_LOW_CELL` the monitor is off with one notice |
+| `BATT_LOW_TIMER` | 10 (`I32`) | 0 to 120 | seconds the voltage must stay below a level (strictly more than this long) before it is reached; 0 turns the monitor off |
+| `BATT_FS_CRT_ACT` | 0 (`I32`) | 0 to 1 | action at CRITICAL: 0 warn only, 1 also descend (Altitude, throttle stick read as 0.0 until the mode switch changes or the disarm; a request already true when the vehicle arms starts nothing) |
 
 ### IMU offset parameters
 
@@ -693,7 +698,7 @@ written.
   seqlock every 4th tick of the collector's 10 ms ticker, only a new sample, its own time), BARO (about 50 Hz) and MAG (about 100 Hz) at every new sample, GPS at each receiver sample (the fix rate:
   status, GPS week and ms from UTC, 0/0 before a time is known) and with each GPS record one GPA and, when the sample has a velocity, one GPV (below), BAT at each sample (10 Hz), RCIN at 10 Hz while
   stick reports are fresh, DEV for the 8 rows at 1 Hz and at every state change, MSG for every STATUSTEXT (the
-  text ring's third cursor: the boot texts first), PARM for all 92 parameters when a log opens and after
+  text ring's third cursor: the boot texts first), PARM for all 128 parameters when a log opens and after
   every change of a value, whatever made it (a set, a calibration result, a reset, a reload: the collector
   compares the store with what it logged, every tick), DSF once per second (Dp records dropped in this log, Blk and Bytes of this log, FMn/FMx/FAv the
   ring's free bytes over the second), and with it FDS (Dp flight-ring records dropped in this log, FMn the flight
@@ -711,6 +716,7 @@ written.
   record's RMC speed and course offline. Format character `i` (`i32`) is new in `dflog`.
 - MODE (id 150, format `QBB`, 13 B, columns `TimeUS,Sel,Eff`; decision-nav-eskf-20261120 8c, F6): the selected and the effective flight mode, written by `Stepper` at the first step and at every change of either, armed or not (codes as MOT's `Mode`: 0 Acro, 1 Angle, 2 Altitude, 3 Position; a record the ring dropped is offered again at the next step).
 - SPN (id 151, format `Qfffffff`, 39 B, columns `TimeUS,PN,PE,PD,VN,VE,VD,Hdg`; 8c, F1): the altitude setpoint, only while the setpoint is Altitude, with the step block's cadence (armed every step, disarmed every 8th): `PD` the target height (m, down positive), `VD` the climb-rate feed-forward (m/s, down positive); `PN`, `PE`, `VN`, `VE`, `Hdg` are 0 (Position will fill them). About 31 kB/s more at 800 Hz armed in Altitude, none in Angle; the flight ring's free space in Altitude is not measured yet.
+- BFS (id 157, format `QBBfB`, 18 B, columns `TimeUS,Level,Act,Volt,Cells`; Amendment BATT): one record each time the low-battery monitor reaches a level, on its own (not in the per-step block): `Level` 1 LOW or 2 CRITICAL, `Act` `BATT_FS_CRT_ACT`, `Volt` the pack voltage in V, `Cells` `BATT_CELLS`.
 - NKF1 (id 147, format `QBffffffffffB`, 53 B, columns `TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld`), NKF2 (id 148, format
   `QBffffffffffff`, 60 B, columns `TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd`) and NKI (id 149, format `QBBffB`,
   22 B, columns `TimeUS,I,Src,Inn,Var,Ok`), decision-nav-eskf-20261120 8c, B5, C8 (packet E2), written by IMU1's `Stepper` on core 1
@@ -1200,8 +1206,7 @@ those ends FAILED (a calibration that runs out of time counts as FAILED), and re
 props off). A cancelled calibration shows nothing. During the boot (the white and the roll call) an event waits until
 the roll call has finished; at most one event waits, and a newer one replaces an older one.
 
-**Not shown, on purpose:** sensor reads, telemetry, radio or USB traffic, parameter writes, low battery (the firmware has no
-low-battery threshold), the watchdog's reset cause.
+**Not shown, on purpose:** sensor reads, telemetry, radio or USB traffic, parameter writes, a battery above the monitor's LOW level (`BATT_LOW_CELL`; LOW blinks yellow and CRITICAL red at 5 Hz, between rows 1 and 2 of the running display), the watchdog's reset cause.
 
 **Brightness:** the parameter `LED_BRIGHT` (see Parameters), 0 off, 1 dim (the default), 2 medium, 3 bright. With the
 feature `esc-off` the ESC row reads FAILED, so the running display is a yellow pulse. A build of `sd-fat-probe` has no SD

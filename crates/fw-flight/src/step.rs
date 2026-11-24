@@ -68,6 +68,20 @@ pub struct StepOut {
     pub rate: RateLog,
 }
 
+/// What the low-battery descent (Amendment BATT, `BATT_FS_CRT_ACT` 1) is doing, by value so core 0 can raise the texts
+/// (the flight core has none): [`Flight::batt_descent`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BattDescent {
+    /// Not asked for, or the arm state says nothing.
+    Off = 0,
+    /// Asked for, not cancelled, and the estimate covers Altitude: the throttle stick reads 0.0.
+    Descending = 1,
+    /// Asked for, and a change of the mode switch cancelled it until disarm.
+    Cancelled = 2,
+    /// Asked for, but the estimate does not cover Altitude: Angle, the pilot's throttle.
+    NoHeight = 3,
+}
+
 /// The default of the parameter `MOT_POLES`: poles, not pole pairs (`fw_settings::esc`).
 const NOTCH_POLES_DEFAULT: i32 = 14;
 
@@ -307,6 +321,8 @@ struct StickShaper {
     /// LAND's braking law (decision-heading-monitor-20261123, H14 (1)): the position target is this step's position at
     /// every step, never captured; false outside it.
     brake_only: bool,
+    /// The low-battery descent is in force: the throttle stick reads 0.0 in the vertical part of Altitude and Position.
+    descend: bool,
     /// The previous step's time, us; `None` before the first.
     t_prev_us: Option<u64>,
     /// Tests only: the lead cap is off.
@@ -375,9 +391,8 @@ impl StickShaper {
     /// Down is positive.
     fn height_target(&mut self, nav: &NavState, dt_s: f32) -> (f32, f32) {
         let d = nav.position_m[2];
-        let v_ff = self
-            .land_rate_d_ms
-            .unwrap_or_else(|| self.stick_rate_d(self.sticks.throttle));
+        let throttle = if self.descend { 0.0 } else { self.sticks.throttle };
+        let v_ff = self.land_rate_d_ms.unwrap_or_else(|| self.stick_rate_d(throttle));
         let target = match self.target_d {
             None => d,
             Some(target) => {
@@ -637,6 +652,19 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     blind_trim_n: Option<f32>,
     /// Crash rule K, shadow (Amendment N, N5): its terms and timer after the latest step.
     crash: CrashStatus,
+    /// The newest value of the low-battery monitor's descent request (core 0, `set_batt_descend`).
+    batt_request: bool,
+    /// The request at the previous step.
+    batt_prev_request: bool,
+    /// A false-to-true edge of the request was seen while armed and the request has not fallen since; cleared while
+    /// disarmed, so a request already true at arming (disarm and re-arm within one supervisor tick) starts nothing.
+    batt_started: bool,
+    /// A change of the mode switch cancelled the descent; cleared at the first step the gate is disarmed.
+    batt_cancelled: bool,
+    /// The mode switch of the previous stick report; `None` before the first.
+    prev_switch6: Option<Switch3>,
+    /// What the descent did at the latest step.
+    batt_state: BattDescent,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -707,6 +735,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 target_ne: None,
                 land_rate_d_ms: None,
                 brake_only: false,
+                descend: false,
                 t_prev_us: None,
                 #[cfg(test)]
                 lead_cap_off: false,
@@ -773,6 +802,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 speed: false,
                 held_us: 0,
             },
+            batt_request: false,
+            batt_prev_request: false,
+            batt_started: false,
+            batt_cancelled: false,
+            prev_switch6: None,
+            batt_state: BattDescent::Off,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -932,6 +967,19 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.crash.would_fire()
     }
 
+    /// The low-battery monitor's descent request (Amendment BATT): true while CRITICAL is reached and `BATT_FS_CRT_ACT` is 1.
+    /// Core 0 sets it from one byte; every step reads the newest value. While true, armed and not cancelled the effective
+    /// mode is at least Altitude when the estimate covers it and the throttle stick reads 0.0 (F2's descent speed and lead
+    /// cap); false changes nothing, bit for bit.
+    pub fn set_batt_descend(&mut self, on: bool) {
+        self.batt_request = on;
+    }
+
+    /// What the descent did at the latest step, read only.
+    pub fn batt_descent(&self) -> BattDescent {
+        self.batt_state
+    }
+
     /// The estimator, read only (the log of its own counters, packet E2).
     pub fn estimator(&self) -> &E {
         &self.estimator
@@ -982,6 +1030,13 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.gains = self.gains_pending;
             self.controller.set_gains(&self.gains);
         }
+        // The descent starts on a false-to-true edge of the request seen while armed, never on a level.
+        if !self.gate.armed() || !self.batt_request {
+            self.batt_started = false;
+        } else if !self.batt_prev_request {
+            self.batt_started = true;
+        }
+        self.batt_prev_request = self.batt_request;
         if let Some(rc) = inputs.rc {
             self.rc_newest = Some(rc);
             self.shaper.sticks = rc.sticks;
@@ -990,7 +1045,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 Switch3::Middle => Mode::Altitude,
                 Switch3::High => Mode::Position,
             };
+            // Any change of the mode switch while the descent is in force cancels it until disarm.
+            if self.batt_started && self.gate.armed() && self.prev_switch6.is_some_and(|p| p != rc.switch6) {
+                self.batt_cancelled = true;
+            }
+            self.prev_switch6 = Some(rc.switch6);
         }
+        if !self.gate.armed() {
+            self.batt_cancelled = false;
+        }
+        let batt_on = self.batt_started && !self.batt_cancelled && self.gate.armed();
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
         // A non-finite IMU value never reaches the estimator: no tilt, so the demand is refused and the gate stops.
@@ -1080,8 +1144,18 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.command_result = ho.command;
         // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
         self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
+        // In a hands-off state the state machine is the only actor: the low-battery descent changes nothing there (its
+        // request, edge and cancel still run, so it acts again in PILOT as before).
+        let batt_on = batt_on && !ho.synthetic_sticks;
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
-        let selected = if ho.synthetic_sticks { Mode::Position } else { self.selected };
+        // The low-battery descent lifts Angle to Altitude (when covered); Position stays under its own rule.
+        let selected = if ho.synthetic_sticks {
+            Mode::Position
+        } else if batt_on && self.selected == Mode::Angle {
+            Mode::Altitude
+        } else {
+            self.selected
+        };
         let mode = match selected {
             Mode::Position if position_ok => Mode::Position,
             Mode::Altitude | Mode::Position if covered => Mode::Altitude,
@@ -1157,6 +1231,14 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.shaper.target_ne = None;
             }
         }
+        self.batt_state = if batt_on {
+            if covered { BattDescent::Descending } else { BattDescent::NoHeight }
+        } else if self.batt_started && self.batt_cancelled && self.gate.armed() {
+            BattDescent::Cancelled
+        } else {
+            BattDescent::Off
+        };
+        self.shaper.descend = batt_on;
         let mut setpoint = self.shaper.setpoint(mode, &nav, t_us);
         // AUTO (A6, H3b): entered at the step Start is ACCEPTED, from the vehicle to waypoint 0, or to the kept index after
         // a Pause (A10, L7); each AUTO step on Position flies the guidance's carrots (NE and D, with their rates as
@@ -2996,3 +3078,6 @@ mod station_tests;
 
 #[cfg(test)]
 mod auto_tests;
+
+#[cfg(test)]
+mod batt_tests;

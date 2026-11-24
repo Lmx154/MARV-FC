@@ -25,6 +25,7 @@ extern crate std;
 
 pub mod admission;
 pub mod arming;
+pub mod battery;
 pub mod calib;
 pub mod dflog;
 pub mod esc;

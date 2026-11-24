@@ -39,6 +39,7 @@
 mod actions;
 mod baro;
 mod batt;
+mod batt_fs;
 mod busclear;
 mod calibration;
 mod device;
@@ -996,6 +997,7 @@ async fn supervise() -> ! {
     let mut up_sent = false;
     let mut answering = true;
     let mut devices = Supervision::new(Instant::now());
+    let mut battery = batt_fs::Watch::new();
     let (mut stalls_begun, mut stalls_ended) = (0, 0);
     loop {
         ticker.next().await;
@@ -1052,6 +1054,7 @@ async fn supervise() -> ! {
         }
 
         if tick.is_multiple_of(10) {
+            battery.tick(now.as_micros());
             PING.store(ping.wrapping_add(1), Ordering::Release);
             KICK.kick(KICK_PING);
             first_ping_at.get_or_insert(now);

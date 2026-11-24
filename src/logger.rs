@@ -105,6 +105,7 @@ async fn collect() -> ! {
         imu_due: false,
         imu_seq: None,
         seq: [None; 4],
+        bfs_seen: 0,
         gnss_t_us: None,
         rows: [None; ROWS],
         params: [None; fw_settings::COUNT],
@@ -135,6 +136,8 @@ struct Collector {
     imu_seq: Option<u32>,
     /// The last `seq` logged of BARO, MAG, GNSS, BATT.
     seq: [Option<u32>; 4],
+    /// The number of the last low-battery event logged (BFS).
+    bfs_seen: u32,
     /// The `t_us` of the last GNSS sample logged in this log (GPA's `Delta`).
     gnss_t_us: Option<u64>,
     /// Per row the state (and stuck flag) of its last DEV record.
@@ -174,6 +177,11 @@ impl Collector {
         self.parms(p, now);
         self.imus(p);
         self.sensors(p);
+        if let Some(e) = crate::batt_fs::event(&mut self.bfs_seen) {
+            p.push_with(dflog::BFS.length.into(), |b| {
+                dflog::encode_bfs(b, now, e.level, e.act, e.volts, e.cells)
+            });
+        }
         if tick.is_multiple_of(RCIN_EVERY)
             && let Some(rc) = crate::rc::rc_channels(now)
         {

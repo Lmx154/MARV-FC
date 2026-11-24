@@ -22,6 +22,23 @@ pub const A_OFFSET: &str = "BATT_A_OFFSET";
 /// The number of battery parameters.
 pub const COUNT: usize = 3;
 
+/// Cells in series of the pack; 0 turns the low-battery monitor off.
+pub const CELLS: &str = "BATT_CELLS";
+/// LOW threshold per cell, V.
+pub const LOW_CELL: &str = "BATT_LOW_CELL";
+/// CRITICAL threshold per cell, V.
+pub const CRT_CELL: &str = "BATT_CRT_CELL";
+/// Seconds the voltage must stay below a level before it is reached; 0 turns the monitor off.
+pub const LOW_TIMER: &str = "BATT_LOW_TIMER";
+/// What CRITICAL does: 0 warns, 1 descends (the flight core's descent, off by default).
+pub const FS_CRT_ACT: &str = "BATT_FS_CRT_ACT";
+
+/// The number of low-battery monitor parameters (Amendment BATT).
+pub const FS_COUNT: usize = 5;
+
+/// Where [`FS_TABLE`] starts in `fw_settings::TABLE`: appended last, after `FS_HOLD_EN` (122). Pinned by a test.
+pub const FS_AT: usize = 123;
+
 /// The battery monitor's parameter table; the defaults are the configuration the `adc-battery`
 /// bench program ran on this board (no gain correction, 20 000 uV/A placeholder, zero at 0 V).
 pub static TABLE: [ParamDef; COUNT] = [
@@ -29,6 +46,36 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(A_SCALE, DEVICE, 0.02, 0.0, 10.0, Apply::Live),
     ParamDef::f32(A_OFFSET, DEVICE, 0.0, -3.3, 3.3, Apply::Live),
 ];
+
+/// The low-battery monitor's parameters (decision-nav-eskf-20261120, Amendment BATT, appended at indices 123 to 127 after
+/// the last existing one, so no index changed), all device BATT and `Live` (core 0 reads them at 10 Hz). Defaults and
+/// ranges are the amendment's: `BATT_CELLS` 0 to 12 default 4 (0 is off; PX4 `BAT_N_CELLS`), `BATT_LOW_CELL` 3.0 to 4.2 V
+/// default 3.6, `BATT_CRT_CELL` 3.0 to 4.2 V default 3.5, `BATT_LOW_TIMER` 0 to 120 s default 10 (ArduPilot `BATT_LOW_TIMER`)
+/// and `BATT_FS_CRT_ACT` 0 to 1 default 0 (warn only). The amendment gives no type: the counts and the action are `I32`, the
+/// thresholds `F32`, the timer whole seconds as `I32` (ArduPilot's is an integer too).
+pub static FS_TABLE: [ParamDef; FS_COUNT] = [
+    ParamDef::i32(CELLS, DEVICE, 4, 0, 12, Apply::Live),
+    ParamDef::f32(LOW_CELL, DEVICE, 3.6, 3.0, 4.2, Apply::Live),
+    ParamDef::f32(CRT_CELL, DEVICE, 3.5, 3.0, 4.2, Apply::Live),
+    ParamDef::i32(LOW_TIMER, DEVICE, 10, 0, 120, Apply::Live),
+    ParamDef::i32(FS_CRT_ACT, DEVICE, 0, 0, 1, Apply::Live),
+];
+
+/// The monitor's settings from a view of the parameters (`get_i32` and `get_f32` return the value of a name); a value that
+/// cannot be read is the table's default.
+pub fn monitor_config(
+    get_i32: impl Fn(&str) -> Option<i32>,
+    get_f32: impl Fn(&str) -> Option<f32>,
+) -> fw_core::battery::Config {
+    let d = fw_core::battery::Config::DEFAULT;
+    fw_core::battery::Config {
+        cells: get_i32(CELLS).unwrap_or(d.cells),
+        low_cell_v: get_f32(LOW_CELL).unwrap_or(d.low_cell_v),
+        crt_cell_v: get_f32(CRT_CELL).unwrap_or(d.crt_cell_v),
+        timer_s: get_i32(LOW_TIMER).unwrap_or(d.timer_s),
+        act: get_i32(FS_CRT_ACT).unwrap_or(d.act),
+    }
+}
 
 /// The battery divider on this board: 100k on top, 10k at the bottom.
 const R_TOP_OHM: u32 = 100_000;
@@ -125,6 +172,49 @@ mod tests {
         assert_eq!(c.milliamps(980_000), -1_000);
         assert_eq!(with(A_SCALE, 0.0).current.milliamps(500_000), 0);
         assert_eq!(with(A_OFFSET, -0.5).current.zero_uv, -500_000);
+    }
+
+    /// The monitor's five parameters are at 123 to 127 with the amendment's defaults and ranges; the range is the whole
+    /// validator; the table's defaults are the monitor's `Config::DEFAULT`.
+    #[test]
+    fn the_monitor_parameters_are_appended_at_123_to_127_with_the_amendments_numbers() {
+        use mavlink_device::{ParamError, ParamValue::{F32, I32}};
+        assert_eq!(FS_AT, 123);
+        let expected = [
+            ("BATT_CELLS", I32(4), I32(0), I32(12)),
+            ("BATT_LOW_CELL", F32(3.6), F32(3.0), F32(4.2)),
+            ("BATT_CRT_CELL", F32(3.5), F32(3.0), F32(4.2)),
+            ("BATT_LOW_TIMER", I32(10), I32(0), I32(120)),
+            ("BATT_FS_CRT_ACT", I32(0), I32(0), I32(1)),
+        ];
+        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
+        for (k, (name, default, min, max)) in expected.into_iter().enumerate() {
+            let def = &crate::TABLE[FS_AT + k];
+            assert_eq!(def.name, name);
+            assert_eq!((def.default, def.min, def.max), (default, min, max), "{name}");
+            assert_eq!((def.device, def.apply), (DEVICE, Apply::Live), "{name}");
+            assert!(!def.calibration && !def.read_only && name.len() <= 16);
+            let i = u16::try_from(FS_AT + k).unwrap();
+            assert_eq!(p.set(i, min), Ok(min));
+            assert_eq!(p.set(i, max), Ok(max));
+            let (below, above) = match (min, max) {
+                (I32(lo), I32(hi)) => (I32(lo - 1), I32(hi + 1)),
+                (F32(lo), F32(hi)) => (F32(lo - 0.01), F32(hi + 0.01)),
+                _ => panic!(),
+            };
+            assert_eq!(p.set(i, below), Err(ParamError::OutOfRange), "{name}");
+            assert_eq!(p.set(i, above), Err(ParamError::OutOfRange), "{name}");
+        }
+        // The defaults of the table are the monitor's.
+        let get = |p: &Params<{ crate::COUNT }>| {
+            monitor_config(
+                |n| match p.get_named(n) { Some(I32(v)) => Some(v), _ => None },
+                |n| match p.get_named(n) { Some(F32(v)) => Some(v), _ => None },
+            )
+        };
+        let p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
+        assert_eq!(get(&p), fw_core::battery::Config::DEFAULT);
+        assert_eq!(monitor_config(|_| None, |_| None), fw_core::battery::Config::DEFAULT);
     }
 
     #[test]
