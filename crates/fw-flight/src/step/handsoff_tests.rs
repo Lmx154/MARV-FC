@@ -424,3 +424,290 @@ fn b5_a_0_99_s_coverage_drop_in_hold_keeps_hold_a_1_0_s_drop_lands() {
     assert_eq!(fly.state(), State::Land, "1.0 s");
     assert!(o.armed && o.mode == Mode::Altitude);
 }
+
+// ---- LAND, the touchdown disarm, BLIND, the TAKEOVER descent ----
+
+/// The setpoint's target height, m down.
+fn target_d(o: &StepOut) -> f32 {
+    match o.setpoint {
+        Setpoint::Altitude { down_m, .. } => down_m,
+        Setpoint::Position { position_m, .. } => position_m[2],
+        _ => f32::NAN,
+    }
+}
+
+/// WR1 touchdown: LAND descends (the height target at 0.5 m/s), the vehicle follows it to the ground (d = 0), the real
+/// airborne latch clears after land_detect_us on the idle floor, and the gate is disarmed within one step of that: at
+/// most land_detect_us plus one step after the first step on the idle floor.
+#[test]
+fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_step() {
+    let mut fly = Fly::new(true, false, POSITION);
+    let o = fly.lose();
+    assert_eq!(fly.state(), State::Land);
+    let d0 = target_d(&o);
+    let mut first_low: Option<u64> = None;
+    let mut cleared: Option<u64> = None;
+    let mut disarmed: Option<u64> = None;
+    let mut rate_checked = false;
+    let dt = DT_US as f32 * 1e-6;
+    for k in 0..40_000u32 {
+        // The vehicle follows the target down at the descent rate, and stops on the ground.
+        let mut n = fly.cell.get();
+        let d = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
+        n.velocity_ms[2] = if d < 0.0 { LAND_SPEED_MS } else { 0.0 };
+        n.position_m[2] = d;
+        fly.cell.set(n);
+        let air = fly.f.airborne;
+        let o = fly.quiet();
+        if k == 800 {
+            let rate = (target_d(&o) - d0) / (800.0 * dt);
+            assert!((rate - LAND_SPEED_MS).abs() < 0.01, "descent {rate} m/s");
+            rate_checked = true;
+        }
+        let low = o.allocation.is_none_or(|a| a.saturation.thrust_low);
+        if o.armed && low {
+            first_low.get_or_insert(fly.t);
+        } else if o.armed {
+            first_low = None;
+        }
+        if air && !fly.f.airborne && cleared.is_none() {
+            cleared = Some(fly.t);
+        }
+        if !o.armed {
+            disarmed = Some(fly.t);
+            assert_eq!(fly.state(), State::Stop);
+            break;
+        }
+        assert_eq!(fly.state(), State::Land, "step {k}");
+    }
+    assert!(rate_checked);
+    let (low, clear, dis) = (first_low.unwrap(), cleared.expect("the latch cleared"), disarmed.expect("disarmed"));
+    let land = Tuning::DEFAULT.land_detect_us;
+    std::println!("idle floor at {low}, latch clear {} us later, disarm {} us after the clear", clear - low, dis - clear);
+    assert!(dis - clear <= DT_US, "disarmed within one step of the clear");
+    assert!(dis - low <= land + DT_US, "land_detect_us plus one step: {} us", dis - low);
+}
+
+#[test]
+fn blind_is_level_with_the_collective_0_3_m_s2_below_hover() {
+    // T1 for longer than the debounce before the sticks are lost.
+    let mut fly = Fly::new(true, true, ANGLE);
+    for _ in 0..800 {
+        fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+    }
+    let o = fly.lose();
+    assert_eq!(fly.state(), State::Blind);
+    let want = MASS * (GRAVITY_MSS - BLIND_BELOW_HOVER_MSS);
+    for o in [o, fly.quiet(), fly.quiet()] {
+        assert_eq!(o.mode, Mode::Angle);
+        match o.setpoint {
+            Setpoint::Attitude { attitude, heading_rate_rads, thrust_n } => {
+                assert_eq!((attitude, heading_rate_rads), ([1.0, 0.0, 0.0, 0.0], 0.0));
+                assert!((thrust_n - want).abs() < 1e-3 * want, "{thrust_n} vs {want}");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(o.armed && o.demand.is_ok());
+    }
+    // The height back: LAND at once (B6).
+    fly.set_valid(ALTITUDE);
+    let o = fly.quiet();
+    assert_eq!((fly.state(), o.mode), (State::Land, Mode::Altitude));
+}
+
+#[test]
+fn takeover_descent_flies_the_land_law_and_hand_over_stays_possible() {
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    let o = fly.rc(true, FULL, Switch3::Low);
+    assert_eq!(fly.state(), State::Takeover);
+    assert!(is_centred(&o));
+    fly.f.battery_critical = true;
+    let o = fly.rc(true, FULL, Switch3::Low);
+    let d0 = target_d(&o);
+    assert_eq!(o.mode, Mode::Position);
+    match o.setpoint {
+        Setpoint::Position { velocity_ms, heading_rate_rads, .. } => {
+            assert_eq!((velocity_ms, heading_rate_rads), ([0.0, 0.0, LAND_SPEED_MS], 0.0), "the LAND law, no real stick");
+        }
+        other => panic!("{other:?}"),
+    }
+    for _ in 0..800 {
+        fly.rc(true, FULL, Switch3::Low);
+    }
+    let o = fly.rc(true, FULL, Switch3::High);
+    let rate = (target_d(&o) - d0) / (802.0 * DT_US as f32 * 1e-6);
+    assert!((rate - LAND_SPEED_MS).abs() < 0.01, "{rate}");
+    assert_eq!(fly.state(), State::Takeover);
+    let o = fly.rc(true, FULL, Switch3::Middle);
+    assert_eq!(fly.state(), State::Pilot, "hand-over");
+    assert!(!is_centred(&o));
+}
+
+// ---- I12 ----
+
+/// I12 across a GNSS outage (Position lost for 2 s) and a height reset (the vertical flags gone for one step), in each
+/// hands-off state: every step's setpoint is covered, the demand is made and the gate stays armed.
+#[test]
+fn i12_no_uncovered_setpoint_and_no_coverage_disarm_in_any_hands_off_state() {
+    let outage = |fly: &mut Fly, name: &str, first: Valid| {
+        let mut seen = std::vec::Vec::new();
+        let script =
+            [(first, 400), (POSITION, 10), (ALTITUDE, 1_600), (ANGLE, 1), (ALTITUDE, 10), (POSITION, 10), (ANGLE, 1), (POSITION, 10)];
+        for (valid, n) in script {
+            fly.set_valid(valid);
+            for _ in 0..n {
+                let o = fly.quiet();
+                assert!(o.nav.valid.covers(&o.setpoint.requires()), "{name}: {:?} with {valid:?}", o.setpoint);
+                assert!(o.demand.is_ok() && o.armed && o.motors.throttles().is_some(), "{name}: {o:?}");
+                if seen.last() != Some(&fly.state()) {
+                    seen.push(fly.state());
+                }
+            }
+        }
+        std::println!("{name}: {seen:?}");
+        assert!(seen.iter().all(|s| !matches!(s, State::Stop | State::Pilot)), "{name}: {seen:?}");
+    };
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    outage(&mut fly, "hold", POSITION);
+    // TAKEOVER: reports keep coming (the newest report fresh), so give one every step.
+    let mut fly = Fly::new(true, true, POSITION);
+    fly.lose();
+    fly.rc(true, FULL, Switch3::Low);
+    let script = [(POSITION, 10), (ALTITUDE, 1_600), (ANGLE, 1), (ALTITUDE, 10), (POSITION, 10), (ANGLE, 1), (POSITION, 10)];
+    for (valid, n) in script {
+        fly.set_valid(valid);
+        for _ in 0..n {
+            let o = fly.rc(true, FULL, Switch3::Low);
+            assert!(o.nav.valid.covers(&o.setpoint.requires()) && o.demand.is_ok() && o.armed, "takeover {o:?}");
+            assert_eq!(fly.state(), State::Takeover);
+        }
+    }
+    let mut fly = Fly::new(true, false, POSITION);
+    fly.lose();
+    assert_eq!(fly.state(), State::Land);
+    outage(&mut fly, "land", POSITION);
+    let mut fly = Fly::new(true, true, ANGLE);
+    for _ in 0..800 {
+        fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
+    }
+    fly.lose();
+    assert_eq!(fly.state(), State::Blind);
+    outage(&mut fly, "blind", ANGLE);
+}
+
+// ---- WR3 and return_built on the real step ----
+
+/// WR3 a-d on the real `Flight` over random reports, switches, sticks, coverage, silences, FS_HOLD_EN and the heading
+/// monitor's verdict; the airborne latch is the real one (it clears in LAND on the idle floor), and now and then the
+/// test clears it between steps (a modelled false "landed"): (a) armed at the end of two consecutive steps implies the
+/// second is not STOP; (b) only the switch cycle arms; (c) outside the hands-off states silence disarms at the first
+/// step past the timeout and not before; (d) a hands-off state that reads the latch false ends that step disarmed.
+/// And return_built false: never AUTO or RETURN.
+#[test]
+fn wr3_and_return_built_on_the_real_step() {
+    let tuning = Tuning::DEFAULT;
+    let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
+    let mut f = flight(cell, handshake(), &tuning);
+    let mut rng = Lcg(0x5eed_0d3a);
+    let mut t = 1_000_000u64;
+    let (mut quiet, mut arm, mut switch6, mut throttle) = (0u32, false, Switch3::High, 0.0f32);
+    let mut newest: Option<u64> = None;
+    let (mut prev_armed, mut prev_state, mut off_then_disarmed) = (false, State::Stop, false);
+    let mut counts = [0u32; 6];
+    let mut seen = [0u32; 8];
+    for k in 0..300_000u32 {
+        t += DT_US;
+        if rng.chance(2) {
+            f.set_fs_hold_en(!rng.chance(200));
+        }
+        if rng.chance(2) {
+            f.set_heading_ok(!rng.chance(300));
+        }
+        if rng.chance(1) {
+            cell.set(nav_at(-10.0, [ANGLE, ALTITUDE, POSITION, POSITION][(rng.next() % 4) as usize]));
+        }
+        if quiet == 0 && rng.chance(3) {
+            quiet = 900 + (rng.next() % 1_200) as u32;
+        }
+        quiet = quiet.saturating_sub(1);
+        if rng.chance(3) {
+            arm = !arm || rng.chance(500);
+        }
+        if rng.chance(4) {
+            switch6 = [Switch3::Low, Switch3::Middle, Switch3::High][(rng.next() % 3) as usize];
+        }
+        if !f.gate.armed() {
+            throttle = 0.0;
+        } else if rng.chance(5) || throttle == 0.0 {
+            throttle = [0.5, 0.5, 0.6, 0.0][(rng.next() % 4) as usize];
+        }
+        let modelled_clear = rng.chance(1) && f.airborne;
+        if modelled_clear {
+            f.airborne = false;
+        }
+        let air = f.airborne;
+        let rc = (quiet == 0).then(|| RcSample {
+            sticks: Sticks { roll: rng.unit() - 0.5, pitch: rng.unit() - 0.5, throttle, yaw: rng.unit() - 0.5 },
+            arm,
+            switch6,
+            t_us: t,
+        });
+        if rc.is_some() {
+            newest = Some(t);
+        }
+        let o = f.step(&input(t, rc));
+        let state = f.hands_off_state();
+        let hands_off = !matches!(state, State::Pilot | State::Stop);
+        assert!(!matches!(state, State::Auto | State::Return), "step {k}: return_built false");
+        // (a)
+        assert!(!(prev_armed && o.armed && state == State::Stop), "a, step {k}");
+        // (b)
+        if !prev_armed && o.armed {
+            let r = rc.expect("b: arming needs a report");
+            assert!(r.arm && off_then_disarmed, "b, step {k}");
+            counts[0] += 1;
+        }
+        // (c), from a step outside the hands-off states too (a hands-off state leaves for STOP by WR1 or the arm switch)
+        if prev_armed && !hands_off && matches!(prev_state, State::Pilot | State::Stop) && rc.is_none() {
+            let age = newest.map_or(u64::MAX, |n| t - n);
+            if age > tuning.rc_fs_timeout_us {
+                assert!(!o.armed, "c, step {k}: silence did not disarm");
+                counts[1] += 1;
+            } else if o.allocation.is_some() {
+                assert!(o.armed, "c, step {k}: disarmed before the timeout");
+            }
+        }
+        // (d)
+        if !matches!(prev_state, State::Pilot | State::Stop) && !air {
+            assert!(!o.armed, "d, step {k}: {prev_state:?} grounded, still armed");
+            counts[2 + usize::from(modelled_clear)] += u32::from(prev_armed);
+        }
+        counts[4] += u32::from(hands_off && o.armed);
+        counts[5] += u32::from(prev_armed && !o.armed && hands_off);
+        if let Some(slot) = seen.get_mut(usize::from(state.code() - 1)) {
+            *slot += 1;
+        }
+        if let Some(r) = rc {
+            off_then_disarmed = !r.arm && !o.armed;
+        }
+        prev_armed = o.armed;
+        prev_state = state;
+    }
+    std::println!("armings, silence disarms, real and modelled WR1 stops, hands-off armed steps, ..: {counts:?}; states {seen:?}");
+    assert!(counts[0] > 50 && counts[1] > 10 && counts[3] > 5 && counts[4] > 10_000, "{counts:?}");
+    for s in [State::Pilot, State::Takeover, State::Hold, State::Land, State::Stop, State::Blind] {
+        assert!(seen[usize::from(s.code() - 1)] > 0, "{s:?} reached: {seen:?}");
+    }
+}
+
+#[test]
+fn hands_off_msg_names_every_state_with_its_code() {
+    for s in [State::Pilot, State::Takeover, State::Hold, State::Auto, State::Return, State::Land, State::Stop, State::Blind] {
+        let text = hands_off_msg(s);
+        assert!(text.starts_with(&std::format!("HO {} ", s.code())), "{text}");
+        assert!(text.len() <= 64);
+    }
+    assert!(hands_off_msg(State::Auto).contains("HOLD's law") && hands_off_msg(State::Return).contains("HOLD's law"));
+}

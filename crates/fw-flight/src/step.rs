@@ -389,6 +389,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
+    /// Tests only: the battery is critical (the battery monitor is on another branch; the board gives false).
+    #[cfg(test)]
+    battery_critical: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -469,6 +472,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             threshold_rule: false,
             #[cfg(test)]
             latch_off: false,
+            #[cfg(test)]
+            battery_critical: false,
         }
     }
 
@@ -635,6 +640,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         } else {
             Tier::T1
         };
+        #[cfg(test)]
+        let battery_critical = self.battery_critical;
+        #[cfg(not(test))]
+        let battery_critical = false;
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
             fs_hold_en: self.fs_hold_en,
@@ -654,7 +663,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             home_reached: false,
             heading_ok: self.heading_ok,
             battery_ok: false,
-            battery_critical: false,
+            battery_critical,
             return_built: false,
         });
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
