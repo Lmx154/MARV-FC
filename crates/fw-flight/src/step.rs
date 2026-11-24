@@ -116,11 +116,12 @@ const TOUCHDOWN_ACCEL_LPF_HZ: f32 = 1.0;
 const TOUCHDOWN_ACCEL_MAX_MSS: f32 = 1.0;
 
 /// The touchdown rule's largest roll rate and largest pitch rate (each axis, the estimate's body rates), rad/s
-/// (decision-mavlink-mode-20261123, Amendment N, N4 (c): PX4 LNDMC_ROT_MAX 20 deg/s, land_detector_params_mc.yaml).
+/// (decision-mavlink-mode-20261123, Amendment N, N4 (c): PX4 LNDMC_ROT_MAX 20 deg/s, land_detector_params_mc.yaml;
+/// approved by the owner 2026-11-24).
 const TOUCHDOWN_ROT_MAX_RADS: f32 = 20.0 * (core::f32::consts::PI / 180.0);
 
 /// BLIND's probe (Amendment N, N4): the time over which its collective ramps linearly from BLIND's down to the ground
-/// threshold, us. No outside source; pending the owner's approval 2026-11-23.
+/// threshold, us. No outside source; approved by the owner 2026-11-24.
 pub const BLIND_PROBE_RAMP_US: u64 = 1_000_000;
 
 /// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
