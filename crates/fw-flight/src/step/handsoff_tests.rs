@@ -2416,3 +2416,171 @@ fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     }
     assert!(total[4] > 0, "no arm-OFF report held with M: {total:?}");
 }
+
+// ---- N11 (1a, 1c): the learned hover collective ----
+
+const MG: f32 = MASS * GRAVITY_MSS;
+
+impl Fly {
+    /// One step in Angle with the throttle `thr` (collective 2 thr m g up to half stick), arm ON.
+    fn angle(&mut self, thr: f32) -> StepOut {
+        self.rc(true, [0.0, 0.0, thr, 0.0], Switch3::Low)
+    }
+
+    /// The fake vehicle's roll and pitch, rad (level otherwise).
+    fn tilt(&self, roll: f32, pitch: f32) {
+        let mut n = self.cell.get();
+        n.attitude = if roll != 0.0 {
+            [libm::cosf(roll / 2.0), libm::sinf(roll / 2.0), 0.0, 0.0]
+        } else {
+            [libm::cosf(pitch / 2.0), 0.0, libm::sinf(pitch / 2.0), 0.0]
+        };
+        self.cell.set(n);
+    }
+
+    fn vd(&self, v: f32) {
+        let mut n = self.cell.get();
+        n.velocity_ms[2] = v;
+        self.cell.set(n);
+    }
+}
+
+/// Whether one step in Angle at 0.52 throttle (1.04 m g) moves H and the qualifying time, after `change` set the step up.
+fn learns(change: impl FnOnce(&mut Fly)) -> bool {
+    let mut fly = Fly::new(true, true, ALTITUDE);
+    fly.angle(0.52);
+    let (h, us) = (fly.f.hover_n, fly.f.hover_us);
+    change(&mut fly);
+    fly.angle(0.52);
+    let moved = fly.f.hover_n != h;
+    assert_eq!(moved, fly.f.hover_us > us, "H and the qualifying time move together");
+    moved
+}
+
+/// N11 (1e): each gate blocks the learner alone: the airborne latch, TD held (N13), v_D not valid, |v_D| at 0.6 m/s,
+/// roll or pitch at 5 deg; it learns just inside each bound; a disarmed step resets H to the card's m g and the time.
+#[test]
+fn n11_each_gate_condition_blocks_learning() {
+    let deg = core::f32::consts::PI / 180.0;
+    assert!(learns(|_| {}), "all gates pass");
+    assert!(!learns(|f| f.f.airborne = false), "latch clear");
+    assert!(!learns(|f| f.f.still_us = f.f.land_detect_us), "TD held");
+    assert!(!learns(|f| f.set_valid(Valid { velocity_d: false, ..ALTITUDE })), "v_D not valid");
+    for v in [0.6, -0.6] {
+        assert!(!learns(|f| f.vd(v)), "v_D {v}");
+        assert!(learns(|f| f.vd(v * 0.98)), "v_D {}", v * 0.98);
+    }
+    for a in [5.05 * deg, -5.05 * deg] {
+        assert!(!learns(|f| f.tilt(a, 0.0)), "roll {a}");
+        assert!(!learns(|f| f.tilt(0.0, a)), "pitch {a}");
+        assert!(learns(|f| f.tilt(a * 0.98, 0.0)), "roll {}", a * 0.98);
+        assert!(learns(|f| f.tilt(0.0, a * 0.98)), "pitch {}", a * 0.98);
+    }
+    assert!((HOVER_TAN_ROLL_MAX - libm::tanf(5.0 * deg)).abs() < 1e-7 && (HOVER_SIN_PITCH_MAX - libm::sinf(5.0 * deg)).abs() < 1e-7);
+    let mut fly = Fly::new(true, true, ALTITUDE);
+    fly.angle(0.52);
+    assert!(fly.f.hover_us > 0 && fly.f.hover_n != MG);
+    let o = fly.rc(false, [0.0, 0.0, 0.52, 0.0], Switch3::Low);
+    assert!(!o.armed && fly.f.hover_n == MG && fly.f.hover_us == 0, "disarmed: card value, time cleared");
+}
+
+/// N11 (1e): from the card's m g, a step of the collective to 1.11 m g reaches 63 % at 10 s of qualifying steps and has
+/// not at 9.9 s; the clamp holds at m g x 1.12 and x 0.88.
+#[test]
+fn n11_a_step_reaches_63_percent_at_10_s_not_at_9_9_s_and_the_clamp_holds_at_both_ends() {
+    let mut fly = Fly::new(true, true, ALTITUDE);
+    fly.f.hover_n = MG;
+    fly.f.hover_us = 0;
+    let (mut at_9_9, mut at_10, mut c) = (0.0f32, 0.0f32, 0.0f32);
+    for k in 1..=8_000u32 {
+        c = thrust_of(&fly.angle(0.555));
+        let frac = (fly.f.hover_n - MG) / (c - MG);
+        if k == 7_920 {
+            at_9_9 = frac;
+        }
+        at_10 = frac;
+    }
+    std::println!("N11 step to {:.4} m g: {at_9_9:.5} at 9.9 s, {at_10:.5} at 10 s, time {} us", c / MG, fly.f.hover_us);
+    assert_eq!(fly.f.hover_us, HOVER_VALID_US);
+    assert!(at_10 >= 0.63 && at_9_9 < 0.63, "{at_9_9} {at_10}");
+    for (thr, end) in [(0.75, HOVER_MAX_G), (0.4, HOVER_MIN_G)] {
+        for _ in 0..48_000 {
+            fly.angle(thr);
+        }
+        assert_eq!(fly.f.hover_n, end * MG, "throttle {thr}");
+    }
+}
+
+/// A T1 flight with v_D valid (no position_d), sticks lost: BLIND; H and its time then set to `h` and `us`.
+fn blind_with(h: f32, us: u64) -> Fly {
+    let mut fly = Fly::new(true, true, Valid { velocity_d: true, ..ANGLE });
+    fly.lose();
+    assert_eq!(fly.state(), State::Blind);
+    fly.f.hover_n = h;
+    fly.f.hover_us = us;
+    fly
+}
+
+/// N11 (1e, 1c): in BLIND the collective is H - 0.3 m once H is valid (10 s of qualifying time) and the card's m g -
+/// 0.3 m before; H and its time are frozen in BLIND (here with v_D valid, so the BLIND gate alone stops it).
+#[test]
+fn n11_blind_flies_h_minus_0_3_m_once_valid_the_card_before_and_h_is_frozen() {
+    for h in [HOVER_MIN_G * MG, 1.0 * MG, 1.05 * MG, HOVER_MAX_G * MG] {
+        let mut fly = blind_with(h, HOVER_VALID_US);
+        for _ in 0..1_600 {
+            let o = fly.quiet();
+            assert_eq!(fly.state(), State::Blind);
+            let want = h - MASS * BLIND_BELOW_HOVER_MSS;
+            assert!((thrust_of(&o) - want).abs() <= 1e-5 * MG, "H {h}: {} vs {want}", thrust_of(&o));
+        }
+        assert!(fly.f.hover_n == h && fly.f.hover_us == HOVER_VALID_US, "frozen in BLIND");
+        let mut fly = blind_with(h, HOVER_VALID_US - 1);
+        let o = fly.quiet();
+        let card = MG - MASS * BLIND_BELOW_HOVER_MSS;
+        assert!((thrust_of(&o) - card).abs() <= 1e-5 * MG, "before 10 s: the card's value");
+    }
+}
+
+/// The net downward acceleration, m/s^2, at the first BLIND step of a vehicle whose thrust is `gain` x the commanded
+/// collective: 20 s of altitude hold at mid stick on the point-mass plant, then T1 (no vertical estimate) and the sticks
+/// lost.
+fn blind_entry_accel(gain: f32) -> f32 {
+    let mut fly = Fly::new(true, true, ALTITUDE);
+    let dt = DT_US as f32 * 1e-6;
+    let (mut v, mut d) = (0.0f32, -10.0f32);
+    let mut plant = |fly: &Fly, o: &StepOut| {
+        v += (GRAVITY_MSS - gain * thrust_of(o) / MASS) * dt;
+        d += v * dt;
+        let mut n = fly.cell.get();
+        n.position_m[2] = d;
+        n.velocity_ms[2] = v;
+        fly.cell.set(n);
+    };
+    for _ in 0..16_000 {
+        let o = fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Middle);
+        plant(&fly, &o);
+    }
+    fly.set_valid(ANGLE);
+    for _ in 0..4_000 {
+        let o = fly.quiet();
+        if fly.state() == State::Blind {
+            assert!(fly.f.hover_us >= HOVER_VALID_US, "H valid: {} us", fly.f.hover_us);
+            return GRAVITY_MSS - gain * thrust_of(&o) / MASS;
+        }
+        plant(&fly, &o);
+    }
+    panic!("never BLIND");
+}
+
+/// N11 (1e) closed loop: BLIND after 20 s of hover at thrust gain 0.88, 1.00 and 1.12 descends at entry, at least
+/// 0.1 m/s^2 down (N11 (1c)); the card-based collective gave 1.44 down, 0.30 down and 0.83 UP.
+#[test]
+fn n11_closed_loop_blind_after_20_s_of_hover_descends_at_every_gain() {
+    let got = [0.88f32, 1.0, 1.12].map(|gain| {
+        let a = blind_entry_accel(gain);
+        let card = GRAVITY_MSS - gain * (GRAVITY_MSS - BLIND_BELOW_HOVER_MSS);
+        std::println!("N11 gain {gain}: BLIND entry {a:.3} m/s^2 down (card-based {card:.3})");
+        (gain, a)
+    });
+    assert!(got.iter().all(|&(_, a)| (0.1..=0.6).contains(&a)), "m/s^2 down by gain: {got:?}");
+}

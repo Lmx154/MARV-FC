@@ -107,6 +107,24 @@ pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
 /// nominal m g, the collective Angle gives at half throttle (there is no height estimate to find the real hover).
 const BLIND_THROTTLE: f32 = THROTTLE_CENTRE * (1.0 - BLIND_BELOW_HOVER_MSS / GRAVITY_MSS);
 
+/// N11 (1a): the learned hover collective's low-pass time constant, s (ArduPilot AP_MOTORS_THST_HOVER_TC 10,
+/// AP_MotorsMulticopter.h:14-17, called from ArduCopter Attitude.cpp:62).
+const HOVER_TC_S: f32 = 10.0;
+
+/// N11 (1a): the learner runs only below this vertical speed, m/s (ArduCopter Attitude.cpp:59, 60 cm/s).
+const HOVER_VD_MAX_MS: f32 = 0.6;
+
+/// N11 (1a): tan 5 deg and sin 5 deg, the roll and pitch bounds of the learner (ArduCopter Attitude.cpp:59-60, 5 deg each).
+const HOVER_TAN_ROLL_MAX: f32 = 0.087_488_66;
+const HOVER_SIN_PITCH_MAX: f32 = 0.087_155_74;
+
+/// N11 (1a): the learned hover collective's range, x the card's m g: the measured thrust gain range (tune1 section 12).
+const HOVER_MIN_G: f32 = 0.88;
+const HOVER_MAX_G: f32 = 1.12;
+
+/// N11 (1a): the learned hover collective is used after this much qualifying time since arming, us.
+const HOVER_VALID_US: u64 = 10_000_000;
+
 /// The touchdown backstop's acceleration filter, Hz (decision-mavlink-mode-20261123, E3: ArduPilot
 /// LAND_DETECTOR_ACCEL_LPF_CUTOFF 1.0, config.h:359-372).
 const TOUCHDOWN_ACCEL_LPF_HZ: f32 = 1.0;
@@ -353,6 +371,17 @@ impl StickShaper {
         (quat::mul(heading, tilt), self.heading_rate(yaw), thrust_n)
     }
 
+    /// The throttle at which [`StickShaper::attitude_setpoint`]'s collective is `thrust_n`: its piecewise-linear map
+    /// inverted (N11 (1c)).
+    fn throttle_for(&self, thrust_n: f32) -> f32 {
+        let hover = MASS * GRAVITY_MSS;
+        if thrust_n <= hover {
+            thrust_n / (2.0 * hover)
+        } else {
+            0.5 + (thrust_n - hover) / (2.0 * (full_thrust_n(self.pilot_thrust_max_g) - hover))
+        }
+    }
+
     /// Angle: [`StickShaper::attitude_setpoint`] as a `Setpoint`.
     fn angle(&self, nav: &NavState) -> Setpoint {
         let (attitude, heading_rate_rads, thrust_n) = self.attitude_setpoint(nav);
@@ -441,6 +470,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     probe_us: Option<u64>,
     /// E2: the descent rate LAND and the TAKEOVER descent flew at the latest step, m/s down; `None` outside them.
     land_rate_ms: Option<f32>,
+    /// N11 (1a): the learned hover collective H, N: the card's m g at every disarmed step, then a low-pass of the
+    /// commanded collective on the qualifying steps, within m g x [`HOVER_MIN_G`, `HOVER_MAX_G`].
+    hover_n: f32,
+    /// N11 (1a): the qualifying time since arming, us (H is used from `HOVER_VALID_US`); 0 at every disarmed step.
+    hover_us: u64,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -540,6 +574,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             quiet_us: 0,
             probe_us: None,
             land_rate_ms: None,
+            hover_n: MASS * GRAVITY_MSS,
+            hover_us: 0,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -748,6 +784,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         #[cfg(not(test))]
         let battery_critical = false;
         let was = self.hands_off.state();
+        // N11 (1a): the latch and TD as the state machine reads them at this step.
+        let (air_in, td_in) = (self.airborne, self.still_us >= self.land_detect_us);
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
             fs_hold_en: self.fs_hold_en,
@@ -773,7 +811,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             return_built: false,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
-            td_held: self.still_us >= self.land_detect_us,
+            td_held: td_in,
         });
         // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
         self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
@@ -791,14 +829,20 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         // Hands-off laws (Amendment D): centred synthetic sticks, no real stick reaching the shaper (I3); LAND's descent in
         // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4) linearly down to the ground
-        // threshold over `BLIND_PROBE_RAMP_US`. AUTO and RETURN (unreachable here) fly HOLD's.
+        // threshold over `BLIND_PROBE_RAMP_US`. AUTO and RETURN (unreachable here) fly HOLD's. N11 (1c): BLIND's
+        // collective is H - m `BLIND_BELOW_HOVER_MSS` once H is valid (the throttle that gives it in Angle), else the card's.
         let probe_end = self.probe_us.is_some_and(|p| p >= BLIND_PROBE_RAMP_US);
+        let blind_start = if self.hover_us >= HOVER_VALID_US {
+            self.shaper.throttle_for(self.hover_n - MASS * BLIND_BELOW_HOVER_MSS)
+        } else {
+            BLIND_THROTTLE
+        };
         let blind_throttle = match self.probe_us {
-            None => BLIND_THROTTLE,
+            None => blind_start,
             Some(p) => {
                 let ramp = p.min(BLIND_PROBE_RAMP_US) as f32 / BLIND_PROBE_RAMP_US as f32;
                 let ground = self.ground_thrust_n / (2.0 * MASS * GRAVITY_MSS);
-                BLIND_THROTTLE - ramp * (BLIND_THROTTLE - ground)
+                blind_start - ramp * (blind_start - ground)
             }
         };
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
@@ -971,6 +1015,33 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             }
             if self.airborne_forced {
                 self.airborne = true;
+            }
+        }
+        // N11 (1a): the hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with the latch set
+        // and TD not held (as the state machine read them), not BLIND, v_D valid below `HOVER_VD_MAX_MS`, roll and pitch
+        // each under 5 deg, H follows the commanded collective with `HOVER_TC_S`, clamped; the card's m g when disarmed.
+        if !self.gate.armed() {
+            self.hover_n = MASS * GRAVITY_MSS;
+            self.hover_us = 0;
+        } else if let Ok(d) = demand
+            && air_in
+            && !td_in
+            && ho.state != State::Blind
+            && nav.valid.velocity_d
+            && libm::fabsf(nav.velocity_ms[2]) < HOVER_VD_MAX_MS
+            && nav.valid.tilt
+        {
+            let [w, x, y, z] = nav.attitude;
+            let cos_part = 1.0 - 2.0 * (x * x + y * y);
+            let level = cos_part > 0.0
+                && libm::fabsf(2.0 * (w * x + y * z)) < HOVER_TAN_ROLL_MAX * cos_part
+                && libm::fabsf(2.0 * (w * y - x * z)) < HOVER_SIN_PITCH_MAX;
+            if level {
+                let dt_s = dt_us as f32 * 1e-6;
+                let mg = MASS * GRAVITY_MSS;
+                let h = self.hover_n + dt_s / (dt_s + HOVER_TC_S) * (d.thrust_n - self.hover_n);
+                self.hover_n = h.clamp(HOVER_MIN_G * mg, HOVER_MAX_G * mg);
+                self.hover_us = self.hover_us.saturating_add(dt_us);
             }
         }
         StepOut {
