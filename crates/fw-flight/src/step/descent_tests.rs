@@ -585,3 +585,102 @@ fn n18_a_2_m_downward_step_of_the_estimate_in_land_does_not_climb_back() {
     std::println!("N18 estimate step +2 m down at {:?} s: smallest true v_D after {v_after:.3} m/s; contact {:.1} s; STOP {:.2} s after contact", at, r.contact_s, r.stop_after_s);
     assert!(at.is_some() && v_after >= 0.0, "{v_after}");
 }
+
+/// FX-4 (1): RETURN at home climbing to 20 m; from the first step the guidance reports Home the v_D estimate reads
+/// -0.8 m/s (above `HOME_VD_MAX_MS`). Returns the time from that step to LAND, s (`None`: no LAND within 20 s).
+fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
+    use crate::hands_off::{Command, Link, StationCommand};
+    let mut p = land_plant();
+    p.station = true;
+    p.f.home_wait_off = wait_off;
+    p.f.set_fs_hold_en(true);
+    p.f.set_battery_ok(true);
+    p.f.set_mission(super::auto_tests::square());
+    p.hover_at(5.0, 10.0);
+    while p.f.hands_off_state() == State::Pilot {
+        p.step(None);
+    }
+    for _ in 0..800 {
+        p.step(None);
+    }
+    p.f.set_command(StationCommand { command: Command::Return, link: Link::Radio });
+    while p.f.legs.phase() != LegPhase::Home {
+        assert!(p.step(None).armed && p.t < 100_000_000);
+        assert_ne!(p.f.hands_off_state(), State::Land);
+    }
+    p.vd_frozen = Some(-0.8);
+    for k in 1..=16_000u32 {
+        p.step(None);
+        if p.f.hands_off_state() == State::Land {
+            return Some(k as f32 * DT_US as f32 * 1e-6);
+        }
+        assert_eq!(p.f.hands_off_state(), State::Return);
+    }
+    None
+}
+
+/// FX-4 (1): with v_D held at -0.8 m/s after arrival, LAND comes `HOME_WAIT_US` (3.0 s) after Home, within one step;
+/// control: the bound removed, no LAND in 20 s.
+#[test]
+fn fx4_home_wait_is_bounded_at_3_s() {
+    let t = home_wait_with_v_d_held(false);
+    let off = home_wait_with_v_d_held(true);
+    std::println!("FX-4 (1) v_D held at -0.8 m/s: LAND {t:?} s after Home (bound {} s); control without the bound {off:?}", HOME_WAIT_US as f32 * 1e-6);
+    let want = HOME_WAIT_US as f32 * 1e-6;
+    assert!(t.is_some_and(|t| t >= want && t <= want + 2.0 * DT_US as f32 * 1e-6), "{t:?}");
+    assert_eq!(off, None);
+}
+
+/// FX-4 (2): LAND in the 0.5 m/s stage at about 4.3 m; the height estimate reads 1.0 m lower for one step. The true
+/// descent rate never exceeds the down-speed limit (1.5 m/s) + 0.05; the extra descent is about the spike (0.7 to 1.3
+/// m); the rate is back at 0.5 +- 0.05 within 3 s; no idle floor in the air.
+#[test]
+fn fx4_a_one_step_1_m_downward_spike_of_the_estimate_in_land() {
+    let mut p = pilot_hover_lost(5.0);
+    for _ in 0..2_400 {
+        p.step(None);
+    }
+    let (h0, dt) = (-p.d, DT_US as f32 * 1e-6);
+    p.d_off = 1.0;
+    p.step(None);
+    p.d_off = 0.0;
+    let (mut v_max, mut last_off, mut floor) = (0.0f32, 0.0f32, false);
+    let n = 4_000u32;
+    for k in 1..=n {
+        let o = p.step(None);
+        assert!(o.armed && !p.on_ground());
+        v_max = v_max.max(p.v);
+        floor |= o.allocation.is_none_or(|a| a.saturation.thrust_low);
+        if libm::fabsf(p.v - LAND_SPEED_MS) > 0.05 {
+            last_off = k as f32 * dt;
+        }
+    }
+    let extra = (h0 + p.d) - LAND_SPEED_MS * (n + 1) as f32 * dt;
+    std::println!("FX-4 (2) spike at {h0:.2} m: largest true descent {v_max:.3} m/s; extra descent {extra:.3} m; rate within 0.05 of 0.5 from {last_off:.2} s; idle floor {floor}");
+    let limit = Tuning::DEFAULT.pilot_speed_dn_ms;
+    assert!(v_max <= limit + 0.05 && (0.7..=1.3).contains(&extra) && last_off <= 3.0 && !floor, "{v_max} {extra} {last_off} {floor}");
+}
+
+/// FX-4 (2): estimate noise uniform +-0.2 m at every step for 10 s in LAND's 0.5 m/s stage (from about 10 m): the mean and
+/// the largest true descent rate reported; the largest at or below the down-speed limit.
+#[test]
+fn fx4_estimate_noise_0_2_m_in_lands_slow_stage() {
+    let mut p = pilot_hover_lost(10.0);
+    for _ in 0..1_600 {
+        p.step(None);
+    }
+    assert!(p.f.land_rate_ms == Some(LAND_SPEED_MS) && p.d < -8.0, "{:?} {}", p.f.land_rate_ms, p.d);
+    let mut x = 0x5eed_f404u64;
+    let (h0, mut v_max, mut floor) = (-p.d, 0.0f32, 0u32);
+    for _ in 0..8_000 {
+        x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        p.d_off = ((x >> 40) as f32 / (1u64 << 24) as f32 - 0.5) * 0.4;
+        let o = p.step(None);
+        assert!(o.armed && !p.on_ground());
+        v_max = v_max.max(p.v);
+        floor += u32::from(o.allocation.is_none_or(|a| a.saturation.thrust_low));
+    }
+    let mean = (h0 + p.d) / 10.0;
+    std::println!("FX-4 (2) noise +-0.2 m for 10 s from {h0:.2} m: mean true descent {mean:.3} m/s, largest {v_max:.3} m/s, steps on the idle floor {floor}");
+    assert!(v_max <= Tuning::DEFAULT.pilot_speed_dn_ms, "{v_max}");
+}

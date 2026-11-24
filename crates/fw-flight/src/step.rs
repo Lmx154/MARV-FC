@@ -121,6 +121,10 @@ const LAND_SLOW_MARGIN_M: f32 =
 /// `LAND_SPEED_MS` of rest and E2's first stage is reached within about 2 s at `LAND_RATE_ACC_MSS`.
 const HOME_VD_MAX_MS: f32 = LAND_SPEED_MS;
 
+/// FX-4 (1): RETURN reports Home this long after the guidance first reported it in this RETURN, us, whatever v_D reads:
+/// the time LAND's own rate ramp needs to absorb the largest climb rate (`LEG_CLIMB_MS` / `LAND_RATE_ACC_MSS`).
+const HOME_WAIT_US: u64 = (guidance::LEG_CLIMB_MS / LAND_RATE_ACC_MSS * 1e6) as u64;
+
 /// BLIND's collective below hover, m/s^2 (decision-mavlink-mode-20261123, Numbers "BLIND 0.3 m/s^2 below hover", PX4
 /// FlightTaskDescend.cpp:55-58). UNVERIFIED: the decision marks it UNKNOWN (U-1) and for the simulator only.
 pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
@@ -629,9 +633,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The guidance was done (the last waypoint reached, or the entry refused) at the previous step: the state
     /// machine's `last_waypoint_reached` (it runs before the law, as the track distance).
     leg_done: bool,
-    /// RETURN's guidance was within GDN_RADIUS of home with |v_D| below `HOME_VD_MAX_MS` (or its entry was refused) at
-    /// the previous step: the state machine's `home_reached` (A7: LAND at once).
+    /// RETURN's guidance was within GDN_RADIUS of home with |v_D| below `HOME_VD_MAX_MS` or for `HOME_WAIT_US` (or its
+    /// entry was refused) at the previous step: the state machine's `home_reached` (A7: LAND at once).
     leg_home: bool,
+    /// FX-4 (1): the step time at which the guidance first reported Home in this RETURN, us; `None` before.
+    home_since_us: Option<u64>,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -693,6 +699,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the latch never clears by the timer.
     #[cfg(test)]
     timer_off: bool,
+    /// Tests only: FX-4 (1)'s bound on RETURN's home wait is off (the control).
+    #[cfg(test)]
+    home_wait_off: bool,
     /// Tests only: the old per-step rule: airborne is armed and the collective at or above the threshold, at every step.
     #[cfg(test)]
     per_step_rule: bool,
@@ -797,6 +806,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             leg_heading_rad: 0.0,
             leg_done: false,
             leg_home: false,
+            home_since_us: None,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -833,6 +843,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             airborne_forced: false,
             #[cfg(test)]
             timer_off: false,
+            #[cfg(test)]
+            home_wait_off: false,
             #[cfg(test)]
             per_step_rule: false,
             #[cfg(test)]
@@ -1272,8 +1284,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.legs.stop();
             self.leg_done = false;
             self.leg_home = false;
+            self.home_since_us = None;
         } else {
             if was != ho.state {
+                self.home_since_us = None;
                 let start = match ho.events.start {
                     Some(hands_off::StartAt::KeptPlace) => self.legs.active(),
                     _ => 0,
@@ -1305,7 +1319,14 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             // FX-2 (3): Home is reported once the vertical speed is also below `HOME_VD_MAX_MS` (or not valid), so LAND does
             // not start from the climb's v_D (N11 (2)) when the climb in place ends at home.
             let v_d = nav.velocity_ms[2];
-            let settled = !(nav.valid.velocity_d && v_d.is_finite()) || libm::fabsf(v_d) < HOME_VD_MAX_MS;
+            // FX-4 (1): or `HOME_WAIT_US` after the guidance first reported Home in this RETURN.
+            if !auto && leg.phase == LegPhase::Home {
+                self.home_since_us.get_or_insert(t_us);
+            }
+            let waited = self.home_since_us.is_some_and(|t0| t_us.saturating_sub(t0) >= HOME_WAIT_US);
+            #[cfg(test)]
+            let waited = waited && !self.home_wait_off;
+            let settled = !(nav.valid.velocity_d && v_d.is_finite()) || libm::fabsf(v_d) < HOME_VD_MAX_MS || waited;
             self.leg_home = !auto && (leg.phase == LegPhase::Idle || (leg.phase == LegPhase::Home && settled));
             if leg.phase != LegPhase::Idle && !leg.held && mode == Mode::Position {
                 self.shaper.target_ne = None;
