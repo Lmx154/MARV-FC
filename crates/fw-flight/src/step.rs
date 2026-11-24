@@ -134,6 +134,10 @@ const GAIN_MIN: f32 = 0.62;
 /// ArduPilot's hover/2 (ArduCopter Attitude.cpp:120) at the strongest end of the spread, 0.5 / `GAIN_MAX` = 0.34.
 pub const EVER_AIRBORNE_G: f32 = 0.5 / GAIN_MAX;
 
+/// N14 (3): the card check reports H when it differs from the card's m g by more than this fraction: the measured thrust
+/// gain spread, +-12 % (tune1 section 12).
+pub const CARD_CHECK_FRAC: f32 = 0.12;
+
 /// N11 (1a): the learned hover collective is used after this much qualifying time since arming, us.
 const HOVER_VALID_US: u64 = 10_000_000;
 
@@ -769,6 +773,13 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// N12's M in force after the latest step: a hands-off state and a RADIO_STATUS after its entry (the log's M bit).
     pub fn radio_status_seen(&self) -> bool {
         self.hands_off.radio_status_seen()
+    }
+
+    /// N14 (3), the card check: H / the card's m g in percent (rounded, at most 999) once H is valid and differs from the
+    /// card's m g by more than `CARD_CHECK_FRAC`; `None` otherwise. No behaviour reads it; the board logs it once per arming.
+    pub fn card_check_pct(&self) -> Option<u16> {
+        let r = self.hover_n / (MASS * GRAVITY_MSS);
+        (self.hover_us >= HOVER_VALID_US && libm::fabsf(r - 1.0) > CARD_CHECK_FRAC).then(|| (r * 100.0 + 0.5).min(999.0) as u16)
     }
 
     /// The hands-off state after the latest step (its HEARTBEAT and log code is `State::code`).
@@ -1475,6 +1486,17 @@ pub fn crash_msg(logged: bool, s: &CrashStatus) -> Option<[u8; 8]> {
         (true, false) => Some(*b"K 0\0\0\0\0\0"),
         _ => None,
     }
+}
+
+/// N14 (3): the card check's MSG text, "HOVER <pct> % of card", `pct` right-aligned in three places (at most 999).
+pub fn card_msg(pct: u16) -> [u8; 19] {
+    let p = pct.min(999);
+    let digit = |n: u16| b'0' + (n % 10) as u8;
+    let h = if p >= 100 { digit(p / 100) } else { b' ' };
+    let t = if p >= 10 { digit(p / 10) } else { b' ' };
+    let mut m = *b"HOVER  00 % of card";
+    (m[6], m[7], m[8]) = (h, t, digit(p));
+    m
 }
 
 /// When to write MODE (decision-nav-eskf-20261120, 8c, F6): at the first step and at every change of the selected or

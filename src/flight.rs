@@ -670,6 +670,8 @@ pub struct Stepper {
     m_logged: bool,
     /// Crash rule K's would-fire of the last "K" MSG written (false before the first; `crash_msg`).
     k_logged: bool,
+    /// N14 (3): the card check's MSG was written in this arming (cleared on a disarmed step).
+    card_logged: bool,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
     guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
@@ -721,6 +723,7 @@ impl Stepper {
             ho_logged: None,
             m_logged: false,
             k_logged: false,
+            card_logged: false,
             guidance: Guidance::new(),
             gdn_in_force: GDN_OFF,
             gdn_pushed: GDN_OFF,
@@ -958,6 +961,18 @@ impl SampleSink for Stepper {
             && self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text))
         {
             self.k_logged = crash.would_fire();
+        }
+        // N14 (3): the card check, one MSG per arming once H is valid and more than 12 % from the card's m g ("HOVER
+        // <H / m g> % of card"; no STATUSTEXT path from the flight step on this branch); a dropped one is offered again.
+        if !out.armed {
+            self.card_logged = false;
+        } else if !self.card_logged
+            && let Some(pct) = self.flight.card_check_pct()
+            && self.log.push_with(dflog::MSG.length.into(), |b| {
+                dflog::encode_msg(b, out.t_us, &fw_flight::step::card_msg(pct))
+            })
+        {
+            self.card_logged = true;
         }
         // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
         // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).

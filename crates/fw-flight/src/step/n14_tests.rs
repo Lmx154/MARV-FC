@@ -349,3 +349,21 @@ fn n14_saturation_gates_block_learning() {
         assert!(f.hover_us > us && f.hover_n != h, "{force:?}: learns again");
     }
 }
+
+/// N14 (3), the card check (no behaviour): `card_check_pct` is `None` until H is valid, `None` at 11 % off, the percent at
+/// 13 % off (either side); the text. The board writes it once per arming (src/flight.rs, `card_logged`).
+#[test]
+fn n14_card_check_fires_at_13_percent_not_at_11() {
+    let mut p = Plant::new(1.0, 0.0, POSITION);
+    let mg = MASS * GRAVITY_MSS;
+    for (r, want) in [(1.13f32, Some(113u16)), (0.87, Some(87)), (1.11, None), (0.89, None), (1.0, None)] {
+        p.f.hover_n = r * mg;
+        p.f.hover_us = HOVER_VALID_US - 1;
+        assert_eq!(p.f.card_check_pct(), None, "{r}: H not valid");
+        p.f.hover_us = HOVER_VALID_US;
+        assert_eq!(p.f.card_check_pct(), want, "{r}");
+    }
+    assert_eq!(&card_msg(113), b"HOVER 113 % of card");
+    assert_eq!(&card_msg(87), b"HOVER  87 % of card");
+    assert_eq!(&card_msg(1_200), b"HOVER 999 % of card");
+}
