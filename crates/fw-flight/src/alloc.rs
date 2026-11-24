@@ -25,6 +25,12 @@ impl CardAllocator {
         }
     }
 
+    /// The collective's physical range, N: the idle floor 4 T_lo (below it `thrust_low`) and full thrust 4 T_hi (above it
+    /// `thrust_high`), step 1 of [`CardAllocator::allocate`] (decision-mavlink-mode-20261123, N14 (1) and (2)).
+    pub fn collective_range(&self) -> (f32, f32) {
+        (4.0 * self.t_lo, 4.0 * self.t_hi)
+    }
+
     /// Rotor thrusts by DShot line, N, each in [T_lo, T_hi], and what could not be met (decision 1c, steps 1 to 4).
     fn thrusts(&self, demand: &ThrustTorque) -> ([f32; 4], Saturation) {
         let (lo, hi) = (self.t_lo, self.t_hi);

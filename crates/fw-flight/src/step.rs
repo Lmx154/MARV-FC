@@ -2,6 +2,7 @@
 //! [`Flight::step`] runs the stages in the order of rule R1, each exactly once. No clock: the step time is
 //! `sensors.imu1.t_us`.
 
+use crate::alloc::CardAllocator;
 use crate::gate::{Gate, MotorCommand};
 use crate::hands_off::{self, Demand, HandsOff, LandLaw, MissionFacts, State, Tier};
 use crate::gnc::{
@@ -138,8 +139,8 @@ const TOUCHDOWN_ACCEL_MAX_MSS: f32 = 1.0;
 /// approved by the owner 2026-11-24).
 const TOUCHDOWN_ROT_MAX_RADS: f32 = 20.0 * (core::f32::consts::PI / 180.0);
 
-/// BLIND's probe (Amendment N, N4): the time over which its collective ramps linearly from BLIND's down to the ground
-/// threshold, us. No outside source; approved by the owner 2026-11-24.
+/// BLIND's probe (Amendment N, N4; N14 (1)): the time over which its collective ramps linearly from BLIND's down to the
+/// allocator's idle floor, us. No outside source; approved by the owner 2026-11-24.
 pub const BLIND_PROBE_RAMP_US: u64 = 1_000_000;
 
 /// N13: BLIND's one-shot correction is made this long after BLIND's entry, us, from the mean net vertical acceleration
@@ -466,6 +467,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     last_us: Option<u64>,
     /// The collective below which the vehicle counts as on the ground, N (`ground_thrust_g` x m g).
     ground_thrust_n: f32,
+    /// The allocator's idle floor, N (`CardAllocator::collective_range`; N14 (1)).
+    floor_n: f32,
     /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
     /// controller take it at every disarmed step, so the value at the arming step is the one in force until disarm.
     speed_pending: f32,
@@ -502,8 +505,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// E3: the earth-frame acceleration, gravity removed, low-passed at `TOUCHDOWN_ACCEL_LPF_HZ`, m/s^2 NED, from IMU1's
     /// specific force and the estimate's attitude; every step with a finite value.
     accel_ef_mss: [f32; 3],
-    /// The touchdown rule TD (Amendment N, N4; replaces E3): how long (a) the collective below the ground threshold (in
-    /// BLIND: or the probe at its end), (b) `accel_ef_mss` at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch
+    /// The touchdown rule TD (Amendment N, N4; replaces E3; N14 (1)): how long (a) the collective on the allocator's idle
+    /// floor (its `thrust_low` flag; a refused demand counts), (b) `accel_ef_mss` at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch
     /// rates each at most `TOUCHDOWN_ROT_MAX_RADS` have held together, in the armed steps of every state since one last
     /// failed, us (N10).
     still_us: u64,
@@ -551,6 +554,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
+    /// Tests only: TD's (a) is the old rule, the collective below the ground threshold (0.714 x the card's m g).
+    #[cfg(test)]
+    td_card_rule: bool,
     /// Tests only: the battery is critical (the battery monitor is on another branch; the board gives false).
     #[cfg(test)]
     battery_critical: bool,
@@ -612,6 +618,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             land_detect_us: tuning.land_detect_us,
             last_us: None,
             ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
+            floor_n: CardAllocator::new().collective_range().0,
             speed_pending: tuning.pilot_speed_xy_ms,
             notch_pending: (false, NOTCH_POLES_DEFAULT),
             notch: (false, NOTCH_POLES_DEFAULT),
@@ -659,6 +666,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             threshold_rule: false,
             #[cfg(test)]
             latch_off: false,
+            #[cfg(test)]
+            td_card_rule: false,
             #[cfg(test)]
             battery_critical: false,
         }
@@ -909,12 +918,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             _ => mode,
         };
         // Hands-off laws (Amendment D): centred synthetic sticks, no real stick reaching the shaper (I3); LAND's descent in
-        // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4) linearly down to the ground
-        // threshold over `BLIND_PROBE_RAMP_US`. AUTO and RETURN (unreachable here) fly HOLD's. N11 (1c): BLIND's
+        // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4, N14 (1)) linearly down to the
+        // idle floor over `BLIND_PROBE_RAMP_US`, then throttle 0 (the allocator holds the floor and flags `thrust_low`). AUTO and RETURN (unreachable here) fly HOLD's. N11 (1c): BLIND's
         // collective is H - m `BLIND_BELOW_HOVER_MSS` once H is valid (the throttle that gives it in Angle), else the card's.
         // N13: after the one-shot correction, the corrected collective (the probe ramps from it, an aborted probe returns
         // to it).
-        let probe_end = self.probe_us.is_some_and(|p| p >= BLIND_PROBE_RAMP_US);
         let hover_valid = self.hover_us >= HOVER_VALID_US;
         let blind_start = match self.blind_trim_n {
             Some(c) => self.shaper.throttle_for(c),
@@ -923,10 +931,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         let blind_throttle = match self.probe_us {
             None => blind_start,
+            Some(p) if p >= BLIND_PROBE_RAMP_US => 0.0,
             Some(p) => {
-                let ramp = p.min(BLIND_PROBE_RAMP_US) as f32 / BLIND_PROBE_RAMP_US as f32;
-                let ground = self.ground_thrust_n / (2.0 * MASS * GRAVITY_MSS);
-                blind_start - ramp * (blind_start - ground)
+                let ramp = p as f32 / BLIND_PROBE_RAMP_US as f32;
+                let floor = self.shaper.throttle_for(self.floor_n);
+                blind_start - ramp * (blind_start - floor)
             }
         };
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
@@ -1022,6 +1031,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // value DMD logs as Sat bit 3). Start only above the ground threshold, end only after `land_detect_us` low.
         let thrust_ok = demand.is_ok_and(|d| d.thrust_n >= self.ground_thrust_n);
         let low = allocation.map_or(true, |a| a.saturation.thrust_low);
+        let floor = low;
+        #[cfg(test)]
+        let floor = if self.td_card_rule { !thrust_ok } else { floor };
         #[cfg(test)]
         let low = if self.threshold_rule { !thrust_ok } else { low };
         if !self.gate.armed() {
@@ -1043,7 +1055,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             }
         }
         // TD, the touchdown rule (decision-mavlink-mode-20261123, Amendment N, N4 and N10; replaces E3): on every armed step,
-        // (a) the collective below the ground threshold (BLIND: or its probe at the threshold), (b) the filtered
+        // (a) the collective on the idle floor, `floor` (N14 (1): ArduPilot's throttle_lower), (b) the filtered
         // acceleration at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch rates at most `TOUCHDOWN_ROT_MAX_RADS`,
         // all for `land_detect_us`. Only the state machine's stops read it (WR1, stick loss with the latch false); in LAND,
         // TAKEOVER's descent and BLIND it also clears the latch, so the next step's ground exit (WR1) stops and disarms.
@@ -1070,7 +1082,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             && libm::fabsf(p_rads) <= TOUCHDOWN_ROT_MAX_RADS
             && libm::fabsf(q_rads) <= TOUCHDOWN_ROT_MAX_RADS;
         let blind = self.gate.armed() && ho.state == State::Blind;
-        if self.gate.armed() && (!thrust_ok || (blind && probe_end)) && still && level {
+        if self.gate.armed() && floor && still && level {
             self.still_us += dt_us;
             if self.still_us >= self.land_detect_us && (ho.landing || ho.takeover_descent || blind) {
                 self.airborne = false;
@@ -2700,3 +2712,6 @@ mod handsoff_tests;
 
 #[cfg(test)]
 mod crash_tests;
+
+#[cfg(test)]
+mod n14_tests;

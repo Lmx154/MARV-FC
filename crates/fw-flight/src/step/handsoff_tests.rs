@@ -574,9 +574,9 @@ fn target_d(o: &StepOut) -> f32 {
 }
 
 /// WR1 touchdown: LAND descends (the height target at 0.5 m/s), the vehicle follows it to the ground (d = 0) and IMU1
-/// reads it at rest (WR1's guard, N4 (b)), the real airborne latch clears (TD or land_detect_us on the idle floor,
-/// whichever is first: TD, which starts at the ground threshold, above the idle floor), and the gate is disarmed within
-/// one step of that: at most land_detect_us plus one step after the first step below the ground threshold.
+/// reads it at rest (WR1's guard, N4 (b)), the real airborne latch clears (TD or land_detect_us on the idle floor; both
+/// count from the idle floor since N14 (1)), and the gate is disarmed within one step of that: at most land_detect_us
+/// plus one step after the first step on the idle floor.
 #[test]
 fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_step() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -606,7 +606,7 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
             assert!((rate - LAND_SPEED_MS).abs() < 0.01, "descent {rate} m/s");
             rate_checked = true;
         }
-        let low = !o.demand.is_ok_and(|d| d.thrust_n >= ground_n());
+        let low = on_floor(&o);
         if o.armed && low {
             first_low.get_or_insert(fly.t);
         } else if o.armed {
@@ -625,7 +625,7 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
     assert!(rate_checked);
     let (low, clear, dis) = (first_low.unwrap(), cleared.expect("the latch cleared"), disarmed.expect("disarmed"));
     let land = Tuning::DEFAULT.land_detect_us;
-    std::println!("below the ground threshold at {low}, latch clear {} us later, disarm {} us after the clear", clear - low, dis - clear);
+    std::println!("on the idle floor at {low}, latch clear {} us later, disarm {} us after the clear", clear - low, dis - clear);
     assert!(dis - clear <= DT_US, "disarmed within one step of the clear");
     assert!(dis - low <= land + DT_US, "land_detect_us plus one step: {} us", dis - low);
 }
@@ -1296,9 +1296,15 @@ fn ground_n() -> f32 {
     Tuning::DEFAULT.ground_thrust_g * MASS * GRAVITY_MSS
 }
 
-/// E3 on a touchdown whose height estimate flickers 1.5 m low for one step every 0.1 s: the airborne latch's count
-/// restarts at the flickers and never expires, and the backstop disarms 1.0 s (within one step) after the collective went
-/// below the ground threshold for good, the accelerometer at rest.
+/// TD's (a) (N14 (1)): the step's collective on the allocator's idle floor (`thrust_low`), or the demand refused.
+fn on_floor(o: &StepOut) -> bool {
+    o.allocation.is_none_or(|a| a.saturation.thrust_low)
+}
+
+/// E3 on a touchdown whose height estimate flickers 1.5 m low for one step every 0.1 s for 20 s on the ground. Since N14
+/// (1) TD's (a) is the idle-floor flag the latch's count reads, so the flickers restart both and the gate stays armed in
+/// LAND while they last (a late stop on the ground, N14's accepted side); once they end, disarmed 1.0 s (within one
+/// step) after the collective reached the idle floor for good, the accelerometer at rest.
 #[test]
 fn e3_a_touchdown_with_a_flickering_height_disarms_within_1_0_s_plus_one_step() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -1307,35 +1313,40 @@ fn e3_a_touchdown_with_a_flickering_height_disarms_within_1_0_s_plus_one_step() 
     let dt = DT_US as f32 * 1e-6;
     let land = Tuning::DEFAULT.land_detect_us;
     let (mut ground, mut since, mut restarts, mut low_prev, mut disarmed) = (false, None, 0u32, false, None);
-    for k in 0..40_000u32 {
+    let mut flicker_end = None;
+    for k in 0..60_000u32 {
         let mut n = fly.cell.get();
         let d = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
         ground |= d >= 0.0;
         n.velocity_ms[2] = if d < 0.0 { LAND_SPEED_MS } else { 0.0 };
-        n.position_m[2] = if ground && k % 80 == 0 { 1.5 } else { d };
+        let flicker = ground && *flicker_end.get_or_insert(k + 16_000) > k;
+        n.position_m[2] = if flicker && k % 80 == 0 { 1.5 } else { d };
         fly.cell.set(n);
         let o = fly.quiet_f(AT_REST);
         if !o.armed {
             disarmed = Some(fly.t);
             assert_eq!(fly.state(), State::Stop);
+            assert!(!flicker, "step {k}: disarmed during the flicker");
             break;
         }
         assert_eq!(fly.state(), State::Land, "step {k}");
-        assert!(fly.f.low_us < land, "step {k}: the latch's own count expired");
+        if flicker {
+            assert!(fly.f.low_us < land, "step {k}: the latch's own count expired");
+        }
         if !ground {
             continue;
         }
-        let low = o.allocation.is_none_or(|a| a.saturation.thrust_low);
-        if o.demand.is_ok_and(|d| d.thrust_n >= ground_n()) {
-            (since, restarts) = (None, 0);
-        } else {
+        let low = on_floor(&o);
+        restarts += u32::from(flicker && low_prev && !low);
+        if low {
             since.get_or_insert(fly.t);
-            restarts += u32::from(low_prev && !low);
+        } else {
+            since = None;
         }
         low_prev = low;
     }
-    let (since, disarmed) = (since.expect("below the threshold"), disarmed.expect("disarmed"));
-    std::println!("collective below the threshold from {since}, disarmed {} us later, latch count restarts {restarts}", disarmed - since);
+    let (since, disarmed) = (since.expect("on the floor"), disarmed.expect("disarmed"));
+    std::println!("on the idle floor for good from {since}, disarmed {} us later, floor restarts in the flicker {restarts}", disarmed - since);
     assert!(restarts >= 5, "the latch's count restarted: {restarts}");
     assert!(disarmed - since <= land + DT_US && disarmed - since + DT_US >= land, "{} us", disarmed - since);
 }
@@ -1388,7 +1399,7 @@ fn e3_in_the_air_below_the_ground_threshold_the_acceleration_condition_is_false_
 /// N10: TD counts in every state but clears the latch only in LAND, the TAKEOVER descent and BLIND: HOLD, TAKEOVER and
 /// PILOT with the vehicle 3 m above its height target (the collective below the threshold), the accelerometer at rest
 /// and the latch's timer off: TD's count passes 1.0 s, the latch stays set and the gate armed. The TAKEOVER descent on
-/// the ground with the timer off: disarmed by TD within 1.0 s plus one step.
+/// the ground with the timer off: disarmed by TD within 1.0 s plus one step of the idle floor (N14 (1)).
 #[test]
 fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
     for name in ["hold", "takeover", "pilot"] {
@@ -1444,7 +1455,7 @@ fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
             return;
         }
         assert_eq!(fly.state(), State::Takeover, "step {k}");
-        if o.demand.is_ok_and(|d| d.thrust_n < ground_n()) {
+        if on_floor(&o) {
             since.get_or_insert(fly.t);
         } else {
             since = None;
@@ -1475,7 +1486,7 @@ fn at_rest_tilted(r: f32, p: f32) -> [f32; 3] {
 
 /// E3 on a slope (review finding F3): LAND to a touchdown on ground tilted roll 20 deg, pitch -15 deg, yaw 90 deg; at
 /// rest there the estimate's attitude is that tilt and IMU1 reads the matching specific force; the latch's timer off, so
-/// only E3 can clear it: disarmed 1.0 s (within one step) after the collective went below the ground threshold.
+/// only E3 can clear it: disarmed 1.0 s (within one step) after the collective reached the idle floor (N14 (1)).
 #[test]
 fn e3_at_rest_on_a_slope_disarms_within_1_0_s_plus_one_step() {
     let (r, p) = (20f32.to_radians(), (-15f32).to_radians());
@@ -1502,12 +1513,12 @@ fn e3_at_rest_on_a_slope_disarms_within_1_0_s_plus_one_step() {
         if !o.armed {
             let since: u64 = since.expect("below the threshold on the ground");
             assert_eq!(fly.state(), State::Stop);
-            std::println!("slope: disarmed {} us after the collective went below the threshold", fly.t - since);
+            std::println!("slope: disarmed {} us after the collective reached the idle floor", fly.t - since);
             assert!(fly.t - since <= land + DT_US && fly.t - since + DT_US >= land, "{} us", fly.t - since);
             return;
         }
         assert_eq!(fly.state(), State::Land, "step {k}");
-        if ground && !o.demand.is_ok_and(|d| d.thrust_n >= ground_n()) {
+        if ground && on_floor(&o) {
             since.get_or_insert(fly.t);
         } else {
             since = None;
@@ -1688,6 +1699,10 @@ fn wr3_and_return_built_on_the_real_step() {
     let mut rest = true;
     // N12: RADIO_STATUS about once a second from a generator of its own (the main sequence is unchanged).
     let mut radio = Lcg(0x5eed_0d3b);
+    // N14 (1): TD now needs the idle floor, which a hold at the estimate never reaches, so a generator of its own (the
+    // main sequence is unchanged) puts the estimate 3 m above where it was now and then (0.1 % of steps), holds IMU1 at rest
+    // on hands-off steps (99 %) and also clears the latch while TD holds (2 % of those steps), keeping (d) exercised.
+    let mut clears = Lcg(0x5eed_0d3c);
     for k in 0..2_000_000u32 {
         t += DT_US;
         if radio.chance(1) {
@@ -1717,7 +1732,13 @@ fn wr3_and_return_built_on_the_real_step() {
         } else if rng.chance(5) || throttle == 0.0 {
             throttle = [0.5, 0.5, 0.6, 0.0][(rng.next() % 4) as usize];
         }
-        let modelled_clear = rng.chance(1) && f.airborne;
+        if clears.chance(1) {
+            let mut n = cell.get();
+            n.position_m[2] = -13.0;
+            cell.set(n);
+        }
+        let td_now = f.still_us >= tuning.land_detect_us;
+        let modelled_clear = (rng.chance(1) | (clears.chance(20) && td_now)) && f.airborne;
         if modelled_clear {
             f.airborne = false;
         }
@@ -1736,7 +1757,7 @@ fn wr3_and_return_built_on_the_real_step() {
         }
         let td = f.still_us >= tuning.land_detect_us;
         let mut i = input(t, rc);
-        if rest {
+        if rest || (!matches!(prev_state, State::Pilot | State::Stop) && clears.chance(990)) {
             i.sensors.imu1.reading.accel_ms2 = AT_REST;
         }
         let o = f.step(&i);
@@ -1778,7 +1799,9 @@ fn wr3_and_return_built_on_the_real_step() {
         prev_state = state;
     }
     std::println!("armings, silence disarms, real and modelled WR1 stops, hands-off armed steps, ..: {counts:?}; states {seen:?}");
-    assert!(counts[0] > 50 && counts[1] > 10 && counts[2] + counts[3] > 5 && counts[3] > 0 && counts[4] > 10_000, "{counts:?}");
+    // N14 (1): a modelled clear (counts[3]) needs TD held in HOLD, i.e. HOLD on the idle floor, which the walk's
+    // estimate (reset to 10 m up) rarely gives; it is counted, not required.
+    assert!(counts[0] > 50 && counts[1] > 10 && counts[2] + counts[3] > 5 && counts[4] > 10_000, "{counts:?}");
     for s in [State::Pilot, State::Takeover, State::Hold, State::Land, State::Stop, State::Blind] {
         assert!(seen[usize::from(s.code() - 1)] > 0, "{s:?} reached: {seen:?}");
     }
@@ -2034,7 +2057,8 @@ fn n10_stick_loss_after_a_long_throttle_chop_in_the_air_lands_never_stops() {
 
 /// N10 (iii): a hand landing (Angle, throttle 0 on the ground, IMU1 at rest), then a stick loss: STOP at the first step
 /// past the stick-loss time when TD has held at the loss; when it has not (the vehicle rocking at 30 deg/s until 0.5 s
-/// before the loss), LAND, then STOP through TD within 2 s of the loss.
+/// before the loss), LAND, then STOP through TD within 3.2 s + 1.0 s of the loss (N14 (1): LAND's law reaches the idle
+/// floor, then TD's 1.0 s).
 #[test]
 fn n10_stick_loss_on_the_ground_after_a_hand_landing_stops_through_td() {
     let timeout = Tuning::DEFAULT.rc_fs_timeout_us;
@@ -2061,7 +2085,7 @@ fn n10_stick_loss_on_the_ground_after_a_hand_landing_stops_through_td() {
         if !o.armed {
             let since = fly.t - (last + timeout);
             std::println!("hand landing, TD not held at the loss: STOP {since} us after the loss");
-            assert!(landed && fly.state() == State::Stop && since <= 2_000_000, "{since} us");
+            assert!(landed && fly.state() == State::Stop && since <= 4_200_000, "{since} us");
             return;
         }
         assert!(matches!(fly.state(), State::Pilot | State::Land), "{:?}", fly.state());
@@ -2087,34 +2111,40 @@ fn thrust_of(o: &StepOut) -> f32 {
 }
 
 /// N7, BLIND's probe on the ground: IMU1 at rest and no rotation from the step BLIND begins. From the first step whose
-/// (b) holds: 1.0 s of stillness, the 1.0 s ramp of the collective from BLIND's down to the ground threshold (linear,
-/// never rising), then TD's 1.0 s; STOP and disarmed within (1.0 + 1.0 + 1.0) s plus three steps.
+/// (b) holds: 1.0 s of stillness, the 1.0 s ramp of the collective from BLIND's down to the idle floor (linear, never
+/// rising, above the floor until the ramp's end; N14 (1)), then on the floor (the allocator's `thrust_low`) TD's 1.0 s;
+/// STOP and disarmed within (1.0 + 1.0 + 1.0) s plus three steps.
 #[test]
 fn n4_blind_probe_on_the_ground_reaches_the_threshold_and_stops_within_3_s() {
     let mut fly = blind_fly();
     let blind_n = MASS * (GRAVITY_MSS - BLIND_BELOW_HOVER_MSS);
     let (mut first_still, mut prev, mut min_thrust) = (None::<u64>, f32::INFINITY, f32::INFINITY);
+    let floor_n = fly.f.floor_n;
     for k in 0..20_000u32 {
         // N13: from the step after the one-shot correction, BLIND's collective is the corrected one.
         let want = fly.f.blind_trim_n.unwrap_or(blind_n);
         let o = fly.quiet_f(AT_REST);
         if !o.armed {
             let since = fly.t - first_still.expect("(b) held");
-            std::println!("BLIND on the ground: stopped {since} us after (b) first held; lowest collective {min_thrust} N (threshold {} N)", ground_n());
+            std::println!("BLIND on the ground: stopped {since} us after (b) first held; lowest ramp collective {min_thrust} N (floor {floor_n} N)");
             assert_eq!(fly.state(), State::Stop);
             assert!(since <= 3_000_000 + 3 * DT_US && since + DT_US >= 3_000_000, "{since} us");
-            assert!((min_thrust - ground_n()).abs() < 1e-3 * ground_n(), "the probe reached the threshold");
+            assert!(min_thrust > floor_n && min_thrust - floor_n < 0.01 * MASS * GRAVITY_MSS, "the ramp reached the floor");
             return;
         }
         assert_eq!(fly.state(), State::Blind, "step {k}");
         let thrust = thrust_of(&o);
+        let ramp_end = fly.f.probe_us.is_some_and(|p| p > BLIND_PROBE_RAMP_US);
         if fly.f.probe_us.is_none() {
             assert!((thrust - want).abs() < 1e-3 * want, "BLIND's collective outside the probe, step {k}");
         } else {
             assert!(thrust <= prev + 1e-4, "the ramp never rises, step {k}");
+            assert_eq!(on_floor(&o), ramp_end, "on the floor only from the ramp's end, step {k}");
         }
         prev = thrust;
-        min_thrust = min_thrust.min(thrust);
+        if !ramp_end {
+            min_thrust = min_thrust.min(thrust);
+        }
         if fly.f.still {
             first_still.get_or_insert(fly.t);
         }
@@ -2150,7 +2180,7 @@ fn blind_air_run(gain: f32, seconds: u64) -> (bool, u32, u32, f32, f32) {
 }
 
 /// N7, BLIND's probe in the air at thrust gain 0.88, 1.0 and 1.12 (60 s): the plant accelerates downward as the probe
-/// lowers the collective, (b) fails, the probe aborts before the threshold, and BLIND never stops. (At 0.88 the probes
+/// lowers the collective, (b) fails, the probe aborts before the idle floor, and BLIND never stops. (At 0.88 the probes
 /// begin once drag has brought the acceleration under 1.0 m/s^2 in the fall.)
 #[test]
 fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
@@ -2158,7 +2188,7 @@ fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
         let (stopped, started, aborted, min_thrust, fell) = blind_air_run(gain, 60);
         std::println!("gain {gain}: stopped {stopped}, probes {started} started {aborted} aborted, lowest collective {min_thrust} N, {fell} m down");
         assert!(!stopped, "gain {gain}");
-        assert!(min_thrust > ground_n(), "gain {gain}: the probe never reached the threshold");
+        assert!(min_thrust > CardAllocator::new().collective_range().0, "gain {gain}: the probe never reached the floor");
         assert!(started > 5 && aborted + 1 >= started, "gain {gain}: {started} {aborted}");
     }
 }
