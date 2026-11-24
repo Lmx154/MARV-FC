@@ -24,11 +24,14 @@ fn handshake() -> &'static Handshake {
     h
 }
 
+/// A receiver report (N19: these tests fly MAVLink flights at FS_HOLD_EN 1), the mission switch OFF.
 fn rc(t: u64, arm: bool, throttle: f32) -> RcSample {
     RcSample {
         sticks: Sticks { roll: 0.0, pitch: 0.0, throttle, yaw: 0.0 },
         arm,
         switch6: Switch3::High,
+        source: fw_core::rc::RcSource::Receiver,
+        mission: false,
         t_us: t,
     }
 }
@@ -64,10 +67,11 @@ fn a_command_through_the_mailbox_is_applied_on_the_step_that_takes_it_and_answer
         go(&mut f, Some((true, 0.5)));
     }
     assert!(f.airborne);
-    // PILOT with fresh sticks: DENIED, code 2, with this command's number; the state is unchanged.
+    // PILOT with fresh sticks on a MAVLink flight: DENIED, code 4 (N19 section 5), with this command's number; the state
+    // is unchanged.
     let s = m.post(request_byte(FlightCommand::Land, true)).unwrap();
     go(&mut f, Some((true, 0.5)));
-    assert_eq!(m.poll(s), Some(DenyReason::CrsfFresh.code()));
+    assert_eq!(m.poll(s), Some(DenyReason::NotInThisState.code()));
     assert_eq!(f.hands_off_state(), State::Pilot);
     m.end(s, 0);
     // Stick loss: HOLD.
@@ -145,8 +149,16 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
         let (mut pos, mut vel) = ([0.0f32; 3], [0.0f32; 3]);
         let mut newest = None::<u64>;
         let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
+        // N19: receiver reports with the mission switch from a generator of its own (the main sequence is unchanged); the
+        // pilot arms with it OFF (a report with it ON never arms) and keeps it mostly ON in the air.
+        let (mut ms, mut mission) = (Lcg(seed ^ 0x8888), false);
         for _ in 0..40_000 {
             t += DT_US;
+            if !f.gate.armed() {
+                mission = false;
+            } else if ms.chance(if mission { 1 } else { 3 }) {
+                mission = !mission;
+            }
             if quiet == 0 && rng.chance(2) {
                 quiet = 900 + (rng.next() % 3000) as u32;
             }
@@ -174,6 +186,8 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
                 },
                 arm,
                 switch6: Switch3::High,
+                source: fw_core::rc::RcSource::Receiver,
+                mission,
                 t_us: t,
             });
             f.set_last_radio_heartbeat_us(Some(t));

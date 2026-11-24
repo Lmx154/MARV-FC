@@ -84,6 +84,8 @@ pub(super) fn report(t_us: u64, arm: bool, throttle: f32, switch6: Switch3) -> R
         },
         arm,
         switch6,
+        source: fw_core::rc::RcSource::Crsf,
+        mission: false,
         t_us,
     }
 }

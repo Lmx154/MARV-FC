@@ -7,7 +7,7 @@ use crate::quat::down_in_body;
 use crate::tuning::Tuning;
 use fw_core::esc::LINES;
 use fw_core::handshake::Handshake;
-use fw_core::rc::RcSample;
+use fw_core::rc::{RcSample, RcSource};
 use marv_card::{IDLE_LEVEL, LEVEL_MAX};
 
 /// The gate disarms and the ESC task clears `ARMED` when the gap between flight steps exceeds this, us. 100 ms is the
@@ -52,6 +52,8 @@ pub struct Gate {
     last_rc_us: Option<u64>,
     /// A fresh report with the switch off was seen since the last disarm or refused arm.
     seen_off: bool,
+    /// The flight's source (N19 1(3)): the source of the report the gate armed on, until disarm.
+    source: Option<RcSource>,
     /// Where the armed state is stored for core 0; arming also needs its `try_arm` (no save running).
     handshake: &'static Handshake,
     rc_fs_timeout_us: u64,
@@ -68,6 +70,7 @@ impl Gate {
             last_step_us: None,
             last_rc_us: None,
             seen_off: false,
+            source: None,
             handshake,
             rc_fs_timeout_us: tuning.rc_fs_timeout_us,
             arm_thr_max: tuning.arm_thr_max,
@@ -78,6 +81,15 @@ impl Gate {
     /// The gate's armed state.
     pub fn armed(&self) -> bool {
         self.armed
+    }
+
+    /// N19 1(3): armed, only a report of the flight's source counts; disarmed, a CRSF report, or a receiver report with
+    /// FS_HOLD_EN `fs_hold_en` 1. `Flight::step` hands no other report to the shaper, the state machine or the gate.
+    pub(crate) fn accepts(&self, r: &RcSample, fs_hold_en: bool) -> bool {
+        match self.source {
+            Some(s) if self.armed => r.source == s,
+            _ => r.source == RcSource::Crsf || fs_hold_en,
+        }
     }
 
     /// The last stage of every step. `rc` is this step's new stick report. RC loss is the age of the newest report at
@@ -124,9 +136,11 @@ impl Gate {
                     && nav.valid.tilt
                     && nav.valid.rates
                     && down_in_body(nav.attitude)[2] >= self.cos_angle_max
-                    && levels.is_some();
+                    && levels.is_some()
+                    && !(r.source == RcSource::Receiver && r.mission);
                 if ready && self.handshake.try_arm() {
                     self.armed = true;
+                    self.source = Some(r.source);
                 } else {
                     self.seen_off = false;
                 }
@@ -161,6 +175,7 @@ impl Gate {
         }
         self.armed = false;
         self.seen_off = false;
+        self.source = None;
     }
 }
 
@@ -184,6 +199,8 @@ mod tests {
             sticks,
             arm,
             switch6: Switch3::Low,
+            source: fw_core::rc::RcSource::Crsf,
+            mission: false,
             t_us,
         }
     }
@@ -686,6 +703,46 @@ mod tests {
         assert!(armed_steps > 10_000 && spins > 10_000, "{armed_steps} {spins}");
     }
 
+    /// N19 section 3: a receiver report with the mission switch ON never arms (switch cycle, low throttle and every
+    /// check met), with it OFF it does; a receiver report counts while disarmed only at FS_HOLD_EN 1; the source the gate
+    /// armed on is latched until disarm (`accepts`), both ways.
+    #[test]
+    fn n19_mission_switch_on_never_arms_and_the_source_is_latched() {
+        static HS_N19: Handshake = Handshake::new();
+        HS_N19.set_permit(true);
+        let mut gate = Gate::new(&Tuning::DEFAULT, &HS_N19);
+        let levels = Some([600; 4]);
+        let rx = |t: u64, arm: bool, mission: bool| RcSample { source: RcSource::Receiver, mission, ..report(t, arm, 0.0) };
+        let mut t = 1_000;
+        for _ in 0..5 {
+            t += 1_000;
+            step(&mut gate, t, Some(rx(t, false, true)), levels);
+            t += 1_000;
+            let c = step(&mut gate, t, Some(rx(t, true, true)), levels);
+            assert!(c == MotorCommand::STOP && !gate.armed() && !HS_N19.armed(), "mission switch ON");
+        }
+        assert!(gate.accepts(&report(t, true, 0.0), false) && gate.accepts(&report(t, true, 0.0), true));
+        assert!(!gate.accepts(&rx(t, true, false), false), "disarmed, FS_HOLD_EN 0: no receiver report");
+        assert!(gate.accepts(&rx(t, true, false), true));
+        t += 1_000;
+        step(&mut gate, t, Some(rx(t, false, false)), levels);
+        t += 1_000;
+        let c = step(&mut gate, t, Some(rx(t, true, false)), levels);
+        assert!(gate.armed() && c.throttles().is_some(), "mission switch OFF arms");
+        assert!(gate.accepts(&rx(t, true, true), false), "the flight's source, FS_HOLD_EN aside");
+        assert!(!gate.accepts(&report(t, true, 0.0), true), "a CRSF report on a MAVLink flight");
+        t += 1_000;
+        step(&mut gate, t, Some(rx(t, false, false)), levels);
+        assert!(!gate.armed());
+        t += 1_000;
+        step(&mut gate, t, Some(report(t, false, 0.0)), levels);
+        t += 1_000;
+        step(&mut gate, t, Some(report(t, true, 0.0)), levels);
+        assert!(gate.armed(), "CRSF arms");
+        assert!(!gate.accepts(&rx(t, true, false), true), "a receiver report on a CRSF flight");
+        assert!(gate.accepts(&report(t, true, 0.0), false));
+    }
+
     /// Amendment D, WR3: the real gate driven by the real hands-off machine. Each step the machine runs first with the
     /// armed state and the airborne latch the previous step left; its `disarm` goes through the gate's disarm path,
     /// then `apply` takes this step's report and the Output's `hands_off` and `arm_off_holds`. The airborne latch lives
@@ -764,6 +821,8 @@ mod tests {
                 },
                 arm: !rng.chance(50),
                 switch6: [Switch3::Low, Switch3::Middle, Switch3::High][(rng.next() % 3) as usize],
+                source: if rng.chance(500) { RcSource::Receiver } else { RcSource::Crsf },
+                mission: if i.crsf.is_some_and(|c| c.mission) { !rng.chance(20) } else { rng.chance(100) },
                 t_us: t,
             });
             let levels = if rng.chance(2) { None } else { LEVELS };
@@ -787,6 +846,9 @@ mod tests {
             i.home_reached = rng.chance(5);
             i.last_waypoint_reached = rng.chance(5);
             i.now_us = t;
+            // N19: CRSF and receiver reports at random (MAVLink flights reach every state); the step hands on only what the
+            // gate accepts (the flight's source; disarmed at FS_HOLD_EN 0 no receiver report).
+            let rc = rc.filter(|r| gate.accepts(r, i.fs_hold_en));
             if rc.is_some() {
                 i.crsf = rc;
             }
@@ -806,6 +868,7 @@ mod tests {
             if !prev_armed && armed {
                 let r = rc.expect("b: arming needs a report");
                 assert!(r.arm && r.sticks.throttle <= tuning.arm_thr_max && levels.is_some(), "b, step {k}");
+                assert!(r.source == RcSource::Crsf || (!r.mission && i.fs_hold_en), "b, step {k}: N19 receiver arming");
                 assert!(off_then_disarmed, "b, step {k}: arming without a switch cycle");
                 armings += 1;
             }

@@ -63,6 +63,8 @@ fn script(mut hook: impl FnMut(usize, &mut TestFlight)) -> Vec<Record> {
             },
             arm: arm_switch(k),
             switch6: Switch3::Low,
+            source: fw_core::rc::RcSource::Crsf,
+            mission: false,
             t_us: t,
         };
         let o = f.step(&input(t, Some(rc)));

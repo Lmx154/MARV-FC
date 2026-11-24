@@ -42,6 +42,8 @@ struct Plant {
     station: bool,
     /// The height estimate's error, m down (the estimate is d + this).
     d_off: f32,
+    /// Where the reports come from (N19: the receiver for the MAVLink flights at FS_HOLD_EN 1).
+    source: fw_core::rc::RcSource,
 }
 
 impl Plant {
@@ -49,7 +51,7 @@ impl Plant {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, POSITION))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         f.set_heading_ok(true);
-        Plant { f, cell, t: 1_000_000, gain, tau, k, kq, d: 0.0, v: 0.0, demand: 0.0, thrust: 0.0, vd_frozen: None, station: false, d_off: 0.0 }
+        Plant { f, cell, t: 1_000_000, gain, tau, k, kq, d: 0.0, v: 0.0, demand: 0.0, thrust: 0.0, vd_frozen: None, station: false, d_off: 0.0, source: fw_core::rc::RcSource::Crsf }
     }
 
     fn on_ground(&self) -> bool {
@@ -82,7 +84,7 @@ impl Plant {
         if self.station {
             self.f.set_last_radio_heartbeat_us(Some(self.t));
         }
-        let mut i = input(self.t, rc.map(|(arm, thr, sw)| report(self.t, arm, thr, sw)));
+        let mut i = input(self.t, rc.map(|(arm, thr, sw)| RcSample { source: self.source, ..report(self.t, arm, thr, sw) }));
         i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, a - GRAVITY_MSS];
         let o = self.f.step(&i);
         self.demand = o.demand.map_or(0.0, |d| d.thrust_n);
@@ -164,6 +166,7 @@ fn return_at_home(top: f32) -> Plant {
     let mut p = land_plant();
     p.station = true;
     p.f.set_fs_hold_en(true);
+    p.source = fw_core::rc::RcSource::Receiver;
     p.f.set_battery_ok(true);
     let mut m = super::auto_tests::square();
     m.return_m = top;
@@ -409,7 +412,7 @@ fn fx2_wr1_modelled_clear_agrees_with_the_real_one() {
         let mut step = |f: &mut TestFlight<'static>, rc: Option<(bool, f32)>| {
             t += DT_US;
             f.set_last_radio_heartbeat_us(Some(t));
-            let mut i = input(t, rc.map(|(arm, thr)| report(t, arm, thr, Switch3::High)));
+            let mut i = input(t, rc.map(|(arm, thr)| RcSample { source: fw_core::rc::RcSource::Receiver, ..report(t, arm, thr, Switch3::High) }));
             i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -GRAVITY_MSS];
             f.step(&i)
         };
@@ -594,6 +597,7 @@ fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
     p.station = true;
     p.f.home_wait_off = wait_off;
     p.f.set_fs_hold_en(true);
+    p.source = fw_core::rc::RcSource::Receiver;
     p.f.set_battery_ok(true);
     p.f.set_mission(super::auto_tests::square());
     p.hover_at(5.0, 10.0);

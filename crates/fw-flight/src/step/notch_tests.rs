@@ -33,6 +33,8 @@ fn armed_step(
         },
         arm,
         switch6: Switch3::Low,
+        source: fw_core::rc::RcSource::Crsf,
+        mission: false,
         t_us: t,
     };
     let mut inputs = input(t, Some(rc));

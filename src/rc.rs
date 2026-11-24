@@ -2,8 +2,9 @@
 //! between CRSF (420000 baud) and MAVLink (460800 baud) by itself. This module only REPORTS: the
 //! RC row (no health machine, no recovery), RC_CHANNELS and the mapped sticks (MANUAL_CONTROL) for
 //! USB, the `[STAT] RC:` line, the BATT value as CRSF telemetry, and the radio's MAVLink node (link
-//! 1, active only while the port is locked on MAVLink). It also hands every CRSF stick report, mapped,
-//! to the flight core through [`FLIGHT_RC`]; arming and link loss are decided there (`fw_flight::gate`).
+//! 1, active only while the port is locked on MAVLink). It also hands every CRSF stick report and every receiver report
+//! (`fw_core::rc::receiver_report`, N19), mapped, to the flight core through [`FLIGHT_RC`]; arming and link loss are
+//! decided there (`fw_flight::gate`).
 //!
 //! UART0 as the bench (`rc-port/hil/src/bin/rc_link.rs`) set it up: `BufferedUart` (interrupt
 //! driven, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART
@@ -28,7 +29,8 @@ use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
 use fw_core::health::Counters;
 use fw_core::rc::{
-    PortMode, RcInput, RcSample, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, verdict,
+    PortMode, RcInput, RcSample, RcSource, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, receiver_report,
+    verdict,
 };
 use fw_core::sample::GnssReading;
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
@@ -89,7 +91,7 @@ const GPS_FRAME_MIN_US: u64 = 1_000_000;
 /// The hook re-reads the stick map from the store at every this many CRSF stick reports (about 4/s).
 const MAP_EVERY: u32 = 64;
 
-/// Core 0 -> flight core: the latest CRSF stick report, mapped, with the arm switch and its time (one
+/// Core 0 -> flight core: the latest CRSF or receiver stick report, mapped, with its switches and time (one
 /// writer, the port's hooks; one reader, IMU1's [`crate::flight::Stepper`]).
 pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
     sticks: fw_core::rc::Sticks {
@@ -100,6 +102,8 @@ pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
     },
     arm: false,
     switch6: fw_core::rc::Switch3::Low,
+    source: RcSource::Crsf,
+    mission: false,
     t_us: 0,
 });
 
@@ -305,16 +309,24 @@ struct RcHooks {
     flight_radio: Option<TripleWriter<'static, u64>>,
     /// The stick map last read from the store; `None` until the store gave one (no sample then).
     map: Option<RcMap>,
-    /// CRSF stick reports seen.
+    /// Stick reports handed on (CRSF and receiver).
     crsf_reports: u32,
-    /// The arm switch in the previous CRSF stick report.
+    /// The arm switch in the previous stick report handed on.
     arm_on: bool,
 }
 
 impl Hooks for RcHooks {
     fn report(&mut self, report: Report) {
         let crsf = match &report {
-            Report::Sticks(r) if matches!(r.source, Source::Crsf) => Some((r.channels_us, r.at_us)),
+            Report::Sticks(r) => match r.source {
+                Source::Crsf => Some((r.channels_us, r.at_us, RcSource::Crsf)),
+                Source::Mavlink { system_id, component_id }
+                    if receiver_report(system_id, component_id, &r.channels_us) =>
+                {
+                    Some((r.channels_us, r.at_us, RcSource::Receiver))
+                }
+                _ => None,
+            },
             _ => None,
         };
         SHARED.lock(|s| {
@@ -332,7 +344,7 @@ impl Hooks for RcHooks {
         if let (Report::RadioStatus(r), Some(w)) = (&report, &mut self.flight_radio) {
             w.write(r.at_us);
         }
-        let Some((ch, t_us)) = crsf else {
+        let Some((ch, t_us, source)) = crsf else {
             return;
         };
         if self.crsf_reports.is_multiple_of(MAP_EVERY) {
@@ -359,6 +371,8 @@ impl Hooks for RcHooks {
                 sticks: map.sticks(&ch),
                 arm: arm_switch(ch[4]),
                 switch6: mode_switch(ch[5], &map.channels[5]),
+                source,
+                mission: arm_switch(ch[7]),
                 t_us,
             });
         }

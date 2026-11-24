@@ -109,6 +109,7 @@ mod tests {
             (DenyReason::SwitchNotHigh, 16),
             (DenyReason::BatteryCritical, 17),
             (DenyReason::LinkLost, 18),
+            (DenyReason::MissionSwitchOff, 19),
         ];
         for (r, code) in reasons {
             assert_eq!(ack_of(answer_byte(Some(CommandResult::Denied(r)))), (false, code), "{r:?}");

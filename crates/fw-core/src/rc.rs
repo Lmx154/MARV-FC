@@ -204,7 +204,30 @@ pub enum Switch3 {
     High,
 }
 
-/// One CRSF stick report as normalised sticks, with the board time it was read, us.
+/// Where a stick report came from (decision-mavlink-mode-20261123, Amendment N19, 1(1) and 1(3)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RcSource {
+    /// A CRSF stick frame.
+    Crsf,
+    /// A receiver report: an RC_CHANNELS_OVERRIDE that passed [`receiver_report`].
+    Receiver,
+}
+
+/// The receiver's own MAVLink sender ids (ExpressLRS defaults): system 255, component 68 (N19 1(1)).
+pub const RECEIVER_SYSTEM_ID: u8 = 255;
+/// See [`RECEIVER_SYSTEM_ID`].
+pub const RECEIVER_COMPONENT_ID: u8 = 68;
+
+/// N19 1(1): an RC_CHANNELS_OVERRIDE (already addressed to this vehicle or to all, the port's target rule) is a receiver
+/// report only from (`RECEIVER_SYSTEM_ID`, `RECEIVER_COMPONENT_ID`) and with none of channels 1 to 8 at 0 or 65535
+/// (MAVLink's "release" and "ignore"). Any other sender (the station's 255/190 included) is never a stick report.
+pub fn receiver_report(system_id: u8, component_id: u8, channels_us: &[u16; 16]) -> bool {
+    system_id == RECEIVER_SYSTEM_ID
+        && component_id == RECEIVER_COMPONENT_ID
+        && channels_us.iter().take(8).all(|&c| c != 0 && c != u16::MAX)
+}
+
+/// One stick report as normalised sticks, with the board time it was read, us.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RcSample {
     /// The normalised sticks.
@@ -213,6 +236,10 @@ pub struct RcSample {
     pub arm: bool,
     /// Channel 6, the mode switch, same report.
     pub switch6: Switch3,
+    /// Where the report came from (N19).
+    pub source: RcSource,
+    /// Channel 8, the mission switch, ON (N19 1(2): the arm switch's rule), same report.
+    pub mission: bool,
     /// Board time the report was read, us.
     pub t_us: u64,
 }
@@ -473,5 +500,31 @@ mod tests {
         );
         assert!(!gps_frame_due(None, None), "no sample");
         assert!(!gps_frame_due(None, Some(1)), "no sample");
+    }
+
+    /// N19 1(1), hazard 1: only the receiver's own ids with live channels 1 to 8 make a receiver report. The station's
+    /// (255, 190) override, an arm channel at 65535 and a channel at 0 make none; channels 9 to 16 are not read.
+    #[test]
+    fn n19_receiver_report_filter() {
+        let live = [1500u16; 16];
+        assert!(receiver_report(255, 68, &live));
+        assert!(!receiver_report(255, 190, &live), "the station's sender");
+        assert!(!receiver_report(1, 68, &live), "another system");
+        assert!(!receiver_report(255, 1, &live), "another component");
+        for k in 0..8 {
+            for bad in [0u16, u16::MAX] {
+                let mut ch = live;
+                ch[k] = bad;
+                assert!(!receiver_report(255, 68, &ch), "channel {} at {bad}", k + 1);
+            }
+        }
+        let mut arm = live;
+        arm[4] = u16::MAX;
+        assert!(!receiver_report(255, 68, &arm), "arm channel at 65535");
+        for k in 8..16 {
+            let mut ch = live;
+            ch[k] = if k % 2 == 0 { 0 } else { u16::MAX };
+            assert!(receiver_report(255, 68, &ch), "channel {} is not read", k + 1);
+        }
     }
 }

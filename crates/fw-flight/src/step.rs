@@ -1075,7 +1075,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.batt_started = true;
         }
         self.batt_prev_request = self.batt_request;
-        if let Some(rc) = inputs.rc {
+        // N19 1(3): a report the gate does not accept (the other source, or a receiver report at FS_HOLD_EN 0 while
+        // disarmed) reaches nothing in this step.
+        let rc = inputs.rc.as_ref().filter(|r| self.gate.accepts(r, self.fs_hold_en));
+        if let Some(&rc) = rc {
             self.rc_newest = Some(rc);
             self.shaper.sticks = rc.sticks;
             self.selected = match rc.switch6 {
@@ -1388,7 +1391,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if ho.disarm {
             self.gate.disarm();
         }
-        let motors = self.gate.apply(t_us, inputs.rc.as_ref(), &nav, levels, ho.hands_off, ho.arm_off_holds);
+        let motors = self.gate.apply(t_us, rc, &nav, levels, ho.hands_off, ho.arm_off_holds);
         // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
         // arming step.
         // Low: the demand was refused, or the allocator put the collective on the idle floor (its `thrust_low` flag, the
@@ -2066,6 +2069,8 @@ mod tests {
             },
             arm,
             switch6: Switch3::Low,
+            source: fw_core::rc::RcSource::Crsf,
+            mission: false,
             t_us,
         };
         let mut t = 2_000;
@@ -2162,6 +2167,8 @@ mod tests {
                     },
                     arm: n >= 200,
                     switch6: Switch3::Low,
+                    source: fw_core::rc::RcSource::Crsf,
+                    mission: false,
                     t_us,
                 });
                 if slow {
@@ -2269,6 +2276,8 @@ mod tests {
             },
             arm: n >= 200,
             switch6: Switch3::Low,
+            source: fw_core::rc::RcSource::Crsf,
+            mission: false,
             t_us,
         });
         i.sensors.baro = (n % 16 == 3).then_some(BaroSample {
@@ -2812,6 +2821,8 @@ mod tests {
                 },
                 arm: t_us >= 2_000_000,
                 switch6: Switch3::Low,
+                source: fw_core::rc::RcSource::Crsf,
+                mission: false,
                 t_us,
             });
             if Some(k) == tilt_at {
@@ -2908,6 +2919,8 @@ mod tests {
                 sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: if t_us < 3_000_000 { 0.0 } else { 0.5 }, yaw: 0.0 },
                 arm: t_us >= 2_000_000,
                 switch6: Switch3::Middle,
+                source: fw_core::rc::RcSource::Crsf,
+                mission: false,
                 t_us,
             });
             if Some(k) == poison_at {
@@ -3047,6 +3060,8 @@ mod tests {
                 sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: if t_us < 3_000_000 { 0.0 } else { 0.5 }, yaw: 0.0 },
                 arm: t_us >= 2_000_000,
                 switch6: Switch3::High,
+                source: fw_core::rc::RcSource::Crsf,
+                mission: false,
                 t_us,
             });
             let out = flight.step(&FlightInputs { sensors, rc, erpm: [None; LINES] });

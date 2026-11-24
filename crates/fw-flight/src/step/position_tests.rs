@@ -50,6 +50,8 @@ fn step_sticks(
             },
             arm,
             switch6,
+            source: fw_core::rc::RcSource::Crsf,
+            mission: false,
             t_us,
         }),
     ))
@@ -1153,6 +1155,8 @@ fn g2_inputs(secs: u64) -> Vec<FlightInputs> {
                 sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: if t_us < 3_000_000 { 0.0 } else { 0.5 }, yaw: 0.0 },
                 arm: t_us >= 2_000_000,
                 switch6: Switch3::High,
+                source: fw_core::rc::RcSource::Crsf,
+                mission: false,
                 t_us,
             });
             FlightInputs { sensors, rc, erpm: [None; LINES] }

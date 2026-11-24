@@ -70,6 +70,11 @@ fn digest_step(h: &mut u64, o: &StepOut) {
 /// report older than the stick-loss time; `None` if there is none), and counts of what it went through (armed steps,
 /// RC-loss disarms in the air, steps per effective mode).
 fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, Option<u64>, [u32; 5]) {
+    walk_with(seed, steps, fw_core::rc::RcSource::Crsf, setup)
+}
+
+/// `walk` with the reports from `source` (N19).
+fn walk_with(seed: u64, steps: usize, source: fw_core::rc::RcSource, setup: impl FnOnce(&mut TestFlight)) -> (u64, Option<u64>, [u32; 5]) {
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(0.0, ANGLE));
     let mut f = flight(&cell, handshake(), &tuning);
@@ -116,6 +121,8 @@ fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, O
             },
             arm,
             switch6,
+            source,
+            mission: false,
             t_us: t,
         });
         let air = f.airborne;
@@ -192,9 +199,10 @@ fn i2_fs_hold_en_0_is_bit_identical_to_the_step_before_the_wiring() {
     assert_eq!(got, want);
 }
 
-/// I2's control as amended by N2 and H14: with the heading verdict forced false (so no T3' and no HOLD) the flights at
-/// FS_HOLD_EN 0 and 1 equal the heading-off goldens, since FS_HOLD_EN now gates only HOLD and missions; with the verdict
-/// `Valid.heading` (HOLD on T3') FS_HOLD_EN 1 differs from FS_HOLD_EN 0.
+/// I2's control as amended by N2, H14 and N19: with the heading verdict forced false (so no T3' and no HOLD) the flights
+/// at FS_HOLD_EN 0 and 1 equal the heading-off goldens; with the verdict `Valid.heading` the CRSF walk at FS_HOLD_EN 1
+/// equals WALK_GOLDEN (no hands-off on a CRSF flight, N19 1(5)) and the same walk with receiver reports differs (HOLD
+/// on T3').
 #[test]
 fn i2_control_fs_hold_en_1_changes_the_flights() {
     for ((seed, golden), (seed_off, golden_off)) in WALK_GOLDEN.into_iter().zip(WALK_GOLDEN_HEADING_OFF) {
@@ -208,7 +216,9 @@ fn i2_control_fs_hold_en_1_changes_the_flights() {
             assert_eq!(h, golden_off, "seed {seed:#x}, fs {fs}, heading forced false");
         }
         let (h, _, _) = walk(seed, 40_000, |f| f.set_fs_hold_en(true));
-        assert_ne!(h, golden, "seed {seed:#x}, heading OK");
+        assert_eq!(h, golden, "seed {seed:#x}, heading OK, CRSF at FS_HOLD_EN 1");
+        let (h, _, _) = walk_with(seed, 40_000, fw_core::rc::RcSource::Receiver, |f| f.set_fs_hold_en(true));
+        assert_ne!(h, golden, "seed {seed:#x}, heading OK, receiver reports at FS_HOLD_EN 1");
     }
 }
 
@@ -255,11 +265,18 @@ fn i2_fs_hold_en_0_rc_loss_in_the_air_lands_at_1_0_s_and_stays_armed() {
 const FULL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// A flight with FS_HOLD_EN `fs`, the heading monitor's verdict `heading_ok` and coverage `valid`, 10 m up: armed in
-/// High with the throttle low, then 0.5 s at half throttle so the airborne latch is set.
+/// High with the throttle low, then 0.5 s at half throttle so the airborne latch is set. N19: the reports come from
+/// `source`, the receiver at FS_HOLD_EN 1 (a MAVLink flight) and CRSF at 0, unless built by `crsf`.
 struct Fly {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
     t: u64,
+    source: fw_core::rc::RcSource,
+}
+
+/// N19: the receiver at FS_HOLD_EN 1, CRSF at 0.
+fn source_for(fs: bool) -> fw_core::rc::RcSource {
+    if fs { fw_core::rc::RcSource::Receiver } else { fw_core::rc::RcSource::Crsf }
 }
 
 impl Fly {
@@ -269,12 +286,21 @@ impl Fly {
 
     /// As `new`, with `PILOT_SPEED_XY` `speed` (m/s) written before the arming.
     fn with_speed(fs: bool, heading_ok: bool, valid: Valid, speed: f32) -> Fly {
+        Fly::build(fs, heading_ok, valid, speed, source_for(fs))
+    }
+
+    /// As `new`, a CRSF flight at either FS_HOLD_EN (N19 section 3).
+    fn crsf(fs: bool, heading_ok: bool, valid: Valid) -> Fly {
+        Fly::build(fs, heading_ok, valid, Tuning::DEFAULT.pilot_speed_xy_ms, fw_core::rc::RcSource::Crsf)
+    }
+
+    fn build(fs: bool, heading_ok: bool, valid: Valid, speed: f32, source: fw_core::rc::RcSource) -> Fly {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, valid))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         assert!(f.set_pilot_speed_xy(speed));
         f.set_fs_hold_en(fs);
         f.set_heading_ok(heading_ok);
-        let mut fly = Fly { f, cell, t: 1_000_000 };
+        let mut fly = Fly { f, cell, t: 1_000_000, source };
         fly.rc(false, [0.0; 4], Switch3::High);
         let o = fly.rc(true, [0.0; 4], Switch3::High);
         assert!(o.armed, "armed");
@@ -286,8 +312,13 @@ impl Fly {
         fly
     }
 
-    /// One step with a report: arm switch, sticks [roll, pitch, throttle, yaw], mode switch.
-    fn rc(&mut self, arm: bool, [roll, pitch, throttle, yaw]: [f32; 4], switch6: Switch3) -> StepOut {
+    /// One step with a report: arm switch, sticks [roll, pitch, throttle, yaw], mode switch; the mission switch OFF.
+    fn rc(&mut self, arm: bool, sticks: [f32; 4], switch6: Switch3) -> StepOut {
+        self.rc_ms(arm, sticks, switch6, false)
+    }
+
+    /// `rc` with the mission switch `mission` (N19 1(2)).
+    fn rc_ms(&mut self, arm: bool, [roll, pitch, throttle, yaw]: [f32; 4], switch6: Switch3, mission: bool) -> StepOut {
         self.t += DT_US;
         let t = self.t;
         self.f.step(&input(
@@ -296,6 +327,8 @@ impl Fly {
                 sticks: Sticks { roll, pitch, throttle, yaw },
                 arm,
                 switch6,
+                source: self.source,
+                mission,
                 t_us: t,
             }),
         ))
@@ -400,7 +433,7 @@ fn h14_the_heading_verdict_is_valid_heading_and_the_override_only_forces_it_fals
         if let Some(ok) = ok {
             f.set_heading_ok(ok);
         }
-        let mut fly = Fly { f, cell, t: 1_000_000 };
+        let mut fly = Fly { f, cell, t: 1_000_000, source: source_for(fs) };
         fly.rc(false, [0.0; 4], Switch3::High);
         fly.rc(true, [0.0; 4], Switch3::High);
         for _ in 0..400 {
@@ -429,9 +462,9 @@ fn hold_without_the_heading_monitor_stick_loss_in_the_air_is_land_never_hold() {
 
 #[test]
 fn i3_full_sticks_and_any_switch_in_takeover_give_the_centred_setpoint_until_the_lock_hands_over() {
-    let mut fly = Fly::new(true, true, POSITION);
+    let mut fly = Fly::crsf(true, true, POSITION);
     fly.lose();
-    assert_eq!(fly.state(), State::Hold);
+    assert_eq!(fly.state(), State::Land);
     // CRSF back with full sticks: Low and Middle before High, then High with arm ON (the lock), all centred.
     for sw in [Switch3::Low, Switch3::Middle, Switch3::Low, Switch3::High, Switch3::High] {
         let o = fly.rc(true, FULL, sw);
@@ -452,7 +485,7 @@ fn i3_full_sticks_and_any_switch_in_takeover_give_the_centred_setpoint_until_the
 
 #[test]
 fn i3_control_high_with_arm_off_does_not_open_the_lock() {
-    let mut fly = Fly::new(true, true, POSITION);
+    let mut fly = Fly::crsf(true, true, POSITION);
     fly.lose();
     fly.radio_status();
     fly.rc(false, FULL, Switch3::High);
@@ -463,8 +496,8 @@ fn i3_control_high_with_arm_off_does_not_open_the_lock() {
 
 #[test]
 fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot() {
-    // CRSF back with arm OFF after a RADIO_STATUS (N12's M): TAKEOVER, the gate armed, the motors run.
-    let mut fly = Fly::new(true, true, POSITION);
+    // CRSF back with arm OFF after a RADIO_STATUS (N12's M): TAKEOVER, the gate armed, the motors run (a CRSF flight).
+    let mut fly = Fly::crsf(true, true, POSITION);
     fly.lose();
     fly.radio_status();
     for _ in 0..200 {
@@ -497,7 +530,7 @@ fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot()
 
 #[test]
 fn wr2_the_held_arm_off_report_still_newest_when_the_latch_clears_stays_held_until_td_then_disarms_in_that_step() {
-    let mut fly = Fly::new(true, true, POSITION);
+    let mut fly = Fly::crsf(true, true, POSITION);
     fly.lose();
     fly.radio_status();
     let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
@@ -524,7 +557,8 @@ fn b9_fs_hold_en_written_while_armed_takes_effect_after_the_next_disarm() {
     // The sticks back with arm ON (K), then arm OFF: disarmed.
     fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
     assert!(!fly.rc(false, [0.0; 4], Switch3::High).armed);
-    // Re-armed after a disarmed step: the 1 is in force.
+    // Re-armed after a disarmed step on the receiver (N19: a MAVLink flight): the 1 is in force.
+    fly.source = fw_core::rc::RcSource::Receiver;
     for _ in 0..10 {
         fly.rc(false, [0.0; 4], Switch3::High);
     }
@@ -690,11 +724,12 @@ fn takeover_descent_flies_the_land_law_and_hand_over_stays_possible() {
             d1 = target_d(&o);
         }
     }
-    let o = fly.rc(true, FULL, Switch3::High);
+    let o = fly.rc(true, FULL, Switch3::Low);
     let rate = (target_d(&o) - d1) / (401.0 * DT_US as f32 * 1e-6);
     assert!((rate - LAND_SPEED_MS).abs() < 0.01, "{rate}");
     assert_eq!(fly.state(), State::Takeover);
-    let o = fly.rc(true, FULL, Switch3::Middle);
+    // N19 column 2: the mission switch OFF, arm ON and Position hand over.
+    let o = fly.rc(true, FULL, Switch3::High);
     assert_eq!(fly.state(), State::Pilot, "hand-over");
     assert!(!is_centred(&o));
 }
@@ -1553,6 +1588,8 @@ fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
                 sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 },
                 arm: true,
                 switch6: if name == "takeover" { Switch3::Low } else { Switch3::High },
+                source: fly.source,
+                mission: false,
                 t_us: fly.t,
             }));
             i.sensors.imu1.reading.accel_ms2 = AT_REST;
@@ -1577,7 +1614,7 @@ fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
         n.velocity_ms[2] = if n.position_m[2] < 0.0 { LAND_SPEED_MS } else { 0.0 };
         fly.cell.set(n);
         fly.t += DT_US;
-        let mut i = input(fly.t, Some(RcSample { sticks: Sticks { roll: 1.0, pitch: 1.0, throttle: 1.0, yaw: 1.0 }, arm: true, switch6: Switch3::Low, t_us: fly.t }));
+        let mut i = input(fly.t, Some(RcSample { sticks: Sticks { roll: 1.0, pitch: 1.0, throttle: 1.0, yaw: 1.0 }, arm: true, switch6: Switch3::Low, source: fly.source, mission: false, t_us: fly.t }));
         i.sensors.imu1.reading.accel_ms2 = AT_REST;
         let o = fly.f.step(&i);
         if !o.armed {
@@ -1767,12 +1804,13 @@ fn n10_hands_off_msg_due_table() {
 fn n10_ho_msg_at_fs_hold_en_0_only_from_the_stick_loss() {
     for (fs, want) in [
         (false, &["HO 6 LAND", "HO 2 TAKEOVER", "HO 1 PILOT"][..]),
-        (true, &["HO 7 STOP", "HO 1 PILOT", "HO 3 HOLD", "HO 2 TAKEOVER", "HO 1 PILOT", "HO 7 STOP"][..]),
+        (true, &["HO 7 STOP", "HO 1 PILOT", "HO 6 LAND", "HO 2 TAKEOVER", "HO 1 PILOT", "HO 7 STOP"][..]),
     ] {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         f.set_fs_hold_en(fs);
-        let mut fly = Fly { f, cell, t: 1_000_000 };
+        // N19: CRSF flights at both values (the MSG rule; the lock as built for them).
+        let mut fly = Fly { f, cell, t: 1_000_000, source: fw_core::rc::RcSource::Crsf };
         let (mut logged, mut texts) = (None::<State>, std::vec::Vec::new());
         let mut log = |fly: &Fly| {
             let state = fly.state();
@@ -1886,6 +1924,8 @@ fn wr3_and_return_built_on_the_real_step() {
             sticks: Sticks { roll: rng.unit() - 0.5, pitch: rng.unit() - 0.5, throttle: thr_rc, yaw: rng.unit() - 0.5 },
             arm,
             switch6: sw_rc,
+            source: fw_core::rc::RcSource::Receiver,
+            mission: false,
             t_us: t,
         });
         if rc.is_some() {
@@ -1895,6 +1935,8 @@ fn wr3_and_return_built_on_the_real_step() {
             rest = !rest;
         }
         let td = f.still_us >= tuning.land_detect_us;
+        // N19: a receiver report the gate does not take (disarmed at FS_HOLD_EN 0) is no switch cycle.
+        let accepted = rc.is_some_and(|r| f.gate.accepts(&r, f.fs_hold_en));
         let mut i = input(t, rc);
         if rest || (!matches!(prev_state, State::Pilot | State::Stop) && clears.chance(990)) {
             i.sensors.imu1.reading.accel_ms2 = AT_REST;
@@ -1931,7 +1973,7 @@ fn wr3_and_return_built_on_the_real_step() {
         if let Some(slot) = seen.get_mut(usize::from(state.code() - 1)) {
             *slot += 1;
         }
-        if let Some(r) = rc {
+        if let Some(r) = rc.filter(|_| accepted) {
             off_then_disarmed = !r.arm && !o.armed;
         }
         prev_armed = o.armed;
@@ -2181,7 +2223,7 @@ fn chopped(valid: Valid, f: [f32; 3], rates: [f32; 3], chop_steps: u32) -> Fly {
     for _ in 0..chop_steps {
         fly.t += DT_US;
         let t = fly.t;
-        let mut i = input(t, Some(RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.0, yaw: 0.0 }, arm: true, switch6: Switch3::Low, t_us: t }));
+        let mut i = input(t, Some(RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.0, yaw: 0.0 }, arm: true, switch6: Switch3::Low, source: fw_core::rc::RcSource::Crsf, mission: false, t_us: t }));
         i.sensors.imu1.reading.accel_ms2 = f;
         let o = fly.f.step(&i);
         assert!(o.armed && fly.state() == State::Pilot);
@@ -2465,7 +2507,11 @@ enum Cause {
 /// "MAVLink model" periods (a generator of its own); an arm-OFF report that stops while K is clear in a hands-off state
 /// must have M clear (P), so with M set such a stop has a cause of T or F. Returns the count per cause, then the arm-OFF
 /// reports held with M set (armed after them), then the stick losses in the air handled as hands-off states.
-fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
+fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSource) -> [u32; 6] {
+    let receiver = source == fw_core::rc::RcSource::Receiver;
+    // N19: the mission switch (receiver reports only), OFF while disarmed (a report with it ON never arms), mostly ON in
+    // the air, from a generator of its own.
+    let (mut msw, mut mission) = (Lcg(seed ^ 0x5a5a), false);
     let tuning = Tuning::DEFAULT;
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
     let mut f = flight(cell, handshake(), &tuning);
@@ -2490,6 +2536,11 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     let (mut cmds, mut station, mut auto_steps, mut return_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32, 0u32);
     let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
     for k in 0..steps {
+        if !f.gate.armed() {
+            mission = false;
+        } else if receiver && msw.chance(if mission { 1 } else { 3 }) {
+            mission = !mission;
+        }
         match fs {
             Some(v) => f.set_fs_hold_en(v),
             None if rng.chance(2) => f.set_fs_hold_en(rng.chance(500)),
@@ -2545,6 +2596,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
             sticks: Sticks { roll: rng.unit() - 0.5, pitch: rng.unit() - 0.5, throttle, yaw: rng.unit() - 0.5 },
             arm,
             switch6,
+            source,
+            mission,
             t_us: t,
         });
         if rc.is_some() {
@@ -2587,6 +2640,9 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
             m = true;
         }
         let held = hands_off(prev_state) && !(prev_state == State::Takeover && k_set) && m;
+        // N19: on a MAVLink flight an arm-OFF report is held only with the mission switch ON (STOP after "ever airborne"
+        // from an arm-OFF report must have it OFF, P).
+        let held = if receiver { rc.is_some_and(|r| r.mission) } else { held };
         let o = f.step(&i);
         let state = f.hands_off_state();
         if state != prev_state && hands_off(state) {
@@ -2632,9 +2688,11 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
     std::println!("NS walk {seed:#x}: AUTO steps {auto_steps}, RETURN steps {return_steps}");
     // Required at FS_HOLD_EN 1; with it changing (in force only from a disarmed step) the walk seldom gets there; never
     // at FS_HOLD_EN 0 (N2: a stick loss lands, no HOLD, so no RETURN).
-    assert!(fs != Some(true) || auto_steps > 200, "seed {seed:#x}: AUTO reached ({auto_steps} steps)");
-    assert!(fs != Some(true) || return_steps > 500, "seed {seed:#x}: RETURN reached ({return_steps} steps)");
+    // N19: on the receiver at FS_HOLD_EN 1; never on CRSF flights.
+    assert!(fs != Some(true) || !receiver || auto_steps > 200, "seed {seed:#x}: AUTO reached ({auto_steps} steps)");
+    assert!(fs != Some(true) || !receiver || return_steps > 500, "seed {seed:#x}: RETURN reached ({return_steps} steps)");
     assert!(fs != Some(false) || auto_steps + return_steps == 0, "seed {seed:#x}: FS_HOLD_EN 0");
+    assert!(receiver || auto_steps + return_steps == 0, "seed {seed:#x}: CRSF flight");
     counts
 }
 
@@ -2645,8 +2703,11 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>) -> [u32; 6] {
 #[test]
 fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     let mut total = [0u32; 6];
-    for (seed, fs) in [(0x5eed_0e01, Some(false)), (0x5eed_0e02, Some(true)), (0x5eed_0e03, None)] {
-        let c = ns_walk(seed, 400_000, fs);
+    use fw_core::rc::RcSource::{Crsf, Receiver};
+    for (seed, fs, source) in
+        [(0x5eed_0e01, Some(false), Crsf), (0x5eed_0e02, Some(true), Receiver), (0x5eed_0e03, None, Crsf), (0x5eed_0e04, Some(true), Crsf)]
+    {
+        let c = ns_walk(seed, 400_000, fs, source);
         std::println!("NS walk {seed:#x} fs {fs:?}: gap, arm off, coverage, touchdown, arm off held with M, air losses: {c:?}");
         assert!(c[5] > 20, "seed {seed:#x}: stick losses in the air {c:?}");
         for (a, b) in total.iter_mut().zip(c) {

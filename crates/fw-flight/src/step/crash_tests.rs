@@ -80,7 +80,7 @@ impl Crash {
         // f_body = R(q)^T (-g down + extra), so that the earth-frame acceleration with gravity removed is `extra_ned`.
         let [e0, e1, e2] = self.extra_ned;
         let [_, fx, fy, fz] = quat::mul(quat::mul(quat::conj(q), [0.0, e0, e1, e2 - GRAVITY_MSS]), q);
-        let mut i = input(self.t, Some(RcSample { sticks: Sticks { roll, pitch, throttle, yaw: 0.0 }, arm, switch6: self.switch6, t_us: self.t }));
+        let mut i = input(self.t, Some(RcSample { sticks: Sticks { roll, pitch, throttle, yaw: 0.0 }, arm, switch6: self.switch6, source: fw_core::rc::RcSource::Crsf, mission: false, t_us: self.t }));
         i.sensors.imu1.reading.accel_ms2 = [fx, fy, fz];
         self.f.step(&i)
     }

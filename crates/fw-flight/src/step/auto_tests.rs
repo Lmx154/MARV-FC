@@ -54,6 +54,8 @@ const YAW_RAD: f32 = 0.523_598_8;
 
 /// A flight on the fake estimator: armed on the ground at the origin (home N 0, E 0, D 0), lifted, put 10 m up, the
 /// sticks lost on T3' with FS_HOLD_EN 1: HOLD. The station is heard on the radio link at every step while `station`.
+/// N19: at FS_HOLD_EN 1 the reports come from the receiver (a MAVLink flight), and Start's step carries one with the
+/// mission switch ON, arm ON and Position (the pilot's confirmation); at 0 from CRSF.
 struct Run {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
@@ -62,6 +64,9 @@ struct Run {
     /// The plant's steady push, m/s^2 north and east.
     push: [f32; 2],
     last: Option<StepOut>,
+    source: fw_core::rc::RcSource,
+    /// The next `quiet` step carries the mission-switch report.
+    confirm: bool,
 }
 
 impl Run {
@@ -84,7 +89,8 @@ impl Run {
         if let Some(m) = set {
             f.set_mission(m);
         }
-        let mut r = Run { f, cell, t: 1_000_000, station: true, push: [0.0; 2], last: None };
+        let source = if fs { fw_core::rc::RcSource::Receiver } else { fw_core::rc::RcSource::Crsf };
+        let mut r = Run { f, cell, t: 1_000_000, station: true, push: [0.0; 2], last: None, source, confirm: false };
         r.rc(false, 0.0);
         assert!(r.rc(true, 0.0).armed);
         for _ in 0..400 {
@@ -111,7 +117,7 @@ impl Run {
         self.t += DT_US;
         let t = self.t;
         self.f.set_last_radio_heartbeat_us(Some(t));
-        let report = RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle, yaw: 0.0 }, arm, switch6: Switch3::High, t_us: t };
+        let report = RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle, yaw: 0.0 }, arm, switch6: Switch3::High, source: self.source, mission: false, t_us: t };
         self.f.step(&input(t, Some(report)))
     }
 
@@ -121,7 +127,17 @@ impl Run {
         if self.station {
             self.f.set_last_radio_heartbeat_us(Some(self.t));
         }
-        let mut i = input(self.t, None);
+        let t = self.t;
+        let report = self.confirm.then(|| RcSample {
+            sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 },
+            arm: true,
+            switch6: Switch3::High,
+            source: self.source,
+            mission: true,
+            t_us: t,
+        });
+        self.confirm = false;
+        let mut i = input(self.t, report);
         i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -GRAVITY_MSS];
         let o = self.f.step(&i);
         self.last = Some(o);
@@ -161,6 +177,7 @@ impl Run {
 
     fn command(&mut self, c: Command) -> CommandResult {
         self.f.set_command(StationCommand { command: c, link: Link::Radio });
+        self.confirm = c == Command::Start && self.source == fw_core::rc::RcSource::Receiver;
         self.fly();
         self.f.take_command_result().expect("answered")
     }
@@ -519,8 +536,8 @@ fn e_a_vehicle_that_cannot_follow_stops_the_carrot_then_lands_braking() {
     }
 }
 
-/// (f) T3' lost in AUTO gives LAND after the debounce; the height lost gives BLIND; a stick report gives TAKEOVER; the
-/// motors run throughout.
+/// (f) T3' lost in AUTO gives LAND after the debounce; the height lost gives BLIND; a stick report with the mission
+/// switch OFF, arm ON and Position hands back to PILOT (N19 column 2); the motors run throughout.
 #[test]
 fn f_t3_lost_lands_height_lost_blind_and_sticks_take_over() {
     let mut r = in_auto();
@@ -543,7 +560,7 @@ fn f_t3_lost_lands_height_lost_blind_and_sticks_take_over() {
     let mut r = in_auto();
     let o = r.rc(true, 0.5);
     assert!(o.armed);
-    assert_eq!((r.state(), r.f.leg_active()), (State::Takeover, None));
+    assert_eq!((r.state(), r.f.leg_active()), (State::Pilot, None));
 }
 
 // ---- RETURN (A7, H3b-2) ----
@@ -709,8 +726,8 @@ fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_5_s_th
     assert!(a > 5.0 && a < 5.01 && a + b > 10.0 && a + b < 10.01, "{a} {b}");
 }
 
-/// (d) Fresh sticks in RETURN: TAKEOVER; the lock as built (a report with switch6 High opens it, the next not High
-/// hands over to PILOT).
+/// (d) Fresh sticks in RETURN on a MAVLink flight (N19): the mission switch OFF out of Position gives TAKEOVER, then
+/// in Position PILOT.
 #[test]
 fn rd_fresh_sticks_in_return_take_over_and_the_lock_hands_over() {
     let mut r = Run::new(3.0, Some(square()));
@@ -719,12 +736,12 @@ fn rd_fresh_sticks_in_return_take_over_and_the_lock_hands_over() {
         r.fly();
     }
     assert_eq!(r.state(), State::Return);
-    assert!(r.rc(true, 0.5).armed);
-    assert_eq!((r.state(), r.f.legs.phase()), (State::Takeover, LegPhase::Idle));
     r.t += DT_US;
     let t = r.t;
-    let report = RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 }, arm: true, switch6: Switch3::Middle, t_us: t };
+    let report = RcSample { sticks: Sticks { roll: 0.0, pitch: 0.0, throttle: 0.5, yaw: 0.0 }, arm: true, switch6: Switch3::Middle, source: r.source, mission: false, t_us: t };
     assert!(r.f.step(&input(t, Some(report))).armed);
+    assert_eq!((r.state(), r.f.legs.phase()), (State::Takeover, LegPhase::Idle));
+    assert!(r.rc(true, 0.5).armed);
     assert_eq!(r.state(), State::Pilot);
 }
 
