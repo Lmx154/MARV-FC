@@ -5,8 +5,9 @@
 use crate::alloc::CardAllocator;
 use crate::gate::{Gate, MotorCommand};
 use crate::hands_off::{self, Demand, HandsOff, LandLaw, MissionFacts, State, Tier};
+use crate::eskf::ned_from_geo;
 use crate::gnc::{
-    Allocation, Allocator, Controller, Estimator, Mode, NavState, RateLog, Refused, Saturation,
+    Allocation, Allocator, Controller, Estimator, GeoPoint, Mode, NavState, RateLog, Refused, Saturation,
     Sensors, Setpoint, ThrustTorque, Valid,
 };
 use crate::mahony::DT_MAX_US;
@@ -16,6 +17,7 @@ use fw_core::calib::GRAVITY_MSS;
 use fw_core::dflog::{self, FLIGHT_TYPES};
 use fw_core::esc::LINES;
 use fw_core::handshake::Handshake;
+use fw_core::mission::{GDN_TARGETS, GdnTargets};
 use fw_core::rc::{RcSample, Sticks, Switch3};
 use marv_card::MASS;
 #[cfg(test)]
@@ -205,8 +207,8 @@ impl CrashStatus {
     }
 }
 
-/// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
-/// NoWaypoints and AUTO cannot be reached.
+/// The mission facts of a set that is not the uploaded mission (`GDN_SRC` 0: the `GDN_*` parameters have no heights,
+/// section 36): none, so Start is DENIED NoWaypoints.
 const NO_MISSION: MissionFacts = MissionFacts {
     plan_id: None,
     has_waypoints: false,
@@ -214,6 +216,60 @@ const NO_MISSION: MissionFacts = MissionFacts {
     max_waypoint_distance_m: None,
     return_height_m: None,
 };
+
+/// The target set before the first `set_mission`: off, not the mission.
+const MISSION_OFF: GdnTargets = GdnTargets {
+    count: 0,
+    radius_m: 0.0,
+    targets: [(0, 0); GDN_TARGETS],
+    alts_m: [0.0; GDN_TARGETS],
+    return_m: 0.0,
+    plan_id: 0,
+    from_mission: false,
+    heights_ok: false,
+};
+
+/// The state machine's mission facts from `set`, the target set in force (Amendment A, A4: list, heights, return height
+/// and plan id of one push). Not the mission (`GDN_SRC` 0): [`NO_MISSION`] with the plan id of the station feed
+/// (`station_plan`). The mission: its plan id, waypoints and height check (core 0's, against `GDN_ALT_MIN`/`GDN_ALT_MAX`
+/// when pushed), the return height, and, only when `start` (a Start command at this step: A9 is checked at every Start
+/// and nowhere else), the largest horizontal distance of a waypoint from `home`, converted at `origin` as the guidance
+/// converts them; `None` without home or origin.
+fn mission_facts(
+    set: &GdnTargets,
+    station_plan: Option<u32>,
+    home: Option<hands_off::Home>,
+    origin: Option<GeoPoint>,
+    start: bool,
+) -> MissionFacts {
+    if !set.from_mission {
+        return MissionFacts { plan_id: station_plan, ..NO_MISSION };
+    }
+    let far = match (home, origin) {
+        (Some(h), Some(o)) if start => {
+            let mut far = 0.0f32;
+            for &(lat_e7, lon_e7) in set.targets.iter().take(usize::from(set.count)) {
+                let [n, e, _] = ned_from_geo(&o, &GeoPoint { lat_e7, lon_e7, alt_mm: o.alt_mm });
+                let (dn, de) = (n - h.ne_m[0], e - h.ne_m[1]);
+                // Not `max`: a NaN distance must win (Start then answers WaypointDistanceUnknown).
+                let d = libm::sqrtf(dn * dn + de * de);
+                if !(d <= far) {
+                    far = d;
+                }
+            }
+            Some(far)
+        }
+        _ => None,
+    };
+    let plan_id = crate::station::plan_id_of(set.plan_id);
+    MissionFacts {
+        plan_id,
+        has_waypoints: set.count > 0,
+        z_within_limits: set.heights_ok,
+        max_waypoint_distance_m: far,
+        return_height_m: plan_id.map(|_| set.return_m),
+    }
+}
 
 /// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle mode (decision-first-pair-20261119, section 4), altitude
 /// hold (decision-nav-eskf-20261120, F1, F2) and position hold (Amendment P, P1).
@@ -524,8 +580,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     command: Option<hands_off::StationCommand>,
     /// The answer of the latest step to its command (`take_command_result`).
     command_result: Option<hands_off::CommandResult>,
-    /// The plan id of the committed list (`set_plan_id`); `None` when none is stored.
+    /// The plan id of the committed list (`set_plan_id`); `None` when none is stored. Read only while `mission` is not
+    /// the uploaded mission (with it, the set's own plan id, pushed with its list, is the plan).
     plan_id: Option<u32>,
+    /// The newest target set from core 0 (`set_mission`): the mission facts at every step, and AUTO's list at Start.
+    mission: GdnTargets,
     /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
     /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
     track_error_m: Option<f32>,
@@ -592,6 +651,10 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the battery is critical (the battery monitor is on another branch; the board gives false).
     #[cfg(test)]
     battery_critical: bool,
+    /// Host tests and MARV-sim only: the battery is known not to be critical (`set_battery_ok`); false until set. The
+    /// board has no battery input on the flight core and gives false (Start answers BatteryNotOk).
+    #[cfg(any(test, feature = "sim"))]
+    battery_ok: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -668,6 +731,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             command: None,
             command_result: None,
             plan_id: None,
+            mission: MISSION_OFF,
             track_error_m: None,
             accel_ef_mss: [0.0; 3],
             still_us: 0,
@@ -710,6 +774,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             td_card_rule: false,
             #[cfg(test)]
             battery_critical: false,
+            #[cfg(any(test, feature = "sim"))]
+            battery_ok: false,
         }
     }
 
@@ -764,6 +830,13 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.heading_ok = ok;
     }
 
+    /// The state machine's `battery_ok` (Start's battery check): only in host tests and with the feature `sim`; the board
+    /// gives false until a battery input reaches the flight core.
+    #[cfg(any(test, feature = "sim"))]
+    pub fn set_battery_ok(&mut self, ok: bool) {
+        self.battery_ok = ok;
+    }
+
     /// When the newest station HEARTBEAT arrived on the radio link, us (A1's link age). `None` (the default, and the board's
     /// value until the station link is wired) makes the link age run from the newest stick report alone. A missing feed
     /// means "link lost" (E5): 10 s (`LINK_LOSS_US`) after the last stick report HOLD leaves for RETURN, or LAND without
@@ -789,6 +862,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// plan"); `None` when none is stored. Given to the state machine every step.
     pub fn set_plan_id(&mut self, plan_id: Option<u32>) {
         self.plan_id = plan_id;
+    }
+
+    /// The newest target set core 0 pushed (`FLIGHT_GDN`, whole sets only), at any step, armed or not (Amendment A, A4):
+    /// the mission facts from the next step on; AUTO takes its list from it at Start only, never mid-leg.
+    pub fn set_mission(&mut self, set: GdnTargets) {
+        self.mission = set;
     }
 
     /// The latest step's answer to its command; `None` when it had none (or the answer was taken).
@@ -937,9 +1016,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let battery_critical = self.battery_critical;
         #[cfg(not(test))]
         let battery_critical = false;
+        #[cfg(any(test, feature = "sim"))]
+        let battery_ok = self.battery_ok;
+        #[cfg(not(any(test, feature = "sim")))]
+        let battery_ok = false;
         let was = self.hands_off.state();
         // N11 (1a): the low mark (N14 (1)) and TD as the state machine reads them at this step.
         let (lifted_in, td_in) = (self.lifted, self.still_us >= self.land_detect_us);
+        let command = self.command.take();
+        let start = command.is_some_and(|c| c.command == hands_off::Command::Start);
+        let mission = mission_facts(&self.mission, self.plan_id, self.hands_off.home(), self.estimator.origin(), start);
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
             fs_hold_en: self.fs_hold_en,
@@ -956,12 +1042,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             velocity_ne_valid: nav.valid.velocity_ne,
             position_d_m: nav.position_m[2],
             position_d_valid: nav.valid.position_d,
-            command: self.command.take(),
-            mission: MissionFacts { plan_id: self.plan_id, ..NO_MISSION },
+            command,
+            mission,
             last_waypoint_reached: false,
             home_reached: false,
             heading_ok: nav.valid.heading && self.heading_ok,
-            battery_ok: false,
+            battery_ok,
             battery_critical,
             return_built: false,
             track_error_m: self.track_error_m,
@@ -2819,3 +2905,6 @@ mod n14_tests;
 
 #[cfg(test)]
 mod station_tests;
+
+#[cfg(test)]
+mod auto_tests;

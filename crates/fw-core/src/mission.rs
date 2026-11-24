@@ -450,11 +450,17 @@ pub struct GdnTargets {
     pub return_m: f32,
     /// The committed mission's plan id (0 with `GDN_SRC` 0 or no mission).
     pub plan_id: u32,
+    /// The set is the committed mission (`GDN_SRC` 1), not the `GDN_*` parameters.
+    pub from_mission: bool,
+    /// `GDN_SRC` 1, the mission has its return item, and every waypoint `z` and the return height are finite and within
+    /// the height limits given to [`select_targets`] (`GDN_ALT_MIN`, `GDN_ALT_MAX` when the set was pushed).
+    pub heights_ok: bool,
 }
 
 /// The target set to push: with `source` 1 the committed mission's waypoints (`mission` without its last item, the return
 /// item, whose `z` is the return height) with `radius_m` and the mission's `plan_id`; with any other `source` (0, the default) exactly the `GDN_*` parameters, `count_param` clamped to
-/// `0..=param_targets.len()` and the first of `param_targets`, whatever the mission holds.
+/// `0..=param_targets.len()` and the first of `param_targets`, whatever the mission holds. `alt_limits_m`: (`GDN_ALT_MIN`,
+/// `GDN_ALT_MAX`) in force, m, for `heights_ok` (a NaN limit fails it).
 pub fn select_targets(
     source: i32,
     count_param: i32,
@@ -462,11 +468,13 @@ pub fn select_targets(
     param_targets: &[(i32, i32)],
     mission: &[Item],
     plan_id: u32,
+    alt_limits_m: (f32, f32),
 ) -> GdnTargets {
     let mut targets = [(0, 0); GDN_TARGETS];
     let mut alts_m = [0.0; GDN_TARGETS];
     let mut return_m = 0.0;
     let mut plan = 0;
+    let mut heights_ok = false;
     let count = if source == 1 {
         let (waypoints, ret) = match mission.split_last() {
             Some((ret, waypoints)) => (waypoints, Some(ret)),
@@ -479,6 +487,11 @@ pub fn select_targets(
         if let Some(ret) = ret {
             return_m = f32::from_bits(ret.z_bits);
             plan = plan_id;
+            let (lo, hi) = alt_limits_m;
+            heights_ok = waypoints.iter().chain(core::iter::once(ret)).all(|it| {
+                let z = f32::from_bits(it.z_bits);
+                z >= lo && z <= hi
+            });
         }
         waypoints.len().min(GDN_TARGETS)
     } else {
@@ -488,7 +501,16 @@ pub fn select_targets(
         let limit = i32::try_from(param_targets.len().min(GDN_TARGETS)).unwrap_or(0);
         usize::try_from(count_param.clamp(0, limit)).unwrap_or(0)
     };
-    GdnTargets { count: u8::try_from(count).unwrap_or(0), radius_m, targets, alts_m, return_m, plan_id: plan }
+    GdnTargets {
+        count: u8::try_from(count).unwrap_or(0),
+        radius_m,
+        targets,
+        alts_m,
+        return_m,
+        plan_id: plan,
+        from_mission: source == 1,
+        heights_ok,
+    }
 }
 
 /// The vehicle's mission service; see the module documentation.
@@ -2394,6 +2416,8 @@ mod tests {
     // ---- the shadow guidance's target source ----
 
     const PARAM_TARGETS: [(i32, i32); 4] = [(10, 20), (30, 40), (50, 60), (70, 80)];
+    /// `GDN_ALT_MIN`, `GDN_ALT_MAX` at their defaults.
+    const LIMITS: (f32, f32) = (ALT_MIN_DEFAULT, ALT_MAX_DEFAULT);
 
     #[test]
     fn source_0_is_the_parameters_whatever_the_mission_holds() {
@@ -2404,23 +2428,25 @@ mod tests {
             alts_m: [0.0; GDN_TARGETS],
             return_m: 0.0,
             plan_id: 0,
+            from_mission: false,
+            heights_ok: false,
         };
         want.targets[..4].copy_from_slice(&PARAM_TARGETS);
         let missions = [many(0), many(1), many(3), many(7), many(16), points3().to_vec()];
         for mission in &missions {
-            assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, mission, 7), want, "{} items", mission.len());
+            assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, mission, 7, LIMITS), want, "{} items", mission.len());
         }
         // Any other value than 1 is the parameters too (the parameter's range is 0 to 1).
-        assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5), 7), want);
-        assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5), 7), want);
+        assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
+        assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
     }
 
     #[test]
     fn source_0_clamps_the_count_as_the_board_did() {
-        let clamp = |n| select_targets(0, n, 2.0, &PARAM_TARGETS, &many(17), 7).count;
+        let clamp = |n| select_targets(0, n, 2.0, &PARAM_TARGETS, &many(17), 7, LIMITS).count;
         assert_eq!([clamp(-5), clamp(0), clamp(4), clamp(5), clamp(i32::MAX)], [0, 0, 4, 4, 4]);
         // Off stays off: no mission content turns it on.
-        assert_eq!(select_targets(0, 0, 2.0, &PARAM_TARGETS, &many(17), 7).count, 0);
+        assert_eq!(select_targets(0, 0, 2.0, &PARAM_TARGETS, &many(17), 7, LIMITS).count, 0);
     }
 
     #[test]
@@ -2428,8 +2454,8 @@ mod tests {
         // n items: n - 1 waypoints and the return item.
         for n in [2usize, 4, 17] {
             let mission = many(n);
-            let params = select_targets(0, 3, 2.5, &PARAM_TARGETS, &mission, 7);
-            let from_mission = select_targets(1, 3, 2.5, &PARAM_TARGETS, &mission, 7);
+            let params = select_targets(0, 3, 2.5, &PARAM_TARGETS, &mission, 7, LIMITS);
+            let from_mission = select_targets(1, 3, 2.5, &PARAM_TARGETS, &mission, 7, LIMITS);
             assert_ne!(from_mission, params, "{n} items");
             assert_eq!(usize::from(from_mission.count), n - 1);
             assert_eq!(from_mission.radius_m, 2.5, "the radius is still GDN_RADIUS");
@@ -2446,7 +2472,7 @@ mod tests {
 
     #[test]
     fn source_1_with_the_return_item_alone_has_no_targets_but_the_return_height() {
-        let g = select_targets(1, 4, 2.5, &PARAM_TARGETS, &many(1), 9);
+        let g = select_targets(1, 4, 2.5, &PARAM_TARGETS, &many(1), 9, LIMITS);
         assert_eq!((g.count, g.return_m, g.plan_id), (0, 20.0, 9));
         assert!(g.targets.iter().all(|t| *t == (0, 0)));
         assert!(g.alts_m.iter().all(|z| *z == 0.0));
@@ -2454,7 +2480,7 @@ mod tests {
 
     #[test]
     fn source_1_with_an_empty_mission_is_off() {
-        let g = select_targets(1, 4, 3.0, &PARAM_TARGETS, &[], 7);
+        let g = select_targets(1, 4, 3.0, &PARAM_TARGETS, &[], 7, LIMITS);
         assert_eq!(g.count, 0);
         assert_eq!(g.radius_m, 3.0);
         assert_eq!((g.return_m, g.plan_id), (0.0, 0));
@@ -2464,10 +2490,26 @@ mod tests {
     #[test]
     fn source_1_ignores_the_parameter_targets_and_count() {
         let mission = many(3);
-        let a = select_targets(1, 0, 2.0, &PARAM_TARGETS, &mission, 7);
-        let b = select_targets(1, 4, 2.0, &[], &mission, 7);
+        let a = select_targets(1, 0, 2.0, &PARAM_TARGETS, &mission, 7, LIMITS);
+        let b = select_targets(1, 4, 2.0, &[], &mission, 7, LIMITS);
         assert_eq!(a, b);
         assert_eq!(a.count, 2);
+    }
+
+    #[test]
+    fn the_source_and_the_height_check_against_the_limits_given() {
+        // many(4): waypoints at 10, 11, 12 m, return 20 m.
+        let g = |source, mission: &[Item], limits| select_targets(source, 3, 2.0, &PARAM_TARGETS, mission, 7, limits);
+        assert!(!g(0, &many(4), LIMITS).from_mission && !g(0, &many(4), LIMITS).heights_ok, "the parameters: no heights");
+        assert!(g(1, &many(4), LIMITS).from_mission && g(1, &many(4), LIMITS).heights_ok);
+        // Inclusive at both limits, a waypoint or the return height outside fails, a NaN limit fails.
+        assert!(g(1, &many(4), (10.0, 20.0)).heights_ok);
+        assert!(!g(1, &many(4), (10.5, 20.0)).heights_ok, "waypoint 0 below");
+        assert!(!g(1, &many(4), (5.0, 19.0)).heights_ok, "the return height above");
+        assert!(!g(1, &many(4), (f32::NAN, 50.0)).heights_ok);
+        // An empty mission has no return item: no heights; the return item alone is checked.
+        assert!(g(1, &[], LIMITS).from_mission && !g(1, &[], LIMITS).heights_ok);
+        assert!(g(1, &many(1), LIMITS).heights_ok);
     }
 
     // ---- decode of the wire payloads ----

@@ -558,6 +558,8 @@ const GDN_OFF: GdnSet = GdnTargets {
     alts_m: [0.0; GDN_TARGETS],
     return_m: 0.0,
     plan_id: 0,
+    from_mission: false,
+    heights_ok: false,
 };
 
 /// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
@@ -585,11 +587,16 @@ pub fn init_gdn() {
 /// (the supervisor tick, [`crate::mission::changed`]). A value that cannot be read or has the wrong type is the table's
 /// default (count 0: off).
 pub fn push_gdn(why: &str) {
-    use fw_settings::flight::{GDN_COUNT, GDN_LAT, GDN_LON, GDN_RADIUS, GDN_SLOTS, GDN_SRC};
-    let (source, count, radius, params) = crate::store::with(|p| {
+    use fw_settings::flight::{GDN_ALT_MAX, GDN_ALT_MIN, GDN_COUNT, GDN_LAT, GDN_LON, GDN_RADIUS, GDN_SLOTS, GDN_SRC};
+    let (source, count, radius, params, limits) = crate::store::with(|p| {
         let int = |name| match p.get_named(name) {
             Some(mavlink_device::ParamValue::I32(v)) => v,
             _ => 0,
+        };
+        // The height limits as the upload reads them: a value that cannot be read is NaN (no heights pass).
+        let float = |name| match p.get_named(name) {
+            Some(mavlink_device::ParamValue::F32(v)) => v,
+            _ => f32::NAN,
         };
         let radius = match p.get_named(GDN_RADIUS) {
             Some(mavlink_device::ParamValue::F32(v)) => v,
@@ -599,12 +606,13 @@ pub fn push_gdn(why: &str) {
         for k in 0..GDN_SLOTS {
             params[k] = (int(GDN_LAT[k]), int(GDN_LON[k]));
         }
-        (int(GDN_SRC), int(GDN_COUNT), radius, params)
+        (int(GDN_SRC), int(GDN_COUNT), radius, params, (float(GDN_ALT_MIN), float(GDN_ALT_MAX)))
     })
-    .unwrap_or((0, 0, GDN_OFF.radius_m, [(0, 0); GDN_SLOTS]));
+    .unwrap_or((0, 0, GDN_OFF.radius_m, [(0, 0); GDN_SLOTS], (f32::NAN, f32::NAN)));
     // The mission is read after the store is released (never nested); the counter noted is the one of the copy used.
     let (items, items_len, changes, plan_id) = crate::mission::committed();
-    let value = select_targets(source, count, radius, &params, items.get(..items_len).unwrap_or(&[]), plan_id);
+    let value =
+        select_targets(source, count, radius, &params, items.get(..items_len).unwrap_or(&[]), plan_id, limits);
     crate::mission::note_pushed(changes);
     GDN_WRITER.lock(|w| {
         if let Some(writer) = w.borrow_mut().as_mut() {
@@ -821,7 +829,9 @@ impl Stepper {
     fn guide(&mut self, out: &StepOut, step: u32) {
         if self.gdn_wait && !out.armed {
             self.gdn_wait = false;
-            if self.gdn_pushed != self.gdn_in_force {
+            // The two facts the shadow does not use are left out of the comparison, so it starts over exactly as before.
+            let pushed = GdnTargets { from_mission: self.gdn_in_force.from_mission, heights_ok: self.gdn_in_force.heights_ok, ..self.gdn_pushed };
+            if pushed != self.gdn_in_force {
                 self.gdn_in_force = self.gdn_pushed;
                 let GdnTargets { count, radius_m, targets, .. } = self.gdn_in_force;
                 let mut geo = [GeoPoint { lat_e7: 0, lon_e7: 0, alt_mm: 0 }; GDN_TARGETS];
@@ -884,10 +894,13 @@ impl SampleSink for Stepper {
         if radio_status_fresh {
             self.flight.set_last_radio_status_us(Some(radio_status));
         }
+        // The whole set, read wait-free: the flight's mission facts and AUTO's list (taken at Start) at once, armed or not
+        // (Amendment A, A4); the shadow's copy waits for a disarmed step as before.
         let (gdn, gdn_fresh) = self.gdn.read();
         if gdn_fresh {
             self.gdn_pushed = gdn;
             self.gdn_wait = true;
+            self.flight.set_mission(gdn);
         }
         // The ESC status, once: the eRPM of the step's notch and the ESC record below both come from this copy. A read
         // that fails (the writer paused in mid-write) is no status: every line is missing.

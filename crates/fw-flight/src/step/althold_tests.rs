@@ -16,11 +16,17 @@ pub(super) const DT_US: u64 = 1_250;
 /// An estimator that returns the state in its cell, stamped with the step time.
 pub(super) struct Fake<'a>(pub &'a Cell<NavState>);
 
+/// The fake's NED origin (read only by AUTO's mission facts and entry).
+pub(super) const ORIGIN: crate::gnc::GeoPoint = crate::gnc::GeoPoint { lat_e7: 473_977_420, lon_e7: 85_455_940, alt_mm: 488_000 };
+
 impl Estimator for Fake<'_> {
     fn update(&mut self, sensors: &Sensors) -> NavState {
         let mut nav = self.0.get();
         nav.t_us = sensors.imu1.t_us;
         nav
+    }
+    fn origin(&self) -> Option<crate::gnc::GeoPoint> {
+        Some(ORIGIN)
     }
 }
 
