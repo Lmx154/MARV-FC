@@ -222,3 +222,230 @@ fn fx2_land_from_5_m_descends_at_0_5_m_s() {
     std::println!("FX-2 (3) 5 m: LAND at {:.2} m; largest stage rate {:.3} m/s; rise {:.3} m", r.h0, r.rate_max, r.rise);
     assert!(r.rate_max <= LAND_SPEED_MS && r.rise <= 0.1);
 }
+
+/// The quadratic-drag plant of section 48: no linear drag, a 50 ms motor lag, gain `gain`, and kq such that the terminal
+/// fall at the allocator's idle floor is 15 m/s: kq = (g - gain floor / m) / 15^2 (1/m).
+fn quadratic_plant(gain: f32) -> Plant {
+    let mut p = Plant::new(gain, 0.05, 0.0, 0.0);
+    p.kq = (GRAVITY_MSS - gain * p.f.floor_n / MASS) / (15.0 * 15.0);
+    p
+}
+
+/// FX-2 item 4 (a), section 48: a pilot throttle chop in Angle of 5 s from 60 m, then a stick loss (FS_HOLD_EN 0): the
+/// accepted residual. On this plant the 5 s chop reaches the ground before the loss, so a 3 s chop is flown too.
+/// Asserted only what the code is designed to do: a loss in the air gives LAND, or STOP when TD already held at the
+/// loss (WR1); the numbers printed.
+#[test]
+fn fx2_quadratic_drag_throttle_chop_5_s_from_60_m_then_stick_loss() {
+  for chop_s in [5.0f32, 3.0] {
+    let mut p = quadratic_plant(1.0);
+    p.hover_at(60.0, 5.0);
+    for _ in 0..(chop_s / 1.25e-3) as u32 {
+        p.step(Some((true, 0.0, Switch3::Low)));
+    }
+    let (h_loss, v_loss, td_loss) = (-p.d, p.v, p.f.still_us);
+    let held = td_loss >= Tuning::DEFAULT.land_detect_us;
+    let (mut k, mut first, mut stop_h, mut v_min_h) = (0u32, None::<State>, None::<f32>, (f32::NAN, f32::NAN));
+    while p.d < -0.05 && k < 80_000 {
+        let o = p.step(None);
+        k += 1;
+        let s = p.f.hands_off_state();
+        if s != State::Pilot {
+            first.get_or_insert(s);
+        }
+        if !o.armed {
+            stop_h.get_or_insert(-p.d);
+        }
+        if k == 8_000 {
+            v_min_h = (p.v, -p.d);
+            std::println!("FX-2 (4a) chop {chop_s} s, 10 s after the loss: {:?} in {:?}, latch {}, ever airborne {}, H valid {}", p.f.hands_off_state(), o.mode, p.f.airborne, p.f.hands_off.ever_airborne(), p.f.hover_us >= HOVER_VALID_US);
+        }
+    }
+    std::println!(
+        "FX-2 (4a) chop {chop_s} s from 60 m: at the loss {h_loss:.1} m, v_D {v_loss:.2} m/s, TD {td_loss} us (held {held}); first hands-off state {first:?}; stop at height {stop_h:?} m; v_D {:.2} m/s at {:.1} m 10 s after the loss; end after {:.1} s at {:.2} m/s",
+        v_min_h.0, v_min_h.1, k as f32 * 1.25e-3, p.v
+    );
+    match first {
+        _ if h_loss < 0.05 => {}
+        Some(State::Land) => {}
+        Some(State::Stop) => assert!(held, "STOP at the loss without TD held"),
+        s => panic!("{s:?}"),
+    }
+  }
+}
+
+/// FX-2 item 4 (a): BLIND entered from a 5 m/s descent (Angle at throttle 0.3 from a hover at 60 m, then the sticks and
+/// the height lost together; from 150 m so that 10 s of BLIND fit): the probe aborts, no stop in the air, BLIND's collective never above its entry value; the
+/// descent rate 10 s after the entry printed.
+#[test]
+fn fx2_quadratic_drag_blind_from_a_5_m_s_descent() {
+    let mut p = quadratic_plant(1.0);
+    p.hover_at(150.0, 20.0);
+    while p.v < 5.0 {
+        assert!(p.step(Some((true, 0.3, Switch3::Low))).armed && p.d < -10.0);
+    }
+    let v_loss = p.v;
+    p.cell.set(NavState { valid: super::althold_tests::ANGLE, ..p.cell.get() });
+    while p.f.hands_off_state() != State::Blind {
+        assert!(p.step(None).armed && p.d < -5.0);
+    }
+    let (h0, v0, c0) = (-p.d, p.v, p.demand);
+    let (mut probes, mut aborted, mut was, mut c_max, mut v_10s, mut k) = (0u32, 0u32, p.f.probe_us, c0, f32::NAN, 0u32);
+    while p.d < -1.0 && k < 48_000 {
+        let o = p.step(None);
+        k += 1;
+        assert!(o.armed, "a stop in the air at {:.1} m", -p.d);
+        assert_eq!(p.f.hands_off_state(), State::Blind);
+        c_max = c_max.max(p.demand);
+        let now = p.f.probe_us;
+        probes += u32::from(was.is_none() && now.is_some());
+        aborted += u32::from(was.is_some() && now.is_none());
+        was = now;
+        if k == 8_000 {
+            v_10s = p.v;
+        }
+    }
+    std::println!(
+        "FX-2 (4a) BLIND from {v_loss:.2} m/s: entry at {h0:.1} m, v_D {v0:.2} m/s, collective {c0:.3} N (largest {c_max:.3}); probes {probes}, aborted {aborted}; v_D 10 s after the entry {v_10s:.2} m/s; {:.1} m after {:.1} s",
+        -p.d, k as f32 * 1.25e-3
+    );
+    assert!(probes > 0 && aborted + 1 >= probes, "{probes} {aborted}");
+    assert!(c_max <= c0 + 1e-3, "{c_max} {c0}");
+}
+
+/// FX-2 item 4 (a): LAND from a hover at 20 m with the v_D estimate frozen at a faulty value from the stick loss on
+/// (FS_HOLD_EN 0): +3 m/s (down, the loop adds thrust) and -3 m/s (up, the loop commands the idle floor). Printed: the
+/// time until the commanded collective first reaches the floor, the ground contact and whether TD then holds in the air
+/// (20 s); asserted: no stop within the first 3 s.
+#[test]
+fn fx2_quadratic_drag_land_with_v_d_frozen() {
+    for vd in [3.0f32, -3.0] {
+        let mut p = quadratic_plant(1.0);
+        p.hover_at(20.0, 10.0);
+        p.vd_frozen = Some(vd);
+        let (mut k, mut floor, mut stop) = (0u32, None::<f32>, None::<(f32, f32, f32)>);
+        let mut contact = None::<f32>;
+        while k < 16_000 {
+            let o = p.step(None);
+            k += 1;
+            let t = k as f32 * 1.25e-3;
+            if p.on_ground() {
+                contact.get_or_insert(t);
+            }
+            if o.allocation.is_none_or(|a| a.saturation.thrust_low) {
+                floor.get_or_insert(t);
+            }
+            if !o.armed {
+                stop = Some((t, -p.d, p.v));
+                break;
+            }
+            assert!(t > 3.0 || o.armed);
+        }
+        std::println!(
+            "FX-2 (4a) LAND with v_D frozen at {vd:+} m/s from 20 m: floor first after {floor:?} s; ground contact {contact:?} s; stop (s, height m, v_D m/s) {stop:?}; at the end {:.1} m, {:.2} m/s after {:.1} s, {:?}",
+            -p.d, p.v, k as f32 * 1.25e-3, p.f.hands_off_state()
+        );
+        assert!(stop.is_none_or(|(t, _, _)| t > 3.0));
+    }
+}
+
+/// FX-2 item 4 (b), section 48: a gentle take-off in Angle at thrust gain 1.46 never sets the 0.714 latch; the stick loss
+/// with FS_HOLD_EN 1 (station heard) and with FS_HOLD_EN 0 lands without a stop, and LAND's first mode is Altitude, not
+/// Position (the (state, mode) pairs in order printed).
+#[test]
+fn fx2_hover_below_the_latch_hold_and_land_fly_altitude() {
+    for fs in [true, false] {
+        let mut p = Plant::new(1.46, 0.0, 0.0, 0.0);
+        p.station = true;
+        p.f.set_fs_hold_en(fs);
+        p.step(Some((false, 0.0, Switch3::Low)));
+        p.step(Some((true, 0.0, Switch3::Low)));
+        let (climb, hover) = (p.f.shaper.throttle_for(1.03 * MASS * GRAVITY_MSS / 1.46), p.f.shaper.throttle_for(MASS * GRAVITY_MSS / 1.46));
+        let (mut thr, mut latch) = (0.0f32, false);
+        while p.d > -3.0 {
+            thr = (thr + 0.2 * DT_US as f32 * 1e-6).min(climb);
+            assert!(p.step(Some((true, thr, Switch3::Low))).armed && p.t < 60_000_000);
+            latch |= p.f.airborne;
+        }
+        for _ in 0..4_000 {
+            assert!(p.step(Some((true, hover, Switch3::Low))).armed);
+            latch |= p.f.airborne;
+        }
+        assert!(!latch && p.f.hands_off.ever_airborne());
+        let (mut modes, mut states) = (std::vec::Vec::new(), std::vec::Vec::new());
+        for k in 0..2_400 {
+            let o = p.step(None);
+            let s = p.f.hands_off_state();
+            if !states.contains(&s) {
+                states.push(s);
+            }
+            assert!(o.armed && s != State::Stop && p.d < -1.0, "step {k}: {s:?}");
+            if !modes.contains(&(s, o.mode)) {
+                modes.push((s, o.mode));
+            }
+        }
+        std::println!("FX-2 (4b) gain 1.46 below the latch, FS_HOLD_EN {fs}: (state, mode) {modes:?}; states {states:?}; latch at the end {}", p.f.airborne);
+        assert_eq!(modes.get(1), Some(&(State::Land, Mode::Altitude)), "{modes:?}");
+    }
+}
+
+/// FX-2 item 4 (c), section 48: WR1's modelled clear agrees with the real one, deterministically (the wr3 walk counts it
+/// without requiring it). HOLD at 10 m on the fake estimator, the estimate then 3 m above the held height (the vertical
+/// loop at the idle floor), IMU1 at rest: at a hands-off step with TD held and the airborne latch still set the
+/// test clears the latch; that step ends disarmed in STOP. TD is put at its hold time directly, as the latch clears itself
+/// on the same idle-floor second TD needs (that is why the walk rarely sees the case). Without the clear the step stays
+/// armed in HOLD and STOP follows when the latch clears itself.
+#[test]
+fn fx2_wr1_modelled_clear_agrees_with_the_real_one() {
+    let mut results = std::vec::Vec::new();
+    for modelled in [true, false] {
+        let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
+        let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
+        f.set_heading_ok(true);
+        f.set_fs_hold_en(true);
+        let mut t = 1_000_000u64;
+        let mut step = |f: &mut TestFlight<'static>, rc: Option<(bool, f32)>| {
+            t += DT_US;
+            f.set_last_radio_heartbeat_us(Some(t));
+            let mut i = input(t, rc.map(|(arm, thr)| report(t, arm, thr, Switch3::High)));
+            i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -GRAVITY_MSS];
+            f.step(&i)
+        };
+        step(&mut f, Some((false, 0.0)));
+        step(&mut f, Some((true, 0.0)));
+        for _ in 0..400 {
+            step(&mut f, Some((true, 0.5)));
+        }
+        assert!(f.airborne);
+        while f.hands_off_state() == State::Pilot {
+            step(&mut f, None);
+        }
+        assert_eq!(f.hands_off_state(), State::Hold);
+        let mut n = cell.get();
+        n.position_m[2] = -13.0;
+        cell.set(n);
+        let mut n_steps = 0u32;
+        while f.still_us == 0 {
+            step(&mut f, None);
+            n_steps += 1;
+            assert!(n_steps < 8_000, "TD never counts");
+        }
+        assert!(f.still_us > 0 && f.airborne && f.hands_off_state() == State::Hold, "{} {} {:?}", f.still_us, f.airborne, f.hands_off_state());
+        f.still_us = Tuning::DEFAULT.land_detect_us;
+        if modelled {
+            f.airborne = false;
+        }
+        let o = step(&mut f, None);
+        let first = (o.armed, f.hands_off_state());
+        let mut k = 1u32;
+        while f.gate.armed() {
+            step(&mut f, None);
+            k += 1;
+            assert!(k < 20_000, "never stopped");
+        }
+        std::println!("FX-2 (4c) modelled clear {modelled}: TD counting after {n_steps} steps; the step after TD held: (armed, state) {first:?}; STOP after {k} steps");
+        results.push((first, k));
+    }
+    assert_eq!(results[0], ((false, State::Stop), 1), "the modelled clear: STOP on that step");
+    assert!(results[1].0 == (true, State::Hold) && results[1].1 > 1, "the latch still set: armed until it clears itself");
+}
