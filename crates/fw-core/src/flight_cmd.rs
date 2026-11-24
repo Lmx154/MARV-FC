@@ -162,8 +162,12 @@ impl Mailbox {
         let _ = self.claim.compare_exchange(seq, 0, Ordering::Release, Ordering::Relaxed);
     }
 
-    /// Flight step: takes the waiting request, at most once: (sequence number, payload).
+    /// Flight step: takes the waiting request, at most once: (sequence number, payload). An empty slot is seen with a
+    /// plain load and left alone; a request posted after that load is taken by the next call.
     pub fn take(&self) -> Option<(u32, u8)> {
+        if self.req.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
         let w = self.req.swap(0, Ordering::AcqRel);
         (w != 0).then_some((w >> 8, w as u8))
     }
@@ -301,6 +305,19 @@ mod tests {
         let s2 = m.post(0x13).unwrap();
         assert_ne!(s2, s);
         assert_eq!(m.poll(s2), None, "the old answer is not the new one's");
+    }
+
+    #[test]
+    fn take_on_an_empty_slot_is_none_and_leaves_it_empty_and_postable() {
+        let m = Mailbox::new();
+        for _ in 0..3 {
+            assert_eq!(m.take(), None);
+            assert_eq!(m.req.load(Ordering::Relaxed), 0);
+        }
+        let s = m.post(0x12).unwrap();
+        assert_eq!(m.take(), Some((s, 0x12)), "a request posted after empty takes is taken once");
+        assert_eq!(m.take(), None);
+        assert_eq!(m.poll(s), None, "the empty takes answered nothing");
     }
 
     #[test]
