@@ -331,6 +331,10 @@ impl StickShaper {
 }
 
 /// The flight code: estimator, controller, allocator, gate. Only [`Flight::step`] reaches them.
+#[cfg_attr(
+    not(feature = "sim"),
+    doc = "\n\nWithout the feature `sim` (the board image) there is no `set_heading_ok` (decision-mavlink-mode-20261123, E5):\n\n```compile_fail\nfn f<E, C, A>(flight: &mut fw_flight::step::Flight<E, C, A>)\nwhere\n    E: fw_flight::gnc::Estimator,\n    C: fw_flight::gnc::Controller,\n    A: fw_flight::gnc::Allocator,\n{\n    flight.set_heading_ok(true);\n}\n```"
+)]
 pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     estimator: E,
     controller: C,
@@ -539,15 +543,19 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.fs_hold_en = on;
     }
 
-    /// The heading monitor's verdict for the hands-off state machine (B4: T3' = position covered AND heading OK). No monitor
-    /// exists on this branch, so the board never calls this and it stays false: T3' is unreachable and stick loss in the
-    /// air gives LAND or BLIND, never HOLD, until the monitor is merged. Host tests and MARV-sim set it to exercise HOLD.
+    /// The heading monitor's verdict for the hands-off state machine (B4: T3' = position covered AND heading OK; H12: and
+    /// no track fault). No monitor exists on this branch, so on the board it stays false: T3' is unreachable and stick loss
+    /// in the air gives LAND or BLIND, never HOLD. Host tests and MARV-sim set it to exercise HOLD. Only in host tests and
+    /// with the feature `sim`, which the board image never enables: a flight image has no path that asserts heading OK (E5).
+    #[cfg(any(test, feature = "sim"))]
     pub fn set_heading_ok(&mut self, ok: bool) {
         self.heading_ok = ok;
     }
 
     /// When the newest station HEARTBEAT arrived on the radio link, us (A1's link age). `None` (the default, and the board's
-    /// value until the station link is wired) makes the link age run from the newest stick report alone.
+    /// value until the station link is wired) makes the link age run from the newest stick report alone. A missing feed
+    /// means "link lost" (E5): 10 s (`LINK_LOSS_US`) after the last stick report HOLD leaves for RETURN, or LAND without
+    /// home (always on this branch), and Start is DENIED (no station); that fails safe.
     pub fn set_last_radio_heartbeat_us(&mut self, t_us: Option<u64>) {
         self.last_radio_heartbeat_us = t_us;
     }

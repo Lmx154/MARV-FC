@@ -27,3 +27,6 @@ libm = "0.2"
 [features]
 # The N0 bench's arithmetic (src/eskf_n0.rs), for the bench binary eskf_bench only; not in the flight image.
 eskf-n0 = []
+# Simulator and test overrides (`Flight::set_heading_ok`, decision-mavlink-mode-20261123 E5), for MARV-sim only; the
+# board image never enables it. Host unit tests get them through cfg(test).
+sim = []
