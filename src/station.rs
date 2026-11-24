@@ -13,8 +13,8 @@
 //! Mode: after each step core 1 stores the state machine's mode code in [`MODE`] (0 until the first step); both nodes put
 //! it in HEARTBEAT `custom_mode` ([`custom_mode`]).
 //!
-//! Heartbeat and plan: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link
-//! ([`FLIGHT_STATION_HB`], the clock of `rc::FLIGHT_RADIO_STATUS`) and the committed list's plan id ([`FLIGHT_PLAN`],
+//! Heartbeat and plan: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the
+//! station's sender only ([`FLIGHT_STATION_HB`], the clock of `rc::FLIGHT_RADIO_STATUS`) and the committed list's plan id ([`FLIGHT_PLAN`],
 //! 0 for no list); core 1 gives them to `Flight::set_last_radio_heartbeat_us` and `Flight::set_plan_id`.
 
 use core::cell::{Cell, RefCell};
@@ -22,7 +22,7 @@ use core::sync::atomic::{AtomicU8, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use fw_core::flight_cmd::{Decoded, Exchange, Mailbox, Pending, decode, request_byte};
+use fw_core::flight_cmd::{Decoded, Exchange, Mailbox, Pending, decode, request_byte, station_heartbeat_us};
 use fw_core::xcore::{TripleBuffer, TripleReader, TripleWriter};
 use fw_flight::gnc::{Allocator, Controller, Estimator};
 use fw_flight::step::Flight;
@@ -58,9 +58,10 @@ struct Outstanding {
 
 static OUTSTANDING: Mutex<CriticalSectionRawMutex, Cell<Option<Outstanding>>> = Mutex::new(Cell::new(None));
 
-/// Core 0: the writers of [`FLIGHT_STATION_HB`] (with the last time written) and [`FLIGHT_PLAN`], taken at first use.
+/// Core 0: the writers of [`FLIGHT_STATION_HB`] (with the station's own last time, the one written) and [`FLIGHT_PLAN`],
+/// taken at first use.
 struct Writers {
-    hb: Option<(TripleWriter<'static, u64>, u64)>,
+    hb: Option<(TripleWriter<'static, u64>, Option<u64>)>,
     plan: Option<TripleWriter<'static, u32>>,
 }
 
@@ -159,22 +160,21 @@ pub fn custom_mode() -> u32 {
     u32::from(MODE.load(Ordering::Relaxed))
 }
 
-/// Core 0, from the RC port's `Hooks::stats`: its time of the latest station HEARTBEAT (`None` before the first),
-/// written to the flight step when it is new.
-pub fn station_heartbeat(t_us: Option<u64>) {
-    let Some(t) = t_us else {
-        return;
-    };
+/// Core 0, from the RC port's `Hooks::stats`: its time and sender of the latest ground-station HEARTBEAT (`None` before
+/// the first); the time counts only from the station's sender (`station_heartbeat_us`) and is written to the flight step
+/// when it is new.
+pub fn station_heartbeat(t_us: Option<u64>, sender: Option<(u8, u8)>) {
     WRITERS.lock(|w| {
         let mut w = w.borrow_mut();
         if w.hb.is_none() {
-            w.hb = FLIGHT_STATION_HB.take_writer().map(|wr| (wr, u64::MAX));
+            w.hb = FLIGHT_STATION_HB.take_writer().map(|wr| (wr, None));
         }
         if let Some((wr, last)) = &mut w.hb
-            && *last != t
+            && let Some(t) = station_heartbeat_us(*last, t_us, sender)
+            && *last != Some(t)
         {
             wr.write(t);
-            *last = t;
+            *last = Some(t);
         }
     });
 }

@@ -442,7 +442,7 @@ impl Hooks for RcHooks {
     }
 
     fn stats(&mut self, stats: &Stats) {
-        crate::station::station_heartbeat(stats.last_gcs_heartbeat_us);
+        crate::station::station_heartbeat(stats.last_gcs_heartbeat_us, stats.last_gcs_heartbeat_sender);
         let before = SHARED.lock(|s| {
             let mut s = s.borrow_mut();
             let before = s.mode();

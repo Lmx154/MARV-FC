@@ -56,6 +56,19 @@ pub fn decode(command: MavCmd, params: &[f32; 7]) -> Decoded {
     }
 }
 
+/// The ground station's (system, component): link-contract section 2, "Ground station: system 255, component 190".
+pub const STATION: (u8, u8) = (255, 190);
+
+/// The station's own latest HEARTBEAT time, from `kept` (the value so far) and the RC port's latest ground-station
+/// HEARTBEAT (`last_gcs_us`, `sender`; any sender of a HEARTBEAT of type GCS sets both): that time when the sender is
+/// exactly [`STATION`], else `kept` (another sender never moves it and never clears it).
+pub fn station_heartbeat_us(kept: Option<u64>, last_gcs_us: Option<u64>, sender: Option<(u8, u8)>) -> Option<u64> {
+    match (last_gcs_us, sender) {
+        (Some(t), Some(s)) if s == STATION => Some(t),
+        _ => kept,
+    }
+}
+
 /// The request payload's radio-link bit (clear: USB).
 const RADIO: u8 = 0x10;
 
@@ -266,6 +279,23 @@ mod tests {
         ] {
             assert_eq!(decode(c, &P), Decoded::Other);
         }
+    }
+
+    #[test]
+    fn only_the_station_sender_moves_the_station_heartbeat_time() {
+        assert_eq!(station_heartbeat_us(None, None, None), None, "no heartbeat: none");
+        let t = station_heartbeat_us(None, Some(1_000), Some(STATION));
+        assert_eq!(t, Some(1_000), "the station at t1");
+        let t = station_heartbeat_us(t, Some(2_000), Some((254, 190)));
+        assert_eq!(t, Some(1_000), "another GCS-type sender at t2 does not move it");
+        for other in [(255, 191), (0, 190), (1, 1), (255, 0)] {
+            assert_eq!(station_heartbeat_us(t, Some(2_500), Some(other)), Some(1_000), "{other:?}");
+        }
+        assert_eq!(station_heartbeat_us(t, None, None), Some(1_000), "never cleared");
+        let t = station_heartbeat_us(t, Some(3_000), Some(STATION));
+        assert_eq!(t, Some(3_000), "the station at t3");
+        assert_eq!(station_heartbeat_us(None, Some(2_000), Some((254, 190))), None, "only others: none");
+        assert_eq!(STATION, (255, 190));
     }
 
     #[test]
