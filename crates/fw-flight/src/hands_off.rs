@@ -169,6 +169,9 @@ pub struct MissionFacts {
     pub max_waypoint_distance_m: Option<f32>,
     /// The stored return height above home, m; `None` when no list is stored.
     pub return_height_m: Option<f32>,
+    /// `GDN_ALT_MAX` in force when the list was pushed, m: RETURN's height is at most this (FX-3 item 1); a non-finite or
+    /// non-positive value is the default `ALT_MAX_DEFAULT`, as the mission service's limits default.
+    pub alt_max_m: f32,
 }
 
 /// The facts of one flight step.
@@ -870,10 +873,14 @@ impl HandsOff {
         self.return_height_m = None;
         if next == State::Return {
             let present = self.home_d.map_or(0.0, |d| d - i.position_d_m);
+            // FX-3 item 1: H_r = max(present, min(return height, GDN_ALT_MAX in force)); a non-finite return height is none.
+            let alt_max = i.mission.alt_max_m;
+            let cap = if alt_max.is_finite() && alt_max > 0.0 { alt_max } else { fw_core::mission::ALT_MAX_DEFAULT };
             self.return_height_m = Some(
                 i.mission
                     .return_height_m
-                    .map_or(present, |h| h.max(present)),
+                    .filter(|h| h.is_finite())
+                    .map_or(present, |h| h.min(cap).max(present)),
             );
         }
         if next == State::Stop {
@@ -1060,6 +1067,7 @@ mod tests {
             z_within_limits: true,
             max_waypoint_distance_m: Some(100.0),
             return_height_m: Some(20.0),
+            alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
         }
     }
 
@@ -1618,9 +1626,35 @@ mod tests {
             z_within_limits: true,
             max_waypoint_distance_m: None,
             return_height_m: None,
+            alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
         };
         let t = r.now() + LINK_LOSS_US + 1;
         assert_eq!(r.at(t).return_height_m, Some(10.0));
+    }
+
+    /// FX-3 item 1: H_r = max(present, min(stored return height, GDN_ALT_MAX in force)); a non-finite or non-positive
+    /// limit is the default 50 m; no mission: the present height.
+    #[test]
+    fn fx3_return_height_is_capped_at_gdn_alt_max() {
+        let enter = |ret: Option<f32>, alt_max: f32, present: f32| {
+            let mut r = Rig::hold();
+            r.i.mission.return_height_m = ret;
+            r.i.mission.alt_max_m = alt_max;
+            r.i.position_d_m = HOME_D - present;
+            let t = r.now() + LINK_LOSS_US + 1;
+            let out = r.at(t);
+            assert_eq!(out.state, State::Return);
+            out.return_height_m
+        };
+        assert_eq!(enter(Some(60.0), 50.0, 10.0), Some(50.0), "stored above the limit: capped");
+        assert_eq!(enter(Some(45.0), 40.0, 10.0), Some(40.0), "the limit in force, not the default");
+        assert_eq!(enter(Some(60.0), 50.0, 55.0), Some(55.0), "present above both: kept");
+        assert_eq!(enter(Some(20.0), 50.0, 10.0), Some(20.0), "within the limit: unchanged");
+        for bad in [f32::NAN, 0.0, -5.0, f32::INFINITY] {
+            assert_eq!(enter(Some(60.0), bad, 10.0), Some(fw_core::mission::ALT_MAX_DEFAULT), "limit {bad}: the default");
+        }
+        assert_eq!(enter(None, 50.0, 10.0), Some(10.0), "no mission: present");
+        assert_eq!(enter(Some(f32::NAN), 50.0, 10.0), Some(10.0), "a non-finite return height: present");
     }
 
     #[test]
@@ -3160,6 +3194,7 @@ mod tests {
             z_within_limits: true,
             max_waypoint_distance_m: None,
             return_height_m: None,
+            alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
         }
     }
 
@@ -3286,6 +3321,7 @@ mod tests {
                 z_within_limits: !rng.chance(100),
                 max_waypoint_distance_m: rng.pick(&[None, Some(100.0), Some(999.0), Some(1500.0)]),
                 return_height_m: rng.pick(&[None, Some(5.0), Some(30.0)]),
+                alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
             };
         }
         i.last_waypoint_reached = rng.chance(5);

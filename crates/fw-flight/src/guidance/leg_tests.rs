@@ -28,7 +28,7 @@ fn geo_at(n_m: f64, e_m: f64) -> (i32, i32) {
 
 /// A mission of (north, east, z above home) waypoints, return height 25 m.
 fn mission(wps: &[(f64, f64, f32)], radius_m: f32) -> GdnTargets {
-    let mut t = GdnTargets { count: wps.len() as u8, radius_m, targets: [(0, 0); GDN_TARGETS], alts_m: [0.0; GDN_TARGETS], return_m: 25.0, plan_id: 1, from_mission: true, heights_ok: true };
+    let mut t = GdnTargets { count: wps.len() as u8, radius_m, targets: [(0, 0); GDN_TARGETS], alts_m: [0.0; GDN_TARGETS], return_m: 25.0, plan_id: 1, from_mission: true, heights_ok: true, alt_max_m: fw_core::mission::ALT_MAX_DEFAULT };
     for (k, &(n, e, z)) in wps.iter().enumerate() {
         t.targets[k] = geo_at(n, e);
         t.alts_m[k] = z;

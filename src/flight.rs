@@ -560,6 +560,7 @@ const GDN_OFF: GdnSet = GdnTargets {
     plan_id: 0,
     from_mission: false,
     heights_ok: false,
+    alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
 };
 
 /// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
@@ -832,8 +833,13 @@ impl Stepper {
     fn guide(&mut self, out: &StepOut, step: u32) {
         if self.gdn_wait && !out.armed {
             self.gdn_wait = false;
-            // The two facts the shadow does not use are left out of the comparison, so it starts over exactly as before.
-            let pushed = GdnTargets { from_mission: self.gdn_in_force.from_mission, heights_ok: self.gdn_in_force.heights_ok, ..self.gdn_pushed };
+            // The three facts the shadow does not use are left out of the comparison, so it starts over exactly as before.
+            let pushed = GdnTargets {
+                from_mission: self.gdn_in_force.from_mission,
+                heights_ok: self.gdn_in_force.heights_ok,
+                alt_max_m: self.gdn_in_force.alt_max_m,
+                ..self.gdn_pushed
+            };
             if pushed != self.gdn_in_force {
                 self.gdn_in_force = self.gdn_pushed;
                 let GdnTargets { count, radius_m, targets, .. } = self.gdn_in_force;

@@ -722,6 +722,7 @@ mod tests {
                 z_within_limits: true,
                 max_waypoint_distance_m: Some(100.0),
                 return_height_m: Some(20.0),
+                alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
             },
             last_waypoint_reached: false,
             home_reached: false,

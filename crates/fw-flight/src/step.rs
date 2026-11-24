@@ -235,6 +235,7 @@ const NO_MISSION: MissionFacts = MissionFacts {
     z_within_limits: true,
     max_waypoint_distance_m: None,
     return_height_m: None,
+    alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
 };
 
 /// The target set before the first `set_mission`: off, not the mission; GDN_RADIUS's default (the board's `GDN_OFF`), so
@@ -248,6 +249,7 @@ const MISSION_OFF: GdnTargets = GdnTargets {
     plan_id: 0,
     from_mission: false,
     heights_ok: false,
+    alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
 };
 
 /// The state machine's mission facts from `set`, the target set in force (Amendment A, A4: list, heights, return height
@@ -289,6 +291,7 @@ fn mission_facts(
         z_within_limits: set.heights_ok,
         max_waypoint_distance_m: far,
         return_height_m: plan_id.map(|_| set.return_m),
+        alt_max_m: set.alt_max_m,
     }
 }
 

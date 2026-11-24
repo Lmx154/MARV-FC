@@ -608,6 +608,33 @@ fn rb_above_the_return_height_no_climb_and_the_height_is_kept() {
     assert!(hi - lo < 0.05 && dist_from(&r, 0.0, 0.0) <= 2.0, "{lo} {hi}");
 }
 
+/// FX-3 item 1 on the real step: a stored return height of 60 m with GDN_ALT_MAX 40 m in the pushed set: Return at 10 m
+/// climbs in place to 40 m, not 60 m.
+#[test]
+fn fx3_return_climbs_to_gdn_alt_max_not_the_stored_height() {
+    let mut m = square();
+    m.return_m = 60.0;
+    m.alt_max_m = 40.0;
+    let mut r = Run::new(3.0, Some(m));
+    assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+    assert_eq!(r.f.legs.phase(), LegPhase::Climb);
+    let (mut steps, mut top) = (0u32, 0.0f32);
+    while r.f.legs.phase() == LegPhase::Climb {
+        r.fly();
+        steps += 1;
+        assert!(steps < 40_000);
+        top = top.max(height(&r));
+    }
+    let carrot = -r.f.legs.down_m();
+    // At home already: Home, then LAND; the highest point is the top of the climb.
+    for _ in 0..4_000 {
+        r.fly();
+        top = top.max(height(&r));
+    }
+    std::println!("FX-3 (1) return 60 m, GDN_ALT_MAX 40 m: carrot {carrot:.2} m, highest {top:.2} m, then {:?}", r.state());
+    assert!(libm::fabsf(carrot - 40.0) < 1e-3 && libm::fabsf(top - 40.0) < 0.1, "{carrot} {top}");
+}
+
 /// Steps flown until the state leaves `from` (at most `max_s` seconds); the time, s.
 fn until_not(r: &mut Run, from: State, max_s: f32) -> f32 {
     let mut steps = 0u32;

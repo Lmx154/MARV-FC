@@ -455,6 +455,8 @@ pub struct GdnTargets {
     /// `GDN_SRC` 1, the mission has its return item, and every waypoint `z` and the return height are finite and within
     /// the height limits given to [`select_targets`] (`GDN_ALT_MIN`, `GDN_ALT_MAX` when the set was pushed).
     pub heights_ok: bool,
+    /// `GDN_ALT_MAX` given to [`select_targets`], m (either source): the cap on RETURN's height on the flight core.
+    pub alt_max_m: f32,
 }
 
 /// The target set to push: with `source` 1 the committed mission's waypoints (`mission` without its last item, the return
@@ -510,6 +512,7 @@ pub fn select_targets(
         plan_id: plan,
         from_mission: source == 1,
         heights_ok,
+        alt_max_m: alt_limits_m.1,
     }
 }
 
@@ -2430,6 +2433,7 @@ mod tests {
             plan_id: 0,
             from_mission: false,
             heights_ok: false,
+            alt_max_m: ALT_MAX_DEFAULT,
         };
         want.targets[..4].copy_from_slice(&PARAM_TARGETS);
         let missions = [many(0), many(1), many(3), many(7), many(16), points3().to_vec()];
@@ -2439,6 +2443,9 @@ mod tests {
         // Any other value than 1 is the parameters too (the parameter's range is 0 to 1).
         assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
         assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
+        // FX-3 item 1: GDN_ALT_MAX in force is carried with either source.
+        assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, &many(5), 7, (5.0, 35.0)).alt_max_m, 35.0);
+        assert_eq!(select_targets(1, 3, 2.5, &PARAM_TARGETS, &many(5), 7, (5.0, 35.0)).alt_max_m, 35.0);
     }
 
     #[test]
