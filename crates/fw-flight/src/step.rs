@@ -810,8 +810,9 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             let a = [n, e, d + GRAVITY_MSS];
             if a.iter().all(|v| v.is_finite()) {
                 let dt_s = dt_us as f32 * 1e-6;
-                let lpf = |k: usize| quat::pt1(self.accel_ef_mss[k], a[k], dt_s, TOUCHDOWN_ACCEL_LPF_HZ);
-                self.accel_ef_mss = [lpf(0), lpf(1), lpf(2)];
+                let lpf = |y: f32, x: f32| quat::pt1(y, x, dt_s, TOUCHDOWN_ACCEL_LPF_HZ);
+                let [yn, ye, yd] = self.accel_ef_mss;
+                self.accel_ef_mss = [lpf(yn, a[0]), lpf(ye, a[1]), lpf(yd, a[2])];
             }
         }
         let still = self.accel_ef_mss.iter().map(|v| v * v).sum::<f32>() <= TOUCHDOWN_ACCEL_MAX_MSS * TOUCHDOWN_ACCEL_MAX_MSS;
