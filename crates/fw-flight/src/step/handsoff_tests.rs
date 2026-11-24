@@ -1798,7 +1798,7 @@ fn n10_ho_msg_at_fs_hold_en_0_only_from_the_stick_loss() {
 /// second is not STOP; (b) only the switch cycle arms; (c) outside the hands-off states silence disarms at the first
 /// step past the timeout and not before; (d) a hands-off state that reads the latch false and TD held at the previous
 /// step (N10 (i), WR1's guard; IMU1 reads at rest or zero specific force, at random) ends that step disarmed. And
-/// return_built false: never AUTO or RETURN.
+/// never AUTO or RETURN (the walk sends no Start or Return and the station is never heard).
 #[test]
 fn wr3_and_return_built_on_the_real_step() {
     let tuning = Tuning::DEFAULT;
@@ -1885,7 +1885,7 @@ fn wr3_and_return_built_on_the_real_step() {
         let o = f.step(&i);
         let state = f.hands_off_state();
         let hands_off = !matches!(state, State::Pilot | State::Stop);
-        assert!(!matches!(state, State::Auto | State::Return), "step {k}: return_built false");
+        assert!(!matches!(state, State::Auto | State::Return), "step {k}: AUTO or RETURN in the walk");
         // (a)
         assert!(!(prev_armed && o.armed && state == State::Stop), "a, step {k}");
         // (b)

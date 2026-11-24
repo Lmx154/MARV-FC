@@ -41,7 +41,7 @@ qmi-psram = { git = "https://github.com/Lmx154/qmi-psram-rs.git", rev = "82f8dbb
 fw-core = { path = "crates/fw-core" }
 fw-flight = { path = "crates/fw-flight" }
 fw-settings = { path = "crates/fw-settings" }
-# The USB byte pipe and the MAVLink device layer, pinned to a commit of their `main` (change `rev`,
+# The USB byte pipe and the MAVLink device layer, pinned to a commit of their `hands-off` branch (change `rev`,
 # then `cargo update -p <crate>`). mavlink-device has the same `rev` as in crates/fw-core/Cargo.toml,
 # so there is one copy of it.
 usb-cdc = { git = "https://github.com/Lmx154/usb-cdc.git", rev = "47cb09087d517b6813e3211e742d9d7d5ff9e379", features = ["defmt"] }

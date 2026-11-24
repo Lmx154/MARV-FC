@@ -126,7 +126,8 @@ const HOME_VD_MAX_MS: f32 = LAND_SPEED_MS;
 pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
 
 /// BLIND's synthetic throttle: Angle's collective at it is m (g - `BLIND_BELOW_HOVER_MSS`), "hover" being the card's
-/// nominal m g, the collective Angle gives at half throttle (there is no height estimate to find the real hover).
+/// nominal m g, the collective Angle gives at half throttle (there is no height estimate to find the real hover). Only
+/// before H is valid: then H - m `BLIND_BELOW_HOVER_MSS` (N11 (1c); N16 (b) uses H for every synthetic Angle throttle).
 const BLIND_THROTTLE: f32 = THROTTLE_CENTRE * (1.0 - BLIND_BELOW_HOVER_MSS / GRAVITY_MSS);
 
 /// N11 (1a): the learned hover collective's low-pass time constant, s (ArduPilot AP_MOTORS_THST_HOVER_TC 10,
@@ -1170,10 +1171,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         // Hands-off laws (Amendment D): centred synthetic sticks, no real stick reaching the shaper (I3); LAND's descent in
         // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4, N14 (1)) linearly down to the
-        // idle floor over `BLIND_PROBE_RAMP_US`, then throttle 0 (the allocator holds the floor and flags `thrust_low`). AUTO and RETURN (unreachable here) fly HOLD's. N11 (1c): BLIND's
+        // idle floor over `BLIND_PROBE_RAMP_US`, then throttle 0 (the allocator holds the floor and flags `thrust_low`). AUTO and RETURN fly HOLD's here; the guidance's setpoint replaces it below. N11 (1c): BLIND's
         // collective is H - m `BLIND_BELOW_HOVER_MSS` once H is valid (the throttle that gives it in Angle), else the card's.
         // N13: after the one-shot correction, the corrected collective (the probe ramps from it, an aborted probe returns
-        // to it).
+        // to it); N16 (a): the correction only cuts, so it never exceeds BLIND's entry collective.
         let hover_valid = self.hover_us >= HOVER_VALID_US;
         let blind_start = match self.blind_trim_n {
             Some(c) => self.shaper.throttle_for(c),

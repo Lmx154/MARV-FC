@@ -97,7 +97,7 @@ fn a_command_through_the_mailbox_is_applied_on_the_step_that_takes_it_and_answer
     // Taken once: the next steps see no command.
     go(&mut f, None);
     assert_eq!(f.take_command_result(), None);
-    // Start: DENIED NoWaypoints or NoHome on this branch (AUTO is not reachable), never ACCEPTED.
+    // Start: DENIED NoWaypoints or NoHome on this branch (this test sets no mission), never ACCEPTED.
     let s = m.post(request_byte(FlightCommand::Start, true)).unwrap();
     go(&mut f, None);
     assert_ne!(m.poll(s), Some(ACCEPTED));
