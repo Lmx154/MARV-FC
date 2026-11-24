@@ -267,6 +267,42 @@ fn a_square_at_3_m_s_flies_every_waypoint_and_holds_at_the_last() {
     assert_eq!(r.f.leg_active(), Some(0));
 }
 
+/// FX-2 item 1: the square with GDN_RADIUS 10 m at 3 m/s (X 7 m): the arrival radius in force is min(10, X - 3.0) = 4 m,
+/// so after each arrival the carrot at the reached corner is within 4 m and e stays below X at the 90 degree corners;
+/// every waypoint reached within 4 m, HOLD at the last, never LAND. With GDN_RADIUS itself the first corner tripped the
+/// track fault (e = 10 m).
+#[test]
+fn fx2_a_square_with_gdn_radius_10_m_at_3_m_s_completes_with_e_below_x() {
+    let wps = [(30.0, 0.0, 10.0f32), (30.0, 30.0, 15.0), (0.0, 30.0, 10.0), (0.0, 0.0, 10.0)];
+    let mut m = square();
+    m.radius_m = 10.0;
+    let mut r = Run::new(3.0, Some(m));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    let x = hands_off::track_fault_m(r.f.speed_xy_in_force());
+    let radius = x - guidance::ARRIVAL_MARGIN_M;
+    let (mut e_max, mut active, mut reached) = (0.0f32, Some(0u8), std::vec::Vec::new());
+    let mut steps = 0u32;
+    while r.state() == State::Auto && steps < 200_000 {
+        r.fly();
+        steps += 1;
+        if r.state() == State::Auto {
+            e_max = e_max.max(r.f.track_error_m.expect("e"));
+        }
+        let now = r.f.leg_active();
+        if now != active || r.state() != State::Auto {
+            let k = usize::from(active.unwrap());
+            reached.push((k, dist_from(&r, wps[k].0, wps[k].1)));
+            active = now;
+        }
+    }
+    std::println!("FX-2 (1) GDN_RADIUS 10 m at 3 m/s: radius in force {radius} m; reached {reached:?}; e max {e_max:.3} m against X {x} m; {:?}", r.state());
+    assert_eq!(radius, 4.0);
+    assert_eq!(reached.iter().map(|r| r.0).collect::<std::vec::Vec<_>>(), [0, 1, 2, 3]);
+    assert!(reached.iter().all(|&(_, d)| d <= radius + 0.01), "{reached:?}");
+    assert!(e_max < x && !r.f.hands_off.track_fault(), "e max {e_max}");
+    assert_eq!(r.state(), State::Hold);
+}
+
 /// (b) Pause mid-leg holds with the place kept; Start resumes the same waypoint on a new first leg from the vehicle;
 /// Abort holds with the place dropped and Start begins at waypoint 0.
 #[test]

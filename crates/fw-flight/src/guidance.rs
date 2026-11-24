@@ -268,6 +268,9 @@ pub const LEG_CLIMB_MS: f32 = 3.0;
 pub const LEG_DESCENT_MS: f32 = 1.5;
 /// L4: the horizontal distance vehicle to carrot at which the carrot stops advancing, m (PX4 MPC_XY_ERR_MAX).
 pub const LAG_E_MAX_M: f32 = 2.0;
+/// FX-2 item 1 (decision-mavlink-mode-20261123, section 54 item 1): the arrival radius is at most the track-fault bound X
+/// less this, m: the lag limit `LAG_E_MAX_M` plus 1.0 m, since after an arrival the carrot sits at the reached waypoint.
+pub const ARRIVAL_MARGIN_M: f32 = LAG_E_MAX_M + 1.0;
 /// A6: the AUTO and RETURN cruise speed is min(speed in force, this), m/s (baro sink measured at 6.8 m/s).
 pub const LEG_SPEED_MAX_MS: f32 = 6.8;
 /// The carrot closer than this to the leg's end, m, is at the end and at rest (f32 rounding, not a tuning value: 2 km out,
@@ -410,7 +413,7 @@ impl LegGuidance {
 
     /// AUTO entry (L2) or re-entry (L7): the waypoints of `mission` converted at `origin` (as the shadow does), the
     /// first leg from the vehicle to waypoint `start`, both carrots at the vehicle and at rest. The radius is the
-    /// mission's (GDN_RADIUS); the cruise speed min(`speed_ms`, `LEG_SPEED_MAX_MS`). Refused (false, `Idle`) when the
+    /// mission's (GDN_RADIUS, at most X - `ARRIVAL_MARGIN_M`); the cruise speed min(`speed_ms`, `LEG_SPEED_MAX_MS`). Refused (false, `Idle`) when the
     /// position or home is not finite or `start` is not a waypoint.
     pub fn enter(&mut self, position_m: [f32; 3], home: Home, origin: &GeoPoint, mission: &GdnTargets, start: u8, speed_ms: f32) -> bool {
         let [pn, pe, pd] = position_m;
@@ -431,7 +434,7 @@ impl LegGuidance {
             *dst = [n, e, d];
         }
         self.count = count;
-        self.radius_m = Self::radius(mission.radius_m);
+        self.radius_m = Self::radius(mission.radius_m, speed_ms);
         self.cruise_ms = Self::cruise(speed_ms);
         self.home_ne = home.ne;
         self.idx = start;
@@ -454,7 +457,7 @@ impl LegGuidance {
         }
         let d_r = home.d - return_m;
         let d_r = if d_r.is_finite() { d_r.min(pd) } else { pd };
-        self.radius_m = Self::radius(radius_m);
+        self.radius_m = Self::radius(radius_m, speed_ms);
         self.cruise_ms = Self::cruise(speed_ms);
         self.home_ne = home.ne;
         self.line = Line::new([pn, pe], [pn, pe]);
@@ -610,8 +613,10 @@ impl LegGuidance {
         }
     }
 
-    fn radius(radius_m: f32) -> f32 {
-        if radius_m.is_finite() { radius_m.max(0.0) } else { 0.0 }
+    /// The arrival radius: min(GDN_RADIUS, X - `ARRIVAL_MARGIN_M`), X the track-fault bound of `speed_ms` (FX-2 item 1).
+    fn radius(radius_m: f32, speed_ms: f32) -> f32 {
+        let cap = crate::hands_off::track_fault_m(speed_ms) - ARRIVAL_MARGIN_M;
+        if radius_m.is_finite() { radius_m.min(cap).max(0.0) } else { 0.0 }
     }
 
     #[allow(clippy::manual_clamp)] // not `clamp`: flight-core code, no panic path
