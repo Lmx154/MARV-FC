@@ -2095,6 +2095,8 @@ fn n4_blind_probe_on_the_ground_reaches_the_threshold_and_stops_within_3_s() {
     let blind_n = MASS * (GRAVITY_MSS - BLIND_BELOW_HOVER_MSS);
     let (mut first_still, mut prev, mut min_thrust) = (None::<u64>, f32::INFINITY, f32::INFINITY);
     for k in 0..20_000u32 {
+        // N13: from the step after the one-shot correction, BLIND's collective is the corrected one.
+        let want = fly.f.blind_trim_n.unwrap_or(blind_n);
         let o = fly.quiet_f(AT_REST);
         if !o.armed {
             let since = fly.t - first_still.expect("(b) held");
@@ -2107,7 +2109,7 @@ fn n4_blind_probe_on_the_ground_reaches_the_threshold_and_stops_within_3_s() {
         assert_eq!(fly.state(), State::Blind, "step {k}");
         let thrust = thrust_of(&o);
         if fly.f.probe_us.is_none() {
-            assert!((thrust - blind_n).abs() < 1e-3 * blind_n, "BLIND's collective outside the probe, step {k}");
+            assert!((thrust - want).abs() < 1e-3 * want, "BLIND's collective outside the probe, step {k}");
         } else {
             assert!(thrust <= prev + 1e-4, "the ramp never rises, step {k}");
         }
@@ -2547,12 +2549,13 @@ fn blind_with(h: f32, us: u64) -> Fly {
 }
 
 /// N11 (1e, 1c): in BLIND the collective is H - 0.3 m once H is valid (10 s of qualifying time) and the card's m g -
-/// 0.3 m before; H and its time are frozen in BLIND (here with v_D valid, so the BLIND gate alone stops it).
+/// 0.3 m before; H and its time are frozen in BLIND (here with v_D valid, so the BLIND gate alone stops it). Checked over
+/// BLIND's first second, before N13's correction.
 #[test]
 fn n11_blind_flies_h_minus_0_3_m_once_valid_the_card_before_and_h_is_frozen() {
     for h in [HOVER_MIN_G * MG, 1.0 * MG, 1.05 * MG, HOVER_MAX_G * MG] {
         let mut fly = blind_with(h, HOVER_VALID_US);
-        for _ in 0..1_600 {
+        for _ in 0..799 {
             let o = fly.quiet();
             assert_eq!(fly.state(), State::Blind);
             let want = h - MASS * BLIND_BELOW_HOVER_MSS;
@@ -2666,4 +2669,69 @@ fn n11_land_starts_from_the_estimated_vertical_speed_no_entry_thrust_step() {
     std::println!("N11 (2) climb: v_D {v0:.3}, first rate {r0:.3}, lowest {low:.3} m g, largest step {step:.4} N, floor {floor}");
     assert!((v0 + 3.0).abs() < 0.1 && (r0 - v0.max(-Tuning::DEFAULT.pilot_speed_up_ms)).abs() < 1e-6, "{v0} {r0}");
     assert!(floor == 0 && low > Tuning::DEFAULT.ground_thrust_g, "{low} {floor}");
+}
+
+// ---- N13: BLIND's one-shot correction ----
+
+/// BLIND (T1, v_D valid, H set to `h` and valid) on a level point-mass plant whose thrust is `gain` x the commanded
+/// collective; IMU1 reads that plant's specific force, so the earth-frame net acceleration down is g - gain T / m. Runs
+/// `steps` steps; returns (net acceleration down at the first step after the correction, the corrected collective, how
+/// many times the corrected collective changed, the collective at that step).
+fn blind_plant(h: f32, gain: f32, steps: u32) -> (f32, Option<f32>, u32, f32) {
+    let mut fly = blind_with(h, HOVER_VALID_US);
+    let mut thrust = h - MASS * BLIND_BELOW_HOVER_MSS;
+    let (mut after, mut changes, mut prev, mut c_after) = (f32::NAN, 0u32, None, 0.0f32);
+    for _ in 0..steps {
+        let o = fly.quiet_f([0.0, 0.0, -gain * thrust / MASS]);
+        if fly.state() != State::Blind {
+            break;
+        }
+        thrust = thrust_of(&o);
+        if fly.f.blind_trim_n != prev {
+            changes += 1;
+        } else if prev.is_some() && after.is_nan() {
+            after = GRAVITY_MSS - gain * thrust / MASS;
+            c_after = thrust;
+        }
+        prev = fly.f.blind_trim_n;
+    }
+    (after, prev, changes, c_after)
+}
+
+/// N13: with the first second's collective 15 % above, at and 10 % below the true hover (H injected, plant gain 1) and
+/// with a plant gain of 0.9 at H = m g, the net acceleration after the correction is 0.3 +- 0.1 m/s^2 down; the
+/// correction is made once (8 s of BLIND); the clamp bounds it at m g x 1.12 and x 0.88.
+#[test]
+fn n13_blind_correction_gives_0_3_down_once_and_is_clamped() {
+    for (h, gain) in [(1.15 * MG, 1.0f32), (MG, 1.0), (0.9 * MG, 1.0), (MG, 0.9)] {
+        let (a, trim, changes, c) = blind_plant(h, gain, 6_400);
+        std::println!("N13 H {:.3} m g, gain {gain}: after the correction {a:.3} m/s^2 down, collective {:.4} m g, changes {changes}", h / MG, c / MG);
+        assert!((a - 0.3).abs() <= 0.1, "H {h} gain {gain}: {a}");
+        assert!(trim.is_some() && changes == 1, "one correction: {changes}");
+        assert!((c - trim.expect("made")).abs() <= 1e-5 * MG, "the probe ramps from the corrected collective");
+    }
+    let (_, hi, _, _) = blind_plant(MG, 0.6, 1_000);
+    let (_, lo, _, _) = blind_plant(MG, 1.4, 1_000);
+    assert_eq!((hi, lo), (Some(HOVER_MAX_G * MG), Some(HOVER_MIN_G * MG)), "clamped");
+}
+
+/// N13 on the ground (the floor carries the vehicle: IMU1 at rest, net acceleration 0): the correction lowers the
+/// collective by m x 0.3 once, then the probe and TD stop the motors.
+#[test]
+fn n13_on_the_ground_the_correction_lowers_by_0_3_m_once_and_the_probe_still_stops() {
+    let mut fly = blind_with(MG, HOVER_VALID_US);
+    let (mut changes, mut prev, mut stopped) = (0u32, None, false);
+    for _ in 0..16_000 {
+        let o = fly.quiet_f(AT_REST);
+        if !o.armed {
+            stopped = fly.state() == State::Stop;
+            break;
+        }
+        changes += u32::from(fly.f.blind_trim_n != prev);
+        prev = fly.f.blind_trim_n;
+    }
+    // The window's 800 samples: the entry step read IMU1's default (zero specific force: g down), the rest at rest (0).
+    let want = MG - 2.0 * MASS * BLIND_BELOW_HOVER_MSS + MASS * GRAVITY_MSS / 800.0;
+    std::println!("N13 ground: corrected {prev:?} N (want {want}), changes {changes}, stopped {stopped}");
+    assert!(prev.is_some_and(|c| (c - want).abs() <= 1e-3 * MG) && changes == 1 && stopped);
 }

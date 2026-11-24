@@ -142,6 +142,10 @@ const TOUCHDOWN_ROT_MAX_RADS: f32 = 20.0 * (core::f32::consts::PI / 180.0);
 /// threshold, us. No outside source; approved by the owner 2026-11-24.
 pub const BLIND_PROBE_RAMP_US: u64 = 1_000_000;
 
+/// N13: BLIND's one-shot correction is made this long after BLIND's entry, us, from the mean net vertical acceleration
+/// over that time. Approved by the owner 2026-11-24, no outside source.
+pub const BLIND_CORRECT_US: u64 = 1_000_000;
+
 /// The mission facts the state machine gets until AUTO and RETURN exist (Amendment D): none, so Start is DENIED
 /// NoWaypoints and AUTO cannot be reached.
 const NO_MISSION: MissionFacts = MissionFacts {
@@ -475,6 +479,15 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     hover_n: f32,
     /// N11 (1a): the qualifying time since arming, us (H is used from `HOVER_VALID_US`); 0 at every disarmed step.
     hover_us: u64,
+    /// N13: time in the present BLIND episode up to `BLIND_CORRECT_US`, us; the sum of its finite net vertical
+    /// accelerations (m/s^2, down positive), their count and the count of its steps; 0 outside BLIND.
+    blind_us: u64,
+    blind_sum: f32,
+    blind_finite: u32,
+    blind_steps: u32,
+    /// N13: the correction was made (or skipped) in this BLIND episode; BLIND's collective after it, N, when made.
+    blind_done: bool,
+    blind_trim_n: Option<f32>,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -576,6 +589,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             land_rate_ms: None,
             hover_n: MASS * GRAVITY_MSS,
             hover_us: 0,
+            blind_us: 0,
+            blind_sum: 0.0,
+            blind_finite: 0,
+            blind_steps: 0,
+            blind_done: false,
+            blind_trim_n: None,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -831,11 +850,14 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4) linearly down to the ground
         // threshold over `BLIND_PROBE_RAMP_US`. AUTO and RETURN (unreachable here) fly HOLD's. N11 (1c): BLIND's
         // collective is H - m `BLIND_BELOW_HOVER_MSS` once H is valid (the throttle that gives it in Angle), else the card's.
+        // N13: after the one-shot correction, the corrected collective (the probe ramps from it, an aborted probe returns
+        // to it).
         let probe_end = self.probe_us.is_some_and(|p| p >= BLIND_PROBE_RAMP_US);
-        let blind_start = if self.hover_us >= HOVER_VALID_US {
-            self.shaper.throttle_for(self.hover_n - MASS * BLIND_BELOW_HOVER_MSS)
-        } else {
-            BLIND_THROTTLE
+        let hover_valid = self.hover_us >= HOVER_VALID_US;
+        let blind_start = match self.blind_trim_n {
+            Some(c) => self.shaper.throttle_for(c),
+            None if hover_valid => self.shaper.throttle_for(self.hover_n - MASS * BLIND_BELOW_HOVER_MSS),
+            None => BLIND_THROTTLE,
         };
         let blind_throttle = match self.probe_us {
             None => blind_start,
@@ -963,12 +985,14 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // all for `land_detect_us`. Only the state machine's stops read it (WR1, stick loss with the latch false); in LAND,
         // TAKEOVER's descent and BLIND it also clears the latch, so the next step's ground exit (WR1) stops and disarms.
         // No vertical speed. A non-finite IMU sample is neither (b) nor (c).
+        let mut a_down = None;
         if finite {
             let f = reading.accel_ms2;
             let q = nav.attitude;
             let [_, n, e, d] = quat::mul(quat::mul(q, [0.0, f[0], f[1], f[2]]), quat::conj(q));
             let a = [n, e, d + GRAVITY_MSS];
             if a.iter().all(|v| v.is_finite()) {
+                a_down = Some(a[2]);
                 let dt_s = dt_us as f32 * 1e-6;
                 let lpf = |y: f32, x: f32| quat::pt1(y, x, dt_s, TOUCHDOWN_ACCEL_LPF_HZ);
                 let [yn, ye, yd] = self.accel_ef_mss;
@@ -994,6 +1018,32 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         #[cfg(test)]
         {
             self.still = still;
+        }
+        // N13: BLIND's one-shot correction, before the probe can start: the mean of the unfiltered earth-frame net
+        // acceleration down (the TD filter's input, gravity removed) over the episode's first `BLIND_CORRECT_US`, non-finite
+        // samples skipped; with at least half of them finite the collective becomes, once, the first second's collective
+        // - m (`BLIND_BELOW_HOVER_MSS` - a_m), clamped to m g x [`HOVER_MIN_G`, `HOVER_MAX_G`]. A new BLIND entry starts
+        // again.
+        if !blind {
+            (self.blind_us, self.blind_sum, self.blind_finite, self.blind_steps) = (0, 0.0, 0, 0);
+            (self.blind_done, self.blind_trim_n) = (false, None);
+        } else if !self.blind_done {
+            self.blind_steps += 1;
+            if let Some(a) = a_down {
+                self.blind_sum += a;
+                self.blind_finite += 1;
+            }
+            self.blind_us += dt_us;
+            if self.blind_us >= BLIND_CORRECT_US {
+                self.blind_done = true;
+                if 2 * self.blind_finite >= self.blind_steps {
+                    let a_m = self.blind_sum / self.blind_finite as f32;
+                    let mg = MASS * GRAVITY_MSS;
+                    let first = if hover_valid { self.hover_n } else { mg } - MASS * BLIND_BELOW_HOVER_MSS;
+                    let c = first - MASS * (BLIND_BELOW_HOVER_MSS - a_m);
+                    self.blind_trim_n = c.is_finite().then(|| c.clamp(HOVER_MIN_G * mg, HOVER_MAX_G * mg));
+                }
+            }
         }
         // BLIND's probe (N4): after (b) and (c) have held for `land_detect_us` it starts; (b) failing while it runs ends it
         // at once (BLIND's collective at the next step) and a new `land_detect_us` of (b) and (c) is needed.
