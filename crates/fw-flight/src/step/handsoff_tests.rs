@@ -2616,7 +2616,7 @@ fn n11_a_nan_commanded_collective_leaves_h_unchanged() {
 }
 
 /// N11 (1e): from the card's m g, a step of the collective to 1.11 m g reaches 63 % at 10 s of qualifying steps and has
-/// not at 9.9 s; the clamp holds at m g x 1.12 and x 0.88.
+/// not at 9.9 s; the clamp holds at m g x 1.61 and x 0.685 (N14 (2)).
 #[test]
 fn n11_a_step_reaches_63_percent_at_10_s_not_at_9_9_s_and_the_clamp_holds_at_both_ends() {
     let mut fly = Fly::new(true, true, ALTITUDE);
@@ -2634,7 +2634,7 @@ fn n11_a_step_reaches_63_percent_at_10_s_not_at_9_9_s_and_the_clamp_holds_at_bot
     std::println!("N11 step to {:.4} m g: {at_9_9:.5} at 9.9 s, {at_10:.5} at 10 s, time {} us", c / MG, fly.f.hover_us);
     assert_eq!(fly.f.hover_us, HOVER_VALID_US);
     assert!(at_10 >= 0.63 && at_9_9 < 0.63, "{at_9_9} {at_10}");
-    for (thr, end) in [(0.75, HOVER_MAX_G), (0.4, HOVER_MIN_G)] {
+    for (thr, end) in [(0.9, HOVER_MAX_G), (0.3, HOVER_MIN_G)] {
         for _ in 0..48_000 {
             fly.angle(thr);
         }
@@ -2803,20 +2803,24 @@ fn blind_plant(h: f32, gain: f32, steps: u32) -> (f32, Option<f32>, u32, f32) {
 }
 
 /// N13: with the first second's collective 15 % above, at and 10 % below the true hover (H injected, plant gain 1) and
-/// with a plant gain of 0.9 at H = m g, the net acceleration after the correction is 0.3 +- 0.1 m/s^2 down; the
-/// correction is made once (8 s of BLIND); the clamp bounds it at m g x 1.12 and x 0.88.
+/// with a plant gain of 0.9 at H = m g, with N14 (5)'s H errors of -40 % and +40 % (H 0.6 and 1.4 m g, gain 1), and
+/// with the card 40 % off at the spread's ends (H learned right: m g / 0.62 at gain 0.62, m g / 1.46 at gain 1.46), the
+/// net acceleration after the correction is 0.3 +- 0.1 m/s^2 down; the correction is made once (8 s of BLIND); N14 (2):
+/// only the allocator's physical range bounds it (the idle floor at gain 3). Reported, not asserted: H at the card's m g
+/// with gain 0.6 (the correction assumes the card's thrust per newton, so it leaves (1 - gain) of the error).
 #[test]
 fn n13_blind_correction_gives_0_3_down_once_and_is_clamped() {
-    for (h, gain) in [(1.15 * MG, 1.0f32), (MG, 1.0), (0.9 * MG, 1.0), (MG, 0.9)] {
+    let (a, _, _, c) = blind_plant(MG, 0.6, 6_400);
+    std::println!("N13 H 1.000 m g, gain 0.6 (reported): after the correction {a:.3} m/s^2 down, collective {:.4} m g", c / MG);
+    for (h, gain) in [(1.15 * MG, 1.0f32), (MG, 1.0), (0.9 * MG, 1.0), (MG, 0.9), (0.6 * MG, 1.0), (1.4 * MG, 1.0), (MG / 0.62, 0.62), (MG / 1.46, 1.46)] {
         let (a, trim, changes, c) = blind_plant(h, gain, 6_400);
         std::println!("N13 H {:.3} m g, gain {gain}: after the correction {a:.3} m/s^2 down, collective {:.4} m g, changes {changes}", h / MG, c / MG);
         assert!((a - 0.3).abs() <= 0.1, "H {h} gain {gain}: {a}");
         assert!(trim.is_some() && changes == 1, "one correction: {changes}");
         assert!((c - trim.expect("made")).abs() <= 1e-5 * MG, "the probe ramps from the corrected collective");
     }
-    let (_, hi, _, _) = blind_plant(MG, 0.6, 1_000);
-    let (_, lo, _, _) = blind_plant(MG, 1.4, 1_000);
-    assert_eq!((hi, lo), (Some(HOVER_MAX_G * MG), Some(HOVER_MIN_G * MG)), "clamped");
+    let (_, lo, _, _) = blind_plant(MG, 3.0, 1_000);
+    assert_eq!(lo, Some(CardAllocator::new().collective_range().0), "clamped at the idle floor");
 }
 
 /// N13 on the ground (the floor carries the vehicle: IMU1 at rest, net acceleration 0): the correction lowers the

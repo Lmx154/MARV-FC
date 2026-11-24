@@ -190,29 +190,46 @@ fn n14_blind_on_the_ground_probes_to_the_floor_and_stops() {
 }
 
 /// One BLIND flight in the air from a hover at 50 m: thrust gain `gain`, vertical drag; 60 s or down to 5 m above the
-/// ground. Returns (stopped, probes,
-/// aborted, height lost per probe m, height gained over the flight m, reached the ground).
-fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, bool) {
+/// ground. Returns (stopped, probes, aborted, mean height lost per probe m, highest rise above the entry after 5 s m, net
+/// acceleration down at the first step after the one-shot correction m/s^2, the lowest net acceleration down after it,
+/// reached the ground).
+fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, f32, f32, bool) {
     let mut p = Plant::new(gain, 0.197 / 0.914, POSITION);
     p.step(Some((false, 0.0, Switch3::Middle)));
     p.step(Some((true, 0.0, Switch3::Middle)));
     while p.d > -50.0 {
         assert!(p.step(Some((true, 1.0, Switch3::Middle))).armed);
     }
-    for _ in 0..16_000 {
+    for _ in 0..48_000 {
         p.step(Some((true, 0.5, Switch3::Middle)));
     }
     p.cell.set(NavState { valid: super::althold_tests::ANGLE, ..p.cell.get() });
+    while p.f.hands_off_state() != State::Blind {
+        assert!(p.step(None).armed && p.t < 1_000_000_000);
+    }
+    std::println!("N14 BLIND gain {gain}: H {:.3} m g, entry v_D {:.2} m/s", p.f.hover_n / (MASS * GRAVITY_MSS), p.v);
     let d0 = p.d;
     let (mut probes, mut aborted, mut was, mut lost, mut d_start) = (0u32, 0u32, None::<u64>, Vec::new(), 0.0f32);
+    let (mut rise, mut a_corr, mut a_min, mut stopped) = (f32::NEG_INFINITY, f32::NAN, f32::INFINITY, false);
     let per = |lost: &Vec<f32>| if lost.is_empty() { 0.0 } else { lost.iter().sum::<f32>() / lost.len() as f32 };
-    for _ in 0..48_000 {
+    for k in 0..48_000u32 {
         let o = p.step(None);
         if !o.armed {
-            return (true, probes, aborted, per(&lost), -(p.d - d0), p.on_ground());
+            stopped = true;
+            break;
         }
         if p.d > -5.0 {
             break;
+        }
+        if k >= 4_000 {
+            rise = rise.max(d0 - p.d);
+        }
+        if p.f.blind_trim_n.is_some() && p.f.probe_us.is_none() {
+            let a = GRAVITY_MSS - (gain * p.thrust / MASS - p.k * p.v);
+            if a_corr.is_nan() {
+                a_corr = a;
+            }
+            a_min = a_min.min(a);
         }
         let now = p.f.probe_us;
         if was.is_none() && now.is_some() {
@@ -225,21 +242,28 @@ fn blind_air(gain: f32) -> (bool, u32, u32, f32, f32, bool) {
         }
         was = now;
     }
-    (false, probes, aborted, per(&lost), -(p.d - d0), p.on_ground())
+    (stopped, probes, aborted, per(&lost), rise, a_corr, a_min, p.on_ground())
 }
 
-/// N14 (1), BLIND in the air at real gains 0.62 to 1.46 with vertical drag: every probe aborts ((b) fails), no stop;
-/// the height lost per probe reported.
+/// N14 (1), (2), BLIND in the air at real gains 0.62 to 1.46 with vertical drag, entered from a hover (H learned): every
+/// probe aborts ((b) fails), no stop, no fall to the ground; never above the entry + 1 m after 5 s at gains up to 1.0.
+/// NOT MET above 1.0 (reported, not asserted; with the architect): the second before BLIND flies Angle at the centred
+/// stick, the card's m g, so at 1.12-1.46 BLIND starts climbing at 1.3-5 m/s and the drag in the correction's first
+/// second makes it under-cut (N14 (2)'s residual). The net acceleration after the correction and the height lost per
+/// probe reported.
 #[test]
 fn n14_blind_in_the_air_probes_abort_and_never_stop() {
-    let got = [0.88f32, 1.0, 1.12].map(|gain| {
-        let (stopped, probes, aborted, per, climbed, ground) = blind_air(gain);
-        std::println!("N14 BLIND gain {gain}: stopped {stopped}, ground {ground}, probes {probes}, aborted {aborted}, mean height lost per probe {per:.3} m, height gained {climbed:.1} m");
-        (gain, stopped, probes, aborted, ground)
+    let got = [0.62f32, 0.88, 1.0, 1.12, 1.3, 1.46].map(|gain| {
+        let (stopped, probes, aborted, per, rise, a_corr, a_min, ground) = blind_air(gain);
+        std::println!("N14 BLIND gain {gain}: stopped {stopped}, ground {ground}, probes {probes}, aborted {aborted}, mean height lost per probe {per:.3} m, highest above entry after 5 s {rise:.2} m, net down after the correction {a_corr:.3} m/s^2 (lowest {a_min:.3})");
+        (gain, stopped, probes, aborted, rise, ground)
     });
-    for (gain, stopped, probes, aborted, ground) in got {
+    for (gain, stopped, probes, aborted, rise, ground) in got {
         assert!(!stopped && !ground, "gain {gain}");
         assert!(probes > 0 && aborted + 1 >= probes, "gain {gain}: {probes} {aborted}");
+        if gain <= 1.0 {
+            assert!(rise <= 1.0, "gain {gain}: {rise} m above the entry");
+        }
     }
 }
 
@@ -278,5 +302,50 @@ fn n14_low_mark_sets_at_gain_1_46_and_a_stick_loss_there_lands() {
         if k > 1_000 {
             assert_eq!(s, State::Land, "step {k}");
         }
+    }
+}
+
+/// An allocator that is the card's with its thrust flags forced: (`thrust_low`, `thrust_high`).
+struct SatAlloc {
+    inner: CardAllocator,
+    force: (bool, bool),
+}
+
+impl Allocator for SatAlloc {
+    fn allocate(&mut self, demand: &ThrustTorque) -> Allocation {
+        let mut a = self.inner.allocate(demand);
+        a.saturation.thrust_low |= self.force.0;
+        a.saturation.thrust_high |= self.force.1;
+        a
+    }
+}
+
+/// N14 (2): a step whose allocation has `thrust_low` or `thrust_high` leaves H and its qualifying time unchanged; the
+/// next step without them learns again.
+#[test]
+fn n14_saturation_gates_block_learning() {
+    let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
+    let tuning = Tuning::DEFAULT;
+    let alloc = SatAlloc { inner: CardAllocator::new(), force: (false, false) };
+    let mut f = Flight::new(super::althold_tests::Fake(cell), crate::pid::CascadedPid::new(&tuning, 800.0), alloc, &tuning, handshake());
+    let mut t = 1_000_000u64;
+    let mut step = |f: &mut Flight<_, _, SatAlloc>, arm: bool, thr: f32| {
+        t += DT_US;
+        f.step(&input(t, Some(report(t, arm, thr, Switch3::Low))))
+    };
+    step(&mut f, false, 0.0);
+    step(&mut f, true, 0.0);
+    for _ in 0..400 {
+        step(&mut f, true, 0.52);
+    }
+    assert!(f.gate.armed() && f.lifted && f.hover_us > 0, "learning");
+    for force in [(true, false), (false, true)] {
+        let (h, us) = (f.hover_n, f.hover_us);
+        f.allocator.force = force;
+        step(&mut f, true, 0.52);
+        assert_eq!((f.hover_n, f.hover_us), (h, us), "{force:?}: no learning");
+        f.allocator.force = (false, false);
+        step(&mut f, true, 0.52);
+        assert!(f.hover_us > us && f.hover_n != h, "{force:?}: learns again");
     }
 }

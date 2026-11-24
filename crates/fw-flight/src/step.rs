@@ -119,9 +119,10 @@ const HOVER_VD_MAX_MS: f32 = 0.6;
 const HOVER_TAN_ROLL_MAX: f32 = 0.087_488_66;
 const HOVER_SIN_PITCH_MAX: f32 = 0.087_155_74;
 
-/// N11 (1a): the learned hover collective's range, x the card's m g: the measured thrust gain range (tune1 section 12).
-const HOVER_MIN_G: f32 = 0.88;
-const HOVER_MAX_G: f32 = 1.12;
+/// N11 (1a), N14 (2): the learned hover collective's range, x the card's m g: the hover collective the real thrust gain
+/// range allows, [1 / `GAIN_MAX`, 1 / `GAIN_MIN`] = [0.685, 1.61].
+const HOVER_MIN_G: f32 = 1.0 / GAIN_MAX;
+const HOVER_MAX_G: f32 = 1.0 / GAIN_MIN;
 
 /// N14 (1), (2): the strongest and the weakest real thrust gain against the card: the plant spread +-30 % (tuning.rs
 /// `ground_thrust_g`) times the measured gain range +-12 % (tune1 section 12), 1.30 x 1.12 = 1.456 and 0.70 x 0.88 =
@@ -483,6 +484,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     ground_thrust_n: f32,
     /// The allocator's idle floor, N (`CardAllocator::collective_range`; N14 (1)).
     floor_n: f32,
+    /// The allocator's full thrust, N (`CardAllocator::collective_range`; N14 (2)).
+    full_n: f32,
     /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
     /// controller take it at every disarmed step, so the value at the arming step is the one in force until disarm.
     speed_pending: f32,
@@ -634,6 +637,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             last_us: None,
             ground_thrust_n: tuning.ground_thrust_g * MASS * GRAVITY_MSS,
             floor_n: CardAllocator::new().collective_range().0,
+            full_n: CardAllocator::new().collective_range().1,
             speed_pending: tuning.pilot_speed_xy_ms,
             notch_pending: (false, NOTCH_POLES_DEFAULT),
             notch: (false, NOTCH_POLES_DEFAULT),
@@ -1138,7 +1142,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // N13: BLIND's one-shot correction, before the probe can start: the mean of the unfiltered earth-frame net
         // acceleration down (the TD filter's input, gravity removed) over the episode's first `BLIND_CORRECT_US`, non-finite
         // samples skipped; with at least half of them finite the collective becomes, once, the first second's collective
-        // - m (`BLIND_BELOW_HOVER_MSS` - a_m), clamped to m g x [`HOVER_MIN_G`, `HOVER_MAX_G`]. A new BLIND entry starts
+        // - m (`BLIND_BELOW_HOVER_MSS` - a_m), kept in the allocator's physical range, idle floor to full thrust (N14 (2): it
+        // measures the real net force, so it bounds a poisoned or stale H; max/min, not clamp). A new BLIND entry starts
         // again.
         if !blind {
             (self.blind_us, self.blind_sum, self.blind_finite, self.blind_steps) = (0, 0.0, 0, 0);
@@ -1157,7 +1162,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                     let mg = MASS * GRAVITY_MSS;
                     let first = if hover_valid { self.hover_n } else { mg } - MASS * BLIND_BELOW_HOVER_MSS;
                     let c = first - MASS * (BLIND_BELOW_HOVER_MSS - a_m);
-                    self.blind_trim_n = c.is_finite().then(|| c.clamp(HOVER_MIN_G * mg, HOVER_MAX_G * mg));
+                    self.blind_trim_n = c.is_finite().then(|| c.max(self.floor_n).min(self.full_n));
                 }
             }
         }
@@ -1191,7 +1196,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             }
         }
         // N11 (1a): the hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with a finite
-        // commanded collective (review F2), the low mark set (N14 (1)) and TD not held (as the state machine read them), not BLIND, v_D
+        // commanded collective (review F2), the low mark set (N14 (1)) and TD not held (as the state machine read them), the allocation
+        // neither `thrust_low` nor `thrust_high` (N14 (2)), not BLIND, v_D
         // valid below `HOVER_VD_MAX_MS`, roll and pitch
         // each under 5 deg, H follows the commanded collective with `HOVER_TC_S`, clamped; the card's m g when disarmed.
         if !self.gate.armed() {
@@ -1200,6 +1206,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         } else if let Ok(d) = demand
             && d.thrust_n.is_finite()
             && lifted_in
+            && allocation.as_ref().is_some_and(|a| !a.saturation.thrust_low && !a.saturation.thrust_high)
             && !td_in
             && ho.state != State::Blind
             && nav.valid.velocity_d
