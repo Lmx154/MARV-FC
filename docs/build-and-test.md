@@ -71,6 +71,15 @@ Cargo features are off by default; they add board checks and fault injections. B
 | ESC | `esc-off`, `esc-no-edt` | ESC task not built; or no extended-telemetry burst ([esc](esc.md)) |
 | PSRAM | `psram-skip-remap`, `psram-absent`, `psram-negative` | PSRAM checks |
 | Measurement | `xip-stat`, `xip-park`, `latency-text`, `quiet-stat`, `eskf-bench` | XIP counters, parked-core check, latency texts, silent `[STAT]`, ESKF bench |
+| Bench, PROPS OFF | `restart-bench` | The in-air restart on the bench (below); never for flight |
+
+**`restart-bench` (props off only).** Measures how fast the motors spin up when the in-air restart re-arms
+([flight-modes](flight-modes.md), decision-inair-restart-20261125). With it, every arm-OFF STOP, on the ground too, opens the
+5 s restart window and the free-fall test reads true, so arm back ON within 5 s re-arms at once with the throttle wherever it
+is (no throttle-low check). Bench steps: remove the props; build and flash with `FEATURES=restart-bench tools/run.sh <s>`; arm
+normally, raise the throttle, flip arm OFF, wait the delay under test (0 to 5 s), flip arm ON. The SD log has `HO 7 STOP`,
+`ARM fall t=<delay ms> ... thr=<x100>` at the re-arm, and the ESC records (eRPM by line) give the spin-up from that time.
+After 5 s the arm ON is refused (`ARM no thr`) as in the flight image. The default build does not have it.
 
 ## Related
 

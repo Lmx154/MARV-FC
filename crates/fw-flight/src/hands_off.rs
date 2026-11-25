@@ -240,6 +240,8 @@ pub struct Inputs {
     /// armed step in every state (Amendment N, N10). Guards WR1's ground exit (N10 (i)) and the stick-loss STOP after
     /// take-off (N10 (iii)).
     pub td_held: bool,
+    /// The gate armed this arming through the in-air restart (decision-inair-restart-20261125): home never latches.
+    pub restart: bool,
 }
 
 /// Why a command was DENIED: the first condition that failed, in this order.
@@ -490,6 +492,9 @@ pub struct Output {
     pub speed_limit_xy_ms: f32,
     /// Why the present state was entered; `None` before the first change (the initial STOP).
     pub reason: Option<Reason>,
+    /// STOP entered this step from armed by the arm switch (`disarm` with `ArmMsOff`, `ArmOff` or `ArmOffGround`): the
+    /// ground predicate of that step (`ground`); `None` otherwise. The in-air restart reads it.
+    pub arm_stop_ground: Option<bool>,
 }
 
 /// The hands-off state machine.
@@ -721,6 +726,11 @@ impl HandsOff {
                 i.speed_xy_ms
             },
             reason: self.reason,
+            arm_stop_ground: (self.state == State::Stop
+                && was != State::Stop
+                && i.armed
+                && matches!(self.reason, Some(Reason::ArmMsOff | Reason::ArmOff | Reason::ArmOffGround)))
+            .then(|| self.ground(i)),
         }
     }
 
@@ -794,7 +804,7 @@ impl HandsOff {
     }
 
     /// A6 with B8: D and NE each at the first armed step where they are valid while not airborne; the window closes on
-    /// airborne; home is both or nothing; cleared at disarm.
+    /// airborne; home is both or nothing; cleared at disarm. A restart arming (`Inputs::restart`) never opens the window.
     fn update_home(&mut self, i: &Inputs) {
         if !i.armed {
             self.home_d = None;
@@ -802,7 +812,7 @@ impl HandsOff {
             self.home_window = false;
         } else {
             if !self.was_armed {
-                self.home_window = true;
+                self.home_window = !i.restart;
             }
             if self.home_window {
                 if i.airborne {
@@ -820,6 +830,11 @@ impl HandsOff {
         self.was_armed = i.armed;
     }
 
+    /// On the ground: neither the airborne latch nor (since arming) ever airborne, or TD held (N19's arm columns).
+    fn ground(&self, i: &Inputs) -> bool {
+        !i.airborne && (!self.ever_airborne || i.td_held)
+    }
+
     /// N19 1(5): ho_allowed, "this is a MAVLink flight" where it replaces FS_HOLD_EN in force; disarmed, FS_HOLD_EN in
     /// force as before.
     fn ho_allowed(&self) -> bool {
@@ -835,7 +850,7 @@ impl HandsOff {
     /// report, stale or not), WR1, columns 2 and 3, each state's own exits (column 6 among them), column 1.
     fn mission_switch(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
         if let Some(r) = i.crsf.filter(|r| !r.arm) {
-            let ground = !i.airborne && (!self.ever_airborne || i.td_held);
+            let ground = self.ground(i);
             match self.state {
                 _ if !r.mission => {
                     self.go(State::Stop, Reason::ArmMsOff, i, ev);
@@ -1384,6 +1399,7 @@ mod tests {
                 speed_xy_ms: Tuning::DEFAULT.pilot_speed_xy_ms,
                 td_held: true,
                 lifted: false,
+                restart: false,
             };
             Rig {
                 h: HandsOff::new(&Tuning::DEFAULT),
@@ -4654,6 +4670,23 @@ mod tests {
             assert!(!t.is_empty() && t.len() <= 10 && !t.contains(' '), "{a:?} {t}");
             for b in all.iter().skip(k + 1) {
                 assert_ne!(t, b.token(), "{a:?} {b:?}");
+            }
+        }
+    }
+
+    /// The in-air restart (decision-inair-restart-20261125): a restart arming (`Inputs::restart`) never opens the home
+    /// window, on the ground or in the air; the same arming without it latches home at its first armed step (the control).
+    #[test]
+    fn a_restart_arming_never_latches_home() {
+        for restart in [false, true] {
+            let mut r = Rig::new();
+            r.i.restart = restart;
+            assert_eq!(r.at(T0).home, None);
+            r.i.armed = true;
+            for k in 1..50u64 {
+                let o = r.at(T0 + k * 1_000);
+                let want = (!restart).then_some(Home { ne_m: HOME_NE, d_m: HOME_D });
+                assert_eq!(o.home, want, "restart {restart}, step {k}");
             }
         }
     }

@@ -3,7 +3,7 @@
 //! `sensors.imu1.t_us`.
 
 use crate::alloc::CardAllocator;
-use crate::gate::{Gate, MotorCommand};
+use crate::gate::{ArmNote, FallNote, Gate, MotorCommand};
 use crate::hands_off::{self, Demand, HandsOff, LandLaw, MissionFacts, State, Tier};
 use crate::eskf::ned_from_geo;
 use crate::guidance::{self, LegGuidance, LegPhase};
@@ -694,6 +694,11 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     prev_switch6: Option<Switch3>,
     /// What the descent did at the latest step.
     batt_state: BattDescent,
+    /// The in-air restart (decision-inair-restart-20261125): the gate armed this arming with the restart latch true;
+    /// cleared at the first step the gate is disarmed.
+    restart_armed: bool,
+    /// A change of the mode switch cancelled the restart's Altitude; cleared at the first step the gate is disarmed.
+    restart_cancelled: bool,
     /// Tests only: the effective mode ignores what the estimate covers.
     #[cfg(test)]
     ignore_coverage: bool,
@@ -841,6 +846,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             batt_cancelled: false,
             prev_switch6: None,
             batt_state: BattDescent::Off,
+            restart_armed: false,
+            restart_cancelled: false,
             #[cfg(test)]
             ignore_coverage: false,
             #[cfg(test)]
@@ -1040,6 +1047,16 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.batt_state
     }
 
+    /// What the latest step's switch-on edge did (refused, or armed through the in-air restart), for the board's MSG.
+    pub fn arm_note(&self) -> Option<ArmNote> {
+        self.gate.arm_note()
+    }
+
+    /// The in-air restart's free-fall latch change at the latest step, for the board's MSG.
+    pub fn fall_note(&self) -> Option<FallNote> {
+        self.gate.fall_note()
+    }
+
     /// The estimator, read only (the log of its own counters, packet E2).
     pub fn estimator(&self) -> &E {
         &self.estimator
@@ -1112,12 +1129,19 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             if self.batt_started && self.gate.armed() && self.prev_switch6.is_some_and(|p| p != rc.switch6) {
                 self.batt_cancelled = true;
             }
+            // The same for the restart's Altitude.
+            if self.restart_armed && self.gate.armed() && self.prev_switch6.is_some_and(|p| p != rc.switch6) {
+                self.restart_cancelled = true;
+            }
             self.prev_switch6 = Some(rc.switch6);
         }
         if !self.gate.armed() {
             self.batt_cancelled = false;
+            self.restart_armed = false;
+            self.restart_cancelled = false;
         }
         let batt_on = self.batt_started && !self.batt_cancelled && self.gate.armed();
+        let restart_on = self.restart_armed && !self.restart_cancelled && self.gate.armed();
         // The armed state the previous step left, then R1.1 to R1.7.
         self.estimator.set_armed(self.gate.armed());
         // A non-finite IMU value never reaches the estimator: no tilt, so the demand is refused and the gate stops.
@@ -1196,6 +1220,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             td_held: td_in,
+            restart: self.restart_armed,
         });
         self.command_result = ho.command;
         // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
@@ -1204,10 +1229,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // edge and cancel still run, so it acts again in PILOT as before; STOP included, the touchdown step's disarm).
         let batt_on = batt_on && ho.state == State::Pilot;
         // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
-        // The low-battery descent lifts Angle to Altitude (when covered); Position stays under its own rule.
+        // The low-battery descent lifts Angle to Altitude (when covered); Position stays under its own rule. So does a
+        // restart arming until the mode switch changes (decision-inair-restart-20261125).
         let selected = if ho.synthetic_sticks {
             Mode::Position
-        } else if batt_on && self.selected == Mode::Angle {
+        } else if (batt_on || restart_on) && self.selected == Mode::Angle {
             Mode::Altitude
         } else {
             self.selected
@@ -1410,11 +1436,17 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.limited = a.saturation;
         }
         let levels = allocation.as_ref().map(|a| &a.levels);
-        // WR2: STOP entered from an armed step disarms in this step, before the gate's own rules.
+        // WR2: STOP entered from an armed step disarms in this step, before the gate's own rules; an arm-switch STOP in the
+        // air starts the in-air restart's window. Then the restart's free-fall latch takes IMU1's specific force.
         if ho.disarm {
-            self.gate.disarm();
+            self.gate.stop(t_us, ho.arm_stop_ground);
         }
+        self.gate.fall_step(t_us, reading.accel_ms2);
+        let was_armed = self.gate.armed();
         let motors = self.gate.apply(t_us, rc, &nav, levels, ho.hands_off, ho.arm_off_holds);
+        if !was_armed && self.gate.armed() {
+            self.restart_armed = matches!(self.gate.arm_note(), Some(ArmNote::Restart { .. }));
+        }
         // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
         // arming step.
         // Low: the demand was refused, or the allocator put the collective on the idle floor (its `thrust_low` flag, the
@@ -1961,6 +1993,42 @@ pub fn station_lost_msg(age_ms: Option<u32>, gcs: Option<(u8, u8)>) -> [u8; 40] 
         }
         None => {
             put(&mut m, n, b"none");
+        }
+    }
+    m
+}
+
+/// The switch-on edge's MSG (decision-inair-restart-20261125): "ARM no <token>" (`Refusal::token`) when refused, "ARM
+/// fall t=<ms since the STOP> f=<|f| x100, m/s^2> thr=<throttle x100>" when armed through the in-air restart; NUL padded.
+pub fn arm_msg(note: ArmNote) -> [u8; 52] {
+    let mut m = [0u8; 52];
+    match note {
+        ArmNote::Refused(why) => {
+            let n = put(&mut m, 0, b"ARM no ");
+            put(&mut m, n, why.token().as_bytes());
+        }
+        ArmNote::Restart { t_ms, f_x100, thr_x100 } => {
+            let mut n = put(&mut m, 0, b"ARM fall t=");
+            n = put_dec(&mut m, n, t_ms);
+            n = put(&mut m, n, b" f=");
+            n = put_dec(&mut m, n, f_x100);
+            n = put(&mut m, n, b" thr=");
+            put_dec(&mut m, n, thr_x100);
+        }
+    }
+    m
+}
+
+/// The in-air restart's free-fall latch MSG: "FALL on", or "FALL off <token>" (`FallOff::token`); NUL padded.
+pub fn fall_msg(note: FallNote) -> [u8; 16] {
+    let mut m = [0u8; 16];
+    match note {
+        FallNote::On => {
+            put(&mut m, 0, b"FALL on");
+        }
+        FallNote::Off(why) => {
+            let n = put(&mut m, 0, b"FALL off ");
+            put(&mut m, n, why.token().as_bytes());
         }
     }
     m
@@ -3274,3 +3342,6 @@ mod batt_tests;
 
 #[cfg(test)]
 mod descent_tests;
+
+#[cfg(test)]
+mod restart_tests;

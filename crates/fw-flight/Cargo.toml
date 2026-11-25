@@ -30,3 +30,7 @@ eskf-n0 = []
 # Simulator and test overrides (`Flight::set_heading_ok`, decision-mavlink-mode-20261123 E5), for MARV-sim only; the
 # board image never enables it. Host unit tests get them through cfg(test).
 sim = []
+# Props-off bench only (decision-inair-restart-20261125): every arm-switch STOP starts the in-air restart's 5 s window and
+# its free-fall test reads true, so arm ON within 5 s restarts the motors on the bench (spin-up from ESC telemetry). Never
+# in the flight image.
+restart-bench = []

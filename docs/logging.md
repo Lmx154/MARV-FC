@@ -61,6 +61,9 @@ MSG texts of the station and hands-off path (logged only; a full ring drops them
 | `STN age <ms> ms gcs <sys>,<comp>` | after `HO 3 HOLD stn-lost`: the station HEARTBEAT's age and the RC port's latest ground-station sender (`none` when unknown) | flight core |
 | `CMD <NAME> ok` / `CMD <NAME> den <code>` | each station flight command the step takes, its answer (`DenyReason::code`, 0 no answer) | flight core |
 | `PLAN 0x<id> n=<k>` | first step and each change of the plan id the state machine sees (0x00000000 none) and its waypoints | flight core |
+| `ARM no <why>` | each refused arm-switch OFF-to-ON edge, the first failed check: `thr`, `tilt`, `rates`, `lean`, `ctl` (no controller output), `ms` (receiver report with MS ON), `busy` (core 0 refused: save running or permit clear) | flight core |
+| `FALL on` / `FALL off <why>` | the in-air restart's free-fall latch set after an in-air arm-OFF STOP, and why it ended: `impact` (a sample at or above 0.25 g), `f` (a non-finite sample), `late` (5 s passed); `FALL off ground` at an arm-OFF STOP on the ground (no restart) | flight core |
+| `ARM fall t=<ms> f=<x100> thr=<x100>` | an in-air restart arming: ms since the STOP, IMU1's specific force (m/s^2 x100) and the throttle (x100) of the edge | flight core |
 | `GCS HB <sys>,<comp>` | first time each ground-station HEARTBEAT sender is seen on the radio link since boot (at most 8); also sent as STATUSTEXT | core 0 (`rc`) |
 
 Reason tokens: `armed`, `arm-off`, `arm-gnd`, `arm-ms-off`, `disarmed`, `landed`, `rc-lost`, `rc-back`, `handover`, `ms-off`,

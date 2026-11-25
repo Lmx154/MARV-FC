@@ -1043,6 +1043,15 @@ impl SampleSink for Stepper {
         {
             self.card_logged = true;
         }
+        // The in-air restart (decision-inair-restart-20261125): the free-fall latch's changes ("FALL on", "FALL off
+        // impact"), then a refused switch-on edge ("ARM no thr") or a restart arming ("ARM fall t=630 f=95 thr=74"); one
+        // push each, dropped if full.
+        if let Some(note) = self.flight.fall_note() {
+            self.push_msg(out.t_us, &fw_flight::step::fall_msg(note));
+        }
+        if let Some(note) = self.flight.arm_note() {
+            self.push_msg(out.t_us, &fw_flight::step::arm_msg(note));
+        }
         // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
         // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).
         if due.block && matches!(out.setpoint, Setpoint::Altitude { .. } | Setpoint::Position { .. }) {

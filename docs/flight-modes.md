@@ -108,6 +108,7 @@ The flight keeps the link type it armed on until disarm; reports from the other 
 | Take control back | MS OFF with arm ON and Position: PILOT at once (also after a link gap). Mode switch not in Position: TAKEOVER until it is |
 | Arm OFF, MS ON | Controlled LAND (BLIND on T1); stops on the ground. MS OFF + arm ON + Position returns control |
 | Arm OFF, MS OFF | Motors stop at once, in the air too |
+| In-air restart | After an arm-OFF STOP taken in the air (the state machine's ground test false: `HO 7 STOP arm-ms-off` or `arm-off`), arm back ON within 5 s while IMU1 reads free fall (below 0.25 g since the first low sample after the STOP, and on that step) arms with any throttle and lean; the switch cycle, tilt and rates valid, a controller output, core 0's permit and the MS rule still apply. An impact or any sample at or above 0.25 g (or not finite) ends it for good; a STOP on the ground never starts it. That arming flies Altitude when Angle is selected and the height estimate covers it (throttle stick at the bottom: 1.5 m/s descent), until the mode switch changes, and latches no home. The `restart-bench` feature forces it on a props-off bench ([build-and-test](build-and-test.md)) |
 | Hand-back into Position | If sticks are off centre, the vehicle moves at up to `PILOT_SPEED_XY` horizontally and 3.0 / 1.5 m/s vertically |
 
 ## Code
@@ -115,7 +116,7 @@ The flight keeps the link type it armed on until disarm; reports from the other 
 | File | Role |
 |---|---|
 | `crates/fw-flight/src/hands_off.rs` | `State`, `Tier`, `Command`, `DenyReason`, the transition code (`mission_switch`, `lost`, `update_home`, `command`) |
-| `crates/fw-flight/src/gate.rs` | Arming rules, link latch (`accepts`) |
+| `crates/fw-flight/src/gate.rs` | Arming rules, link latch (`accepts`), the in-air restart latch (`stop`, `fall_step`) |
 | `crates/fw-settings/src/rc.rs`, `src/rc.rs` | Switch decoding, channel map, `RC_CHANNELS_OVERRIDE` filter |
 | `src/station.rs` | HEARTBEAT `custom_mode`, station commands |
 
