@@ -1,5 +1,7 @@
 # MARV V2 Rev 1 device facts for driver authors
 
+Part of [MARV V2 firmware](../README.md)
+
 Register, timing and behaviour facts for the devices on the board; wiring is in `pinout.md`. Page numbers are PDF pages of the datasheets listed at the end. Items marked UNKNOWN or "unverified" have not been checked against the datasheet or on hardware. "Measured" means measured on this board.
 
 ## ICM-45686 (TDK InvenSense, IMU on SPI0)

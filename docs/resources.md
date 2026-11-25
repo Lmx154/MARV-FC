@@ -1,5 +1,7 @@
 # MARV V2 Rev 1 firmware: resource plan
 
+Part of [MARV V2 firmware](../README.md)
+
 Version 2, 2026-11-13 (lead; updated for the two-core design), from a survey of every driver crate, `docs/pinout.md` and embassy-rp 0.10.0.
 Purpose: every device runs in ONE program at the same time, so each peripheral, PIO block, DMA channel, interrupt
 and executor is assigned once, here. The bench programs of the driver crates each chose their own and collide

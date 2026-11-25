@@ -1,5 +1,7 @@
 # MARV V2 Rev 1 pin map
 
+Part of [MARV V2 firmware](../README.md)
+
 GPIO assignments and the electrical facts a driver needs at each pin; per-device register facts are in `devices.md`. The netlist and the board silk are authoritative. All GPIO are 3.3 V logic and are not 5 V tolerant.
 
 ## MCU and clock
