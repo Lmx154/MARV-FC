@@ -24,14 +24,18 @@ flowchart LR
   c1 --> esc["4 ESCs<br/>DShot300"]
 ```
 
-## How it fits together
+## MARV project
 
 | Repository | Role |
 |---|---|
-| This repo | The firmware and its three crates ([fw-core](crates/fw-core/README.md), [fw-flight](crates/fw-flight/README.md), [fw-settings](crates/fw-settings/README.md)) |
+| **MARV-FC** (this repo) | Flight-controller firmware and its three crates ([fw-core](crates/fw-core/README.md), [fw-flight](crates/fw-flight/README.md), [fw-settings](crates/fw-settings/README.md)) |
 | [MARV-GCS](https://github.com/Lmx154/MARV-GCS) | Ground station (`marv-gcs`) and command line (`marv-cli`); see [ground-station](docs/ground-station.md) |
-| [MARV-sim](https://github.com/Lmx154/MARV-sim) | Simulator that runs this repo's real flight code |
-| Driver crates | One repository each, pinned by commit in `Cargo.toml`: [icm45686](https://github.com/Lmx154/icm45686-rs), [lsm6dsk320x](https://github.com/Lmx154/lsm6dsk320x-rs), [bmp581](https://github.com/Lmx154/bmp581-rs), [bmm350](https://github.com/Lmx154/bmm350-rs), [sam-m10q](https://github.com/Lmx154/sam-m10q), [adc-battery](https://github.com/Lmx154/adc-battery), [dshot](https://github.com/Lmx154/dshot-rs), [pio-sdmmc](https://github.com/Lmx154/pio-sdmmc-rs), [qmi-psram](https://github.com/Lmx154/qmi-psram-rs), [ws2812c](https://github.com/Lmx154/ws2812c-rs), [usb-cdc](https://github.com/Lmx154/usb-cdc), [mavlink-device](https://github.com/Lmx154/mavlink-device), [rc-port](https://github.com/Lmx154/rc-port) |
+| [MARV-sim](https://github.com/Lmx154/MARV-sim) | Simulator that runs this repo's flight code |
+| Sensors | [icm45686](https://github.com/Lmx154/icm45686-rs) · [lsm6dsk320x](https://github.com/Lmx154/lsm6dsk320x-rs) · [bmp581](https://github.com/Lmx154/bmp581-rs) · [bmm350](https://github.com/Lmx154/bmm350-rs) · [sam-m10q](https://github.com/Lmx154/sam-m10q) · [adc-battery](https://github.com/Lmx154/adc-battery) |
+| Board I/O | [pio-sdmmc](https://github.com/Lmx154/pio-sdmmc-rs) · [qmi-psram](https://github.com/Lmx154/qmi-psram-rs) · [ws2812c](https://github.com/Lmx154/ws2812c-rs) · [usb-cdc](https://github.com/Lmx154/usb-cdc) · [pio-uart](https://github.com/Lmx154/pio-uart) |
+| Motors and links | [dshot](https://github.com/Lmx154/dshot-rs) · [esc-passthrough](https://github.com/Lmx154/esc-passthrough) · [rc-port](https://github.com/Lmx154/rc-port) · [crsf-codec](https://github.com/Lmx154/crsf-codec) · [mavlink-device](https://github.com/Lmx154/mavlink-device) · [marv-dialect](https://github.com/Lmx154/marv-dialect) |
+
+The drivers the firmware uses are pinned by commit in `Cargo.toml`.
 
 ## Nodes
 
