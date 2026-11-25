@@ -829,6 +829,12 @@ impl Stepper {
 }
 
 impl Stepper {
+    /// One MSG record of `text` (up to its first NUL), one push of its own; false when the ring dropped it. One
+    /// instance of the ring's push for every text written through it.
+    fn push_msg(&mut self, t_us: u64, text: &[u8]) -> bool {
+        self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, t_us, text))
+    }
+
     /// The shadow guidance (decision-guidance-shadow-20261123, section 3), after the command is out and the step's own
     /// records are pushed. New targets are taken on a disarmed step only and start the guidance over, and so does arming.
     /// Only with a count in force above 0, and on every 8th step, armed or not: `anchor`, then `step`, from copies of
@@ -976,9 +982,7 @@ impl SampleSink for Stepper {
         let ho = self.flight.hands_off_state();
         let reason = self.flight.hands_off_reason();
         if fw_flight::step::hands_off_msg_due(self.flight.fs_hold_in_force(), self.ho_logged, ho)
-            && self.log.push_with(dflog::MSG.length.into(), |b| {
-                dflog::encode_msg(b, out.t_us, &fw_flight::step::hands_off_reason_msg(ho, reason))
-            })
+            && self.push_msg(out.t_us, &fw_flight::step::hands_off_reason_msg(ho, reason))
         {
             self.ho_logged = Some(ho);
             if reason == Some(fw_flight::hands_off::Reason::StationLost) {
@@ -986,23 +990,19 @@ impl SampleSink for Stepper {
                     .flight
                     .last_radio_heartbeat_us()
                     .map(|t| (out.t_us.saturating_sub(t) / 1000).min(u64::from(u32::MAX)) as u32);
-                let text = fw_flight::step::station_lost_msg(age_ms, crate::station::gcs_sender());
-                self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text));
+                self.push_msg(out.t_us, &fw_flight::step::station_lost_msg(age_ms, crate::station::gcs_sender()));
             }
         }
         // The station's flight command of this step and its answer: "CMD START ok", "CMD PAUSE den 5" (one push, dropped
         // if full).
         if let Some((command, result)) = answered {
-            let text = fw_flight::step::command_msg(command, result);
-            self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text));
+            self.push_msg(out.t_us, &fw_flight::step::command_msg(command, result));
         }
         // The plan id the state machine is given and its waypoints, at the first step and at each change: "PLAN 0x1862F4A2
         // n=4"; a dropped one is offered again.
         let plan = self.flight.plan_seen();
         if self.plan_logged != Some(plan)
-            && self.log.push_with(dflog::MSG.length.into(), |b| {
-                dflog::encode_msg(b, out.t_us, &fw_flight::step::plan_msg(plan.0, plan.1))
-            })
+            && self.push_msg(out.t_us, &fw_flight::step::plan_msg(plan.0, plan.1))
         {
             self.plan_logged = Some(plan);
         }

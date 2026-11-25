@@ -1864,7 +1864,8 @@ fn put(m: &mut [u8], at: usize, s: &[u8]) -> usize {
     (at + s.len()).min(m.len())
 }
 
-/// Writes `v` in decimal, no leading zeros, into `m` from `at`; the index after it.
+/// Writes `v` in decimal, no leading zeros, into `m` from `at`; the index after it. Not inlined: one copy in RAM.
+#[inline(never)]
 fn put_dec(m: &mut [u8], at: usize, v: u32) -> usize {
     let mut digits = [0u8; 10];
     let (mut v, mut n) = (v, 0);
