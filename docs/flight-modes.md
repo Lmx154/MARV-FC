@@ -30,7 +30,7 @@ stateDiagram-v2
     PILOT --> HOLD: no report 1 s, tier T3
     PILOT --> LAND: no report 1 s, tier T2 (BLIND on T1)
     HOLD --> AUTO: station Start
-    AUTO --> HOLD: Pause / Abort / last waypoint / station silent 5 s
+    AUTO --> HOLD: Pause / Abort / last waypoint / station silent 10 s
     HOLD --> RETURN: link age over 10 s (home latched) or station Return
     HOLD --> LAND: link age over 10 s without home, battery critical, track fault
     AUTO --> LAND: battery critical, track fault, station Land
@@ -55,7 +55,7 @@ MS = mission switch (ch 8) ON, A = arm ON, P = mode switch in Position. "Fresh" 
 | PILOT | HOLD if P, airborne and the entry check passes (T3, no track fault, battery OK, link, arm ON); else PILOT | PILOT | PILOT | on ground STOP; else LAND | STOP | HOLD (T3), LAND (T2), BLIND (T1), STOP (ground) |
 | TAKEOVER | stays | PILOT | stays | LAND | STOP | as PILOT |
 | HOLD | stays (mode switch ignored; Start allowed) | PILOT, place dropped | TAKEOVER | LAND | STOP | stays; link age over 10 s gives RETURN (home + return built) else LAND |
-| AUTO | stays | PILOT | TAKEOVER | LAND | STOP | stays; station silent 5 s gives HOLD, place kept |
+| AUTO | stays | PILOT | TAKEOVER | LAND | STOP | stays; station silent 10 s gives HOLD, place kept |
 | RETURN | stays | PILOT | TAKEOVER | LAND | STOP | stays |
 | LAND / BLIND | unchanged | PILOT | TAKEOVER | stays | STOP | unchanged |
 
@@ -68,7 +68,7 @@ Priority in code: arm OFF columns (they read the newest report even if stale), t
 |---|---|---|
 | No fresh stick report | 1.0 s (`rc_fs_timeout_us`) | HOLD on T3, LAND on T2, BLIND on T1, STOP on the ground or if never airborne |
 | Link age in HOLD (newer of stick report and station heartbeat) | 10 s (`LINK_LOSS_US`) | RETURN if home latched and RETURN built, else LAND |
-| No station heartbeat in AUTO | 5 s (`STATION_LOST_US`) | HOLD, mission paused, place kept; Start again continues. Live sticks mean no RETURN |
+| No station heartbeat in AUTO | 10 s (`STATION_LOST_US`) | HOLD, mission paused, place kept; Start again continues. Live sticks mean no RETURN |
 | Tier drop | 1.0 s debounce (`TIER_DEBOUNCE_US`) | state exits take effect only after it |
 | Battery critical or track fault in HOLD / AUTO / RETURN | immediate | LAND |
 | Distance rule | D_max 10 m (`D_MAX_M`) | LAND must have started by then |

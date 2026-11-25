@@ -427,12 +427,13 @@ fn g_start_denied_with_its_reason() {
     let mut r = Run::new(3.0, Some(square()));
     r.f.set_battery_ok(false);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::BatteryNotOk), "no battery input");
-    // Station absent (no radio heartbeat for 5 s).
+    // Station absent. With STATION_LOST_US equal to LINK_LOSS_US a heartbeat that has aged out of the former has also
+    // aged out of the latter (the link age is the newer of sticks and heartbeat), and HOLD leaves for RETURN
+    // (hands_off.rs:897) before the command is read on that step. So the case is a heartbeat never heard on the radio
+    // link, with the sticks' last report still inside LINK_LOSS_US.
     let mut r = Run::new(3.0, Some(square()));
     r.station = false;
-    for _ in 0..4_100 {
-        r.fly();
-    }
+    r.f.set_last_radio_heartbeat_us(None);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::StationAbsent), "station absent");
     // Not in HOLD: LAND.
     let mut r = Run::new(3.0, Some(square()));
@@ -480,13 +481,15 @@ fn c_a_new_plan_in_auto_holds_with_the_place_dropped() {
     assert_eq!(r.f.leg_active(), Some(0));
 }
 
-/// (d) No station heartbeat for 5 s in AUTO: HOLD with the place kept (Start resumes the same waypoint).
+/// (d) No station heartbeat for STATION_LOST_US (10 s) in AUTO: HOLD with the place kept (Start resumes the same waypoint).
 #[test]
-fn d_station_lost_5_s_in_auto_holds_with_the_place_kept() {
+fn d_station_lost_in_auto_holds_with_the_place_kept() {
     let mut r = in_auto();
     r.station = false;
     let mut steps = 0u64;
+    let mut wp = r.f.leg_active();
     while r.state() == State::Auto {
+        wp = r.f.leg_active().or(wp);
         r.fly();
         steps += 1;
     }
@@ -496,7 +499,8 @@ fn d_station_lost_5_s_in_auto_holds_with_the_place_kept() {
     r.station = true;
     r.fly();
     assert_eq!(r.command(Command::Start), CommandResult::Accepted);
-    assert_eq!(r.f.leg_active(), Some(0), "the kept place: still waypoint 0");
+    assert_eq!(r.f.leg_active(), wp, "the kept place: the waypoint AUTO was on");
+    assert!(wp.is_some());
 }
 
 /// The log's facts on the real step (logged only): the reason of each AUTO exit as the board's HO MSG writes it, the
@@ -750,10 +754,12 @@ fn until_not(r: &mut Run, from: State, max_s: f32) -> f32 {
 }
 
 /// (c) Link loss (A1, table): sticks and station heartbeat both gone in HOLD: RETURN just past 10 s with home, LAND
-/// without. The station heartbeat alone stopping in AUTO: HOLD at 5 s (place kept), RETURN at 10 s (the sticks were
-/// lost long before, so the link age is the heartbeat's).
+/// without. The station heartbeat alone stopping in AUTO: HOLD past STATION_LOST_US (place kept) and RETURN past
+/// LINK_LOSS_US (the sticks were lost long before, so the link age is the heartbeat's). Both are 10 s, so the two
+/// exits fall on consecutive steps: AUTO's arm (hands_off.rs:913) pauses to HOLD, and only the next step's HOLD arm
+/// (hands_off.rs:897) sees the link age above LINK_LOSS_US.
 #[test]
-fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_5_s_then_returns_at_10_s() {
+fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_station_loss_then_returns_the_next_step() {
     let mut r = Run::new(3.0, Some(square()));
     r.station = false;
     let s = until_not(&mut r, State::Hold, 12.0);
@@ -766,12 +772,14 @@ fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_5_s_th
     assert!(s > 10.0 && s < 10.01, "{s}");
     let mut r = in_auto();
     r.station = false;
-    let a = until_not(&mut r, State::Auto, 6.0);
+    let a = until_not(&mut r, State::Auto, 12.0);
     assert_eq!(r.state(), State::Hold);
-    let b = until_not(&mut r, State::Hold, 6.0);
+    let b = until_not(&mut r, State::Hold, 12.0);
     std::println!("station lost in AUTO: HOLD at {a:.3} s, RETURN at {:.3} s", a + b);
     assert_eq!(r.state(), State::Return);
-    assert!(a > 5.0 && a < 5.01 && a + b > 10.0 && a + b < 10.01, "{a} {b}");
+    let (station, link, dt) = (hands_off::STATION_LOST_US as f32 * 1e-6, hands_off::LINK_LOSS_US as f32 * 1e-6, DT_US as f32 * 1e-6);
+    assert!(a > station && a < station + 0.01 && a + b > link && a + b < link + 0.01, "{a} {b}");
+    assert!((b - dt).abs() < 0.5 * dt, "RETURN one step after HOLD: {b}");
 }
 
 /// (d) Fresh sticks in RETURN on a MAVLink flight (N19): the mission switch OFF out of Position gives TAKEOVER, then
@@ -1032,7 +1040,7 @@ fn n19_hand_back_from_auto_at_3_m_s_and_from_land_brakes_and_holds() {
     }
 }
 
-/// Review of N19, item 4: in AUTO, the stick reports lost for 3 s (more than 1.0 s, less than the station's 5 s), then
+/// Review of N19, item 4: in AUTO, the stick reports lost for 3 s (more than 1.0 s, less than STATION_LOST_US, 10 s), then
 /// the first fresh report: the mission switch ON with arm ON carries AUTO on at the same waypoint; the mission switch OFF
 /// with arm ON and Position hands back to PILOT.
 #[test]

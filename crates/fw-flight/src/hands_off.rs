@@ -12,8 +12,9 @@ use fw_core::rc::{RcSample, RcSource, Switch3};
 pub const LINK_LOSS_US: u64 = 10_000_000;
 
 /// Station lost: no station HEARTBEAT on the radio link for longer than this pauses AUTO into HOLD with the place kept,
-/// us; Start needs one within it. Decision section 9, A1 (line 161) and Numbers "AUTO pause on station loss 5 s".
-pub const STATION_LOST_US: u64 = 5_000_000;
+/// us; Start needs one within it. 10 s: the laptop <-> WiFi backpack path drops both ways for 6-7 s at a time (field logs
+/// 2026-11-25, 13 events); owner: "yes raise the laptop silence" (was 5 s).
+pub const STATION_LOST_US: u64 = 10_000_000;
 
 /// The largest horizontal distance from home of the vehicle and of every waypoint at Start, m; more is DENIED.
 /// Decision section 9, A9 (line 213): "within 1000 m horizontally of home"; owner, section 8 Q9 "1km".

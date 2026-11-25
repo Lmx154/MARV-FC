@@ -57,7 +57,7 @@ Start is `MAV_CMD_MISSION_START` from state HOLD. It must arrive on the radio li
 | a | command arrived on the radio (USB commands refused) | 1 |
 | b | flight armed on CRSF / `FS_HOLD_EN` 0 | 3 |
 | c | state is not HOLD (or AUTO already) | 4 |
-| 1 | station heartbeat heard within 5 s | 5 |
+| 1 | station heartbeat heard within 10 s | 5 |
 | 2 | a list with a waypoint stored and `GDN_SRC` is 1 | 6 (none stored), 20 (stored but `GDN_SRC` not 1) |
 | 3 | every z within `GDN_ALT_MIN`..`GDN_ALT_MAX` | 7 |
 | 4 | home latched | 8 |
@@ -85,7 +85,7 @@ position with velocity feed-forward, plus the vertical carrot's acceleration as 
 | Return | climb in place to the return height, straight leg home at that height, within the radius LAND |
 | Land | controlled descent |
 | New list uploaded while holding | kept place dropped |
-| Station silent 5 s in AUTO | HOLD, place kept |
+| Station silent 10 s in AUTO | HOLD, place kept |
 
 ## Code
 
