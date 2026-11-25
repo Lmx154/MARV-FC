@@ -9,7 +9,7 @@ and executor is assigned once, here. The bench programs of the driver crates eac
 firmware. Status of each line: FIXED = dictated by the board; CHOSEN = decided here; OPEN = waits for the
 foundation design. Run as one program so far (2026-11-14): the two-core skeleton (core 1 started with `spawn_core1`, USB with a
 MAVLink node on core 0, `DMA_IRQ_0` off on core 0), the BMP581 barometer on core 0 (I2C1 without DMA, `I2C1_IRQ`, the data-ready
-input GPIO21 through `IO_IRQ_BANK0`), the BMM350 magnetometer on core 0 (2026-11-15: I2C0 without DMA, `I2C0_IRQ`, GPIO12 SDA, GPIO13 SCL, data-ready GPIO4 through `IO_IRQ_BANK0`), the LC76G GNSS receiver on core 0 (2026-11-15: UART1 buffered and interrupt driven without DMA, `UART1_IRQ`, TX GPIO24, RX GPIO25; the fix interval and message set of `GPS_RATE_MS` sent at every start, restart and apply, never saved; PPS GPIO5 not read), the battery monitor on core 0 (2026-11-15: the ADC without DMA, `ADC_IRQ_FIFO`, GPIO41 and GPIO42; GPIO40 unused), the ELRS receiver on core 0 (2026-11-15: UART0 buffered and interrupt driven without DMA, `UART0_IRQ`, TX GPIO14, RX GPIO17 with the pad's pull-up, task `rc_link` on the `SWI_IRQ_0` interrupt executor, `rc-port`) and IMU1, the ICM-45686, on core 1 (SPI0 at 8 MHz mode 0 with DMA channels 0 and 1 on
+input GPIO21 through `IO_IRQ_BANK0`), the BMM350 magnetometer on core 0 (2026-11-15: I2C0 without DMA, `I2C0_IRQ`, GPIO12 SDA, GPIO13 SCL, data-ready GPIO4 through `IO_IRQ_BANK0`), the SAM-M10Q GNSS receiver on core 0 (UART1 buffered and interrupt driven without DMA, `UART1_IRQ`, TX GPIO24, RX GPIO25; UBX configuration from `GPS_RATE_MS` and `GPS_GNSS` sent to RAM at every start, restart and apply, never saved; PPS GPIO5 edges time-stamped), the battery monitor on core 0 (2026-11-15: the ADC without DMA, `ADC_IRQ_FIFO`, GPIO41 and GPIO42; GPIO40 unused), the ELRS receiver on core 0 (2026-11-15: UART0 buffered and interrupt driven without DMA, `UART0_IRQ`, TX GPIO14, RX GPIO17 with the pad's pull-up, task `rc_link` on the `SWI_IRQ_0` interrupt executor, `rc-port`) and IMU1, the ICM-45686, on core 1 (SPI0 at 8 MHz mode 0 with DMA channels 0 and 1 on
 `DMA_IRQ_0`, INT1 on GPIO15 through core 1's `IO_IRQ_BANK0`, all built inside core 1's entry closure; start-up checks:
 `DMA_IRQ_0` enabled on core 1, not on core 0), IMU2, the LSM6DSK320X, on core 1 (2026-11-15: SPI1 at 8 MHz mode 0
 with DMA channels 2 and 3 on `DMA_IRQ_0`, INT1 on GPIO7 through core 1's `IO_IRQ_BANK0`, INT2 GPIO6 unused,
@@ -28,7 +28,7 @@ other device, PIO block or DMA channel of this plan has run in it yet.
 | LSM6DSK320X IMU | SCK 10, MOSI 11, MISO 8, CS 9, INT1 7, INT2 6 | SPI1 | `lsm6dsk320x` |
 | BMP581 barometer | SDA 22, SCL 23, INT 21 | I2C1 | `bmp581` |
 | BMM350 magnetometer (bench, magnetometer port) | SDA 12, SCL 13, INT 4 (servo pad S6) | I2C0 | `bmm350` |
-| LC76G GNSS (bench, pads T1/R1) | TX 24, RX 25, PPS 5 (servo pad S5) | UART1 | `lc76g` (BUILT, `src/gnss.rs`: `BufferedUart`, 4096-byte RX buffer, 64-byte TX buffer for the rate and message commands (no longer receive only), `UART1_IRQ` on core 0; PPS not read) |
+| SAM-M10Q GNSS (pads T1/R1) | TX 24, RX 25, PPS 5 (servo pad S5) | UART1 | `sam-m10q` (`src/gnss.rs`: `BufferedUart`, 4096-byte RX buffer, 64-byte TX buffer, `UART1_IRQ` on core 0; PPS edges time-stamped) |
 | ELRS receiver (pads T0/R0) | TX 14 (function 11), RX 17 | UART0 | `rc-port` |
 | microSD | DAT 28-31, CLK 32, CMD 33 | PIO | `pio-sdmmc` |
 | ESC telemetry in | 34 | PIO | `pio-uart` `UartRx` |

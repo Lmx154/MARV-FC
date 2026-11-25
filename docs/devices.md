@@ -175,57 +175,29 @@ Pins: see `pinout.md`, QMI CS1 / PSRAM.
   without a chip command (verified with the M1 reset simulated).
 - The QMI registers used to reach it are under RP2350 below.
 
-## Quectel LC76G (GNSS, UART1 and PPS on the bench)
+## u-blox SAM-M10Q (GNSS, UART1, PPS)
 
-Pins: see `pinout.md`, Bench configuration. Test: `tools/run.sh lc76g_smoke`; driver: `../MARV-V2-drivers/lc76g`.
+Pins: see `pinout.md`. Driver: [`sam-m10q`](https://github.com/Lmx154/sam-m10q) (UBX protocol only). Firmware side: `src/gnss.rs`,
+`crates/fw-settings/src/gnss.rs`; behaviour in [device-layer](device-layer.md). Sources: the u-blox SAM-M10Q data sheet, integration manual
+and M10 SPG 5.10 interface description ("IM").
 
-- Protocol specification V1.1 (link below). Bench module `LC76GABNR12A05S`, build 2025/09/25 10:10:11 (`$PQTMVERNO`,
-  p100). 115200 baud 8N1 confirmed. Get commands answer `$PAIR001,<id>,0`, then the value (p39): `$PAIR051,1000*13`.
-- PPS: `$PAIR752,<type>,<width_ms>` (p78): type 0 off, 1 after first fix, 2 3D fix only, 3 2D/3D fix, 4 always.
-  Default type: UNKNOWN (the module pulsed at 1 Hz, 100 ms wide, with a fix; not read back).
-- Default sentences (measured): GGA, GLL, GSA, GSV, RMC, VTG every fix; ZDA, GRS, GST, GNS off. The spec's "default 1"
-  for all types (p41) is wrong here. `$PAIR062,-1` resets the rates (ZDA 1 -> 0 verified); `$PAIR062,-1,0` and `,-1,1`
-  are rejected with `$PAIR001,062,4`.
-- `$PAIR050,100` gives 10 Hz (p38), but here GGA, GLL, RMC, VTG, `$PQTMEPE` and (at rate 1) GSA and GSV all go at
-  10 Hz; the spec says GSA/GSV stay at 1 Hz and VTG/GLL stop. That is 187 sentences, 11.6 kB per second: the whole
-  capacity of 115200 baud (11.52 kB/s). Fixes drop (97 per 10 s) and commands are answered a second late or never.
-  One epoch at the default rates is 19 sentences (4 GSA, 11 to 12 GSV). `Config::is_valid` therefore requires GSA, GSV
-  and GRS off or at most once per second below 1000 ms; GSA/GSV at 10 (`with_fix_interval(100)`): 100 fixes per 10 s,
-  ~65 sentences/s, replies in milliseconds. `init` sets 1000 ms first and the target interval last, so no step floods.
-- 10 Hz fix times are not on a 100 ms grid: about 57 of 99 steps are exactly 100 ms, the rest 89 to 107 ms, rarely up
-  to 172 ms. After a return to 1 Hz one step of 1277 to 1483 ms precedes the 1000 ms steps.
-- Drone mode (`$PAIR080,5`): coordinates still have six decimals of minutes (`ddmm.mmmmmm,N,dddmm.mmmmmm,W`), not
-  seven as the note on p51 says; the driver accepts both. `$PQTMEPE,2,1.224,1.253,2.415,1.752,2.983*57` follows each fix.
-- Bench fix: 3D, 19 to 25 satellites used, HDOP 0.5; at rest the position moves 1 to 13 m within 10 s in drone mode.
-- PPS (GPIO5, plain input): 1 s period to 5 ppm by the MCU timer; in about half the runs one period is 1 to 3 ms off
-  (module or edge latency, undecided). `read_fix` returns the fix of a second 75 to 90 ms after the PPS edge.
-- RP2350 at 150 MHz: framing one GGA 49 us, framing + parse 115 us (RMC 46 / 116 us; 209 / 174 before `Decimal::scaled`
-  got a 64-bit path); `Lc76g<BufferedUart>` 440 bytes plus the buffers (RX 4096, TX 256). Bursts are about 1.4 kB, so
-  use a buffered UART. After a probe reset the receive line can show a burst of framing errors (0 to 228 seen).
-- `$PAIR513*3D` saves the module's settings to its flash. Send it only when a permanent change is intended.
-- The firmware (`src/gnss.rs`) sends at every start, restart and apply only `fw_settings::gnss::commands` for `GPS_RATE_MS`
-  (100, 200, 500 or 1000 ms): version query, `$PAIR050,1000`, `$PAIR062` for the ten types (GGA, RMC, GST 1; GSA
-  ceil(1000 / ms); the rest 0), `$PQTMCFGMSGRATE,W,PQTMEPE,0,2`, `$PQTMCFGMSGRATE,W,PQTMPVT,1,1` (`$PQTMPVT` every fix,
-  answered `$PQTMCFGMSGRATE,OK` in 6 ms on the driver's bench), then `$PAIR050,<ms>` if not 1000, at least 500 ms after
-  the first `$PAIR050` was acknowledged (`FIX_INTERVAL_SETTLE_MS`). Measured 2026-11-20 (LC76GABNR12A05S, 2025/09/25): a
-  `$PAIR050` 18 to 170 ms after one that changed the rate gets `$PAIR001,050,1` (being processed), then the module restarts
-  by itself about 1.8 s later (ROM boot text, `BL Jump`, `$PQTMVER`) at its stored settings (8 of 8); from 207 ms on it is
-  accepted (7 of 7). An applied change is followed 114 to 241 ms later by an unsolicited `$PAIR001,124,0`. Never `init` (navigation
-  mode), PPS, `$PAIR513` or `$PQTMSAVEPAR`: volatile; after a power cycle the module runs at its stored settings until the
-  next start, restart or apply.
-- Cold power-on, measured 2026-11-20 (3 of 3, off 22, 23 and 47 s, the module last at 200 ms): the module comes up at the fix
-  interval it had before power was removed (200 ms: the interval survives at least 47 s without power) with its default
-  sentence set (GGA, GLL, 4 GSA, about 12 GSV, RMC, VTG every fix; GST off; 77 to 100 sentences/s). Its first sentence came
-  110 ms after the board's start and `$PQTMVERNO` was answered in 11 ms, but `$PAIR050,1000` sent at once got only
-  `$PAIR001,050,1` (being processed), `$PAIR001,124,0` and `$PAIR011,001` about 240 ms later, and no result within the
-  driver's 100 sentences (1.48 s); the interval stayed 200 ms. With the module up for a while (warm resets of the board, the
-  same state) the same list passes. The firmware therefore sends a failed list again every `CONFIGURE_RETRY_MS` (5 s)
-  until it succeeds. The epoch's sentence order with GST on is not recorded yet (bench B-g2).
-- `$PQTMPVT` (driver rev 9fbd8be decodes it; 134 to 139 bytes): one per fix, the same UTC time as the RMC of its epoch, about 16 ms
-  after that RMC in the same burst (driver bench 2026-11-21). At rest, mm/s: north and east scatter 12 to 14 (sd), down 0.7. The firmware
-  puts its velocity north, east, down into the reading of the same epoch (`vel_ned_mm_s`) and logs it (GPV); nothing uses it yet. **The
-  sign of the down velocity and its response to vertical motion are not verified** (needs a lift-and-lower test). With it the stream at
-  200 ms is 24 sentences/s (19 without).
+- UBX frame: `B5 62 | class | id | len U2 LE | payload | CK_A CK_B`, 8-bit Fletcher checksum over class to payload end.
+  MON-VER poll: `B5 62 0A 04 00 00 0E 34`.
+- CFG-VALSET (06 8A), version 0, layers 0x01 (RAM only: nothing reaches battery-backed RAM or flash), 2 reserved bytes, then key U4 LE and
+  value; the value size comes from key bits 28..30 (1 and 2 one byte, 3 two bytes, 4 four bytes, 5 eight bytes); at most 64 pairs.
+- ACK-ACK / ACK-NAK (05 01 / 05 00) answer within 1 s (IM 3.9). A baud-rate change takes about 100 ms (IM).
+- A CFG-SIGNAL change restarts the GNSS: wait for the acknowledgement plus 0.5 s (integration manual).
+- Configure sequence (driver `Receiver::configure`): probe each candidate baud with a MON-VER poll (the firmware tries 115200, 9600, 38400;
+  1 s each), switch to 115200 with CFG-UART1-BAUDRATE if needed and poll MON-VER again, then one CFG-VALSET to RAM: UBX only (NMEA off),
+  the measurement period, NAV-PVT on UART1 once per epoch, dynamic model 8, static hold off, the constellation set. ACK-ACK is required.
+  Up to 5.6 s in total. The firmware runs it at every start, restart and parameter apply; nothing is saved in the receiver.
+- Measurement period: 100, 200, 500 or 1000 ms (`MEAS_RATES_MS`), and no faster than the constellation set allows
+  (`Constellations::min_meas_rate_ms`): GPS + Galileo + BeiDou B1C + QZSS 125 ms, GPS + Galileo 100 ms, GPS + Galileo + GLONASS 167 ms.
+  Firmware parameters `GPS_RATE_MS` (default 200) and `GPS_GNSS` (default 0).
+- NAV-PVT (01 07, 92 bytes) is the only output used: fix flags (`is_3d_fix_ok`), lat/lon 1e-7 degree, height above mean sea level mm,
+  velocity north/east/down mm/s, ground speed, heading of motion, hAcc/vAcc mm, satellites, UTC time and date, iTOW.
+- Stream: one NAV-PVT per epoch (100 bytes framed), 5 per second at the default 200 ms, so a 4096-byte receive buffer holds about 8 s.
+- PPS on GPIO5: a plain input. The firmware time-stamps each rising edge and pairs it with whole-second fixes (a latency measurement only).
 
 ## WS2812C-2020 status LED (D20)
 
@@ -306,7 +278,7 @@ Pins: see `pinout.md`, MCU and clock.
 | IS66WVS16M8FBLL PSRAM | https://cdn.sparkfun.com/assets/a/7/e/0/0/IS66WVS16M8FBLL-104NLI-COM-29556.pdf |
 | APS6404L-SQN-SN PSRAM (socket option) | https://www.apmemory.com/tw/downloadFiles/0324112120g3605268 |
 | W25Q32JVSNIQ NOR (socket option) | https://www.winbond.com/resource-files/W25Q32JV%20RevJ%2012242024%20Plus.pdf |
-| Quectel LC76G protocol specification V1.1 | https://quectel.com/content/uploads/2024/02/Quectel_LC26GABLC76GLC86G_Series_GNSS_Protocol_Specification_V1.1.pdf |
+| u-blox SAM-M10Q data sheet, integration manual, M10 SPG 5.10 interface description | u-blox documentation for the SAM-M10Q (M10 family) |
 | WS2812C-2020 | https://www.lcsc.com/datasheet/lcsc_datasheet_2202221130_Worldsemi-WS2812C-2020-V1_C2976072.pdf |
 | X1 32.000 kHz oscillator HCI 1521H-32K000J18DTSL | https://www.lcsc.com/product-detail/crystal-oscillators_hci-1521h-32k000j18dtsl_C19674133.html |
 | Molex 47219-2001 microSD socket | https://www.es.co.th/Schemetic/PDF/472192001.PDF |
