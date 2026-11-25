@@ -1011,7 +1011,7 @@ impl SampleSink for Stepper {
         let wp = self.flight.leg_active();
         if let Some(k) = wp
             && wp != self.wp_logged
-            && self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &fw_flight::step::leg_msg(k)))
+            && self.push_msg(out.t_us, &fw_flight::step::leg_msg(k))
         {
             self.wp_logged = wp;
         } else if wp.is_none() {
@@ -1021,9 +1021,7 @@ impl SampleSink for Stepper {
         // dropped one is offered again.
         let m = self.flight.radio_status_seen();
         if m != self.m_logged
-            && self.log.push_with(dflog::MSG.length.into(), |b| {
-                dflog::encode_msg(b, out.t_us, if m { "HO M 1 RADIO_STATUS after entry" } else { "HO M 0" }.as_bytes())
-            })
+            && self.push_msg(out.t_us, if m { "HO M 1 RADIO_STATUS after entry" } else { "HO M 0" }.as_bytes())
         {
             self.m_logged = m;
         }
@@ -1031,7 +1029,7 @@ impl SampleSink for Stepper {
         // clears, in every configuration; a dropped one is offered again.
         let crash = self.flight.crash_status();
         if let Some(text) = fw_flight::step::crash_msg(self.k_logged, &crash)
-            && self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text))
+            && self.push_msg(out.t_us, &text)
         {
             self.k_logged = crash.would_fire();
         }
@@ -1041,9 +1039,7 @@ impl SampleSink for Stepper {
             self.card_logged = false;
         } else if !self.card_logged
             && let Some(pct) = self.flight.card_check_pct()
-            && self.log.push_with(dflog::MSG.length.into(), |b| {
-                dflog::encode_msg(b, out.t_us, &fw_flight::step::card_msg(pct))
-            })
+            && self.push_msg(out.t_us, &fw_flight::step::card_msg(pct))
         {
             self.card_logged = true;
         }
