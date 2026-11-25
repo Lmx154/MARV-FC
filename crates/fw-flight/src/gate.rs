@@ -213,12 +213,12 @@ impl Gate {
         self.armed
     }
 
-    /// Armed, only a report of the flight's source counts; disarmed, a CRSF report, or a receiver report with
-    /// FS_HOLD_EN `fs_hold_en` 1. `Flight::step` hands no other report to the shaper, the state machine or the gate.
-    pub(crate) fn accepts(&self, r: &RcSample, fs_hold_en: bool) -> bool {
+    /// Armed, only a report of the flight's source counts; disarmed, every report. `Flight::step` hands no other
+    /// report to the shaper, the state machine or the gate.
+    pub(crate) fn accepts(&self, r: &RcSample) -> bool {
         match self.source {
             Some(s) if self.armed => r.source == s,
-            _ => r.source == RcSource::Crsf || fs_hold_en,
+            _ => true,
         }
     }
 
@@ -1026,7 +1026,7 @@ mod tests {
     }
 
     /// A receiver report with the mission switch ON never arms (switch cycle, low throttle and every check met), with
-    /// it OFF it does; a receiver report counts while disarmed only at FS_HOLD_EN 1.
+    /// it OFF it does; armed, only the flight's source counts.
     #[test]
     fn n19_mission_switch_on_never_arms_and_the_source_is_latched() {
         static HS_N19: Handshake = Handshake::new();
@@ -1042,16 +1042,14 @@ mod tests {
             let c = step(&mut gate, t, Some(rx(t, true, true)), levels);
             assert!(c == MotorCommand::STOP && !gate.armed() && !HS_N19.armed(), "mission switch ON");
         }
-        assert!(gate.accepts(&report(t, true, 0.0), false) && gate.accepts(&report(t, true, 0.0), true));
-        assert!(!gate.accepts(&rx(t, true, false), false), "disarmed, FS_HOLD_EN 0: no receiver report");
-        assert!(gate.accepts(&rx(t, true, false), true));
+        assert!(gate.accepts(&report(t, true, 0.0)) && gate.accepts(&rx(t, true, false)), "disarmed: both sources");
         t += 1_000;
         step(&mut gate, t, Some(rx(t, false, false)), levels);
         t += 1_000;
         let c = step(&mut gate, t, Some(rx(t, true, false)), levels);
         assert!(gate.armed() && c.throttles().is_some(), "mission switch OFF arms");
-        assert!(gate.accepts(&rx(t, true, true), false), "the flight's source, FS_HOLD_EN aside");
-        assert!(!gate.accepts(&report(t, true, 0.0), true), "a CRSF report on a MAVLink flight");
+        assert!(gate.accepts(&rx(t, true, true)), "the flight's source");
+        assert!(!gate.accepts(&report(t, true, 0.0)), "a CRSF report on a MAVLink flight");
         t += 1_000;
         step(&mut gate, t, Some(rx(t, false, false)), levels);
         assert!(!gate.armed());
@@ -1060,8 +1058,8 @@ mod tests {
         t += 1_000;
         step(&mut gate, t, Some(report(t, true, 0.0)), levels);
         assert!(gate.armed(), "CRSF arms");
-        assert!(!gate.accepts(&rx(t, true, false), true), "a receiver report on a CRSF flight");
-        assert!(gate.accepts(&report(t, true, 0.0), false));
+        assert!(!gate.accepts(&rx(t, true, false)), "a receiver report on a CRSF flight");
+        assert!(gate.accepts(&report(t, true, 0.0)));
     }
 
     /// The real gate driven by the real hands-off machine.
@@ -1076,7 +1074,6 @@ mod tests {
         let mut rng = Rng(0x5eed_00d4);
         let mut i = Inputs {
             now_us: 0,
-            fs_hold_en: true,
             crsf: None,
             last_radio_heartbeat_us: None,
             last_radio_status_us: None,
@@ -1146,9 +1143,6 @@ mod tests {
                 t_us: t,
             });
             let levels = if rng.chance(2) { None } else { LEVELS };
-            if rng.chance(5) {
-                i.fs_hold_en = !i.fs_hold_en;
-            }
             if rng.chance(50) {
                 i.tier = [Tier::T3, Tier::T3, Tier::T3, Tier::T2, Tier::T1][(rng.next() % 5) as usize];
             }
@@ -1166,7 +1160,7 @@ mod tests {
             i.home_reached = rng.chance(5);
             i.last_waypoint_reached = rng.chance(5);
             i.now_us = t;
-            let rc = rc.filter(|r| gate.accepts(r, i.fs_hold_en));
+            let rc = rc.filter(|r| gate.accepts(r));
             if rc.is_some() {
                 i.crsf = rc;
             }
@@ -1200,7 +1194,7 @@ mod tests {
                 let r = rc.expect("b: arming needs a report");
                 let normal = r.sticks.throttle <= tuning.arm_thr_max;
                 assert!(r.arm && (normal || latch) && levels.is_some(), "b, step {k}");
-                assert!(r.source == RcSource::Crsf || (!r.mission && i.fs_hold_en), "b, step {k}: N19 receiver arming");
+                assert!(r.source == RcSource::Crsf || !r.mission, "b, step {k}: N19 receiver arming");
                 assert!(off_then_disarmed, "b, step {k}: arming without a switch cycle");
                 armings += 1;
                 restarts += u32::from(latch);

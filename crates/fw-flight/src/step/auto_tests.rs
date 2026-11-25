@@ -49,7 +49,7 @@ pub(super) fn square() -> GdnTargets {
 const YAW_RAD: f32 = 0.523_598_8;
 
 /// A flight on the fake estimator: armed on the ground at the origin (home N 0, E 0, D 0), lifted, put 10 m up, the
-/// sticks lost on T3' with FS_HOLD_EN 1.
+/// sticks lost on T3' on a MAVLink flight.
 struct Run {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
@@ -68,22 +68,21 @@ impl Run {
         Run::with(speed_ms, set, true, true)
     }
 
-    /// As `new`; without `home` the NE position is not valid until after take-off (no home); with `fs` false
-    /// FS_HOLD_EN is 0 and the stick loss gives LAND.
-    fn with(speed_ms: f32, set: Option<GdnTargets>, home: bool, fs: bool) -> Run {
+    /// As `new`; without `home` the NE position is not valid until after take-off (no home); with `mavlink` false
+    /// a CRSF flight, and the stick loss gives LAND.
+    fn with(speed_ms: f32, set: Option<GdnTargets>, home: bool, mavlink: bool) -> Run {
         let valid = if home { POSITION } else { Valid { position_ne: false, velocity_ne: false, ..POSITION } };
         let mut nav = super::althold_tests::nav_at(0.0, valid);
         nav.attitude = [libm::cosf(YAW_RAD / 2.0), 0.0, 0.0, libm::sinf(YAW_RAD / 2.0)];
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav)));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         assert!(f.set_pilot_speed_xy(speed_ms));
-        f.set_fs_hold_en(fs);
         f.set_heading_ok(true);
         f.set_battery_ok(true);
         if let Some(m) = set {
             f.set_mission(m);
         }
-        let source = if fs { fw_core::rc::RcSource::Receiver } else { fw_core::rc::RcSource::Crsf };
+        let source = if mavlink { fw_core::rc::RcSource::Receiver } else { fw_core::rc::RcSource::Crsf };
         let mut r = Run { f, cell, t: 1_000_000, station: true, push: [0.0; 2], last: None, source, confirm: false };
         r.rc(false, 0.0);
         assert!(r.rc(true, 0.0).armed);
@@ -102,7 +101,7 @@ impl Run {
                 break;
             }
         }
-        assert_eq!(r.state(), if fs { State::Hold } else { State::Land });
+        assert_eq!(r.state(), if mavlink { State::Hold } else { State::Land });
         r
     }
 
@@ -423,7 +422,7 @@ fn g_start_denied_with_its_reason() {
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::NoHome), "no home");
     let mut r = Run::with(3.0, Some(square()), true, false);
     assert_eq!(r.state(), State::Land);
-    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::HandsOffDisabled), "FS_HOLD_EN 0");
+    assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::HandsOffDisabled), "CRSF");
 }
 
 /// A run in AUTO on the square, 3 s after Start.
@@ -825,7 +824,7 @@ fn re_track_fault_lands_braking_t3_lost_lands_height_lost_blind() {
     assert_eq!(r.state(), State::Blind);
 }
 
-/// (f) Return's answers as built: on USB NotRadioLink; FS_HOLD_EN 0 HandsOffDisabled; no home NoHome; in LAND
+/// (f) Return's answers as built: on USB NotRadioLink; CRSF HandsOffDisabled; no home NoHome; in LAND
 /// NotInThisState; in RETURN ACCEPTED (no effect); Start in RETURN NotInThisState.
 #[test]
 fn rf_return_denied_with_its_reason() {
@@ -848,10 +847,10 @@ fn rf_return_denied_with_its_reason() {
     assert_eq!(r.state(), State::Return);
 }
 
-/// with FS_HOLD_EN 0 a stick loss in the air lands, and with neither sticks nor station for 15 s it never becomes
+/// On a CRSF flight a stick loss in the air lands, and with neither sticks nor station for 15 s it never becomes
 /// RETURN.
 #[test]
-fn rh_fs_hold_en_0_stick_loss_lands_never_returns() {
+fn rh_crsf_stick_loss_lands_never_returns() {
     let mut r = Run::with(3.0, Some(square()), true, false);
     r.station = false;
     for k in 0..12_000 {

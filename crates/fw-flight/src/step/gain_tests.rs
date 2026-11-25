@@ -269,8 +269,7 @@ fn set_gains_leaves_the_integrators_and_the_filter_memories_alone() {
 /// wiring (commit c270814)
 const SCRIPT_GOLDEN: u64 = 0x2ed6_7fa3_9e94_9fb8;
 
-/// With FS_HOLD_EN 0 (the default) the scripted flight is bit-identical to the
-/// step before the hands-off wiring.
+/// The scripted flight is bit-identical to the step before the hands-off wiring.
 #[test]
 fn the_script_is_bit_identical_to_the_step_before_the_hands_off_wiring() {
     let mut h = 0xcbf2_9ce4_8422_2325u64;

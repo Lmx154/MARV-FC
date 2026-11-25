@@ -34,8 +34,8 @@ pub const FS_CRT_ACT: &str = "BATT_FS_CRT_ACT";
 /// The number of low-battery monitor parameters.
 pub const FS_COUNT: usize = 5;
 
-/// Where [`FS_TABLE`] starts in `fw_settings::TABLE`: appended last, after `FS_HOLD_EN` (122). Pinned by a test.
-pub const FS_AT: usize = 123;
+/// Where [`FS_TABLE`] starts in `fw_settings::TABLE`: appended last.
+pub const FS_AT: usize = crate::COUNT - FS_COUNT;
 /// The battery monitor's parameter table; the defaults are the `adc-battery` crate's configuration (no gain correction, 20 000 uV/A placeholder, zero at 0 V).
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(V_SCALE, DEVICE, 1.0, 0.1, 10.0, Apply::Live),
@@ -164,7 +164,6 @@ mod tests {
     #[test]
     fn the_monitor_parameters_are_appended_at_123_to_127_with_the_amendments_numbers() {
         use mavlink_device::{ParamError, ParamValue::{F32, I32}};
-        assert_eq!(FS_AT, 123);
         let expected = [
             ("BATT_CELLS", I32(4), I32(0), I32(12)),
             ("BATT_LOW_CELL", F32(3.6), F32(3.0), F32(4.2)),

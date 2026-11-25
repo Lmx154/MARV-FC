@@ -1,4 +1,4 @@
-//! Host tests of crash rule K in shadow: the real step with the fake estimator of `althold_tests`, FS_HOLD_EN 0,
+//! Host tests of crash rule K in shadow: the real step with the fake estimator of `althold_tests`,
 //! sticks present on every step (Angle, switch Low)
 
 extern crate std;
@@ -41,13 +41,12 @@ struct Crash {
 }
 
 impl Crash {
-    /// Armed with the throttle at 0 on the ground, coverage `valid`, FS_HOLD_EN 0.
+    /// Armed with the throttle at 0 on the ground, coverage `valid`.
     fn armed(valid: Valid) -> Crash {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, valid))));
         let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
         h.set_permit(true);
-        let mut f = flight(cell, h, &Tuning::DEFAULT);
-        f.set_fs_hold_en(false);
+        let f = flight(cell, h, &Tuning::DEFAULT);
         let mut c = Crash { f, cell, t: 1_000_000, extra_ned: [0.0; 3], switch6: Switch3::Low };
         c.step(roll(0.0), [0.0; 3], false);
         c.step(roll(0.0), [0.0; 3], true);
@@ -323,7 +322,6 @@ fn k_msg_is_edge_triggered_and_absent_from_a_flight_that_never_fires() {
         msgs
     };
     let mut c = Crash::flown(ANGLE);
-    assert!(!c.f.fs_hold_in_force());
     assert_eq!(board(&mut c, &[(0.0, 4_000), (60.0, 400), (0.0, 4_000), (30.0, 800), (0.0, 800)]), []);
     let mut c = Crash::flown(ANGLE);
     let t0 = c.t;

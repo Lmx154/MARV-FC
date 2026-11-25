@@ -173,9 +173,6 @@ pub struct MissionFacts {
 pub struct Inputs {
     /// Board time, us.
     pub now_us: u64,
-    /// FS_HOLD_EN's present value. Taken into force on disarmed steps only; in force false: no HOLD and no mission
-    /// (stick loss on T3' gives LAND; commands DENIED `HandsOffDisabled`)
-    pub fs_hold_en: bool,
     /// The newest stick report of the flight's source.
     /// accepts), not necessarily new this step; `None` before the first.
     pub crsf: Option<RcSample>,
@@ -239,7 +236,7 @@ pub enum DenyReason {
     NotRadioLink,
     /// A CRSF stick report is fresh.
     CrsfFresh,
-    /// FS_HOLD_EN is 0.
+    /// Armed on a CRSF report: not a MAVLink flight.
     HandsOffDisabled,
     /// The state does not take this command.
     NotInThisState,
@@ -509,8 +506,6 @@ pub struct HandsOff {
     home_ne: Option<[f32; 2]>,
     /// This arming may still latch home (armed, before take-off;)
     home_window: bool,
-    /// FS_HOLD_EN in force, taken on disarmed steps.
-    fs_in_force: bool,
     /// The flight's source: the newest report's at the first armed step, which is the gate's arming report's source;
     /// `None` on disarmed steps.
     source: Option<RcSource>,
@@ -556,7 +551,6 @@ impl HandsOff {
             home_d: None,
             home_ne: None,
             home_window: false,
-            fs_in_force: false,
             source: None,
             ever_airborne: false,
             debounced: Tier::T3,
@@ -598,11 +592,6 @@ impl HandsOff {
         self.anchor
     }
 
-    /// FS_HOLD_EN in force: the value of the latest disarmed step.
-    pub fn fs_hold_in_force(&self) -> bool {
-        self.fs_in_force
-    }
-
     /// "Ever airborne" in force: the latch set at an armed step since arming, as of the latest step.
     pub fn ever_airborne(&self) -> bool {
         self.ever_airborne
@@ -622,7 +611,6 @@ impl HandsOff {
         let was = self.state;
         self.update_home(i);
         if !i.armed {
-            self.fs_in_force = i.fs_hold_en;
             self.source = None;
         } else if self.source.is_none() {
             self.source = i.crsf.map(|r| r.source);
@@ -812,15 +800,14 @@ impl HandsOff {
         !i.airborne && (!self.ever_airborne || i.td_held)
     }
 
-    /// Ho_allowed, "this is a MAVLink flight" where it replaces FS_HOLD_EN in force; disarmed, FS_HOLD_EN in force as
-    /// before.
+    /// Not a CRSF flight: a MAVLink flight, or disarmed.
     fn ho_allowed(&self) -> bool {
-        self.fs_in_force && self.source != Some(RcSource::Crsf)
+        self.source != Some(RcSource::Crsf)
     }
 
-    /// Armed on a receiver report with FS_HOLD_EN 1 in force.
+    /// Armed on a receiver report.
     fn mavlink_flight(&self) -> bool {
-        self.fs_in_force && self.source == Some(RcSource::Receiver)
+        self.source == Some(RcSource::Receiver)
     }
 
     /// Section 2, the transition table of a MAVLink flight, in its priority order: the arm columns 4 and 5.
@@ -919,7 +906,7 @@ impl HandsOff {
         }
     }
 
-    /// The state table's exits that are not commands (FS_HOLD_EN 0 or 1)
+    /// The state table's exits that are not commands.
     fn automatic(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
         if self.mavlink_flight() {
             self.mission_switch(i, fresh, ev);
@@ -1341,7 +1328,6 @@ mod tests {
         fn new() -> Rig {
             let i = Inputs {
                 now_us: T0,
-                fs_hold_en: true,
                 crsf: Some(RcSample {
                     sticks: CENTRED,
                     arm: true,
@@ -1443,7 +1429,7 @@ mod tests {
             r
         }
 
-        /// Sticks lost on T3 in the air on a CRSF flight at FS_HOLD_EN 1: LAND, with the station's heartbeat.
+        /// Sticks lost on T3 in the air on a CRSF flight: LAND, with the station's heartbeat.
         fn crsf_land() -> Rig {
             let mut r = Rig::crsf_pilot();
             let t = r.last_report() + LOSS + 1;
@@ -2064,34 +2050,30 @@ mod tests {
     }
 
     /// Sticks lost in PILOT or TAKEOVER with the latch false after take-off give LAND.
-    /// on T1, by the debounced tier) while TD has not held, at FS_HOLD_EN 0 and 1.
+    /// on T1, by the debounced tier) while TD has not held.
     #[test]
     fn hands_off_n10_stick_loss_with_the_latch_false_after_take_off_lands_until_td() {
-        for fs in [false, true] {
-            for (tier, want) in [(Tier::T3, State::Land), (Tier::T2, State::Land), (Tier::T1, State::Blind)] {
-                for takeover in [false, true] {
-                    let mut r = if takeover { Rig::takeover() } else { Rig::pilot() };
-                    r.h.fs_in_force = fs;
-                    r.drop_tier(tier);
-                    r.i.airborne = false;
-                    r.i.td_held = false;
-                    let t = r.last_report() + LOSS + 1;
-                    let out = r.at(t);
-                    let name = (fs, tier, takeover);
-                    assert_eq!((out.state, out.hands_off, out.disarm), (want, true, false), "{name:?}");
-                    let t = r.now() + 1_000;
-                    assert_eq!(r.at(t).state, want, "{name:?}");
-                    r.i.td_held = true;
-                    let t = r.now() + 1_000;
-                    let out = r.at(t);
-                    assert_eq!((out.state, out.disarm), (State::Stop, true), "{name:?}: TD held");
-                    let mut r = if takeover { Rig::takeover() } else { Rig::pilot() };
-                    r.h.fs_in_force = fs;
-                    r.drop_tier(tier);
-                    r.i.airborne = false;
-                    let t = r.last_report() + LOSS + 1;
-                    assert_eq!(r.at(t).state, State::Stop, "{name:?}: TD held at the loss");
-                }
+        for (tier, want) in [(Tier::T3, State::Land), (Tier::T2, State::Land), (Tier::T1, State::Blind)] {
+            for takeover in [false, true] {
+                let mut r = if takeover { Rig::takeover() } else { Rig::pilot() };
+                r.drop_tier(tier);
+                r.i.airborne = false;
+                r.i.td_held = false;
+                let t = r.last_report() + LOSS + 1;
+                let out = r.at(t);
+                let name = (tier, takeover);
+                assert_eq!((out.state, out.hands_off, out.disarm), (want, true, false), "{name:?}");
+                let t = r.now() + 1_000;
+                assert_eq!(r.at(t).state, want, "{name:?}");
+                r.i.td_held = true;
+                let t = r.now() + 1_000;
+                let out = r.at(t);
+                assert_eq!((out.state, out.disarm), (State::Stop, true), "{name:?}: TD held");
+                let mut r = if takeover { Rig::takeover() } else { Rig::pilot() };
+                r.drop_tier(tier);
+                r.i.airborne = false;
+                let t = r.last_report() + LOSS + 1;
+                assert_eq!(r.at(t).state, State::Stop, "{name:?}: TD held at the loss");
             }
         }
         let mut r = Rig::new();
@@ -2540,41 +2522,6 @@ mod tests {
         assert_eq!(r.cmd(Command::Start).events.start, Some(StartAt::KeptPlace));
     }
 
-    // ---- FS_HOLD_EN in force from disarmed steps ----
-
-    #[test]
-    fn hands_off_b9_fs_hold_en_takes_effect_at_the_next_arming() {
-        let mut r = Rig::hold();
-        r.i.fs_hold_en = false;
-        for k in 1..=5 {
-            let out = r.heartbeat(r.now() + k * S);
-            assert_eq!((out.state, out.hands_off), (State::Hold, true));
-        }
-        r.i.armed = false;
-        r.i.airborne = false;
-        assert_eq!(r.step().state, State::Stop);
-        r.i.armed = true;
-        let t = r.now() + 1_000;
-        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
-        r.i.airborne = true;
-        r.i.fs_hold_en = true;
-        let t = r.last_report() + LOSS + 1;
-        let out = r.at(t);
-        assert_eq!((out.state, out.hands_off, out.disarm), (State::Land, true, false));
-        assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::HandsOffDisabled));
-        r.i.armed = false;
-        r.i.airborne = false;
-        r.step();
-        r.i.armed = true;
-        let t = r.now() + 1_000;
-        r.report(t, Switch3::High);
-        r.i.airborne = true;
-        let t = r.now() + 1_000;
-        r.report(t, Switch3::High);
-        let t = r.last_report() + LOSS + 1;
-        assert_eq!(r.at(t).state, State::Hold);
-    }
-
     // ---- I9 ----
 
     /// HOLD with the station present, entered with the vehicle `vehicle_m` north of home.
@@ -2747,24 +2694,24 @@ mod tests {
         }
     }
 
-    // ---- FS_HOLD_EN 0 ----
+    // ---- CRSF flights ----
 
-    /// With FS_HOLD_EN 0 a stick loss is handled as with 1 except that T3' gives LAND: never HOLD,
-    /// AUTO or RETURN, no mission event, no command accepted, and never STOP from a stick loss in the air.
+    /// On a CRSF flight a stick loss on T3' gives LAND: never HOLD, AUTO or RETURN, no mission event, no command
+    /// accepted, and never STOP from a stick loss in the air.
     #[test]
-    fn hands_off_fs_hold_en_0_walk_gives_no_hold_and_no_mission() {
+    fn hands_off_crsf_walk_gives_no_hold_and_no_mission() {
         let mut rng = Lcg(0x5eed_0000);
         let mut h = HandsOff::new(&Tuning::DEFAULT);
-        let mut i = Rig::new().i;
+        let mut i = Rig::crsf().i;
         let mut seen = [0u32; 8];
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, false);
             let was = h.state();
             let out = h.step(&i);
             seen[usize::from(out.state.code() - 1)] += 1;
-            assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{:?} with FS_HOLD_EN 0", out.state);
+            assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{:?} on CRSF", out.state);
             if matches!(was, State::Pilot | State::Stop) && i.crsf.is_some_and(|r| !r.arm) {
-                assert_eq!(out.state, State::Stop, "FS_HOLD_EN 0: arm OFF in PILOT or STOP is STOP");
+                assert_eq!(out.state, State::Stop, "CRSF: arm OFF in PILOT or STOP is STOP");
             }
             assert_eq!(out.return_height_m, None);
             assert_eq!(out.events, Events::NONE);
@@ -2988,10 +2935,9 @@ mod tests {
         assert_eq!((out.state, out.arm_off_holds), (State::Stop, false));
     }
 
-    /// Armed and airborne in PILOT with FS_HOLD_EN `fs` on a CRSF flight, then sticks lost on T3: LAND.
-    fn lost_with(fs: bool) -> Rig {
+    /// Armed and airborne in PILOT on a CRSF flight, then sticks lost on T3: LAND.
+    fn lost_with() -> Rig {
         let mut r = Rig::crsf();
-        r.i.fs_hold_en = fs;
         r.step();
         r.i.armed = true;
         assert_eq!(r.report(T0 + 1_000, Switch3::High).state, State::Pilot);
@@ -3004,48 +2950,44 @@ mod tests {
     }
 
     /// (replaces N10 (ii) and the airborne term): with no RADIO_STATUS after the entry (a plain dropout, M clear)
-    /// an arm-OFF report on return stops in that step, at FS_HOLD_EN 0 and 1.
+    /// an arm-OFF report on return stops in that step.
     #[test]
     fn hands_off_c1_a3_arm_off_without_radio_status_after_the_entry_is_stop_at_once() {
-        for fs in [false, true] {
-            for airborne in [true, false] {
-                let mut r = lost_with(fs);
-                r.i.airborne = airborne;
-                r.i.td_held = false;
-                let t = r.now() + 1_000;
-                let out = r.report_with(t, CENTRED, Switch3::High, false);
-                assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Stop, false, true), "fs {fs} air {airborne}");
-            }
+        for airborne in [true, false] {
+            let mut r = lost_with();
+            r.i.airborne = airborne;
+            r.i.td_held = false;
+            let t = r.now() + 1_000;
+            let out = r.report_with(t, CENTRED, Switch3::High, false);
+            assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Stop, false, true), "air {airborne}");
         }
     }
 
-    /// With a RADIO_STATUS after the entry (M) an arm-OFF return is held at FS_HOLD_EN 0 and 1, in the air and on the
-    /// ground; ON then OFF stops (P); on the ground TD stops (T)
+    /// With a RADIO_STATUS after the entry (M) an arm-OFF return is held, in the air and on the ground; ON then OFF
+    /// stops (P); on the ground TD stops (T)
     #[test]
     fn hands_off_n12_radio_status_after_the_entry_holds_arm_off_until_k_or_td() {
-        for fs in [false, true] {
-            for airborne in [true, false] {
-                let mut r = lost_with(fs);
-                r.i.airborne = airborne;
-                r.i.td_held = false;
-                r.i.last_radio_status_us = Some(r.now() + 1);
-                let t = r.now() + 1_000;
-                let out = r.report_with(t, CENTRED, Switch3::High, false);
-                assert_eq!((out.state, out.arm_off_holds), (State::Takeover, true), "fs {fs} air {airborne}");
-                assert!(r.h.radio_status_seen());
-                if airborne {
-                    let t = r.now() + 20_000;
-                    assert_eq!(r.report_with(t, CENTRED, Switch3::Low, true).state, State::Takeover);
-                    let t = r.now() + 20_000;
-                    let out = r.report_with(t, CENTRED, Switch3::Low, false);
-                    assert_eq!((out.state, out.disarm), (State::Stop, true), "fs {fs}: ON then OFF");
-                } else {
-                    let t = r.now() + 20_000;
-                    assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Takeover, "fs {fs}");
-                    r.i.td_held = true;
-                    let out = r.step();
-                    assert_eq!((out.state, out.disarm), (State::Stop, true), "fs {fs}: TD on the ground");
-                }
+        for airborne in [true, false] {
+            let mut r = lost_with();
+            r.i.airborne = airborne;
+            r.i.td_held = false;
+            r.i.last_radio_status_us = Some(r.now() + 1);
+            let t = r.now() + 1_000;
+            let out = r.report_with(t, CENTRED, Switch3::High, false);
+            assert_eq!((out.state, out.arm_off_holds), (State::Takeover, true), "air {airborne}");
+            assert!(r.h.radio_status_seen());
+            if airborne {
+                let t = r.now() + 20_000;
+                assert_eq!(r.report_with(t, CENTRED, Switch3::Low, true).state, State::Takeover);
+                let t = r.now() + 20_000;
+                let out = r.report_with(t, CENTRED, Switch3::Low, false);
+                assert_eq!((out.state, out.disarm), (State::Stop, true), "ON then OFF");
+            } else {
+                let t = r.now() + 20_000;
+                assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Takeover);
+                r.i.td_held = true;
+                let out = r.step();
+                assert_eq!((out.state, out.disarm), (State::Stop, true), "TD on the ground");
             }
         }
         let mut r = Rig::pilot();
@@ -3101,8 +3043,7 @@ mod tests {
         let t = r.now() + 1_000;
         let out = r.report_with(t, FULL, Switch3::High, false);
         assert_eq!((out.state, out.arm_off_holds), (State::Stop, false));
-        let mut r = Rig::new();
-        r.i.fs_hold_en = false;
+        let mut r = Rig::crsf();
         r.step();
         r.i.armed = true;
         r.report(T0 + 1_000, Switch3::High);
@@ -3233,10 +3174,7 @@ mod tests {
         r.i.crsf = r.i.crsf.map(|s| RcSample { t_us: t, ..s });
         r.i.now_us = t;
         assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::CrsfFresh));
-        let mut r = Rig::hold();
-        r.h.fs_in_force = false;
-        r.i.fs_hold_en = false;
-        r.i.armed = true;
+        let mut r = Rig::crsf_land();
         let mut ev = Events::NONE;
         let ret = StationCommand {
             command: Command::Return,
@@ -3424,13 +3362,12 @@ mod tests {
         r.i.airborne = false;
         let t = r.last_report() + LOSS + 1;
         assert!(r.at(t).disarm, "sticks lost on the ground");
-        let mut r = Rig::new();
-        r.i.fs_hold_en = false;
+        let mut r = Rig::crsf();
         r.step();
         r.i.armed = true;
         assert_eq!(r.report(T0 + 1_000, Switch3::High).state, State::Pilot);
         let out = r.at(T0 + 1_000 + LOSS + 1);
-        assert_eq!((out.state, out.disarm), (State::Stop, true), "FS_HOLD_EN 0: redundant with the gate's RC loss");
+        assert_eq!((out.state, out.disarm), (State::Stop, true), "CRSF, never airborne");
         let mut r = Rig::new();
         let out = r.step();
         assert_eq!((out.state, out.disarm), (State::Stop, false), "disarmed");
@@ -3524,8 +3461,7 @@ mod tests {
 
     /// One random step: time moves 0 to 2 s (now and then 10 to 12 s with no report and no heartbeat), every input may
     /// change; armed and airborne change rarely.
-    fn random_inputs(rng: &mut Lcg, i: &mut Inputs, fs_hold_en: bool) {
-        i.fs_hold_en = fs_hold_en;
+    fn random_inputs(rng: &mut Lcg, i: &mut Inputs, receiver: bool) {
         let silent = rng.chance(5);
         i.now_us += if silent {
             LINK_LOSS_US + rng.next() % 2_000_000
@@ -3539,8 +3475,8 @@ mod tests {
                 sticks: FULL,
                 arm: !rng.chance(20),
                 switch6,
-                source: if fs_hold_en { RcSource::Receiver } else { RcSource::Crsf },
-                mission: fs_hold_en && if i.crsf.is_some_and(|c| c.mission) { !rng.chance(20) } else { rng.chance(100) },
+                source: if receiver { RcSource::Receiver } else { RcSource::Crsf },
+                mission: receiver && if i.crsf.is_some_and(|c| c.mission) { !rng.chance(20) } else { rng.chance(100) },
                 t_us: now,
             });
         }
@@ -4261,12 +4197,12 @@ mod tests {
         assert_eq!(column(&mut r, 2).state, State::Pilot);
     }
 
-    /// The MAVLink-flight rule and section 3: a CRSF flight at FS_HOLD_EN 1 never enters HOLD, AUTO or RETURN: a stick
-    /// loss on T3' lands, a radio command is refused with code 2 while its report is fresh and 3 after.
+    /// The MAVLink-flight rule and section 3: a CRSF flight never enters HOLD, AUTO or RETURN: a stick loss on T3'
+    /// lands, a radio command is refused with code 2 while its report is fresh and 3 after.
     #[test]
-    fn n19_a_crsf_flight_at_fs_hold_en_1_has_no_hands_off_path() {
+    fn n19_a_crsf_flight_has_no_hands_off_path() {
         let mut r = Rig::crsf_pilot();
-        assert!(!r.h.mavlink_flight() && r.h.fs_hold_in_force());
+        assert!(!r.h.mavlink_flight());
         assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::CrsfFresh));
         let mut r = Rig::crsf_land();
         for c in [Command::Start, Command::Abort, Command::Return] {
@@ -4276,10 +4212,10 @@ mod tests {
         assert_eq!(r.h.state(), State::Land);
     }
 
-    /// The walk of `hands_off_i8_i12_walk_...` on a CRSF flight at FS_HOLD_EN 1.
+    /// The walk of `hands_off_i8_i12_walk_...` on a CRSF flight.
     /// from CRSF, the mission switch never read): never a MAVLink flight, never HOLD, AUTO or RETURN.
     #[test]
-    fn n19_crsf_walk_at_fs_hold_en_1_keeps_the_c1_lock() {
+    fn n19_crsf_walk_keeps_the_c1_lock() {
         let mut rng = Lcg(0x5eed_0001);
         let mut h = HandsOff::new(&Tuning::DEFAULT);
         let mut i = Rig::crsf().i;

@@ -451,46 +451,6 @@ pub fn push_notch(why: &str) {
     );
 }
 
-/// Core 0 -> flight core: the stored `FS_HOLD_EN` (true: 1), decision-mavlink-mode-20261123 (one writer, core 0, through
-/// [`push_fs_hold`]; one reader, IMU1's [`Stepper`]). The flight code passes the newest value to the hands-off state
-/// machine every step, which takes it into force on disarmed steps only (section 11, B9). No flash access on core 1.
-pub static FLIGHT_FS_HOLD: TripleBuffer<bool> = TripleBuffer::new(false);
-
-/// Core 0's writer of [`FLIGHT_FS_HOLD`].
-static FS_HOLD_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, bool>>>> =
-    Mutex::new(RefCell::new(None));
-
-/// Takes the writer of [`FLIGHT_FS_HOLD`] and pushes the stored value. Call once, on core 0, after `settings::boot` and
-/// before core 1 starts, so the flight core's first read has it.
-pub fn init_fs_hold() {
-    let Some(writer) = FLIGHT_FS_HOLD.take_writer() else {
-        defmt::panic!("[FAIL] FS_HOLD_EN writer taken twice");
-    };
-    FS_HOLD_WRITER.lock(|w| *w.borrow_mut() = Some(writer));
-    push_fs_hold("boot");
-}
-
-/// Pushes the stored `FS_HOLD_EN` to the flight core (core 0; call with no store access in progress). A value that
-/// cannot be read or is not an `I32` is the table's default (0, off).
-pub fn push_fs_hold(why: &str) {
-    let on = crate::store::with(|p| match p.get_named(fw_settings::flight::FS_HOLD_EN) {
-        Some(mavlink_device::ParamValue::I32(v)) => Some(v != 0),
-        _ => None,
-    })
-    .flatten()
-    .unwrap_or(false);
-    FS_HOLD_WRITER.lock(|w| {
-        if let Some(writer) = w.borrow_mut().as_mut() {
-            writer.write(on);
-        }
-    });
-    defmt::info!(
-        "[INFO] FS_HOLD_EN {=bool} pushed to the flight core ({=str}); it takes effect at the next disarmed step",
-        on,
-        why
-    );
-}
-
 /// Core 0 -> flight core: the 14 stored gains `ATC_*` as one set (decision-gain-params-20261123, section 1 item 5; one
 /// writer, core 0, through [`push_gains`]; one reader, IMU1's [`Stepper`]). The flight code takes the set at every disarmed
 /// step (`Flight::set_gains`), so the one in force at the arming step stays until the next disarm. No flash access on
@@ -657,7 +617,6 @@ pub struct Stepper {
     gnss: TripleReader<'static, GnssSample>,
     speed: TripleReader<'static, f32>,
     notch: TripleReader<'static, (bool, i32)>,
-    fs_hold: TripleReader<'static, bool>,
     gdn: TripleReader<'static, GdnSet>,
     gains: TripleReader<'static, Gains>,
     radio_status: TripleReader<'static, u64>,
@@ -675,7 +634,7 @@ pub struct Stepper {
     stat: SeqlockWriter<'static, NavStat>,
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
-    /// The hands-off state of the last MSG written (`None` before the first; `hands_off_msg_due`).
+    /// The hands-off state of the last MSG written (`None` before the first).
     ho_logged: Option<fw_flight::hands_off::State>,
     /// AUTO's waypoint index of the last "HO WP" MSG written (`None` outside AUTO's guidance).
     wp_logged: Option<u8>,
@@ -700,7 +659,7 @@ pub struct Stepper {
 impl Stepper {
     /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
     /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`], [`FLIGHT_SPEED_XY`] or [`FLIGHT_NOTCH`] or the writer of
-    /// [`NAV_STAT`] or the reader of [`FLIGHT_GDN`], [`FLIGHT_GAINS`] or [`FLIGHT_FS_HOLD`] was taken already.
+    /// [`NAV_STAT`] or the reader of [`FLIGHT_GDN`] or [`FLIGHT_GAINS`] was taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     /// `period_us`: IMU1's sample period from its setup (the value the IMU1 task runs on); the notch's sample rate is
     /// 1e6 / `period_us`.
@@ -724,7 +683,6 @@ impl Stepper {
             gnss: FLIGHT_GNSS.take_reader()?,
             speed: FLIGHT_SPEED_XY.take_reader()?,
             notch: FLIGHT_NOTCH.take_reader()?,
-            fs_hold: FLIGHT_FS_HOLD.take_reader()?,
             gdn: FLIGHT_GDN.take_reader()?,
             gains: FLIGHT_GAINS.take_reader()?,
             radio_status: crate::rc::FLIGHT_RADIO_STATUS.take_reader()?,
@@ -900,10 +858,6 @@ impl SampleSink for Stepper {
         if notch_fresh {
             self.flight.set_notch(notch.0, notch.1);
         }
-        let (fs_hold, fs_hold_fresh) = self.fs_hold.read();
-        if fs_hold_fresh {
-            self.flight.set_fs_hold_en(fs_hold);
-        }
         // A refused set keeps the previous one; core 1 has no defmt, so it only counts (`stat` prints).
         let (gains, gains_fresh) = self.gains.read();
         if gains_fresh && !self.flight.set_gains(gains) {
@@ -974,14 +928,12 @@ impl SampleSink for Stepper {
         {
             self.mode_log.done(&out);
         }
-        // The hands-off state (decision-mavlink-mode-20261123, Amendment D): a MSG when `hands_off_msg_due` says so (every
-        // change while FS_HOLD_EN in force is 1; with 0 only entries into and exits from a hands-off state, N10 (iv)), a
-        // push of its own (MODE's record format is unchanged); a dropped one is offered again.
+        // The hands-off state: a MSG at every change, a push of its own; a dropped one is offered again.
         // The text carries why the state was entered ("HO 3 HOLD stn-lost"); at AUTO's exit on station loss a second MSG
         // gives the station HEARTBEAT's age and the RC port's latest ground-station sender (one push, dropped if full).
         let ho = self.flight.hands_off_state();
         let reason = self.flight.hands_off_reason();
-        if fw_flight::step::hands_off_msg_due(self.flight.fs_hold_in_force(), self.ho_logged, ho)
+        if self.ho_logged != Some(ho)
             && self.push_msg(out.t_us, &fw_flight::step::hands_off_reason_msg(ho, reason))
         {
             self.ho_logged = Some(ho);

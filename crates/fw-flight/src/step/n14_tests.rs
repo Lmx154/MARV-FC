@@ -97,7 +97,7 @@ fn n14_td_a_is_the_allocator_floor_flag() {
     }
 }
 
-/// One flight: armed on the ground in Altitude, climb to about 5 m, hover 20 s, sticks lost (FS_HOLD_EN 0, T3), LAND to the ground.
+/// One flight: armed on the ground in Altitude, climb to about 5 m, hover 20 s, sticks lost (CRSF, T3), LAND to the ground.
 fn hover_and_land(gain: f32) -> (u64, bool, Option<u64>, Option<u64>) {
     let mut p = Plant::new(gain, 0.0, POSITION);
     p.step(Some((false, 0.0, Switch3::Middle)));
@@ -344,7 +344,7 @@ fn gentle_take_off(gain: f32) -> (Plant, bool) {
 }
 
 /// At real gain 1.46 a gentle take-off never sets the 0.714 latch but sets the low mark ("ever airborne"), and a stick
-/// loss in that hover gives LAND (FS_HOLD_EN 0, T3), not STOP; the vehicle stays armed and in the air for 2 s.
+/// loss in that hover gives LAND (CRSF, T3), not STOP; the vehicle stays armed and in the air for 2 s.
 #[test]
 fn n14_low_mark_sets_at_gain_1_46_and_a_stick_loss_there_lands() {
     let (mut p, latch) = gentle_take_off(1.46);

@@ -52,7 +52,6 @@ fn board_step(f: &mut TestFlight, m: &Mailbox, t: u64, report: Option<RcSample>)
 fn a_command_through_the_mailbox_is_applied_on_the_step_that_takes_it_and_answered_with_its_sequence_number() {
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
     let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
-    f.set_fs_hold_en(true);
     let m = Mailbox::new();
     let mut t = 1_000_000u64;
     let mut go = |f: &mut TestFlight, report: Option<(bool, f32)>| {
@@ -124,7 +123,6 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
     for seed in [0x5eed_0001u64, 0x5eed_0002, 0x5eed_0003] {
         let cell = Cell::new(nav_at(0.0, ANGLE));
         let mut f = flight(&cell, handshake(), &Tuning::DEFAULT);
-        f.set_fs_hold_en(true);
         f.set_mission(super::auto_tests::square());
         let (mut bat, mut batt) = (Lcg(seed ^ 0xb0b0), fw_core::battery::CELL_KNOWN_OK);
         let mut rng = Lcg(seed);
@@ -232,7 +230,6 @@ fn a_plan_id_feed_reaches_the_seam_and_without_auto_changes_no_output() {
     let run = |feed: bool| {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
-        f.set_fs_hold_en(true);
         let m = Mailbox::new();
         let mut outs = std::vec::Vec::new();
         let mut t = 1_000_000u64;

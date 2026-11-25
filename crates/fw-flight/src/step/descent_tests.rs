@@ -155,13 +155,12 @@ fn descend(p: &mut Plant) -> Descent {
     Descent { h0, rise, t_2m, mean: (h0 - 2.0 - 11.0) / (t_11 - t_2m), dv_high, dv_low, dthrust, rate_max }
 }
 
-/// A 10 s hover at 5 m in Position with FS_HOLD_EN 1, the station heard, the square uploaded with return height `top`;
+/// A 10 s hover at 5 m in Position on a MAVLink flight, the station heard, the square uploaded with return height `top`;
 /// the sticks lost (HOLD), 1 s later Return at home: the climb in place to `top`, Home, LAND.
 fn return_at_home(top: f32) -> Plant {
     use crate::hands_off::{Command, Link, StationCommand};
     let mut p = land_plant();
     p.station = true;
-    p.f.set_fs_hold_en(true);
     p.source = fw_core::rc::RcSource::Receiver;
     p.f.set_battery_ok(true);
     let mut m = super::auto_tests::square();
@@ -183,7 +182,7 @@ fn return_at_home(top: f32) -> Plant {
     p
 }
 
-/// A 10 s hover at `h` m in Position, then the sticks lost with FS_HOLD_EN 0: LAND at once.
+/// A 10 s hover at `h` m in Position on a CRSF flight, then the sticks lost: LAND at once.
 fn pilot_hover_lost(h: f32) -> Plant {
     let mut p = land_plant();
     p.hover_at(h, 10.0);
@@ -229,7 +228,7 @@ fn quadratic_plant(gain: f32) -> Plant {
     p
 }
 
-/// A pilot throttle chop in Angle of 5 s from 60 m, then a stick loss (FS_HOLD_EN 0): the
+/// A pilot throttle chop in Angle of 5 s from 60 m, then a stick loss (CRSF): the
 /// accepted residual.
 #[test]
 fn fx2_quadratic_drag_throttle_chop_5_s_from_60_m_then_stick_loss() {
@@ -343,42 +342,39 @@ fn fx2_quadratic_drag_land_with_v_d_frozen() {
 }
 
 /// A gentle take-off in Angle at thrust gain 1.46 never sets the 0.714 latch; the stick
-/// loss with FS_HOLD_EN 1 (station heard) and with FS_HOLD_EN 0 lands without a stop.
+/// loss on a CRSF flight (station heard) lands without a stop.
 #[test]
 fn fx2_hover_below_the_latch_hold_and_land_fly_altitude() {
-    for fs in [true, false] {
-        let mut p = Plant::new(1.46, 0.0, 0.0, 0.0);
-        p.station = true;
-        p.f.set_fs_hold_en(fs);
-        p.step(Some((false, 0.0, Switch3::Low)));
-        p.step(Some((true, 0.0, Switch3::Low)));
-        let (climb, hover) = (p.f.shaper.throttle_for(1.03 * MASS * GRAVITY_MSS / 1.46), p.f.shaper.throttle_for(MASS * GRAVITY_MSS / 1.46));
-        let (mut thr, mut latch) = (0.0f32, false);
-        while p.d > -3.0 {
-            thr = (thr + 0.2 * DT_US as f32 * 1e-6).min(climb);
-            assert!(p.step(Some((true, thr, Switch3::Low))).armed && p.t < 60_000_000);
-            latch |= p.f.airborne;
-        }
-        for _ in 0..4_000 {
-            assert!(p.step(Some((true, hover, Switch3::Low))).armed);
-            latch |= p.f.airborne;
-        }
-        assert!(!latch && p.f.hands_off.ever_airborne());
-        let (mut modes, mut states) = (std::vec::Vec::new(), std::vec::Vec::new());
-        for k in 0..2_400 {
-            let o = p.step(None);
-            let s = p.f.hands_off_state();
-            if !states.contains(&s) {
-                states.push(s);
-            }
-            assert!(o.armed && s != State::Stop && p.d < -1.0, "step {k}: {s:?}");
-            if !modes.contains(&(s, o.mode)) {
-                modes.push((s, o.mode));
-            }
-        }
-        std::println!("FX-2 (4b) gain 1.46 below the latch, FS_HOLD_EN {fs}: (state, mode) {modes:?}; states {states:?}; latch at the end {}", p.f.airborne);
-        assert_eq!(modes.get(1), Some(&(State::Land, Mode::Altitude)), "{modes:?}");
+    let mut p = Plant::new(1.46, 0.0, 0.0, 0.0);
+    p.station = true;
+    p.step(Some((false, 0.0, Switch3::Low)));
+    p.step(Some((true, 0.0, Switch3::Low)));
+    let (climb, hover) = (p.f.shaper.throttle_for(1.03 * MASS * GRAVITY_MSS / 1.46), p.f.shaper.throttle_for(MASS * GRAVITY_MSS / 1.46));
+    let (mut thr, mut latch) = (0.0f32, false);
+    while p.d > -3.0 {
+        thr = (thr + 0.2 * DT_US as f32 * 1e-6).min(climb);
+        assert!(p.step(Some((true, thr, Switch3::Low))).armed && p.t < 60_000_000);
+        latch |= p.f.airborne;
     }
+    for _ in 0..4_000 {
+        assert!(p.step(Some((true, hover, Switch3::Low))).armed);
+        latch |= p.f.airborne;
+    }
+    assert!(!latch && p.f.hands_off.ever_airborne());
+    let (mut modes, mut states) = (std::vec::Vec::new(), std::vec::Vec::new());
+    for k in 0..2_400 {
+        let o = p.step(None);
+        let s = p.f.hands_off_state();
+        if !states.contains(&s) {
+            states.push(s);
+        }
+        assert!(o.armed && s != State::Stop && p.d < -1.0, "step {k}: {s:?}");
+        if !modes.contains(&(s, o.mode)) {
+            modes.push((s, o.mode));
+        }
+    }
+    std::println!("FX-2 (4b) gain 1.46 below the latch: (state, mode) {modes:?}; states {states:?}; latch at the end {}", p.f.airborne);
+    assert_eq!(modes.get(1), Some(&(State::Land, Mode::Altitude)), "{modes:?}");
 }
 
 /// The modelled clear agrees with the real one, deterministically.
@@ -390,7 +386,6 @@ fn fx2_wr1_modelled_clear_agrees_with_the_real_one() {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         f.set_heading_ok(true);
-        f.set_fs_hold_en(true);
         let mut t = 1_000_000u64;
         let mut step = |f: &mut TestFlight<'static>, rc: Option<(bool, f32)>| {
             t += DT_US;
@@ -486,7 +481,7 @@ fn land_to_stop(p: &mut Plant, max_s: f32, mut each: impl FnMut(&mut Plant, f32)
 }
 
 /// The chop case of N18 (c) on the quadratic-drag plant: 3 s at throttle 0 in Angle from a 60 m hover, the sticks lost
-/// at about 31 m falling at 15 m/s (FS_HOLD_EN 0: LAND)
+/// at about 31 m falling at 15 m/s (CRSF: LAND)
 fn chop_land(seat_off: bool) -> LandRun {
     let mut p = quadratic_plant(1.0);
     p.f.shaper.seat_off = seat_off;
@@ -546,7 +541,7 @@ fn n18_land_entered_descending_at_3_and_6_m_s_never_climbs() {
     }
 }
 
-/// A 2 m downward step of the height estimate during LAND at 15 m (from a 20 m hover, FS_HOLD_EN 0): no climb back
+/// A 2 m downward step of the height estimate during LAND at 15 m (from a 20 m hover, CRSF): no climb back
 /// (true v_D never negative after the step), the descent continues, touchdown, TD STOP.
 #[test]
 fn n18_a_2_m_downward_step_of_the_estimate_in_land_does_not_climb_back() {
@@ -577,7 +572,6 @@ fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
     let mut p = land_plant();
     p.station = true;
     p.f.home_wait_off = wait_off;
-    p.f.set_fs_hold_en(true);
     p.source = fw_core::rc::RcSource::Receiver;
     p.f.set_battery_ok(true);
     p.f.set_mission(super::auto_tests::square());

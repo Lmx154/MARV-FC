@@ -578,9 +578,6 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     gains: Gains,
     /// An eRPM this old or older is missing, us (`notch_hold_us`)
     notch_hold_us: u64,
-    /// The newest value of the parameter `FS_HOLD_EN` (`set_fs_hold_en`); the hands-off state machine takes it into
-    /// force on disarmed steps only.
-    fs_hold_en: bool,
     /// The hands-off state machine, stepped before the shaper and the gate.
     hands_off: HandsOff,
     /// The newest stick report, as the gate has seen it (not necessarily new this step); `None` before the first.
@@ -770,7 +767,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             gains_pending: Gains::of(tuning),
             gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
-            fs_hold_en: false,
             hands_off: HandsOff::new(tuning),
             rc_newest: None,
             heading_ok: true,
@@ -869,11 +865,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         ok
     }
 
-    /// The newest value of the runtime parameter `FS_HOLD_EN`.
-    pub fn set_fs_hold_en(&mut self, on: bool) {
-        self.fs_hold_en = on;
-    }
-
     /// An override of the hands-off state machine's heading verdict.
     #[cfg(any(test, feature = "sim"))]
     pub fn set_heading_ok(&mut self, ok: bool) {
@@ -959,12 +950,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     pub fn plan_seen(&self) -> (Option<u32>, u8) {
         let facts = mission_facts(&self.mission, self.plan_id, None, None, false);
         (facts.plan_id, if self.mission.from_mission { self.mission.count } else { 0 })
-    }
-
-    /// FS_HOLD_EN in force after the latest step. The board logs every change of the hands-off state while it is true,
-    /// and only the entries into and exits from a hands-off state while it is false ([`hands_off_msg_due`])
-    pub fn fs_hold_in_force(&self) -> bool {
-        self.hands_off.fs_hold_in_force()
     }
 
     /// Crash rule K after the latest step: the four terms and how long they have held.
@@ -1060,9 +1045,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.batt_started = true;
         }
         self.batt_prev_request = self.batt_request;
-        // A report the gate does not accept (the other source, or a receiver report at FS_HOLD_EN 0 while disarmed)
-        // reaches nothing in this step.
-        let rc = inputs.rc.as_ref().filter(|r| self.gate.accepts(r, self.fs_hold_en));
+        // A report of the other source while armed reaches nothing in this step.
+        let rc = inputs.rc.as_ref().filter(|r| self.gate.accepts(r));
         if let Some(&rc) = rc {
             self.rc_newest = Some(rc);
             self.shaper.sticks = rc.sticks;
@@ -1140,7 +1124,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let mission = mission_facts(&self.mission, self.plan_id, self.hands_off.home(), self.estimator.origin(), start);
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
-            fs_hold_en: self.fs_hold_en,
             crsf: self.rc_newest,
             last_radio_heartbeat_us: self.last_radio_heartbeat_us,
             last_radio_status_us: self.last_radio_status_us,
@@ -1756,13 +1739,6 @@ pub fn hands_off_msg(state: State) -> &'static str {
         State::Stop => "HO 7 STOP",
         State::Blind => "HO 8 BLIND",
     }
-}
-
-/// Whether the board writes [`hands_off_msg`] of `state` at this step, `logged` the state of the last MSG written
-/// (`None` before the first; a dropped MSG is not written, so it is offered again)
-pub fn hands_off_msg_due(fs_hold_in_force: bool, logged: Option<State>, state: State) -> bool {
-    let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
-    logged != Some(state) && (fs_hold_in_force || hands_off(state) || logged.is_some_and(hands_off))
 }
 
 /// The MSG text the board writes for crash rule K, `logged` the would-fire of the last one written.

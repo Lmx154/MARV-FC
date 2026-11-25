@@ -48,11 +48,10 @@ struct Rig {
 }
 
 impl Rig {
-    /// Disarmed on the ground; a MAVLink flight (FS_HOLD_EN 1) for receiver reports.
+    /// Disarmed on the ground; a MAVLink flight for receiver reports.
     fn new(source: RcSource, switch6: Switch3, valid: Valid) -> Rig {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, valid))));
-        let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
-        f.set_fs_hold_en(source == RcSource::Receiver);
+        let f = flight(cell, handshake(), &Tuning::DEFAULT);
         Rig { f, cell, t: 1_000_000, source, mission: false, switch6, valid }
     }
 
