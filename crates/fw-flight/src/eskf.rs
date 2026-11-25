@@ -1,41 +1,37 @@
-//! The shadow navigation filter (decision-nav-eskf-20261120, sections 1a-1c, 3, 6, 12; Amendment B, B2 where it
-//! stands; Amendment C; Amendment C-1; packet E1b): a 15-state error-state Kalman filter on IMU1, barometer, compass
-//! and GNSS at a delayed time horizon, t_now - nav_gps_delay_us (C2a), so that every measurement is fused at its own
-//! time. It never steers in phase 1 and is not in the flight image (packet E2 puts it on the board in shadow).
+//! The navigation filter: a 15-state error-state Kalman filter on IMU1, barometer, compass and GNSS at a delayed time
+//! horizon, t_now - nav_gps_delay_us, so that every measurement is fused at its own time.
 //!
-//! D1 (Amendment D): for `ImuBaro` and `Imu`, [`NavState::rates_rads`] is the PT1 of the raw gyro (`Tuning::ins_gyro_lpf_hz`,
-//! Mahony's form: dt from successive sample times capped at `DT_MAX_US`, started at the first sample with its value) minus
-//! the gyro-bias estimates x and y, subtracted when the NavState is built; with those at 0 it equals `Mahony`'s rates bit
-//! for bit. Amendment H (H2): the z gyro bias is NOT subtracted from the rate output, so `rates_rads[2]` is the PT1 value,
-//! `Mahony`'s bit for bit for any z bias estimate (the yaw rate hold reads it: with the stick centred the vehicle turns at
-//! the raw gyro's z offset, not at the estimated bias minus the true one); the attitude still integrates the gyro minus the
-//! full bias. `Full` keeps the raw gyro of its horizon sample minus the full bias.
+//! For `ImuBaro` and `Imu`, [`NavState::rates_rads`] is the PT1 of the raw gyro (`Tuning::ins_gyro_lpf_hz`, Mahony's
+//! form: dt from successive sample times capped at `DT_MAX_US`, started at the first sample with its value) minus the
+//! gyro-bias estimates x and y, so with those at 0 it equals `Mahony`'s rates bit for bit. The z gyro bias is NOT
+//! subtracted from the rate output (the yaw rate hold reads it: with the stick centred the vehicle turns at the raw
+//! gyro's z offset, not at the estimated bias minus the true one); the attitude still integrates the gyro minus the full
+//! bias. `Full` keeps the raw gyro of its horizon sample minus the full bias.
 //!
-//! D2 (Amendment D): for `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each covariance
-//! propagation closing an interval that was disarmed throughout keeps its mean bias-corrected specific force (the first
-//! one after a disarm is skipped, and the disarm clears it). In the first `update` after the armed state
-//! went false to true, when the tilt is aligned and that force is inside the alignment window, roll and pitch are set from it
-//! as in the first alignment with the yaw (the Euler yaw, atan2(R10, R00), of the attitude before the step) kept; v_N and v_E
-//! go to 0, the hold position to the current N and E, and the cross terms of the three attitude and the N/E velocity rows
-//! and columns of P are zeroed with every variance kept. It is that step's one heavy job; the queued jobs run later.
-//! Outside the window, or with no stored interval, nothing changes. `Full` never does it.
+//! For `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each covariance propagation closing an interval
+//! that was disarmed throughout keeps its mean bias-corrected specific force (the first one after a disarm is skipped,
+//! and the disarm clears it). In the first `update` after the armed state went false to true, when the tilt is aligned
+//! and that force is inside the alignment window, roll and pitch are set from it as in the first alignment with the yaw
+//! (the Euler yaw, atan2(R10, R00), of the attitude before the step) kept; v_N and v_E go to 0, the hold position to the
+//! current N and E, and the cross terms of the three attitude and the N/E velocity rows and columns of P are zeroed with
+//! every variance kept. It is that step's one heavy job; the queued jobs run later. Outside the window, or with no
+//! stored interval, nothing changes. `Full` never does it.
 //!
-//! Amendment E (E1) and Amendment H (H1): for `ImuBaro` the barometer scalar's Kalman gain has support on position D,
-//! velocity D and accelerometer-bias z only (a 3-state vertical filter beside the attitude filter): every other entry is
-//! set to zero and P is updated in Joseph form with that gain for every entry (as the no-aid scalars do for the bias
-//! entries), so in `ImuBaro` and `Imu` b_a,x and b_a,y are exactly 0.0 on every step, from the alignment and after every
-//! re-initialisation, and the barometer no longer moves the attitude, the gyro bias or the horizontal velocity and
-//! position; b_a,z is still learned through its covariance with D. `Full` and `Imu` are untouched. Without GPS the
-//! horizontal accelerometer bias is not estimated: the real one (about +0.1 to +0.2 m/s^2 in x per ESKF3) remains as a
-//! tilt offset of up to about 1 deg, as with Mahony. The mask is constant in production; test-only fields restore the
-//! full gain or also mask b_a,z for a test's negative control.
+//! For `ImuBaro` the barometer scalar's Kalman gain has support on position D, velocity D and accelerometer-bias z only
+//! (a 3-state vertical filter beside the attitude filter): every other entry is set to zero and P is updated in Joseph
+//! form with that gain for every entry (as the no-aid scalars do for the bias entries), so in `ImuBaro` and `Imu`
+//! b_a,x and b_a,y are exactly 0.0 on every step, and the barometer does not move the attitude, the gyro bias or the
+//! horizontal velocity and position; b_a,z is still learned through its covariance with D. `Full` and `Imu` are
+//! untouched. Without GPS the horizontal accelerometer bias is not estimated: the real one remains as a tilt offset of
+//! up to about 1 deg, as with Mahony. The mask is constant in production; test-only fields restore the full gain or also
+//! mask b_a,z for a test's negative control.
 //!
-//! The arithmetic is the N0 bench's ([`crate::eskf_n0`]): nominal integration on every IMU1 sample (at the horizon),
-//! the structured F P F^T + Q every nav_predict_us, sequential scalar fusions. Work rule I2: each step integrates the
-//! nominal state and does at most ONE heavy job (one covariance propagation, one scalar fusion, an alignment or a
-//! reset), taken from a queue of one GNSS epoch (4 jobs), one barometer set (3) and one compass sample (1); a newer set
-//! of the same kind replaces an unprocessed one (C9). Pure arithmetic: no lock, timer or log. The log codes of C8 are
-//! returned by [`Eskf::events`] for the caller to write.
+//! The arithmetic is [`crate::eskf_n0`]'s: nominal integration on every IMU1 sample (at the horizon), the structured
+//! F P F^T + Q every nav_predict_us, sequential scalar fusions. Each step integrates the nominal state and does at
+//! most ONE heavy job (one covariance propagation, one scalar fusion, an alignment or a reset), taken from a queue of one
+//! GNSS epoch (4 jobs), one barometer set (3) and one compass sample (1); a newer set of the same kind replaces an
+//! unprocessed one. Pure arithmetic: no lock, timer or log. The NKI log codes are returned by [`Eskf::events`] for the
+//! caller to write.
 //!
 //! Three variants, chosen at construction ([`Aiding`]): `Full` (ESKF3) is the filter described here; `ImuBaro` (ESKF2)
 //! ignores GNSS (unless built with the VelD option below) and compass, has no horizon delay (every IMU1 sample is
@@ -43,20 +39,20 @@
 //! with each barometer set; `Imu` (ESKF1) also ignores the barometer and holds N, E and D at the tilt alignment's values,
 //! one set per barometer period of horizon time (no-aid source code 5 for all three axes).
 //!
-//! Amendment V: `ImuBaro` built with the VelD option ([`EskfN::with_gps_vd`]; [`EskfN::with_aiding`] builds it without)
-//! also fuses the GNSS vertical velocity as one scalar, z = vel_ned_mm_s[2] x 1e-3 m/s (down positive), sigma
+//! `ImuBaro` built with the VelD option ([`EskfN::with_gps_vd`]; [`EskfN::with_aiding`] builds it without) also fuses
+//! the GNSS vertical velocity as one scalar, z = vel_ned_mm_s[2] x 1e-3 m/s (down positive), sigma
 //! `Tuning::nav_gps_vd_sigma_ms`, gated at nav_gate_sigma, with the barometer's masked gain (support on D, v_D and b_a,z;
 //! Joseph form). Time alignment: every nav_predict_us the time and S, the running sum of the IMU-only change of the
 //! nominal v_D, go into a ring of [`VD_RING`] entries; an epoch is predicted as v_D(now) - (S_now - S(t_m)), t_m = arrival -
 //! nav_gps_delay_us, S(t_m) the newest entry at or before t_m (none: stale, counted, skipped). Acceptance: tilt aligned,
 //! fix type >= 3 with a position, the interval rule as `Full`'s, armed, not an exact repeat of the previous fix (screened,
-//! NKI Src 12 Ok 3), a velocity, not stale. Gated: counted only. A re-initialisation empties the ring and sets S to 0. The GNSS job runs after the propagation and before the
-//! barometer; the vertical flags, the aiding timeout and the height reset stay the barometer's.
+//! NKI Src 12 Ok 3), a velocity, not stale. Gated: counted only. A re-initialisation empties the ring and sets S to 0. The
+//! GNSS job runs after the propagation and before the barometer; the vertical flags, the aiding timeout and the height
+//! reset stay the barometer's.
 //!
-//! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to (C8: "for I = 1, TimeUS is
-//! the horizon time"); there is no output predictor in phase 1.
+//! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to.
 //!
-//! Where the implementation takes a reading of the specification (checked against the code below, 2026-11-21):
+//! Behaviour notes:
 //! - The Src 9 reset fires at the first accepted, aligned, non-repeated epoch after EVERY arming; any change of the
 //!   armed state drops a queued GNSS job and the reject timers.
 //! - Horizontal aiding = armed AND started (a Src 9 reset since arming) AND a GNSS position fused or reset within
@@ -69,7 +65,7 @@
 //!   altitude is the fix's plus the filter's D, so that D keeps its datum.
 //! - A waiting compass sample is used only if it carried an `expected` field itself, with the newest value carried.
 //! - No velocity when the speed is at or above nav_gps_course_min_ms but the course is missing (nor when there is no
-//!   speed); then the speed screen (E3b) does not fire.
+//!   speed); then the speed screen does not fire.
 //! - Job order: propagation, GNSS, barometer, compass.
 //! - The height reset counts from the last barometer aid (fusion, reset, or the initialisation after a
 //!   re-initialisation). After a re-initialisation the next barometer sample initialises the height at once, as
@@ -77,20 +73,20 @@
 //! - No position process noise (Q on attitude, velocity and the biases only).
 //! - The declination is `Tuning::nav_mag_declination_rad`; the simulator sets it from its field model.
 //! - `ned_from_geo` uses the WGS 84 meridian and prime-vertical radii at the origin.
-//! - A Src 9 or C3 reset counts as "a GNSS position fused" for the flags and the aiding timeout.
+//! - A Src 9 or other GNSS position reset counts as "a GNSS position fused" for the flags and the aiding timeout.
 //! - velocity_ne and position_ne are one flag; it needs the yaw aligned, not the heading flag.
 //! - The first epoch after arming (a Src 9 reset) takes the receiver's velocity unscreened, its variance
-//!   nav_gps_vel_sigma_ms^2 also on the low-speed path; the C3 reset likewise.
+//!   nav_gps_vel_sigma_ms^2 also on the low-speed path; the position reset likewise.
 //! - Armed at rest, exactly repeated fixes are screened, the first epoch after arming included: GNSS is neither reset
 //!   nor fused until the fix changes.
-//! - C1b's H row is the exact Jacobian of the innovation in use (review ruling 1, [`yaw_h`]); a compass sample whose
+//! - The yaw H row is the exact Jacobian of the innovation in use ([`yaw_h`]); a compass sample whose
 //!   NED field has no usable horizontal component is a refusal.
 //! - Compass refusals (Ok 2) are all counted; one NKI record per nav_mag_fuse_us at most.
-//! - G5: the reported `NavSigma::position_ne_m` is sqrt(P_N + P_E + s_N^2 + s_E^2), s the floored GST sigmas of the latest GNSS
+//! - The reported `NavSigma::position_ne_m` is sqrt(P_N + P_E + s_N^2 + s_E^2), s the floored GST sigmas of the latest GNSS
 //!   epoch that became a job (a reset or the scalars); before any such epoch sqrt(P_N + P_E). The filter's dynamics do not use it.
-//! - G6-B: armed, when every healthy compass sample has been gated for nav_aid_timeout_us the yaw is not reset: `global_off`
+//! - Armed, when every healthy compass sample has been gated for nav_aid_timeout_us the yaw is not reset: `global_off`
 //!   is set (NKI Src 8, Ok 0, Inn = the innovation, once), `started` goes false, GNSS epochs are counted in `gps_disarmed` and not
-//!   fused, the heading flag is false, until the disarm edge. Disarmed, the yaw is reset to the compass (C1c).
+//!   fused, the heading flag is false, until the disarm edge. Disarmed, the yaw is reset to the compass.
 //! - A barometer, compass or GNSS sample whose time (validity time, sample time, arrival time minus
 //!   nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us, is dropped and counted
 //!   ([`EskfStats::stale`]).
@@ -110,21 +106,21 @@ use fw_core::calib::GRAVITY_MSS;
 use fw_core::sample::{GnssSample, MagExpected};
 use libm::{atan2f, cosf, fabsf, sinf, sqrtf};
 
-/// IMU1 samples the ring holds: nav_buffer_us (500 ms) at IMU1's 803.5 Hz, 402 samples of 32 B (C8).
+/// IMU1 samples the ring holds: nav_buffer_us (500 ms) at IMU1's 803.5 Hz, 402 samples of 32 B.
 pub const RING: usize = 402;
 /// WGS 84 semi-major axis, m (physical constant, as the simulator's GNSS model).
 pub const WGS84_A_M: f32 = 6_378_137.0;
 /// WGS 84 flattening (physical constant, as the simulator's GNSS model).
 pub const WGS84_F: f32 = 1.0 / 298.257_23;
-/// The span of the data the near-zero-speed screen (E3b) was validated on, N0c/N0e at 1 Hz, us: the
+/// The span of the data the near-zero-speed screen was validated on, N0c/N0e at 1 Hz, us: the
 /// position-difference speed is taken between the current epoch and the newest earlier epoch at least this much older.
 /// A derived rule, for the owner's approval.
 pub const SPD_SPAN_US: u64 = 1_000_000;
-/// Fixes kept for that span: 1 s at the receiver's highest rate, 10 Hz (section 4a), the current one, and one for jitter.
+/// Fixes kept for that span: 1 s at the receiver's highest rate, 10 Hz, the current one, and one for jitter.
 const FIX_HIST: usize = 12;
-/// The barometer's rate, Hz (section 4a: "baro 50"), for the waiting buffer.
+/// The barometer's rate, Hz , for the waiting buffer.
 const BARO_RATE_HZ: u64 = 50;
-/// The compass's rate, Hz (section 4a: "compass 100"), for the waiting buffer.
+/// The compass's rate, Hz , for the waiting buffer.
 const MAG_RATE_HZ: u64 = 100;
 /// Barometer samples that can wait for the horizon: nav_buffer_us (the largest delay the constructor accepts) times the
 /// rate, 25.
@@ -134,12 +130,12 @@ pub const BARO_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * BARO_RATE_HZ).div_
 /// sample does not use the slot), so any sample of the window may be the one; samples that arrive before the next
 /// fusion slot while the yaw is aligned are not kept.
 pub const MAG_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * MAG_RATE_HZ).div_ceil(1_000_000) as usize;
-/// Entries of the VelD option's S ring (Amendment V): nav_buffer_us / nav_predict_us + 1, 51.
+/// Entries of the VelD option's S ring: nav_buffer_us / nav_predict_us + 1, 51.
 pub const VD_RING: usize = (Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_predict_us + 1) as usize;
 /// 360 degrees in 1e-7 degree.
 const E7_TURN: i64 = 3_600_000_000;
 
-/// North, east and down (m) of `point` from `origin` (decision-sim-seams 10): i64 differences first, the longitude
+/// North, east and down (m) of `point` from `origin`: i64 differences first, the longitude
 /// difference wrapped to [-180, 180) degrees, scaled on the tangent plane at the origin with the WGS 84 meridian and
 /// prime-vertical radii (the simulator's form); down = -(alt difference) / 1000.
 pub fn ned_from_geo(origin: &GeoPoint, point: &GeoPoint) -> [f32; 3] {
@@ -155,7 +151,7 @@ pub fn ned_from_geo(origin: &GeoPoint, point: &GeoPoint) -> [f32; 3] {
     [rad(dlat) * rm, rad(dlon) * rn * cosf(lat0), -(dalt as f32) * 1e-3]
 }
 
-/// NKI record codes (section 8c, B5, C8).
+/// NKI record codes.
 pub mod code {
     /// Src: GNSS position north.
     pub const GPS_N: u8 = 0;
@@ -177,7 +173,7 @@ pub mod code {
     pub const YAW_RESET: u8 = 8;
     /// Src: GNSS position/velocity reset.
     pub const GPS_RESET: u8 = 9;
-    /// Src: GNSS vertical velocity (`ImuBaro` with the VelD option, Amendment V; logged as I = 1).
+    /// Src: GNSS vertical velocity (`ImuBaro` with the VelD option).
     pub const GPS_VD: u8 = 12;
     /// Ok: gated out.
     pub const GATED: u8 = 0;
@@ -185,11 +181,11 @@ pub mod code {
     pub const FUSED: u8 = 1;
     /// Ok: refused by the compass health test.
     pub const REFUSED: u8 = 2;
-    /// Ok: screened (frozen fix E1s, or near-zero speed E3b).
+    /// Ok: screened (frozen fix, or near-zero speed).
     pub const SCREENED: u8 = 3;
 }
 
-/// One NKI record's content (section 8c): source, innovation, its variance, outcome. TimeUS is the horizon time.
+/// One NKI record's content: source, innovation, its variance, outcome. TimeUS is the horizon time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Nki {
     /// Horizon time, us.
@@ -229,7 +225,7 @@ pub struct EskfStats {
     pub mag_gated: u32,
     /// Yaw alignments (Src 8, the first).
     pub yaw_aligns: u32,
-    /// Yaw resets after the timeout, disarmed only (Src 8, Ok 1); armed, G6-B sets `global_off` instead (Src 8, Ok 0).
+    /// Yaw resets after the timeout, disarmed only (Src 8, Ok 1); armed, the latch sets `global_off` instead (Src 8, Ok 0).
     pub yaw_resets: u32,
     /// GNSS samples seen.
     pub gps_epochs: u32,
@@ -237,11 +233,11 @@ pub struct EskfStats {
     pub gps_unaccepted: u32,
     /// Accepted epochs before the yaw alignment (not fused).
     pub gps_prealign: u32,
-    /// Accepted epochs while disarmed (not fused, C-1), and, armed, after the G6-B latch (`global_off`) was set.
+    /// Accepted epochs while disarmed (not fused), and, armed, after the latch (`global_off`) was set.
     pub gps_disarmed: u32,
-    /// Epochs screened whole as a frozen fix (E1s).
+    /// Epochs screened whole as a frozen fix.
     pub gps_e1s: u32,
-    /// Epochs whose velocity was screened (E3b).
+    /// Epochs whose velocity was screened.
     pub gps_e3b: u32,
     /// GNSS position scalars fused.
     pub gps_pos_fused: u32,
@@ -251,14 +247,14 @@ pub struct EskfStats {
     pub gps_vel_fused: u32,
     /// GNSS velocity scalars gated out.
     pub gps_vel_gated: u32,
-    /// GNSS resets (Src 9): at the first epoch after arming, and C3.
+    /// GNSS resets (Src 9): at the first epoch after arming, and the position reset after the timeout.
     pub gps_resets: u32,
     /// Re-initialisations on a non-finite state.
     pub reinits: u32,
     /// Barometer sets whose no-aid N/E stages were dropped because horizontal aiding had started (a GNSS reset between
     /// the stages).
     pub noaid_dropped: u32,
-    /// Heavy jobs in the step that had the most (the I2 check: never above 1).
+    /// Heavy jobs in the step that had the most (never above 1).
     pub max_jobs_per_step: u32,
     /// Queued jobs replaced by a newer set of the same kind before they ran.
     pub replaced: u32,
@@ -267,7 +263,7 @@ pub struct EskfStats {
     /// Barometer, compass or GNSS samples dropped on arrival because their time (validity time, sample time, or arrival
     /// time minus nav_gps_delay_us) is older than the IMU ring's span, now - nav_buffer_us.
     pub stale: u32,
-    /// VelD scalars fused (Amendment V).
+    /// VelD scalars fused.
     pub gps_vd_fused: u32,
     /// VelD scalars gated out.
     pub gps_vd_gated: u32,
@@ -288,7 +284,7 @@ pub enum Aiding {
     Full,
 }
 
-/// The constructor's refusal (C2a).
+/// The constructor's refusal.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum EskfError {
     /// nav_gps_delay_us > nav_buffer_us.
@@ -297,7 +293,7 @@ pub enum EskfError {
     RingTooSmall,
 }
 
-/// The change a reset made to the nominal state in one `update` (G1): `q_after = dq x q_before` (Hamilton, body to NED,
+/// The change a reset made to the nominal state in one `update`: `q_after = dq x q_before` (Hamilton, body to NED,
 /// [w, x, y, z]; the rotation is on the earth side), `v_after = v_before + dv`, `p_after = p_before + dp`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reset {
@@ -369,7 +365,7 @@ struct MagWait {
     expected: bool,
 }
 
-/// The barometer set: the barometer scalar, then no-aid N and E (B2). For [`Aiding::Imu`] the hold set: stages 1 to 3,
+/// The barometer set: the barometer scalar, then no-aid N and E. For [`Aiding::Imu`] the hold set: stages 1 to 3,
 /// no-aid N, E and D.
 #[derive(Clone, Copy, Debug)]
 struct BaroJob {
@@ -429,12 +425,12 @@ pub struct EskfN<const R: usize> {
     origin: Option<GeoPoint>,
     /// Previous fix (fix type >= 3 with a position): t_us, lat, lon.
     gps_prev: Option<(u64, i32, i32)>,
-    /// Horizontal aiding is running: an epoch after arming has reset the position (C-1).
+    /// Horizontal aiding is running: an epoch after arming has reset the position.
     started: bool,
-    /// G6-B: while armed, every healthy compass sample was gated for nav_aid_timeout_us; GNSS is not fused and the heading
+    /// While armed, every healthy compass sample was gated for nav_aid_timeout_us; GNSS is not fused and the heading
     /// flag stays false until the disarm edge clears this.
     global_off: bool,
-    /// G5: the floored GST sigmas (N, E) of the latest GNSS epoch that became a job, m; only the reported position sigma
+    /// The floored GST sigmas (N, E) of the latest GNSS epoch that became a job, m; only the reported position sigma
     /// reads it (no state or P).
     last_sigma_ne: Option<[f32; 2]>,
     last_pos_us: u64,
@@ -453,43 +449,43 @@ pub struct EskfN<const R: usize> {
     mag_job: Option<[f32; 3]>,
     events: [Option<Nki>; EVENTS],
     stats: EskfStats,
-    /// The accelerometer-bias inhibit of the no-aid scalars (B2); off only in a test's negative control.
+    /// The accelerometer-bias inhibit of the no-aid scalars; off only in a test's negative control.
     noaid_inhibit: bool,
     /// Horizon time from which the next [`Aiding::Imu`] hold set is queued.
     next_hold_us: u64,
-    /// D1: PT1 of the raw gyro of the integrated samples ([`Aiding::ImuBaro`], [`Aiding::Imu`]).
+    /// PT1 of the raw gyro of the integrated samples ([`Aiding::ImuBaro`], [`Aiding::Imu`]).
     rates_lpf: [f32; 3],
-    /// D2: mean bias-corrected specific force of the last completed disarmed covariance interval, body frame.
+    /// Mean bias-corrected specific force of the last completed disarmed covariance interval, body frame.
     arm_f: Option<[f32; 3]>,
-    /// D2: the armed state went false to true and no `update` has run since.
+    /// The armed state went false to true and no `update` has run since.
     arm_edge: bool,
-    /// D2: the current covariance interval began armed (the armed state went true to false since the last propagation).
+    /// The current covariance interval began armed (the armed state went true to false since the last propagation).
     interval_armed: bool,
-    /// D2: the arming-edge re-alignment is on; off only in a test's negative control.
+    /// The arming-edge re-alignment is on; off only in a test's negative control.
     arm_realign: bool,
-    /// G1: the time of the sample whose nominal state [`EskfN::snapshot`] is to keep.
+    /// The time of the sample whose nominal state [`EskfN::snapshot`] is to keep.
     snap_req: Option<u64>,
-    /// G1: that sample's time and nominal q, v, p right after its integration, in the step it was integrated.
+    /// That sample's time and nominal q, v, p right after its integration, in the step it was integrated.
     snap: Option<(u64, [f32; 4], [f32; 3], [f32; 3])>,
-    /// G1: the reset of this step's job, if it was one.
+    /// The reset of this step's job, if it was one.
     reset: Option<Reset>,
-    /// G1: the job of this step was a reset of the nominal state.
+    /// The job of this step was a reset of the nominal state.
     reset_job: bool,
-    /// H1 test control: the `ImuBaro` barometer scalar uses the full gain, every entry (the production gain has support
+    /// Test control: the `ImuBaro` barometer scalar uses the full gain, every entry (the production gain has support
     /// on D, v_D and b_a,z only).
     #[cfg(test)]
     baro_full_gain: bool,
-    /// E1 test control: the same scalar also leaves b_a,z alone.
+    /// Test control: the same scalar also leaves b_a,z alone.
     #[cfg(test)]
     baro_abias_z_mask: bool,
     /// Test switch for a `Flight` test that must stay armed: the compass reset after the timeout also while armed (the rule
-    /// before G6-B), through the same `mag_job` -> `yaw_set` path.
+    /// before the latch), through the same `mag_job` -> `yaw_set` path.
     #[cfg(test)]
     pub(crate) armed_yaw_reset: bool,
-    /// P-2 test control: horizontal aiding stopping at the timeout leaves `started` set (the rule before P-2).
+    /// Test control: horizontal aiding stopping at the timeout leaves `started` set.
     #[cfg(test)]
     pub(crate) keep_started_at_timeout: bool,
-    /// Amendment V: the VelD option (`ImuBaro` only, fixed at construction).
+    /// The VelD option (`ImuBaro` only, fixed at construction).
     gps_vd: bool,
     /// The running sum of the IMU-only change of the nominal v_D, m/s.
     vd_s: f32,
@@ -500,10 +496,10 @@ pub struct EskfN<const R: usize> {
     /// V-4 test control: the prediction is v_D(now), no time alignment.
     #[cfg(test)]
     vd_align_off: bool,
-    /// Test control: a re-initialisation keeps the S ring and S (the rule before the fix).
+    /// Test control: a re-initialisation keeps the S ring and S.
     #[cfg(test)]
     vd_keep_on_reinit: bool,
-    /// Test control: the VelD job fuses a non-finite measurement or innovation (the rule before the fix).
+    /// Test control: the VelD job fuses a non-finite measurement or innovation.
     #[cfg(test)]
     vd_no_finite_check: bool,
 }
@@ -550,7 +546,7 @@ fn wrap(a: f32) -> f32 {
     }
 }
 
-/// The C4 health test on a compass field already rotated to NED.
+/// The health test on a compass field already rotated to NED.
 pub fn healthy(m_ned: &[f32; 3], e: &MagExpected) -> bool {
     let norm = sqrtf(m_ned[0] * m_ned[0] + m_ned[1] * m_ned[1] + m_ned[2] * m_ned[2]);
     let inc = atan2f(m_ned[2], sqrtf(m_ned[0] * m_ned[0] + m_ned[1] * m_ned[1]));
@@ -565,13 +561,13 @@ fn mag_ned(q: &[f32; 4], m_b: &[f32; 3]) -> [f32; 3] {
     core::array::from_fn(|i| r[i][0] * m_b[0] + r[i][1] * m_b[1] + r[i][2] * m_b[2])
 }
 
-/// The C1b yaw innovation: wrap(dec - atan2(m_E, m_N)), m = R(q) m_b.
+/// The yaw innovation: wrap(dec - atan2(m_E, m_N)), m = R(q) m_b.
 pub fn yaw_innov(q: &[f32; 4], m_b: &[f32; 3], dec: f32) -> f32 {
     let m = mag_ned(q, m_b);
     wrap(dec - atan2f(m[1], m[0]))
 }
 
-/// The C1b yaw row on the NED attitude error, as corrected by the review (ruling 1, 2026-11-21): the exact Jacobian of
+/// The yaw row on the NED attitude error: the exact Jacobian of
 /// the predicted azimuth atan2(m_E, m_N) of m = R(q) m_b, the error composed on the left (q <- [1, dθ/2] q, so
 /// m <- m + dθ x m): [-m_N m_D / c, -m_E m_D / c, 1], c = m_N^2 + m_E^2. None when c <= f32::EPSILON |m|^2: a
 /// horizontal component below sqrt(f32::EPSILON) (3.5e-4) of the field, where its direction is set by the rounding
@@ -587,7 +583,7 @@ pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
 }
 
 impl<const R: usize> EskfN<R> {
-    /// Not aligned, disarmed, no sample seen. Err when nav_gps_delay_us > nav_buffer_us (C2a).
+    /// Not aligned, disarmed, no sample seen. Err when nav_gps_delay_us > nav_buffer_us.
     pub fn new(tuning: &Tuning) -> Result<Self, EskfError> {
         Self::with_aiding(tuning, Aiding::Full)
     }
@@ -599,7 +595,7 @@ impl<const R: usize> EskfN<R> {
         Self::build(tuning, aiding, false)
     }
 
-    /// `ImuBaro` with the VelD option (Amendment V). Err as [`EskfN::with_aiding`], and with [`EskfError::RingTooSmall`] when
+    /// `ImuBaro` with the VelD option. Err as [`EskfN::with_aiding`], and with [`EskfError::RingTooSmall`] when
     /// nav_predict_us is 0 or the S ring is shorter than nav_buffer_us / nav_predict_us + 1 entries.
     pub fn with_gps_vd(tuning: &Tuning) -> Result<Self, EskfError> {
         if tuning.nav_predict_us == 0 || tuning.nav_buffer_us / tuning.nav_predict_us + 1 > VD_RING as u64 {
@@ -703,7 +699,7 @@ impl<const R: usize> EskfN<R> {
         self.aiding_set
     }
 
-    /// Built with the VelD option (Amendment V).
+    /// Built with the VelD option.
     pub fn gps_vd(&self) -> bool {
         self.gps_vd
     }
@@ -718,17 +714,17 @@ impl<const R: usize> EskfN<R> {
         &self.stats
     }
 
-    /// This step's NKI records (C8), in order.
+    /// This step's NKI records, in order.
     pub fn events(&self) -> impl Iterator<Item = &Nki> {
         self.events.iter().flatten()
     }
 
-    /// Tilt aligned (B2).
+    /// Tilt aligned.
     pub fn tilt_aligned(&self) -> bool {
         self.tilt_aligned
     }
 
-    /// Yaw aligned to a healthy compass (C1a).
+    /// Yaw aligned to a healthy compass.
     pub fn yaw_aligned(&self) -> bool {
         self.yaw_aligned
     }
@@ -781,7 +777,7 @@ impl<const R: usize> EskfN<R> {
         self.horizon_us.unwrap_or(0)
     }
 
-    /// Back to "not aligned", keeping the origin, the barometer datum, the buffers and the counters (B2, C3).
+    /// Back to "not aligned", keeping the origin, the barometer datum, the buffers and the counters.
     fn reinitialise(&mut self) {
         self.nom = NOMINAL0;
         self.p = [[0.0; N]; N];
@@ -860,7 +856,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// The interval's job: the covariance propagation, or before the tilt alignment the alignment test (B2).
+    /// The interval's job: the covariance propagation, or before the tilt alignment the alignment test.
     fn predict(&mut self) {
         self.predict_due = false;
         self.since_predict_us = 0;
@@ -871,7 +867,7 @@ impl<const R: usize> EskfN<R> {
             }
             self.interval_armed = false;
             n0::covariance_predict(&mut self.p, &self.nom.q, &dvel, dt, &self.noise);
-            // The diagonal held at or above 0, as after a fusion (section 1b).
+            // The diagonal held at or above 0, as after a fusion.
             for i in 0..N {
                 self.p[i][i] = self.p[i][i].max(0.0);
             }
@@ -923,7 +919,7 @@ impl<const R: usize> EskfN<R> {
         self.aiding_prev = false;
     }
 
-    /// D2: the tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step. True
+    /// The tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step. True
     /// when it ran, which is the step's one heavy job.
     fn realign_at_arming(&mut self, q_pre: &[f32; 4]) -> bool {
         let edge = self.arm_edge;
@@ -994,7 +990,7 @@ impl<const R: usize> EskfN<R> {
         (ok, s)
     }
 
-    /// A no-aid scalar on position `axis` (B2): not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
+    /// A no-aid scalar on position `axis`: not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
     /// P - K ph^T - ph K^T + K K^T s.
     fn fuse_noaid(&mut self, axis: usize, innov: f32, var: f32) {
         let k = POS + axis;
@@ -1025,7 +1021,7 @@ impl<const R: usize> EskfN<R> {
         self.event(code::NOAID, innov, s, code::FUSED);
     }
 
-    /// The `ImuBaro` barometer scalar on D (E1, H1): [`EskfN::fuse_vertical_masked`] of state D.
+    /// The `ImuBaro` barometer scalar on D: [`EskfN::fuse_vertical_masked`] of state D.
     fn fuse_baro_masked(&mut self, innov: f32, var: f32) -> (bool, f32) {
         self.fuse_vertical_masked(POS + 2, innov, var)
     }
@@ -1072,7 +1068,7 @@ impl<const R: usize> EskfN<R> {
         (true, s)
     }
 
-    /// Horizontal aiding (C-1): armed, started, and a GNSS position fused within nav_aid_timeout_us.
+    /// Horizontal aiding: armed, started, and a GNSS position fused within nav_aid_timeout_us.
     fn horizontal_aiding(&self) -> bool {
         self.armed && self.started && self.horizon().saturating_sub(self.last_pos_us) < self.t.nav_aid_timeout_us
     }
@@ -1110,7 +1106,7 @@ impl<const R: usize> EskfN<R> {
                     self.stats.baro_gated = self.stats.baro_gated.wrapping_add(1);
                     let since = self.last_baro_aid_us.unwrap_or(horizon);
                     if horizon.saturating_sub(since) >= self.t.nav_aid_timeout_us {
-                        // As B1 (EKF3 ResetHeight): D to the barometer, its row and column re-initialised; vD to 0
+                        // As EKF3 ResetHeight: D to the barometer, its row and column re-initialised; vD to 0
                         // disarmed, kept armed.
                         let change = -job.h_b - self.nom.p[2];
                         self.nom.p[2] = -job.h_b;
@@ -1150,7 +1146,7 @@ impl<const R: usize> EskfN<R> {
     }
 
     /// Yaw := yaw + dpsi (a rotation about NED down); the yaw row and column of P re-initialised to the compass noise;
-    /// b_g,z, b_a,x, b_a,y to 0 with their initial variances and cross terms zeroed (C1a, C3).
+    /// b_g,z, b_a,x, b_a,y to 0 with their initial variances and cross terms zeroed.
     fn yaw_set(&mut self, dpsi: f32) {
         let dq = [cosf(0.5 * dpsi), 0.0, 0.0, sinf(0.5 * dpsi)];
         self.nom.q = normalized(qmul(&dq, &self.nom.q));
@@ -1169,7 +1165,7 @@ impl<const R: usize> EskfN<R> {
         self.event(code::YAW_RESET, dpsi, sm * sm, code::FUSED);
     }
 
-    /// The compass job (C1): alignment, the yaw fusion with the full H row, or the reset after the timeout.
+    /// The compass job: alignment, the yaw fusion with the full H row, or the reset after the timeout.
     fn mag_job(&mut self, m_b: [f32; 3]) {
         let q = self.nom.q;
         let Some(hy) = yaw_h(&q, &m_b) else {
@@ -1217,7 +1213,7 @@ impl<const R: usize> EskfN<R> {
                     self.yaw_set(y);
                     self.stats.yaw_resets = self.stats.yaw_resets.wrapping_add(1);
                 } else if !self.global_off {
-                    // G6-B: armed, a compass that disagrees for the timeout is not trusted over the filter and the filter
+                    // Armed, a compass that disagrees for the timeout is not trusted over the filter and the filter
                     // is not trusted over the compass: no yaw reset, GNSS off until the disarm edge.
                     self.global_off = true;
                     self.started = false;
@@ -1249,7 +1245,7 @@ impl<const R: usize> EskfN<R> {
             return;
         }
         let Some(e) = self.mag_expected.filter(|_| w.expected) else {
-            // No expected field: the compass is never used (C4).
+            // No expected field: the compass is never used.
             return;
         };
         let r = rotation(&self.nom.q);
@@ -1265,8 +1261,8 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A GNSS epoch on arrival (its time is the horizon's, C2a): acceptance (5c, C2b), the origin (6a), the C-1 rules,
-    /// the frozen-fix and near-zero-speed screens (C2d), and the plan: the Src 9 reset or the scalars.
+    /// A GNSS epoch on arrival (its time is the horizon's): acceptance, the origin, the arming rules,
+    /// the frozen-fix and near-zero-speed screens, and the plan: the Src 9 reset or the scalars.
     fn gnss_arrival(&mut self, g: &GnssSample) {
         self.stats.gps_epochs = self.stats.gps_epochs.wrapping_add(1);
         let r = &g.reading;
@@ -1436,7 +1432,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A GNSS epoch on arrival for the VelD option (Amendment V): acceptance as `Full`'s where it applies (a position with
+    /// A GNSS epoch on arrival for the VelD option: acceptance as `Full`'s where it applies (a position with
     /// fix type >= 3, the interval rule, armed, the exact-repeat screen), a velocity, and an S entry at or before t_m.
     fn vd_arrival(&mut self, g: &GnssSample) {
         let r = &g.reading;
@@ -1681,7 +1677,7 @@ impl<const R: usize> Estimator for EskfN<R> {
         let aiding = self.horizontal_aiding();
         if self.aiding_prev && !aiding {
             self.hold_ne = [self.nom.p[0], self.nom.p[1]];
-            // P-2: the next accepted, non-repeated epoch after a timeout restarts aiding with a reset (Src 9).
+            // The next accepted, non-repeated epoch after a timeout restarts aiding with a reset (Src 9).
             #[cfg(test)]
             let keep = self.keep_started_at_timeout;
             #[cfg(not(test))]
@@ -1714,7 +1710,7 @@ impl<const R: usize> Estimator for EskfN<R> {
 
     fn set_armed(&mut self, armed: bool) {
         if armed != self.armed {
-            // GNSS only while armed; the first accepted epoch after arming resets the horizontal state (C-1).
+            // GNSS only while armed; the first accepted epoch after arming resets the horizontal state.
             self.started = false;
             self.gps_job = None;
             self.vd_job = None;
@@ -1744,9 +1740,9 @@ pub(crate) mod tests {
     use std::println;
     use std::vec::Vec;
 
-    /// IMU period, us: 800 Hz (decision-sim-conventions 6).
+    /// IMU period, us: 800 Hz.
     pub(crate) const PERIOD_US: u64 = 1_250;
-    /// Barometer 50 Hz, compass 100 Hz, GNSS 5 Hz (section 3b, 4a; the board's GPS_RATE_MS 200).
+    /// Barometer 50 Hz, compass 100 Hz, GNSS 5 Hz (the board's GPS_RATE_MS 200).
     const BARO_EVERY: u64 = 16;
     const MAG_EVERY: u64 = 8;
     const GNSS_EVERY: u64 = 160;
@@ -1755,7 +1751,7 @@ pub(crate) mod tests {
     /// The synthetic field: 50 uT, 60 deg down; tolerances of the stored defaults MAG_HLT_STR 10 %, MAG_HLT_INC 10 deg.
     const STRENGTH_UT: f64 = 50.0;
     const INC_DEG: f64 = 60.0;
-    /// B3: the test-only sigma honesty check.
+    /// The test-only sigma honesty check.
     const SIGMAS: f32 = 3.0;
 
     pub(crate) fn expected() -> MagExpected {
@@ -1883,7 +1879,7 @@ pub(crate) mod tests {
                 }
                 let (lat, lon) = geo(p);
                 // One unit (about 1 cm) of dither on every other epoch: a perfect receiver at rest would repeat its fix
-                // exactly, which E1s screens while armed.
+                // exactly, which the frozen-fix screen screens while armed.
                 let lat = lat + (self.k / self.gps_every % 2) as i32;
                 let speed = v[0].hypot(v[1]);
                 let course = (v[1].atan2(v[0]).to_degrees().rem_euclid(360.0) * 100.0) as u16;
@@ -1943,7 +1939,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// G2 tests: a non-finite velocity in the core's state, as `b7` makes it.
+    /// A non-finite velocity in the core's state, as `b7` makes it.
     pub(crate) fn poison<const R: usize>(e: &mut EskfN<R>) {
         e.nom.v[1] = f32::NAN;
     }
@@ -2001,7 +1997,7 @@ pub(crate) mod tests {
         assert!(healthy(&field(1.0, inc + e.tol_inclination_rad - d), &e));
         assert!(!healthy(&field(1.0, inc + e.tol_inclination_rad + d), &e));
         assert!(!healthy(&field(1.0, inc - e.tol_inclination_rad - d), &e));
-        // H (review ruling 1): against central differences of the innovation actually used, yaw_innov, under the error
+        // H: against central differences of the innovation actually used, yaw_innov, under the error
         // composed on the left (q <- [1, dθ/2] q): H_j = -(y(+eps e_j) - y(-eps e_j)) / (2 eps). Inclinations 0, 60 and
         // 75 deg; tilts 0 and 30 deg (roll, pitch and both); eight yaws; a 3 deg attitude error about a generic axis so
         // that the innovation is not zero. eps 1e-3 rad: the f32 rounding of y (about 2e-7) gives about 2e-4 of noise,
@@ -2231,7 +2227,7 @@ pub(crate) mod tests {
         assert!(old.gps_unaccepted > new.gps_epochs / 3, "the control: the 219 ms half is refused at 215");
     }
 
-    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`, decision-gnss-m10-20261122) every 200 ms: a 3D fix whose
+    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`) every 200 ms: a 3D fix whose
     /// `lat_std_mm` and `lon_std_mm` are both the receiver's hAcc, `alt_std_mm` its vAcc, no HDOP or VDOP, no UTC time.
     /// `without_std` is the control: the latitude deviation not given.
     fn m10_stream(without_std: bool) -> EskfStats {
@@ -2303,10 +2299,10 @@ pub(crate) mod tests {
             }
         });
         let s1 = *f.stats();
-        // R1 (lead, 2026-11-21): C3 governs. After the hold the next fresh epoch is fused if it passes the gate; if it is
-        // gated, the C3 reset follows after the timeout. Either way the flags return only after an accepted position
+        // After the hold the next fresh epoch is fused if it passes the gate; if it is
+        // gated, the position reset follows after the timeout. Either way the flags return only after an accepted position
         // fusion or a reset.
-        // P-2: the first changed fix after the hold is a reset, and it can fall in the hold's own 10 s window.
+        // The first changed fix after the hold is a reset, and it can fall in the hold's own 10 s window.
         let early_reset = s1.gps_resets > s0.gps_resets;
         let (mut fused_or_reset, mut outcome, mut back) = (early_reset, early_reset.then_some("reset"), None);
         run(&mut f, &mut w, 8.0, |_| true, |f, nav, _| {
@@ -2396,7 +2392,7 @@ pub(crate) mod tests {
             out += &std::format!(" after {secs} s: yaw sigma {:.3} rad, bg_z sigma {:.4} rad/s, gated {}, resets {};", sig.0, sig.1, f.stats().mag_gated, f.stats().yaw_resets);
         }
         println!("c8:{out}");
-        // I3 (report only): the compass turned 90 deg 10 s after the alignment, followed for 40 s.
+        // the compass turned 90 deg 10 s after the alignment, followed for 40 s.
         let (mut f, mut w) = flying(&t, 10.0, [0.0; 3]);
         w.mag_rot = 90.0_f64.to_radians();
         let t0 = f.horizon();
@@ -2427,7 +2423,7 @@ pub(crate) mod tests {
             f.stats().mag_gated,
             f.stats().mag_fused
         );
-        // G6-B: armed, a compass turned 90 deg and gated for the timeout does not reset the yaw: Src 8 with Ok 0, `global_off`,
+        // Armed, a compass turned 90 deg and gated for the timeout does not reset the yaw: Src 8 with Ok 0, `global_off`,
         // GNSS not fused, heading and NE flags false, until the disarm edge.
         let (mut f, mut w) = flying(&t, 60.0, [0.0; 3]);
         assert!(f.stats().gps_pos_fused > 0 && f.nav().valid.position_ne && f.nav().valid.heading);
@@ -2598,7 +2594,7 @@ pub(crate) mod tests {
         assert!(back.is_some_and(|r| r > resets), "NE returned only after a reset");
     }
 
-    /// P-2: what the first epochs after a GNSS outage or hold do, with `keep` the rule before P-2.
+    /// What the first epochs after a GNSS outage or hold do, with `keep` the test control.
     /// Returns (steps with NE valid false from the timeout to the first Src 9 after the fault, first Src 9 time after the
     /// fault ended or None, first epoch event time after the fault ended, NE-valid-lost time, NE flags over the window).
     fn p2_run(fault: impl Fn(u64) -> Fault, keep: bool) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>, bool) {
@@ -2637,7 +2633,7 @@ pub(crate) mod tests {
         let (lost, reset, first) = (lost.expect("NE lost at the timeout"), reset.expect("a Src 9 reset after the outage"), first.expect("an epoch"));
         assert_eq!(reset, first, "the first epoch back is the reset");
         assert!(lost < reset && flags_false, "NE flags false from the timeout to the reset");
-        // The control: the old sequence, no reset at the first epoch back (C3's reset follows only after the timeout, if at all).
+        // The control: the old sequence, no reset at the first epoch back (the position reset follows only after the timeout, if at all).
         assert!(c_lost.is_some());
         assert!(c_reset.is_none_or(|r| r > c_first.unwrap() + 1_000_000), "control resets at its first epoch back");
     }
@@ -3010,7 +3006,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Amendment D, P1: D1 (rates) and D2 (arming-edge re-alignment) ----
+    // ---- Rates and the arming-edge re-alignment ----
 
     use crate::mahony::Mahony;
 
@@ -3080,7 +3076,7 @@ pub(crate) mod tests {
             s.imu1.reading.gyro_rads = off;
             let (nf, nm) = (f.update(&s), m.update(&s));
             bg = f.biases().0;
-            // H2: the z rate is Mahony's PT1 value bit for bit, whatever the z bias estimate.
+            // The z rate is Mahony's PT1 value bit for bit, whatever the z bias estimate.
             assert_eq!(nf.rates_rads[2].to_bits(), nm.rates_rads[2].to_bits(), "z rate differs from Mahony's");
             for i in 0..2 {
                 // nf = fl(x - b) with x Mahony's filtered gyro: |x - nf - b| <= u |x - b|, u = EPSILON / 2; the bound used
@@ -3537,7 +3533,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Amendment E, packet E-1: the ImuBaro barometer scalar does not update b_a,x and b_a,y ----
+    // ---- the ImuBaro barometer scalar does not update b_a,x and b_a,y ----
 
     /// Specific force, body frame, of a vehicle at rest rolled by `roll` and pitched by `pitch` (the inverse of the first
     /// alignment's formulas), plus the constant accelerometer offset `off`.
@@ -3783,7 +3779,7 @@ pub(crate) mod tests {
         let k = POS + 2;
         let p: Vec<Vec<f64>> = f.p.iter().map(|row| row.iter().map(|&x| f64::from(x)).collect()).collect();
         let s = p[k][k] + r;
-        // K = P H^T / s with every entry but D, v_D and b_a,z zeroed (H1); (I - K H) P (I - K H)^T + K R K^T.
+        // K = P H^T / s with every entry but D, v_D and b_a,z zeroed; (I - K H) P (I - K H)^T + K R K^T.
         let mut kg: Vec<f64> = (0..N).map(|i| p[i][k] / s).collect();
         for (i, v) in kg.iter_mut().enumerate() {
             if i != POS + 2 && i != VEL + 2 && i != ACCEL_BIAS + 2 {
@@ -3855,7 +3851,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Amendment H, packet H-1: the ImuBaro barometer scalar has support on D, v_D and b_a,z only; the z rate is the PT1 ----
+    // ---- the ImuBaro barometer scalar has support on D, v_D and b_a,z only; the z rate is the PT1 ----
 
     /// One sample of the warm-up and gusty runs: the World moving (accelerations changing every 7 s, a yaw rate), the body
     /// tilted by slow rolls and pitches, a constant accelerometer offset and a gyro x and y wobble.
@@ -3888,7 +3884,7 @@ pub(crate) mod tests {
 
     #[test]
     fn h_t1_one_imu_baro_barometer_fusion_changes_only_d_vd_and_ba_z() {
-        // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
+        // Scenario dimensioned at nav_baro_sigma_m 0.5; kept whatever the default.
         let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
         let f = warm_imu_baro(&t, 40);
         let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
@@ -3937,7 +3933,7 @@ pub(crate) mod tests {
 
     #[test]
     fn h_t2_a_long_gusty_run_keeps_p_a_covariance() {
-        // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
+        // Scenario dimensioned at nav_baro_sigma_m 0.5; kept whatever the default.
         let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
         // The checker: symmetric (bit-equal [i][j] and [j][i]), finite, a non-negative diagonal.
         let covariance = |f: &Eskf| (0..N).all(|i| (0..N).all(|j| f.p[i][j].to_bits() == f.p[j][i].to_bits())) && f.finite() && (0..N).all(|i| f.p[i][i] >= 0.0);
@@ -4081,9 +4077,9 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Packet P-G1: the ring length as a const generic, the snapshot and the reset hooks ----
+    // ---- the ring length as a const generic, the snapshot and the reset hooks ----
 
-    /// The 60 s stream of the G1 tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite IMU
+    /// The 60 s stream of the ring tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite IMU
     /// sample (index 20 000), a repeated timestamp (24 000) and one 20 ms gap before index 30 000.
     fn g1_stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
         let mut w = World::new(t);
@@ -4443,8 +4439,8 @@ pub(crate) mod tests {
     #[test]
     fn g1_e_resets_are_reported_exactly_and_ordinary_fusions_are_not() {
         let t = Tuning::DEFAULT;
-        // Full: yaw alignment (first compass), GPS reset at arming (5 s), C3 reset (a 10-sigma north fault from 20 s), a
-        // disarmed yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: while armed G6-B latches GNSS off
+        // Full: yaw alignment (first compass), GPS reset at arming (5 s), position reset (a 10-sigma north fault from 20 s), a
+        // disarmed yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: while armed the latch GNSS off
         // instead of resetting; the re-arming at 70 s is a further GPS reset), the height reset after the timeout (barometer
         // 40 m too high from 85 s, armed) and the height initialisation after a re-initialisation (at 100 s).
         let mut w = World::new(&t);
@@ -4509,7 +4505,7 @@ pub(crate) mod tests {
         assert!(kinds[3].is_empty() && !kinds[2].is_empty());
     }
 
-    // ---- Amendment V, packet P-V1: the GNSS vertical velocity in `ImuBaro` (the VelD option) ----
+    // ---- the GNSS vertical velocity in `ImuBaro` (the VelD option) ----
 
     /// The VelD records of the last step.
     fn vd_events(e: &Eskf) -> Vec<Nki> {
@@ -5002,7 +4998,7 @@ pub(crate) mod tests {
             assert!(!c.finite(), "the control must inject the non-finite value");
         }
         // (b) End to end: a NaN v_D at 20 s makes S NaN in that step and re-initialises; VelD fuses again after it and no
-        // further re-initialisation follows. Control (ring and S kept, no finite check: the code before the fix): a
+        // further re-initialisation follows. Control (ring and S kept, no finite check): a
         // re-initialisation at every accepted epoch.
         let run = |old: bool| {
             let (mut f, mut w) = vd_warm(&t, 20, old);

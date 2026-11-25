@@ -1,5 +1,4 @@
-//! The flight-core IMU device loop (design: decision-foundation, items 1 and 2 in the form of the
-//! two-core amendment). One task per IMU runs [`ImuTask::run`] over an [`ImuAdapter`]: it waits
+//! The flight-core IMU device loop. One task per IMU runs [`ImuTask::run`] over an [`ImuAdapter`]: it waits
 //! on `select(data-ready edge, kick)` and never on a timer. The data-ready deadline comes from
 //! core 0 as a CHECK kick ([`ImuCells::request_check`]); the woken task compares the clock with its
 //! last sample and, only if it is late by more than T = max(3 P, 10 ms), makes the one status read.
@@ -246,7 +245,7 @@ pub struct ImuStatus {
     pub missed_late_us: u64,
     /// Waits through the task's [`CountingDelay`] since boot.
     pub delays: u32,
-    /// Of those, waits since the device first reached Ok (design invariant F2: 0 in a clean run).
+    /// Of those, waits since the device first reached Ok (0 in a clean run).
     pub delays_after_start: u32,
     /// The latest finished restart request: number << 1, bit 0 set when the device reached Ok,
     /// clear when Failed or Absent (0: none yet; numbers start at 1).

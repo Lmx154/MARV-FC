@@ -1,4 +1,4 @@
-//! The output predictor (decision-nav-eskf-20261120, Amendment G, G1 and G2; packet P-G2): [`EskfSteer`] wraps the
+//! The output predictor: [`EskfSteer`] wraps the
 //! delayed-horizon navigation filter ([`Eskf`], `Aiding::Full`) and returns a steering estimate at the CURRENT IMU
 //! sample. PX4's `output_predictor.cpp` in its earth-frame form: a second strapdown (the output) integrates every IMU
 //! sample with the core's own `nominal_step` and its current biases; every `nav_predict_us` its state is pushed into a
@@ -8,7 +8,7 @@
 //! entry and the current state (PX4 :326-361). A reset of the core's state (`Eskf::last_reset`) is applied to the output
 //! as the exact delta, so the output never steps when the core resets. The core is not changed by the wrapper.
 //!
-//! Where this implementation takes a reading of the specification:
+//! Notes on the implementation:
 //! - [`EskfSteer::new`] returns `Result`: Err when the ring (compiled from `Tuning::DEFAULT`, [`OUT`] entries) is too
 //!   small for the tuning's `nav_buffer_us / nav_predict_us + 1`, or `nav_predict_us` is 0.
 //! - The step's `dt` is `min(now - previous propagated sample time, DT_MAX_US)`, as the core's `integrate`; a
@@ -43,7 +43,7 @@ use libm::sqrtf;
 #[cfg(test)]
 extern crate std;
 
-/// Entries of the output ring: `nav_buffer_us / nav_predict_us + 1`, 51 with the default tuning (G1). The same sizing
+/// Entries of the output ring: `nav_buffer_us / nav_predict_us + 1`, 51 with the default tuning. The same sizing
 /// rule as `eskf::BARO_WAIT`.
 pub const OUT: usize = (Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_predict_us + 1) as usize;
 /// Lower clamp of the time between two corrections and of T_d, s: PX4 `output_predictor.cpp:280`, `:326` (0.0001).
@@ -111,7 +111,7 @@ impl OutRing {
     }
 }
 
-/// The last correction's tracking errors, for the log (G9: NKI Src 10 and 11).
+/// The last correction's tracking errors, for the log (NKI Src 10 and 11).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tracking {
     /// Magnitude of the attitude error, rad (2 |dq.xyz|, PX4 `_output_tracking_error(0)`).
@@ -143,7 +143,7 @@ struct Moved {
     d: bool,
 }
 
-/// The output state, its ring and the correction state (G1).
+/// The output state, its ring and the correction state.
 #[derive(Clone, Debug)]
 struct Predictor {
     nom: Nominal,
@@ -168,7 +168,7 @@ struct Predictor {
 
 #[cfg(test)]
 std::thread_local! {
-    /// Test control (T12): correct against the core's final horizon time instead of the snapshot.
+    /// Test control: correct against the core's final horizon time instead of the snapshot.
     static MATCH_HORIZON: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// Test mutation m1: the sign of the attitude error.
     static FLIP_ATT: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
@@ -180,9 +180,9 @@ std::thread_local! {
     static NO_BIAS_COPY: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
     /// Test mutation m5: the rates from the raw gyro.
     static RAW_RATES: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
-    /// Test control (T5): the old reset rule, without the velocity step's effect on the position.
+    /// Test control: the old reset rule, without the velocity step's effect on the position.
     static RESET_NO_DV_TERM: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
-    /// Test control (T4): the reset rotation on the body side.
+    /// Test control: the reset rotation on the body side.
     static RESET_BODY_SIDE: core::cell::Cell<bool> = const { core::cell::Cell::new(false) };
 }
 
@@ -238,7 +238,7 @@ impl Predictor {
         }
     }
 
-    /// G1 step 3: PX4's align by copy.
+    /// Step 3: PX4's align by copy.
     fn copy_from(&mut self, core: &Eskf, now: u64) {
         let (q, v, p) = core.nominal();
         let (bg, ba) = core.biases();
@@ -269,7 +269,7 @@ impl Predictor {
         None
     }
 
-    /// G1 step 4a: the correction toward the core's snapshot, at most one per step.
+    /// Step 4a: the correction toward the core's snapshot, at most one per step.
     fn correct(&mut self, core: &Eskf, now: u64, dt: f32) {
         let snap = core.snapshot();
         #[cfg(test)]
@@ -337,10 +337,10 @@ impl Predictor {
         self.corrected = self.corrected.wrapping_add(1);
     }
 
-    /// G1 step 4b: the core's reset as an exact delta on the current state, every entry and the rate correction. The
-    /// core's velocity step `dv` at its horizon time `t_r` also moves its position afterwards (P-G2b, lead's ruling):
-    /// an entry of time `t >= t_r` gets `p += dp + dv (t - t_r)`, the current state, which is at its own time `t_us` (the previous propagated sample; step 4c then integrates the new
-    /// sample with the new velocity), `p += dp + dv (t_us - t_r)`. An entry
+    /// Step 4b: the core's reset as an exact delta on the current state, every entry and the rate correction. The
+    /// core's velocity step `dv` at its horizon time `t_r` also moves its position afterwards:
+    /// an entry of time `t >= t_r` gets `p += dp + dv (t - t_r)`; the current state, at its own time `t_us` (the previous propagated sample; step 4c then integrates the new
+    /// sample with the new velocity), gets `p += dp + dv (t_us - t_r)`. An entry
     /// older than `t_r` (none should exist after the pop) gets `dp` alone and is counted.
     fn apply_reset(&mut self, r: Option<Reset>, t_r: u64) -> Moved {
         let Some(r) = r else {
@@ -395,7 +395,7 @@ impl Predictor {
         }
     }
 
-    /// G1 step 4c: one IMU sample of propagation, the earth-side slew, the periodic push.
+    /// Step 4c: one IMU sample of propagation, the earth-side slew, the periodic push.
     fn propagate(&mut self, core: &Eskf, s: &Sensors, dt_us: u64) {
         let now = s.imu1.t_us;
         let dt = dt_us as f32 * 1e-6;
@@ -431,7 +431,7 @@ impl Predictor {
     }
 }
 
-/// The steering estimator: the delayed-horizon core and its output predictor (G1). It borrows the core, which the
+/// The steering estimator: the delayed-horizon core and its output predictor. It borrows the core, which the
 /// board builds as a static.
 #[derive(Debug)]
 pub struct EskfSteer<'a> {
@@ -486,7 +486,7 @@ impl<'a> EskfSteer<'a> {
     }
 }
 
-/// Test access for the `Flight` test T6 in `step.rs`: an earth-frame tilt offset put into the output's current state.
+/// Test access for the `Flight` test in `step.rs`: an earth-frame tilt offset put into the output's current state.
 #[cfg(test)]
 impl EskfSteer<'_> {
     pub(crate) fn inject_tilt(&mut self, rad: f32) {
@@ -575,19 +575,18 @@ impl Estimator for EskfSteer<'_> {
     }
 }
 
-/// The composite steering estimator (Amendment G-1, G-1b): attitude, rates and the horizontal state from the output
+/// The composite steering estimator: attitude, rates and the horizontal state from the output
 /// predictor ([`EskfSteer`]), the vertical state (D, v_D, their sigmas and flags) from the zero-delay filter ([`EskfN`], `Aiding::ImuBaro`, ring
-/// size `RV`: the host tests use `EskfZ`, ring 1; the board `Eskf`, one monomorphisation of the filter in RAM). Both run on every step with the same sensors and the same armed state. A fixed composition, not
-/// a switch.
+/// size `RV`: the host tests use `EskfZ`, ring 1; the board `Eskf`, one monomorphisation of the filter in RAM). Both run on every step with the same sensors and the same armed state.
 ///
-/// Readings of the specification: the sigma is the output predictor's with the two vertical fields from the zero-delay
+/// The sigma is the output predictor's with the two vertical fields from the zero-delay
 /// filter when both estimators give one; if either has none the composite has none (a vertical sigma of the other
 /// filter would break "vertical fields only from the zero-delay filter", and the log reads `None` as infinite).
 #[derive(Debug)]
 pub struct SteerMix<'a, const RV: usize = 1> {
     h: EskfSteer<'a>,
     v: &'a mut EskfN<RV>,
-    /// The zero-delay filter's own state of the last `update`, for the log (G-1b: I = 1).
+    /// The zero-delay filter's own state of the last `update`, for the log.
     z: Option<NavState>,
 }
 
@@ -614,7 +613,7 @@ impl<'a, const RV: usize> SteerMix<'a, RV> {
     }
 }
 
-/// Test access for the `Flight` tests M2 and M3 in `step.rs`: the zero-delay filter, to force its state.
+/// Test access for the `Flight` tests in `step.rs`: the zero-delay filter, to force its state.
 #[cfg(test)]
 impl<const RV: usize> SteerMix<'_, RV> {
     pub(crate) fn vert_mut(&mut self) -> &mut EskfN<RV> {
@@ -682,7 +681,7 @@ mod tests {
     use std::println;
     use std::vec::Vec;
 
-    /// The scenario of t3, t3b, t5 (velocity part), t5d and t7 was designed at the LC76G's GNSS delay, 430 ms; they keep it whatever the default.
+    /// Scenarios t3, t3b, t5 (velocity part), t5d and t7 were designed at the LC76G's GNSS delay, 430 ms; they keep it whatever the default.
     const LC76G_GPS_DELAY_US: u64 = 430_000;
 
     #[test]
@@ -707,8 +706,8 @@ mod tests {
         assert!(EskfSteer::new(&mut core, &Tuning::DEFAULT).is_ok());
     }
 
-    /// The 100 s stream of the G1-e Full run without the re-initialisation: yawed, moving at constant velocity, a
-    /// yaw alignment (first compass), the GPS reset at arming (5 s), a C3 reset (a 10-sigma north fault from 20 s), a yaw
+    /// The 100 s stream of the Full run without the re-initialisation: yawed, moving at constant velocity, a
+    /// yaw alignment (first compass), the GPS reset at arming (5 s), a north-fault reset (a 10-sigma north fault from 20 s), a yaw
     /// reset (compass turned 90 deg from 60 s), the height reset (barometer 40 m too high from 85 s).
     fn stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
         stream_yaw(t, secs, 0.4)
@@ -741,7 +740,7 @@ mod tests {
         s.imu1.t_us >= 5_000_000
     }
 
-    /// Armed from 5 s but disarmed from `from_us` to `to_us`: G6-B resets no yaw while armed, so a test that needs a yaw reset
+    /// Armed from 5 s but disarmed from `from_us` to `to_us`: the core resets no yaw while armed, so a test that needs a yaw reset
     /// after its compass turn disarms before the timeout runs out (the disarmed reset, the same `yaw_set` path).
     fn armed_but(s: &Sensors, from_us: u64, to_us: u64) -> bool {
         armed_at(s) && !(from_us..to_us).contains(&s.imu1.t_us)
@@ -1067,7 +1066,7 @@ mod tests {
         assert_eq!(steer.skipped(), 0);
     }
 
-    // ---- T7: the tracking law with the core frozen ----
+    // ---- The tracking law with the core frozen ----
 
     /// A resting vehicle whose slow sensors are withheld: after alignment the core only integrates the IMU, so its state
     /// stays where it is. 3 s of settling, then `each(wrapper, true)` (the injection), then `secs` of steps with
@@ -1295,7 +1294,7 @@ mod tests {
         }
     }
 
-    // ---- T12: exact time ----
+    // ---- Exact time ----
 
     /// The World's samples re-timed: spacing varying +-30 % of 1250 us (a fixed pseudo-random sequence), every 500th
     /// sample double-spaced, a NaN gyro at two samples.
@@ -1353,7 +1352,7 @@ mod tests {
         assert!(cskipped > 100);
     }
 
-    // ---- Stage 3: resets and flags ----
+    // ---- Resets and flags ----
 
     /// One reset step as watched from outside.
     #[derive(Clone, Copy, Debug)]
@@ -1427,8 +1426,8 @@ mod tests {
     #[test]
     fn t4_no_tilt_step_across_yaw_alignment_resets_src9_c3_and_height_and_the_yaw_moves_by_the_reset() {
         let t = Tuning::DEFAULT;
-        // Level, yawed 90 deg from the start: the yaw alignment by about 90 deg; the GPS reset at arming (5 s), the C3
-        // reset (north fault from 20 s), a yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: G6-B resets
+        // Level, yawed 90 deg from the start: the yaw alignment by about 90 deg; the GPS reset at arming (5 s), the position
+        // reset (north fault from 20 s), a yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: the core resets
         // no yaw while armed), the height reset (85 s).
         let a = watch_all(&t, &stream_yaw(&t, 100, 90.0_f64.to_radians()), |s| armed_but(s, 61_000_000, 70_000_000));
         // Disarmed throughout, compass turned 90 deg from 30 s: the disarmed yaw reset.
@@ -1454,7 +1453,7 @@ mod tests {
             assert!(r.tilt_step <= r.tilt_bound, "{r:?}");
             assert!(fabsf(r.yaw_err as f32) as f64 <= r.yaw_bound, "{r:?}");
         }
-        // Rolling 30 deg at up to 113 deg/s with the compass turned at 20 s, disarmed from 21 s to 28 s (G6-B resets no yaw while
+        // Rolling 30 deg at up to 113 deg/s with the compass turned at 20 s, disarmed from 21 s to 28 s (no yaw reset while
         // armed): a disarmed yaw reset while tilted. Here the left and right products differ, so this is where the control can
         // fail the test.
         let c_stream = rocking_stream(&t, 40.0);
@@ -1494,7 +1493,7 @@ mod tests {
         (ev, ep, seen)
     }
 
-    /// A vehicle at rest, armed from 5 s; with `fault` the GNSS north is 3 m (10 sigma) off from 20 s (the C3 reset
+    /// A vehicle at rest, armed from 5 s; with `fault` the GNSS north is 3 m (10 sigma) off from 20 s (the position reset
     /// about 5 s later), with `baro_off` the barometer reads 40 m too high from 20 s (the height reset 5 s later).
     fn rest_stream(t: &Tuning, fault: bool, baro_off: bool) -> Vec<Sensors> {
         let mut w = World::new(t);
@@ -1528,7 +1527,7 @@ mod tests {
 
     #[test]
     fn t5_reset_exactness_a_reset_leaves_no_tracking_error_and_a_ring_without_the_delta_shows_the_delta() {
-        // At rest the core's velocity and the receiver's agree, so the C3 reset moves the position only; the height
+        // At rest the core's velocity and the receiver's agree, so the position reset moves the position only; the height
         // reset (armed) moves D only. Reset deltas with a velocity part are not exact: see the module's notes.
         let t = Tuning::DEFAULT;
         let armed = |s: &Sensors| s.imu1.t_us >= 5_000_000;
@@ -1591,11 +1590,10 @@ mod tests {
 
     #[test]
     fn t5_reset_exactness_with_a_velocity_part_the_position_follows_dv_times_the_time_since_the_reset() {
-        // P-G2b/c. A moving vehicle (2, 0.5 m/s), the default stream: the GNSS reset at arming sets the velocity too,
+        // A moving vehicle (2, 0.5 m/s), the default stream: the GNSS reset at arming sets the velocity too,
         // dv = (2, 0.5). The core's position after the reset is then dp + dv (t - t_r) from the old one, so the ring
         // entries (and the current state) must be moved by that, or the next corrections see about |dv| x the entry's age.
-        // On this stream a barometer set's no-aid N stage is queued when the reset runs; the core drops it (P-G2c), where
-        // it used to fuse it toward the old hold position (-9 m, K 9e-4: p_N moved by 8 mm).
+        // On this stream a barometer set's no-aid N stage is queued when the reset runs; the core drops it.
         let t = Tuning { nav_gps_delay_us: LC76G_GPS_DELAY_US, ..Tuning::DEFAULT };
         let st = stream(&t, 12);
         let (k0, r, fused_after, dropped, ev, ep, older) = vel_reset_case(&t, &st, 5_000_000);
@@ -1633,7 +1631,7 @@ mod tests {
 
     #[test]
     fn t5c_the_output_steps_by_the_exact_delta_at_the_reset_step_and_follows_the_twin_plus_the_delta_trajectory() {
-        // P-G2c. In the step of a GNSS reset with a velocity part the output's current position moves by the ordinary
+        // In the step of a GNSS reset with a velocity part the output's current position moves by the ordinary
         // motion of the step plus dp + dv (t_prev - t_r) (the state's own time to the core's reset time) and the velocity by
         // dv; afterwards it equals the run without the reset (disarmed, same samples) plus dp + dv (t - t_r), the core's
         // own trajectory shift, until the next epoch's fusion.
@@ -1705,7 +1703,7 @@ mod tests {
 
     #[test]
     fn t5d_the_rate_correction_is_rotated_by_a_yaw_reset_and_the_tracking_continues_on_the_new_axis() {
-        // P-G2c. The rocker world, the compass turned 90 deg from 20 s, disarmed from 21 s to 28 s (G6-B resets no yaw while armed): the disarmed yaw reset about 5 s later. A 0.05 rad
+        // The rocker world, the compass turned 90 deg from 20 s, disarmed from 21 s to 28 s (no yaw reset while armed): the disarmed yaw reset about 5 s later. A 0.05 rad
         // tilt offset about north is put into the output 800 steps (1 s) before the reset step (the correction sees it one delay,
         // 344 steps, later; at the reset it has been correcting for 456 steps: the earth-frame error vector is about
         // north, the rate correction too). The reset rotates both about down by the reset yaw; the
@@ -1787,8 +1785,8 @@ mod tests {
 
     #[test]
     fn t5b_p2_after_a_gnss_outage_longer_than_the_timeout_the_reset_step_drops_the_ne_flags_and_the_output_steps_by_the_exact_delta() {
-        // Addendum P-2: the first accepted epoch after the outage is a Src 9 reset (started cleared at the timeout); the output's
-        // NE flags are false for exactly that step and its position steps by the exact delta (t5c's formula).
+        // The first accepted epoch after the outage is a reset (started cleared at the timeout); the output's
+        // NE flags are false for exactly that step and its position steps by the exact delta.
         let t = Tuning::DEFAULT;
         let mut w = World::new(&t);
         w.yaw = 0.4;
@@ -1968,7 +1966,7 @@ mod tests {
 
     /// The stream of the SteerMix tests: yawed, moving north-east at constant velocity, a vertical manoeuvre (a climb
     /// from 10 s, at 2 m/s from 12 s; a reversal 20 s to 24 s to a descent at 2 m/s; the descent ended 30 s to 32 s), the
-    /// first compass alignment, GNSS with a 10-sigma north fault from 25 s (C3 reset), and from 36 s the barometer 40 m
+    /// first compass alignment, GNSS with a 10-sigma north fault from 25 s (position reset), and from 36 s the barometer 40 m
     /// too high (the height reset about 5 s later, armed).
     fn mix_stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
         let mut w = World::new(t);
@@ -2064,7 +2062,7 @@ mod tests {
         assert!(h_vs_z > 1_000 && worst > 1e-4, "taking D from the output predictor must be visible: {h_vs_z}, {worst}");
     }
 
-    // ---- Amendment V, packet P-V1: the zero-delay filter with the VelD option ----
+    // ---- The zero-delay filter with the VelD option ----
 
     #[test]
     fn v8_with_veld_on_the_mix_and_its_core_equal_the_mix_with_it_off_off_the_vertical() {

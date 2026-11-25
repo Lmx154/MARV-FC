@@ -1,11 +1,10 @@
-//! The N0 bench's arithmetic (decision-nav-eskf-20261120 in MARV-V2-drivers, section 11 row N0): the
-//! jobs of the planned 15-state error-state Kalman filter, single precision, written to be timed from
+//! Arithmetic of the 15-state error-state Kalman filter jobs, single precision, written to be timed from
 //! SRAM on the flight core by the bench binary `src/bin/eskf_bench.rs` and checked here on the host.
-//! Not called by the flight step. The filter packet (E1) may reuse or replace this module.
+//! Not called by the flight step.
 //!
-//! Error state (section 1a): attitude error (NED frame), velocity, position, gyro bias, accelerometer
+//! Error state: attitude error (NED frame), velocity, position, gyro bias, accelerometer
 //! bias, 3 entries each. Quaternions are `[w, x, y, z]`, body to NED.
-//! Jobs (section 3b work rule): [`nominal_step`] on every IMU sample; [`covariance_predict`] (the
+//! Jobs: [`nominal_step`] on every IMU sample; [`covariance_predict`] (the
 //! structured P <- F P F^T + Q; [`covariance_predict_dense`] is the naive dense form, for comparison);
 //! one scalar fusion, [`fuse`] (dense H row) or [`fuse_position`] (H has a single 1).
 // Fixed-size arrays only; every index is a loop bound or a constant below the array length (matrix
@@ -254,7 +253,7 @@ fn inject(n: &mut Nominal, dx: &[f32; N]) {
 /// The rest of a scalar fusion once P H^T (`ph`) and the innovation variance `s` are known: the gate
 /// (innovation^2 <= gate^2 s), K = P H^T / s, the state correction K innovation injected into the
 /// nominal state, and P <- P - K (H P), with H P = (P H^T)^T by symmetry: the upper triangle is
-/// computed and mirrored (symmetrised) and the diagonal held at or above 0 (section 1b).
+/// computed and mirrored (symmetrised) and the diagonal held at or above 0.
 #[inline(always)]
 fn finish(n: &mut Nominal, p: &mut Cov, ph: &[f32; N], s: f32, innov: f32, gate: f32) -> bool {
     if s.is_nan() || s <= 0.0 || innov * innov > gate * gate * s {
