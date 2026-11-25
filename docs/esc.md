@@ -48,7 +48,6 @@ flowchart LR
 
 - The task starts once at boot (lines released 3 s, a 25 ms break), then runs one exchange per millisecond for ever. A stall gives one late frame, never a burst.
 - Frames are Stop on every line, except command 13 (extended telemetry on) in bursts of 10 frames on one line once that line has answered for 1 s with no extended reply, then a 1 s hold-off.
-  With the feature `esc-no-edt` no burst starts.
 - The task logs nothing and takes no lock; core 0 does all conversion.
 
 ## ESC row
@@ -104,8 +103,6 @@ flowchart LR
 | `crates/fw-core/src/admission.rs` | `classify_motor_test`, `MotorTest` |
 | `src/actions.rs` | `motor_test` action |
 | `crates/fw-core/src/arming.rs` | the arming permit |
-
-Features: `esc-off` (task not built, ESC row FAILED, motor test unsupported), `esc-no-edt`.
 
 ## Related
 

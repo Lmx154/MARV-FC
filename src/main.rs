@@ -42,8 +42,6 @@ mod batt_fs;
 mod busclear;
 mod calibration;
 mod device;
-// With `esc-off` the ESC task is not built: only the core-0 readers of `esc` are used.
-#[cfg_attr(feature = "esc-off", allow(dead_code))]
 mod esc;
 mod flight;
 mod flight_latency;
@@ -290,11 +288,8 @@ async fn fbeat() -> ! {
 fn core1_main(
     imu1_parts: imu1::Parts,
     imu2_parts: imu2::Parts,
-    #[cfg(not(feature = "esc-off"))] esc_parts: esc::Parts,
-    #[cfg(not(feature = "esc-off"))] esc_test: fw_core::xcore::TripleReader<
-        'static,
-        fw_core::esc::TestCmd,
-    >,
+    esc_parts: esc::Parts,
+    esc_test: fw_core::xcore::TripleReader<'static, fw_core::esc::TestCmd>,
     flight_rc: Option<fw_core::xcore::TripleReader<'static, fw_core::rc::RcSample>>,
     steer: Option<&'static mut crate::flight::BoardMix>,
 ) -> ! {
@@ -315,16 +310,12 @@ fn core1_main(
     // Built here so that the DMA and GPIO interrupts are enabled on this core's NVIC.
     let imu1 = imu1::adapter(imu1_parts);
     let imu2 = imu2::adapter(imu2_parts);
-    #[cfg(not(feature = "esc-off"))]
     let esc_driver = esc::driver(esc_parts);
-    #[cfg(not(feature = "esc-off"))]
     let pio2_irq0 = if esc_driver.is_some() {
         1 + u8::from(interrupt::PIO2_IRQ_0.is_enabled())
     } else {
         3
     };
-    #[cfg(feature = "esc-off")]
-    let pio2_irq0 = 1 + u8::from(interrupt::PIO2_IRQ_0.is_enabled());
     CORE1_PIO2_IRQ0.store(pio2_irq0, Ordering::Release);
     CORE1_DMA_IRQ1.store(
         1 + u8::from(interrupt::DMA_IRQ_1.is_enabled()),
@@ -344,7 +335,6 @@ fn core1_main(
         if let Ok(token) = imu2::task(imu2, imu2_period_us) {
             spawner.spawn(token);
         }
-        #[cfg(not(feature = "esc-off"))]
         if let Some(Ok(token)) = esc_driver.map(|driver| esc::task(driver, esc_test)) {
             spawner.spawn(token);
         }
@@ -1331,7 +1321,6 @@ async fn main(spawner: Spawner) {
         offsets: imu2_offsets,
         setup: imu2_setup,
     };
-    #[cfg(not(feature = "esc-off"))]
     let esc_parts = esc::Parts {
         pio: p.PIO2,
         pin36: p.PIN_36,
@@ -1342,9 +1331,7 @@ async fn main(spawner: Spawner) {
         clk_sys_hz: embassy_rp::clocks::clk_sys_freq(),
     };
     // The motor-test cell (as the IMU offsets): the reader goes to core 1, the writer stays here.
-    #[cfg(not(feature = "esc-off"))]
     let esc_test = esc::test_reader();
-    #[cfg(not(feature = "esc-off"))]
     actions::init_motor_test();
     // The sticks cell (as the motor-test cell): the reader goes to core 1, the RC port's hooks take the writer.
     let flight_rc = rc::FLIGHT_RC.take_reader();
@@ -1371,9 +1358,7 @@ async fn main(spawner: Spawner) {
         core1_main(
             imu1_parts,
             imu2_parts,
-            #[cfg(not(feature = "esc-off"))]
             esc_parts,
-            #[cfg(not(feature = "esc-off"))]
             esc_test,
             flight_rc,
             steer,
@@ -1490,16 +1475,9 @@ async fn startup_checks() {
         u32::from(dma0_on),
     );
     let pio2_1 = CORE1_PIO2_IRQ0.load(Ordering::Acquire);
-    #[cfg(not(feature = "esc-off"))]
     check(
         pio2_1 == 2,
         "PIO2_IRQ_0 enabled on core 1 after the ESC driver was built there (0 not read, 1 off, 2 on, 3 driver refused its parts)",
-        u32::from(pio2_1),
-    );
-    #[cfg(feature = "esc-off")]
-    check(
-        pio2_1 == 1,
-        "esc-off: PIO2_IRQ_0 not enabled on core 1 (0 not read, 1 off, 2 on)",
         u32::from(pio2_1),
     );
     let pio2_0 = interrupt::PIO2_IRQ_0.is_enabled();

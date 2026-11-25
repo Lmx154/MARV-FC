@@ -91,13 +91,8 @@ const SLICE: Duration = Duration::from_millis(100);
 /// The SD card's channel (resources.md DMA row 4).
 const CH: usize = 4;
 const BIT: u32 = 1 << CH;
-/// INTE0 as the flight core leaves it: IMU1's channels 0 and 1, IMU2's 2 and 3, the ESC capture's 5
-/// (not built with `esc-off`).
-const FLIGHT_CHANNELS: u32 = if cfg!(feature = "esc-off") {
-    0x0f
-} else {
-    0x2f
-};
+/// INTE0 as the flight core leaves it: IMU1's channels 0 and 1, IMU2's 2 and 3, the ESC capture's 5.
+const FLIGHT_CHANNELS: u32 = 0x2f;
 /// At most this many entries of `LOGS/` are listed.
 const LIST_MAX: usize = 1024;
 /// One slot per log number (slot 0 unused).
@@ -1729,7 +1724,7 @@ fn register_checks() {
     let core1 = crate::CORE1_DMA_IRQ1.load(Ordering::Acquire);
     crate::check(
         inte[0] == FLIGHT_CHANNELS,
-        "SD: INTE0 = exactly the flight core's channels (0-3, and 5 unless esc-off), INTE0",
+        "SD: INTE0 = exactly the flight core's channels (0-3 and 5), INTE0",
         inte[0],
     );
     crate::check(inte[1] == BIT, "SD: INTE1 = 1 << 4, INTE1", inte[1]);

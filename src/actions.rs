@@ -36,9 +36,7 @@ static BOOK: Mutex<CriticalSectionRawMutex, RefCell<ActionBook>> =
     Mutex::new(RefCell::new(ActionBook::new()));
 
 /// Core 0's motor test: the admission record and the writer of the flight core's command cell
-/// (`esc::TEST`). `None` until [`init_motor_test`]: with `esc-off` it is never set, and command 209
-/// is UNSUPPORTED.
-#[cfg_attr(feature = "esc-off", allow(dead_code))]
+/// (`esc::TEST`). `None` until [`init_motor_test`].
 struct Motor {
     state: MotorTest,
     cell: TripleWriter<'static, TestCmd>,
@@ -47,8 +45,7 @@ struct Motor {
 static MOTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<Motor>>> =
     Mutex::new(RefCell::new(None));
 
-#[cfg(not(feature = "esc-off"))]
-/// Takes the cell's writer. Call once, on core 0, before core 1 starts (with the ESC task built).
+/// Takes the cell's writer. Call once, on core 0, before core 1 starts.
 pub fn init_motor_test() {
     let cell = crate::esc::test_writer();
     MOTOR.lock(|m| {
@@ -59,7 +56,7 @@ pub fn init_motor_test() {
     });
 }
 
-/// A motor-test spin is active (the status LED's purple). False when there is no ESC task (`esc-off`).
+/// A motor-test spin is active (the status LED's purple).
 pub fn motor_spin() -> bool {
     MOTOR.lock(|m| {
         m.borrow()
@@ -203,7 +200,7 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
 
 /// Command 209, `MAV_CMD_DO_MOTOR_TEST`: admitted by `fw_core::admission::MotorTest` (ACCEPTED at
 /// once, no IN_PROGRESS, nothing in the book), the whole `TestCmd` of an accepted command written to
-/// the flight core's cell. The same on every link. UNSUPPORTED when there is no ESC task (`esc-off`).
+/// the flight core's cell. The same on every link.
 fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
     // A spin is refused while armed or while flight throttles are sent; a running spin is replaced as before.
     // The permit is cleared before ARMED is loaded, as in `command`.

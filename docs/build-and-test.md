@@ -67,7 +67,6 @@ Cargo features are off by default; they add board checks and fault injections. B
 | SD and log | `inject-sd-no-card`, `inject-sd-wrong-format`, `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume`, `inject-log-delete-big`, `sd-irq-negative` | Test hooks of the SD task ([logging](logging.md)) |
 | Settings | `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | Flash save checks ([parameters](parameters.md)) |
 | Watchdog | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `stall-core0` | Each acts once, 20 s after a start the watchdog did not cause ([health](health.md)) |
-| ESC | `esc-off`, `esc-no-edt` | ESC task not built; or no extended-telemetry burst ([esc](esc.md)) |
 | PSRAM | `psram-skip-remap`, `psram-absent`, `psram-negative` | PSRAM checks |
 | Measurement | `xip-park`, `quiet-stat`, `eskf-bench` | Parked-core check, silent `[STAT]`, ESKF bench |
 | Bench, PROPS OFF | `restart-bench` | The in-air restart on the bench (below); never for flight |

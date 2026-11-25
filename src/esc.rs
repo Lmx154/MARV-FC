@@ -104,8 +104,6 @@ pub async fn task(mut drv: Driver, mut test: TripleReader<'static, TestCmd>) -> 
         match core::future::pending::<core::convert::Infallible>().await {}
     };
     let mut esc = Esc::new();
-    #[cfg(feature = "esc-no-edt")]
-    esc.set_edt_bursts(false);
     esc.start_begin();
     cell.write(*esc.status());
     drv.start(&mut SpinDelay).await;
