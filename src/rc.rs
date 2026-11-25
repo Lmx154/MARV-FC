@@ -378,11 +378,7 @@ impl Hooks for RcHooks {
                 t_us,
             });
         }
-        // A refused arm (decision-prearm-20261119, section 4): on the switch's off-to-on edge, while not armed and
-        // without core 0's permit, one WARNING text with the reason and the LED's three red flashes (the only
-        // formatting and queueing here, and only on such an edge). The gate reads the permit on core 1 a few hundred
-        // us apart from this read, so in that window a report without a refusal, or a refusal without a report, is
-        // possible; both are harmless.
+        // A waypoint mark: channel 9 off-to-on on a MAVLink receiver report sends one MARK text with the position.
         if let Some(n) = self.marks.update(matches!(source, RcSource::Receiver), ch[8], t_us) {
             let pos = match GNSS.latest.try_get() {
                 Some(Sample {
@@ -406,6 +402,11 @@ impl Hooks for RcHooks {
                 format_args!("{}", MarkText { n, pos }),
             );
         }
+        // A refused arm (decision-prearm-20261119, section 4): on the switch's off-to-on edge, while not armed and
+        // without core 0's permit, one WARNING text with the reason and the LED's three red flashes (the only
+        // formatting and queueing here, and only on such an edge). The gate reads the permit on core 1 a few hundred
+        // us apart from this read, so in that window a report without a refusal, or a refusal without a report, is
+        // possible; both are harmless.
         let arm = arm_switch(ch[4]);
         let edge = arm && !self.arm_on;
         self.arm_on = arm;
