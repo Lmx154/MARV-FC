@@ -457,6 +457,8 @@ pub struct GdnTargets {
     pub heights_ok: bool,
     /// `GDN_ALT_MAX` given to [`select_targets`], m (either source): the cap on RETURN's height on the flight core.
     pub alt_max_m: f32,
+    /// The committed mission holds at least one waypoint (any `GDN_SRC`): Start's refusal tells "not selected" from "none".
+    pub mission_stored: bool,
 }
 
 /// The target set to push: with `source` 1 the committed mission's waypoints (`mission` without its last item, the return
@@ -513,6 +515,7 @@ pub fn select_targets(
         from_mission: source == 1,
         heights_ok,
         alt_max_m: alt_limits_m.1,
+        mission_stored: mission.len() >= 2,
     }
 }
 
@@ -2434,13 +2437,16 @@ mod tests {
             from_mission: false,
             heights_ok: false,
             alt_max_m: ALT_MAX_DEFAULT,
+            mission_stored: false,
         };
         want.targets[..4].copy_from_slice(&PARAM_TARGETS);
         let missions = [many(0), many(1), many(3), many(7), many(16), points3().to_vec()];
         for mission in &missions {
+            let want = GdnTargets { mission_stored: mission.len() >= 2, ..want };
             assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, mission, 7, LIMITS), want, "{} items", mission.len());
         }
         // Any other value than 1 is the parameters too (the parameter's range is 0 to 1).
+        let want = GdnTargets { mission_stored: true, ..want };
         assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
         assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
         // FX-3 item 1: GDN_ALT_MAX in force is carried with either source.
@@ -2483,6 +2489,23 @@ mod tests {
         assert_eq!((g.count, g.return_m, g.plan_id), (0, 20.0, 9));
         assert!(g.targets.iter().all(|t| *t == (0, 0)));
         assert!(g.alts_m.iter().all(|z| *z == 0.0));
+    }
+
+    #[test]
+    fn mission_stored_is_at_least_one_waypoint_whatever_the_source() {
+        for source in [0, 1, 2] {
+            let g = |mission: &[Item]| select_targets(source, 3, 2.5, &PARAM_TARGETS, mission, 7, LIMITS).mission_stored;
+            assert!(!g(&[]), "source {source}: empty");
+            assert!(!g(&many(1)), "source {source}: the return item alone");
+            assert!(g(&many(2)), "source {source}: one waypoint and the return item");
+            assert!(g(&many(4)), "source {source}: three waypoints and the return item");
+            assert!(g(&many(16)), "source {source}: full");
+        }
+        // Everything else of the set is as before: source 0 is the parameters, source 1 the mission.
+        let a = select_targets(0, 3, 2.5, &PARAM_TARGETS, &many(4), 7, LIMITS);
+        assert_eq!((a.count, a.from_mission, a.heights_ok, a.plan_id, a.return_m), (3, false, false, 0, 0.0));
+        let b = select_targets(1, 3, 2.5, &PARAM_TARGETS, &many(4), 7, LIMITS);
+        assert_eq!((b.count, b.from_mission, b.heights_ok, b.plan_id, b.return_m), (3, true, true, 7, 20.0));
     }
 
     #[test]

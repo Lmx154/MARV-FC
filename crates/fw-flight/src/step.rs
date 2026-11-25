@@ -236,6 +236,7 @@ impl CrashStatus {
 const NO_MISSION: MissionFacts = MissionFacts {
     plan_id: None,
     has_waypoints: false,
+    mission_stored: false,
     z_within_limits: true,
     max_waypoint_distance_m: None,
     return_height_m: None,
@@ -254,6 +255,7 @@ const MISSION_OFF: GdnTargets = GdnTargets {
     from_mission: false,
     heights_ok: false,
     alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
+    mission_stored: false,
 };
 
 /// The state machine's mission facts from `set`, the target set in force (Amendment A, A4: list, heights, return height
@@ -270,7 +272,7 @@ fn mission_facts(
     start: bool,
 ) -> MissionFacts {
     if !set.from_mission {
-        return MissionFacts { plan_id: station_plan, ..NO_MISSION };
+        return MissionFacts { plan_id: station_plan, mission_stored: set.mission_stored, ..NO_MISSION };
     }
     let far = match (home, origin) {
         (Some(h), Some(o)) if start => {
@@ -292,6 +294,7 @@ fn mission_facts(
     MissionFacts {
         plan_id,
         has_waypoints: set.count > 0,
+        mission_stored: set.mission_stored,
         z_within_limits: set.heights_ok,
         max_waypoint_distance_m: far,
         return_height_m: plan_id.map(|_| set.return_m),

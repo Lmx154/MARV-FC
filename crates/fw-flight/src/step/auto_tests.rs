@@ -36,7 +36,7 @@ pub(super) fn geo(n: f32, e: f32) -> (i32, i32) {
 /// The uploaded mission (`GDN_SRC` 1) of waypoints (north, east, z above home), GDN_RADIUS `radius_m`, return height
 /// 20 m, heights checked by core 0.
 pub(super) fn mission(wps: &[(f32, f32, f32)], radius_m: f32, plan_id: u32) -> GdnTargets {
-    let mut m = GdnTargets { from_mission: true, heights_ok: true, return_m: 20.0, plan_id, radius_m, count: wps.len() as u8, ..MISSION_OFF };
+    let mut m = GdnTargets { from_mission: true, heights_ok: true, return_m: 20.0, plan_id, radius_m, count: wps.len() as u8, mission_stored: !wps.is_empty(), ..MISSION_OFF };
     for (k, &(n, e, z)) in wps.iter().enumerate() {
         m.targets[k] = geo(n, e);
         m.alts_m[k] = z;
@@ -202,6 +202,9 @@ fn mission_facts_from_the_pushed_set_reach_start() {
     params.from_mission = false;
     params.heights_ok = false;
     let mut r = Run::new(3.0, Some(params));
+    assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::MissionNotSelected));
+    params.mission_stored = false;
+    r.f.set_mission(params);
     assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::NoWaypoints));
     let mut high = square();
     high.heights_ok = false;
@@ -401,13 +404,15 @@ fn g_start_denied_with_its_reason() {
     let mut gdn_src_0 = square();
     gdn_src_0.from_mission = false;
     gdn_src_0.heights_ok = false;
+    let gdn_src_0_empty = GdnTargets { mission_stored: false, ..gdn_src_0 };
     let mut high = square();
     high.heights_ok = false;
     let far = mission(&[(30.0, 0.0, 10.0), (1_001.0, 0.0, 10.0)], 2.0, 0x5157_0002);
     let near = mission(&[(30.0, 0.0, 10.0), (999.0, 0.0, 10.0)], 2.0, 0x5157_0003);
-    let cases: [(&str, Option<GdnTargets>, DenyReason); 4] = [
+    let cases: [(&str, Option<GdnTargets>, DenyReason); 5] = [
         ("no mission", None, DenyReason::NoWaypoints),
-        ("GDN_SRC 0", Some(gdn_src_0), DenyReason::NoWaypoints),
+        ("GDN_SRC 0, a mission stored", Some(gdn_src_0), DenyReason::MissionNotSelected),
+        ("GDN_SRC 0, nothing stored", Some(gdn_src_0_empty), DenyReason::NoWaypoints),
         ("a waypoint beyond 1 km", Some(far), DenyReason::WaypointBeyondRange),
         ("a height outside the limits", Some(high), DenyReason::HeightOutsideLimits),
     ];

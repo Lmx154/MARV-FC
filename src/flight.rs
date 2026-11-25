@@ -561,6 +561,7 @@ const GDN_OFF: GdnSet = GdnTargets {
     from_mission: false,
     heights_ok: false,
     alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
+    mission_stored: false,
 };
 
 /// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
@@ -838,6 +839,7 @@ impl Stepper {
                 from_mission: self.gdn_in_force.from_mission,
                 heights_ok: self.gdn_in_force.heights_ok,
                 alt_max_m: self.gdn_in_force.alt_max_m,
+                mission_stored: self.gdn_in_force.mission_stored,
                 ..self.gdn_pushed
             };
             if pushed != self.gdn_in_force {

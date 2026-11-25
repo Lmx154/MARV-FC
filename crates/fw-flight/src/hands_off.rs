@@ -163,6 +163,9 @@ pub struct MissionFacts {
     pub plan_id: Option<u32>,
     /// The stored list has at least one waypoint (count 2 or more).
     pub has_waypoints: bool,
+    /// The stored list has at least one waypoint whether or not it is the set in force (`GDN_SRC`): with `has_waypoints`
+    /// false, Start answers `MissionNotSelected` instead of `NoWaypoints`.
+    pub mission_stored: bool,
     /// Every stored z (waypoints and return) is inside the height limits in force now.
     pub z_within_limits: bool,
     /// The largest horizontal distance of any stored waypoint from home, m; `None` when unknown.
@@ -282,6 +285,9 @@ pub enum DenyReason {
     SwitchNotHigh,
     /// Start on a MAVLink flight (N19 section 5): no receiver report younger than 1.0 s with the mission switch ON.
     MissionSwitchOff,
+    /// Start: a list with a waypoint is stored but it is not the set in force (`GDN_SRC` is not 1). Answered where
+    /// `NoWaypoints` is.
+    MissionNotSelected,
 }
 
 impl DenyReason {
@@ -308,6 +314,7 @@ impl DenyReason {
             DenyReason::BatteryCritical => 17,
             DenyReason::LinkLost => 18,
             DenyReason::MissionSwitchOff => 19,
+            DenyReason::MissionNotSelected => 20,
         }
     }
 }
@@ -1120,7 +1127,11 @@ impl HandsOff {
             return Some(DenyReason::StationAbsent);
         }
         if !i.mission.has_waypoints {
-            return Some(DenyReason::NoWaypoints);
+            return Some(if i.mission.mission_stored {
+                DenyReason::MissionNotSelected
+            } else {
+                DenyReason::NoWaypoints
+            });
         }
         if !i.mission.z_within_limits {
             return Some(DenyReason::HeightOutsideLimits);
@@ -1204,6 +1215,7 @@ mod tests {
         MissionFacts {
             plan_id: Some(PLAN),
             has_waypoints: true,
+            mission_stored: true,
             z_within_limits: true,
             max_waypoint_distance_m: Some(100.0),
             return_height_m: Some(20.0),
@@ -1836,6 +1848,7 @@ mod tests {
         r.i.mission = MissionFacts {
             plan_id: None,
             has_waypoints: false,
+            mission_stored: false,
             z_within_limits: true,
             max_waypoint_distance_m: None,
             return_height_m: None,
@@ -2542,11 +2555,15 @@ mod tests {
 
     #[test]
     fn hands_off_each_start_condition_alone_is_denied_with_its_reason() {
-        let cases: [(DenyReason, fn(&mut Rig)); 16] = [
+        let cases: [(DenyReason, fn(&mut Rig)); 17] = [
             (DenyReason::StationAbsent, |r| {
                 r.i.last_radio_heartbeat_us = Some(r.now() - STATION_LOST_US - 1)
             }),
-            (DenyReason::NoWaypoints, |r| r.i.mission.has_waypoints = false),
+            (DenyReason::NoWaypoints, |r| {
+                r.i.mission.has_waypoints = false;
+                r.i.mission.mission_stored = false;
+            }),
+            (DenyReason::MissionNotSelected, |r| r.i.mission.has_waypoints = false),
             (DenyReason::HeightOutsideLimits, |r| r.i.mission.z_within_limits = false),
             (DenyReason::NoHome, |r| r.h.home_ne = None),
             // A move inside HOLD with the NE velocity valid would trip H13's anchor and land at once (H14).
@@ -2806,6 +2823,7 @@ mod tests {
         let mut r = Rig::ms_hold();
         r.i.last_radio_heartbeat_us = Some(r.now() - STATION_LOST_US - 1);
         r.i.mission.has_waypoints = false;
+        r.i.mission.mission_stored = false;
         r.i.mission.z_within_limits = false;
         r.h.home_ne = None;
         r.i.position_ne_valid = false;
@@ -2814,9 +2832,11 @@ mod tests {
         r.i.tier = Tier::T2;
         r.i.battery_ok = false;
         r.i.crsf = r.i.crsf.map(|c| RcSample { switch6: Switch3::Middle, arm: false, mission: false, ..c });
-        let steps: [(DenyReason, fn(&mut Rig)); 13] = [
+        let steps: [(DenyReason, fn(&mut Rig)); 14] = [
             (DenyReason::StationAbsent, |r| r.i.last_radio_heartbeat_us = Some(r.now())),
-            (DenyReason::NoWaypoints, |r| r.i.mission.has_waypoints = true),
+            // Code 20 sits where code 6 does: a stored list that is not the set in force answers it instead.
+            (DenyReason::NoWaypoints, |r| r.i.mission.mission_stored = true),
+            (DenyReason::MissionNotSelected, |r| r.i.mission.has_waypoints = true),
             (DenyReason::HeightOutsideLimits, |r| r.i.mission.z_within_limits = true),
             (DenyReason::NoHome, |r| r.h.home_ne = Some(HOME_NE)),
             (DenyReason::VehicleBeyondRange, |r| r.i.position_ne_valid = true),
@@ -3313,10 +3333,11 @@ mod tests {
             (DenyReason::BatteryCritical, 17),
             (DenyReason::LinkLost, 18),
             (DenyReason::MissionSwitchOff, 19),
+            (DenyReason::MissionNotSelected, 20),
         ];
         for (k, (reason, code)) in table.iter().enumerate() {
             assert_eq!(reason.code(), *code, "{reason:?}");
-            assert_eq!(usize::from(reason.code()), k + 1, "{reason:?}: 1..=19, 0 reserved");
+            assert_eq!(usize::from(reason.code()), k + 1, "{reason:?}: 1..=20, 0 reserved");
         }
     }
 
@@ -3432,6 +3453,7 @@ mod tests {
         MissionFacts {
             plan_id: None,
             has_waypoints: false,
+            mission_stored: false,
             z_within_limits: true,
             max_waypoint_distance_m: None,
             return_height_m: None,
@@ -3561,6 +3583,7 @@ mod tests {
             i.mission = MissionFacts {
                 plan_id: rng.pick(&[None, Some(PLAN), Some(PLAN + 1)]),
                 has_waypoints: !rng.chance(100),
+                mission_stored: false,
                 z_within_limits: !rng.chance(100),
                 max_waypoint_distance_m: rng.pick(&[None, Some(100.0), Some(999.0), Some(1500.0)]),
                 return_height_m: rng.pick(&[None, Some(5.0), Some(30.0)]),
