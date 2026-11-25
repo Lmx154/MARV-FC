@@ -130,8 +130,8 @@ SECTIONS {
         *(.text.*7fw_core9handshake* .text.*4libm4math*)
         *(.text.__aeabi_d* .text.__aeabi_f2d .text.__aeabi_i2d .text.__aeabi_ul2f .text.*17compiler_builtins5float*)
         *(.text.*16marv_v2_firmware4imu1* .text.*16marv_v2_firmware4imu2*)
-        /* The N0 bench (decision-nav-eskf-20261120): fw_flight::eskf_n0 and the bench binary eskf_bench; nothing in the flight image matches. */
-        *(.text.*9fw_flight7eskf_n0* .text.*10eskf_bench*)
+        /* fw_flight::eskf_n0, the ESKF arithmetic. */
+        *(.text.*9fw_flight7eskf_n0*)
         /* MahonyBaro (decision-nav-eskf-20261120, B1): the flight image's steering estimator since packet E2. */
         *(.text.*9fw_flight11mahony_baro*)
         /* Eskf, the shadow filter (decision-nav-eskf-20261120, E1b): the flight image runs it in shadow since packet E2. */

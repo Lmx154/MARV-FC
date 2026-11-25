@@ -27,7 +27,6 @@ flowchart LR
 | Build for the board | `cargo build --release` | Drivers are fetched from GitHub, pinned by `rev` in `Cargo.toml` |
 | Build, check, flash, run | `tools/run.sh 90` | Runs 90 s; exit 124 is the normal end; log kept under `logs/` |
 | Re-attach, no flash | `ATTACH=1 tools/run.sh 60` | Reads the log of the image already running; build with the same `FEATURES` |
-| Another binary | `BIN=eskf_bench FEATURES=eskf-bench tools/run.sh 60` | The ESKF timing bench (`src/bin/eskf_bench.rs`) |
 | Host tests | `cargo host-test -p fw-core` (also `-p fw-flight`, `-p fw-settings`) | Alias for `test --target x86_64-unknown-linux-gnu`; plain `cargo test -p` picks the board and fails |
 | Host lint | `cargo host-clippy -p fw-core -p fw-flight --all-targets` | |
 | RAM-code guard alone | `python3 tools/check-ram-code.py <elf>` | Exit 0 pass, 1 flash reference found, 2 tool error |
@@ -68,7 +67,7 @@ Cargo features are off by default; they add board checks and fault injections. B
 | Settings | `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | Flash save checks ([parameters](parameters.md)) |
 | Watchdog | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `stall-core0` | Each acts once, 20 s after a start the watchdog did not cause ([health](health.md)) |
 | PSRAM | `psram-skip-remap`, `psram-absent`, `psram-negative` | PSRAM checks |
-| Measurement | `xip-park`, `quiet-stat`, `eskf-bench` | Parked-core check, silent `[STAT]`, ESKF bench |
+| Measurement | `xip-park`, `quiet-stat` | Parked-core check, silent `[STAT]` |
 | Bench, PROPS OFF | `restart-bench` | The in-air restart on the bench (below); never for flight |
 
 **`restart-bench` (props off only).** Measures how fast the motors spin up when the in-air restart re-arms

@@ -201,9 +201,6 @@ ram-negative = []
 # interrupts off and the XIP accesses counted meanwhile (core 1's) must be 0 with both IMUs sampling;
 # with ram-negative at least 1000.
 xip-park = []
-# The N0 bench (src/bin/eskf_bench.rs, decision-nav-eskf-20261120 section 11): fw-flight's eskf_n0 module, for that
-# binary only (`BIN=eskf_bench FEATURES=eskf-bench tools/run.sh 60`); the flight binary is built without it.
-eskf-bench = ["fw-flight/eskf-n0"]
 # Props-off bench of the in-air restart (decision-inair-restart-20261125; docs/build-and-test.md): every arm-switch STOP,
 # on the ground too, lets an arm ON within 5 s restart the motors at once with any throttle (the free-fall test forced
 # true), to measure spin-up from ESC telemetry. PROPS OFF; never for flight.
@@ -217,11 +214,6 @@ restart-bench = ["fw-flight/restart-bench"]
 psram-skip-remap = []
 psram-absent = []
 psram-negative = []
-
-[[bin]]
-name = "eskf_bench"
-path = "src/bin/eskf_bench.rs"
-required-features = ["eskf-bench"]
 
 [profile.release]
 debug = true

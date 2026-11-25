@@ -31,7 +31,7 @@ flowchart LR
 | `tuning` | Gains and limits | [flight-core](../../docs/flight-core.md) |
 | `esc` | Pure ESC telemetry logic for the ESC task | [esc](../../docs/esc.md) |
 | `quat` | Vector and quaternion helpers (private) | [flight-core](../../docs/flight-core.md) |
-| `eskf_n0` | Arithmetic for the ESKF timing bench (feature) | [build-and-test](../../docs/build-and-test.md) |
+| `eskf_n0` | 15-state ESKF arithmetic (nominal step, covariance, fusion) the estimator uses | [flight-core](../../docs/flight-core.md) |
 
 `testdata/` holds a recorded ground run used by tests; `step/*_tests.rs` and `guidance/leg_tests.rs` are the behaviour tests.
 Back to the [README](../../README.md).

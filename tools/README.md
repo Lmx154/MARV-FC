@@ -18,7 +18,7 @@ flowchart LR
 
 ## run.sh
 
-`[FEATURES=<features>] [BIN=<bin>] [ATTACH=1] [NO_CATCH_HARDFAULT=1] tools/run.sh [seconds, default 120]`
+`[FEATURES=<features>] [ATTACH=1] [NO_CATCH_HARDFAULT=1] tools/run.sh [seconds, default 120]`
 
 | Exit | Meaning |
 |---|---|
