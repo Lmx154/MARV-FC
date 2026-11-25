@@ -5,6 +5,12 @@ is the flight core (two IMUs, estimator, controllers, motor output, all from SRA
 receiver, slow sensors, SD log, settings, health). Hardware-free logic lives in three workspace crates so it can be tested on the
 host and reused by the simulator.
 
+<p align="center">
+  <a href="docs/media/position-hold-flight.mp4"><img src="docs/media/position-hold-flight.gif" width="300" alt="MARV V2 flying outdoors in position hold"></a>
+  <img src="docs/media/vehicle.jpg" width="300" alt="The MARV V2 quadcopter">
+</p>
+<p align="center"><em>Left: MARV V2 holding position outdoors on this firmware (click for the video). Right: the vehicle.</em></p>
+
 ```mermaid
 flowchart LR
   imu["IMU1, IMU2<br/>SPI"] --> c1
@@ -64,11 +70,12 @@ Needs the Rust toolchain with `thumbv8m.main-none-eabihf`, `probe-rs`, python3 a
 
 ## Status
 
+- Flown on this firmware: hand flying, altitude hold, and position hold on the GPS + compass estimator (holds within about 0.3 m in calm air, 0.6 m in wind), plus tuning flights.
 - Tested on the host (flight, core and settings crates), in the simulator (mission-switch flights end to end), and on the bench with props off (mode transitions, Start and AUTO, RETURN, LAND, take-over, arming refusals, mission upload).
 - HOLD, AUTO, RETURN, LAND's touchdown stop, TAKEOVER and the mission switch have never been in the air.
 - Hand flying on the MAVLink receiver model has not been flown; BLIND, waypoint arrival and the battery-critical exits have not run on the board.
 
-Photos and videos go in `docs/media/`.
+Photos and videos live in [`docs/media/`](docs/media/).
 
 ## Licence
 

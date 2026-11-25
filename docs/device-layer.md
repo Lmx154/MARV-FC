@@ -6,6 +6,12 @@ Every sensor on core 0 is a *device row*: one task running the same generic loop
 `DeviceAdapter`, stepping a pure health state machine (`fw_core::health::Health`) and carrying out the action it returns.
 The rows are published as `MARV_DEVICE_STATUS` and drive the status LED, the supervisor texts and the arming permit.
 
+<p align="center">
+  <img src="media/board-stack.jpg" width="260" alt="Flight-controller board stack">
+  <img src="media/baro-enclosure.jpg" width="260" alt="3D-printed barometer cover on the board">
+</p>
+<p align="center"><em>The board stack with foam over the barometer, and the printed barometer cover that keeps prop wash off it.</em></p>
+
 ## Health state machine
 
 ```mermaid

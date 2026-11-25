@@ -6,6 +6,12 @@ Every IMU and compass value that leaves the board is in the body frame, FRD (x f
 Three calibrations (gyro, accelerometer, compass) are started by `marv-cli calibrate ...` (MAV_CMD_PREFLIGHT_CALIBRATION 241). The
 logic is pure and host-tested (`fw_core::calib`); the glue is `src/calibration.rs` on core 0, stepped from the supervisor tick.
 
+<p align="center">
+  <img src="media/compass-mount.jpg" width="260" alt="Compass on its raised mount">
+  <img src="media/compass-calibration.jpg" width="260" alt="Compass calibration setup outdoors">
+</p>
+<p align="center"><em>The compass on its raised mount, away from the power wiring, and a calibration session with the ground station.</em></p>
+
 ## Frames
 
 ```mermaid

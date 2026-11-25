@@ -17,6 +17,9 @@ flowchart LR
     U["USB CDC"] --> N["USB MAVLink node, link 0"] --> G["station on link 0"]
 ```
 
+<p align="center"><img src="media/receiver-antenna.jpg" width="260" alt="Receiver antenna mount"></p>
+<p align="center"><em>The ELRS receiver antenna on its printed mount.</em></p>
+
 ## Task and row
 
 - `src/rc.rs`, task `rc_link` (watchdog id RC = 13), alone on core 0's `SWI_IRQ_0` interrupt executor at priority P3 (below the

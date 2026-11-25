@@ -6,6 +6,9 @@ The flight core is core 1. It runs one flight step for every good IMU1 sample (a
 setpoint into a thrust and torque demand, allocate four rotor thrusts and hand a motor command to the ESC task. It is a pure library
 (`crates/fw-flight`) that the board wraps in `src/flight.rs`; the same step runs in host tests.
 
+<p align="center"><a href="media/position-hold-flight.mp4"><img src="media/position-hold-flight.gif" width="260" alt="Position hold flight"></a></p>
+<p align="center"><em>This pipeline flying position hold outdoors (click for the video).</em></p>
+
 ## Per-sample pipeline
 
 ```mermaid
