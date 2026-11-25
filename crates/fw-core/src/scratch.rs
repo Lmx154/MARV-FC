@@ -77,8 +77,7 @@ pub const fn encode(reason: Reason, task_id: u8, age_ms: u32, uptime_ms: u32) ->
     [MAGIC, s1, uptime_ms, check_word(MAGIC, s1, uptime_ms)]
 }
 
-/// Decodes the four scratch words; `None` for anything that is not an encoded record: a wrong
-/// magic (including version 1), a wrong check word, an unknown reason, a non-zero top byte of S1.
+/// Decodes the four scratch words; `None` for anything that is not an encoded record: a wrong magic (including version 1), a wrong check word, an unknown reason, a non-zero top byte of S1.
 pub const fn decode(words: [u32; 4]) -> Option<Record> {
     let [s0, s1, s2, s3] = words;
     if s0 != MAGIC || s3 != check_word(s0, s1, s2) || s1 >> 24 != 0 {
@@ -118,7 +117,6 @@ mod tests {
 
     #[test]
     fn exact_words_hand_computed() {
-        // STALL_FLIGHT = 2, task 5, age 120 ms = 12 units, uptime 0x12345 ms
         let words = encode(Reason::StallFlight, 5, 125, 0x0001_2345);
         assert_eq!(words[0], 0x4D52_5702);
         assert_eq!(words[1], 0x000C_0502);
@@ -181,11 +179,9 @@ mod tests {
     fn rejects_power_on_garbage() {
         assert_eq!(decode([0; 4]), None);
         assert_eq!(decode([u32::MAX; 4]), None);
-        // version 1 magic, even with a consistent check word
         let s1 = 1 | 5 << 8 | 3 << 16;
         let v1 = [0x4D52_5701, s1, 77, check_word(0x4D52_5701, s1, 77)];
         assert_eq!(decode(v1), None);
-        // wrong check word
         let mut w = encode(Reason::Requested, 0, 0, 1);
         w[3] ^= 0x10;
         assert_eq!(decode(w), None);

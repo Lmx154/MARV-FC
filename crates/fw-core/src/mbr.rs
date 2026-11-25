@@ -85,7 +85,6 @@ mod tests {
 
     #[test]
     fn the_bench_cards_mbr_is_a_fat32_volume() {
-        // What `sd-fat-format` wrote: type 0x0C from block 2048 to the end of the card.
         let blocks = (CARD - 2048) as u32;
         assert_eq!(
             partition1(&mbr(0x0c, 2048, blocks), CARD),
@@ -126,8 +125,6 @@ mod tests {
 
     #[test]
     fn a_fat_boot_sector_without_a_partition_table_is_the_wrong_format() {
-        // A "superfloppy" FAT32 boot sector at block 0: jump, OEM name, BPB, boot code, 0x55AA.
-        // Its byte 0x1C2 is boot code; here the text of the usual boot message.
         let mut b = [0u8; 512];
         b[..11].copy_from_slice(b"\xeb\x58\x90mkfs.fat");
         let message = b"This is not a bootable disk.  Please insert a bootable floppy";

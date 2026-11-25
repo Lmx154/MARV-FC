@@ -84,9 +84,7 @@ pub fn verdict(input: &RcInput) -> RcVerdict {
     }
 }
 
-/// The next MARV_DEVICE_STATUS row on the radio: `changed` (a row whose state differs from the
-/// state last sent) goes out of turn, but never twice in a row; otherwise the row at `cursor` goes
-/// in turn. Returns (row, new cursor, whether this message was out of turn).
+/// The next MARV_DEVICE_STATUS row on the radio: `changed` (a row whose state differs from the state last sent) goes out of turn, but never twice in a row; otherwise the row at `cursor` goes in turn.
 pub fn pick_row(
     changed: Option<usize>,
     cursor: usize,
@@ -102,9 +100,7 @@ pub fn pick_row(
     }
 }
 
-/// The sticks that may feed MANUAL_CONTROL: the latest stick report (its channels in us and when it
-/// was read) only when it came from CRSF and is younger than [`FRESH_US`] (strictly). A report from
-/// a MAVLink RC_CHANNELS_OVERRIDE never does: "CRSF is for sticks".
+/// The sticks that may feed MANUAL_CONTROL: the latest stick report (its channels in us and when it was read) only when it came from CRSF and is younger than [`FRESH_US`] (strictly).
 pub fn crsf_sticks(
     latest: Option<([u16; 16], u64)>,
     from_crsf: bool,
@@ -131,19 +127,12 @@ pub struct CrsfGps {
     pub satellites: u8,
 }
 
-/// Lowest altitude sent, in m: Betaflight's wire value 0 (`betaflight-telemetry-crsf.c`, `crsfFrameGps`:
-/// `constrain(altCm / 100 + 1000, 0, 5000)`).
+/// Lowest altitude sent, in m: Betaflight's wire value 0 (`betaflight-telemetry-crsf.c`, `crsfFrameGps`: `constrain(altCm / 100 + 1000, 0, 5000)`).
 pub const CRSF_MIN_ALTITUDE_M: i32 = -1000;
 /// Highest altitude sent, in m: Betaflight's wire value 5000.
 pub const CRSF_MAX_ALTITUDE_M: i32 = 4000;
 
-/// The GNSS sample's values as a CRSF GPS frame's: speed mm/s to 0.1 km/h rounded half up
-/// (`(mm_s * 36 + 500) / 1000`, Betaflight's `(cm_s * 36 + 50) / 100` from a finer unit, clamped to
-/// `u16`), altitude mm to whole metres (floor) clamped to -1000..=4000 m as Betaflight does.
-///
-/// Before a fix, and after a loss, the frame carries zeros (as Betaflight and ArduPilot send their
-/// zeroed GPS state before a first fix); unlike them it does not hold the last position after a loss.
-/// Every `None` is sent as 0 (an altitude of 0 m, satellites 0).
+/// The GNSS sample's values as a CRSF GPS frame's: speed mm/s to 0.1 km/h rounded half up (`(mm_s * 36 + 500) / 1000`, Betaflight's `(cm_s * 36 + 50) / 100` from a finer unit, clamped to `u16`), altitude mm to whole metres (floor) clamped to -1000..=4000 m as Betaflight does.
 pub fn crsf_gps(
     lat_e7: Option<i32>,
     lon_e7: Option<i32>,
@@ -166,9 +155,7 @@ pub fn crsf_gps(
     }
 }
 
-/// Whether the GNSS row's latest sample (read at `sample_t_us`) is newer than the one last sent as a
-/// GPS frame (`last_sent_us`; `None` before the first): then this call of the telemetry hook sends
-/// the GPS frame (fix or no fix), otherwise the battery frame. Betaflight's "on each new solution".
+/// Whether the GNSS row's latest sample (read at `sample_t_us`) is newer than the one last sent as a GPS frame (`last_sent_us`; `None` before the first): then this call of the telemetry hook sends the GPS frame (fix or no fix), otherwise the battery frame.
 pub fn gps_frame_due(sample_t_us: Option<u64>, last_sent_us: Option<u64>) -> bool {
     match (sample_t_us, last_sent_us) {
         (Some(t), Some(sent)) => t > sent,
@@ -191,9 +178,7 @@ pub struct Sticks {
     pub yaw: f32,
 }
 
-/// The three-position mode switch on channel 6, decoded in thirds of the normalised channel
-/// (`fw_settings::rc::mode_switch`). The flight code reads Low as Angle, Middle as
-/// Altitude and High as Position.
+/// The three-position mode switch on channel 6, decoded in thirds of the normalised channel (`fw_settings::rc::mode_switch`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch3 {
     /// Lowest third; also an absent channel 6 or an invalid RC6_MIN/RC6_MAX.
@@ -218,9 +203,7 @@ pub const RECEIVER_SYSTEM_ID: u8 = 255;
 /// See [`RECEIVER_SYSTEM_ID`].
 pub const RECEIVER_COMPONENT_ID: u8 = 68;
 
-/// An RC_CHANNELS_OVERRIDE (already addressed to this vehicle or to all, the port's target rule) is a receiver
-/// report only from (`RECEIVER_SYSTEM_ID`, `RECEIVER_COMPONENT_ID`) and with none of channels 1 to 8 at 0 or 65535
-/// (MAVLink's "release" and "ignore"). Any other sender (the station's 255/190 included) is never a stick report.
+/// An RC_CHANNELS_OVERRIDE (already addressed to this vehicle or to all, the port's target rule) is a receiver report only from (`RECEIVER_SYSTEM_ID`, `RECEIVER_COMPONENT_ID`) and with none of channels 1 to 8 at 0 or 65535 (MAVLink's "release" and "ignore").
 pub fn receiver_report(system_id: u8, component_id: u8, channels_us: &[u16; 16]) -> bool {
     system_id == RECEIVER_SYSTEM_ID
         && component_id == RECEIVER_COMPONENT_ID
@@ -271,7 +254,6 @@ mod tests {
         use ErrorKind::{None as NoError, Timeout};
         use PortMode::{Crsf, Mavlink, Searching};
         use State::{Degraded, Ok, Starting};
-        // (mode, ever locked, last stick report, latest RADIO_STATUS) -> (state, link up, last error)
         #[rustfmt::skip]
         let table: [Row; 20] = [
             (Searching, false, None, None, Starting, false, NoError),
@@ -283,17 +265,14 @@ mod tests {
             (Crsf, true, Some(NOW + 5), None, Ok, true, NoError),
             (Crsf, true, Some(STALE), None, Degraded, false, Timeout),
             (Crsf, true, None, None, Degraded, false, Timeout),
-            // RADIO_STATUS does not make a CRSF link up.
             (Crsf, true, None, Some((200, FRESH)), Degraded, false, Timeout),
             (Mavlink, true, None, Some((1, FRESH)), Ok, true, NoError),
             (Mavlink, true, None, Some((254, NOW)), Ok, true, NoError),
             (Mavlink, true, Some(FRESH), Some((254, FRESH)), Ok, true, NoError),
-            // The transmitter off: RADIO_STATUS goes on with rssi 0.
             (Mavlink, true, None, Some((0, NOW)), Degraded, false, Timeout),
             (Mavlink, true, Some(FRESH), Some((0, FRESH)), Degraded, false, Timeout),
             (Mavlink, true, None, Some((254, STALE)), Degraded, false, Timeout),
             (Mavlink, true, None, None, Degraded, false, Timeout),
-            // Stick reports do not make a MAVLink link up.
             (Mavlink, true, Some(FRESH), None, Degraded, false, Timeout),
             (Mavlink, true, Some(FRESH), Some((254, STALE)), Degraded, false, Timeout),
             (Crsf, true, Some(FRESH), Some((0, FRESH)), Ok, true, NoError),
@@ -366,7 +345,6 @@ mod tests {
     #[test]
     fn only_fresh_crsf_sticks_feed_manual_control() {
         let ch = [1500u16; 16];
-        // (latest report, from CRSF, now) -> sticks
         assert_eq!(
             crsf_sticks(Some((ch, FRESH)), true, NOW),
             Some(ch),
@@ -408,7 +386,6 @@ mod tests {
 
     #[test]
     fn crsf_gps_converts_a_made_up_sample() {
-        // 45.0 N, 9.0 E (made up), 123.456 m, 5.5 m/s = 19.8 km/h, course 270.25, 9 satellites.
         let g = crsf_gps(
             Some(450_000_000),
             Some(90_000_000),
@@ -502,8 +479,7 @@ mod tests {
         assert!(!gps_frame_due(None, Some(1)), "no sample");
     }
 
-    /// Only the receiver's own ids with live channels 1 to 8 make a receiver report. The station's
-    /// (255, 190) override, an arm channel at 65535 and a channel at 0 make none; channels 9 to 16 are not read.
+    /// Only the receiver's own ids with live channels 1 to 8 make a receiver report.
     #[test]
     fn n19_receiver_report_filter() {
         let live = [1500u16; 16];

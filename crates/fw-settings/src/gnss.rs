@@ -11,8 +11,7 @@ use sam_m10q::{Config, Constellations, Pvt};
 
 const DEVICE: u8 = MarvDevice::MARV_DEVICE_GNSS as u8;
 
-/// The position fix interval in milliseconds: one of 100, 200, 500 or 1000 (`sam_m10q::config::MEAS_RATES_MS`), and
-/// not faster than the chosen constellation set allows ([`SET`], `Constellations::min_meas_rate_ms`).
+/// The position fix interval in milliseconds: one of 100, 200, 500 or 1000 (`sam_m10q::config::MEAS_RATES_MS`), and not faster than the chosen constellation set allows ([`SET`], `Constellations::min_meas_rate_ms`).
 pub const RATE_MS: &str = "GPS_RATE_MS";
 
 /// The constellation set: 0 = GPS + Galileo + BeiDou B1C + QZSS, 1 = GPS + Galileo, 2 = GPS + Galileo + GLONASS.
@@ -24,8 +23,7 @@ pub const COUNT: usize = 1;
 /// The number of GNSS parameters appended at the end of the table (`GPS_GNSS`).
 pub const SET_COUNT: usize = 1;
 
-/// `GPS_RATE_MS`, appended to the firmware's table at index 80: `I32`, default 200, range 100 to 1000,
-/// `Configure`. Device GNSS (5). The range is wider than the values [`validate`] accepts.
+/// `GPS_RATE_MS`, appended to the firmware's table at index 80: `I32`, default 200, range 100 to 1000, `Configure`.
 pub static TABLE: [ParamDef; COUNT] = [ParamDef::i32(
     RATE_MS,
     DEVICE,
@@ -41,8 +39,7 @@ pub static SET_TABLE: [ParamDef; SET_COUNT] = [ParamDef::i32(SET, DEVICE, 0, 0, 
 const BAD_RATE: &str = "not 100, 200, 500 or 1000";
 const BAD_SET: &str = "not 0, 1 or 2";
 
-/// The constellation set of a `GPS_GNSS` value; an unknown or missing value is the default, 0. A boot load runs no
-/// validator, so the adapter asks this before it configures.
+/// The constellation set of a `GPS_GNSS` value; an unknown or missing value is the default, 0.
 pub fn constellations(value: Option<i32>) -> Constellations {
     match value {
         Some(1) => Constellations::GpsGal,
@@ -56,7 +53,6 @@ fn fits(ms: u16, set: Constellations) -> Result<(), &'static str> {
     if ms >= set.min_meas_rate_ms() {
         return Ok(());
     }
-    // Only 100 ms is faster than any set's limit among the allowed periods.
     Err(match set {
         Constellations::GpsGalBdsQzss => "100 ms too fast for GPS_GNSS 0",
         Constellations::GpsGal => "100 ms too fast for GPS_GNSS 1",
@@ -64,8 +60,7 @@ fn fits(ms: u16, set: Constellations) -> Result<(), &'static str> {
     })
 }
 
-/// The store's validator for the GNSS receiver: the whole candidate. `GPS_RATE_MS` 100, 200, 500 or 1000 ms, `GPS_GNSS`
-/// 0 to 2, and the period not faster than the set's limit (100 ms only with `GPS_GNSS` 1).
+/// The store's validator for the GNSS receiver: the whole candidate.
 pub fn validate(candidate: &Candidate<'_>) -> Result<(), &'static str> {
     let ms = match candidate.i32(RATE_MS) {
         Some(v @ (100 | 200 | 500 | 1000)) => u16::try_from(v).map_err(|_| BAD_RATE)?,
@@ -80,8 +75,7 @@ pub fn validate(candidate: &Candidate<'_>) -> Result<(), &'static str> {
     fits(ms, set)
 }
 
-/// The stored `GPS_RATE_MS` as the fix interval to configure: the value when [`validate`] accepts it for a rate,
-/// otherwise its refusal. A boot load runs no validator, so the adapter asks this before it configures.
+/// The stored `GPS_RATE_MS` as the fix interval to configure: the value when [`validate`] accepts it for a rate, otherwise its refusal.
 pub fn rate_ms(value: Option<i32>) -> Result<u16, &'static str> {
     match value {
         Some(v @ (100 | 200 | 500 | 1000)) => u16::try_from(v).map_err(|_| BAD_RATE),
@@ -89,8 +83,7 @@ pub fn rate_ms(value: Option<i32>) -> Result<u16, &'static str> {
     }
 }
 
-/// The stored pair as the fix interval and set to configure: [`rate_ms`] and [`constellations`], and the period must fit
-/// the set (a boot load runs no validator).
+/// The stored pair as the fix interval and set to configure: [`rate_ms`] and [`constellations`], and the period must fit the set (a boot load runs no validator).
 pub fn rate_and_set(rate: Option<i32>, set: Option<i32>) -> Result<(u16, Constellations), &'static str> {
     let ms = rate_ms(rate)?;
     let set = constellations(set);
@@ -98,11 +91,7 @@ pub fn rate_and_set(rate: Option<i32>, set: Option<i32>) -> Result<(u16, Constel
     Ok((ms, set))
 }
 
-/// The driver's configuration for a fix interval and constellation set: its defaults (UBX only, NMEA off, one NAV-PVT
-/// per epoch, dynamic model 8, static hold off) with the measurement period `ms`, the set `set` and the baud scan
-/// starting at 115200, the target: after an FC reset with the receiver powered it already runs
-/// there, and a scan that starts at 9600 or 38400 would read its 115200 stream at the wrong rate (a framing-error
-/// `warn!` per byte in embassy-rp's UART interrupt). Then 9600 (the u-blox default) and 38400.
+/// The driver's configuration for a fix interval and constellation set: its defaults (UBX only, NMEA off, one NAV-PVT per epoch, dynamic model 8, static hold off) with the measurement period `ms`, the set `set` and the baud scan starting at 115200, the target: after an FC reset with the receiver powered it already runs there, and a scan that starts at 9600 or 38400 would read its 115200 stream at the wrong rate (a framing-error `warn!` per byte in embassy-rp's UART interrupt).
 pub fn config(ms: u16, set: Constellations) -> Config {
     Config {
         meas_rate_ms: ms,
@@ -112,8 +101,7 @@ pub fn config(ms: u16, set: Constellations) -> Config {
     }
 }
 
-/// UTC time of day of a NAV-PVT: hour, minute and second as sent, `millis` the fraction of the second (`nano`) in
-/// whole milliseconds, a negative fraction (a few ns to us at the receiver's epoch alignment) taken as 0.
+/// UTC time of day of a NAV-PVT: hour, minute and second as sent, `millis` the fraction of the second (`nano`) in whole milliseconds, a negative fraction (a few ns to us at the receiver's epoch alignment) taken as 0.
 fn utc_time(pvt: &Pvt) -> UtcTime {
     UtcTime {
         hour: pvt.hour,
@@ -169,9 +157,7 @@ pub fn reading(pvt: &Pvt) -> GnssReading {
     }
 }
 
-/// The wait from a failed configuration to the next try, ms. 5000 is the start wait for the first
-/// sentence. Not measured on the SAM-M10Q: the driver's configuration is itself up to 5.6 s (three 1 s baud probes,
-/// 100 ms, the acknowledgement's 1 s, 500 ms), so the retry follows a failed one by 5 s more.
+/// The wait from a failed configuration to the next try, ms.
 pub const CONFIGURE_RETRY_MS: u64 = 5000;
 
 /// What a finished configuration reports to the link.
@@ -188,8 +174,7 @@ pub enum RetryReport {
     },
 }
 
-/// The retry schedule of the configuration: a failed configure is run again [`CONFIGURE_RETRY_MS`] after the
-/// failure, until a try succeeds. Only a first try's failure is reported; a retry's success is reported once.
+/// The retry schedule of the configuration: a failed configure is run again [`CONFIGURE_RETRY_MS`] after the failure, until a try succeeds.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Retry {
     tries: u32,
@@ -197,8 +182,7 @@ pub struct Retry {
 }
 
 impl Retry {
-    /// A configuration begins: a retry this schedule called for (`retry`), or a first try (start, restart,
-    /// parameter write), which starts a new count. Returns the try's number (1 for a first try).
+    /// A configuration begins: a retry this schedule called for (`retry`), or a first try (start, restart, parameter write), which starts a new count.
     pub fn begin(&mut self, retry: bool) -> u32 {
         if !retry {
             self.tries = 0;
@@ -247,8 +231,7 @@ pub struct PpsPair {
     pub unpaired: u32,
 }
 
-/// Pairs the PPS edge of each second with the whole-second NAV-PVT fix (iTOW a multiple of 1000 ms, whose time of
-/// validity is the edge) and keeps the latency figures. Measure only: nothing reads it back into the estimator.
+/// Pairs the PPS edge of each second with the whole-second NAV-PVT fix (iTOW a multiple of 1000 ms, whose time of validity is the edge) and keeps the latency figures.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pps {
     /// The latest edge and whether a fix has used it.
@@ -288,9 +271,7 @@ impl Pps {
         self.pulses = self.pulses.saturating_add(1);
     }
 
-    /// A fix with GPS time of week `tow_ms`, published at board time `t_us`. Nothing for a fix that is not a whole
-    /// second; a whole-second fix pairs with the latest unused edge when it is less than 1 s old (and not later
-    /// than the fix), else it counts as unpaired.
+    /// A fix with GPS time of week `tow_ms`, published at board time `t_us`.
     pub fn fix(&mut self, tow_ms: u32, t_us: u64) -> Option<PpsPair> {
         if tow_ms % 1000 != 0 {
             return None;
@@ -372,7 +353,6 @@ mod tests {
         assert_eq!(def.apply, Apply::Configure);
         assert_eq!(crate::TABLE[SET_AT].name, "GPS_GNSS");
         assert_eq!(crate::TABLE[RATE_AT].name, "GPS_RATE_MS");
-        // The defaults configure the driver's default: 200 ms, GPS + Galileo + BeiDou B1C + QZSS.
         assert_eq!(rate_and_set(Some(200), Some(0)), Ok((200, Constellations::GpsGalBdsQzss)));
         assert_eq!(config(200, Constellations::GpsGalBdsQzss).constellations, Config::default().constellations);
     }
@@ -384,21 +364,18 @@ mod tests {
         for (k, set) in SETS.iter().enumerate() {
             for ms in ALLOWED {
                 let mut p = store();
-                // The set first (every set is valid with the default 200 ms), then the period.
                 assert_eq!(p.set(SET_AT as u16, ParamValue::I32(k as i32)), Ok(ParamValue::I32(k as i32)));
                 let r = p.set(RATE_AT as u16, ParamValue::I32(ms as i32));
                 if ms >= set.min_meas_rate_ms() {
                     assert_eq!(r, Ok(ParamValue::I32(ms as i32)), "{k} {ms}");
                 } else {
                     assert_eq!((ms, r), (100, Err(ParamError::Rejected)), "{k} {ms}");
-                    // The refusal names both values.
                     let text = p.take_notice().unwrap().kind.text();
                     assert!(text.contains("100") && text.contains(NAMES[k]), "{text}");
                     assert!("GPS_RATE_MS: ".len() + text.len() <= 50);
                 }
             }
         }
-        // 100 ms with GPS_GNSS 1 is accepted, and GPS_GNSS cannot then go to 0 or 2 (the whole candidate).
         let mut p = store();
         assert_eq!(p.set(SET_AT as u16, ParamValue::I32(1)), Ok(ParamValue::I32(1)));
         assert_eq!(p.set(RATE_AT as u16, ParamValue::I32(100)), Ok(ParamValue::I32(100)));
@@ -407,7 +384,6 @@ mod tests {
             assert!(p.take_notice().unwrap().kind.text().ends_with(["GPS_GNSS 0", "GPS_GNSS 1", "GPS_GNSS 2"][g as usize]));
         }
         assert_eq!(p.set(SET_AT as u16, ParamValue::I32(1)), Ok(ParamValue::I32(1)));
-        // Other periods and out-of-range values.
         assert_eq!(p.set(RATE_AT as u16, ParamValue::I32(300)), Err(ParamError::Rejected));
         assert_eq!(p.take_notice().unwrap().kind.text(), "not 100, 200, 500 or 1000");
         assert!("GPS_RATE_MS: ".len() + BAD_RATE.len() <= 50);
@@ -421,7 +397,6 @@ mod tests {
     fn rate_ms_agrees_with_the_validator() {
         for v in 100..=1000 {
             let mut p = store();
-            // GPS_GNSS 1 allows every period.
             assert!(p.set(SET_AT as u16, ParamValue::I32(1)).is_ok());
             let accepted = p.set(RATE_AT as u16, ParamValue::I32(v)).is_ok();
             assert_eq!(rate_ms(Some(v)).is_ok(), accepted, "{v}");
@@ -530,10 +505,8 @@ mod tests {
                 fix_type: 3,
                 lat_e7: Some(301_234_567),
                 lon_e7: Some(-987_654_321),
-                // hMSL, not the ellipsoid height 250_000.
                 alt_mm: Some(212_345),
                 speed_mm_s: Some(2_914),
-                // 31_500_000 x 1e-5 deg = 315.00 deg.
                 course_cdeg: Some(31_500),
                 sats_used: Some(17),
                 hdop_x100: None,
@@ -575,7 +548,6 @@ mod tests {
                 (None, None, None, None),
                 "{name}"
             );
-            // What does not depend on the fix is still reported.
             assert_eq!(r.sats_used, Some(17), "{name}");
             assert!(r.time.is_some() && r.date.is_some(), "{name}");
             assert_eq!((r.hdop_x100, r.vdop_x100), (None, None), "{name}");
@@ -594,7 +566,6 @@ mod tests {
         p.valid = 0;
         let r = reading(&p);
         assert_eq!((r.time, r.date), (None, None));
-        // A negative fraction of a second is 0 ms, one just under a second 999 ms.
         p.valid = Pvt::VALID_TIME;
         p.nano = -1_234;
         assert_eq!(reading(&p).time.map(|t| t.millis), Some(0));
@@ -631,36 +602,28 @@ mod tests {
     #[test]
     fn pps_pairs_the_whole_second_fix_with_its_fresh_edge() {
         let mut p = Pps::ZERO;
-        // Fixes before any edge: whole second is unpaired, others are ignored.
         assert_eq!(p.fix(200, 10), None);
         assert_eq!(p.unpaired, 0);
         assert_eq!(p.fix(1000, 50_000), None);
         assert_eq!(p.unpaired, 1);
         p.edge(1_000_000);
-        // A 200 ms epoch is not paired and does not use the edge.
         assert_eq!(p.fix(1200, 1_250_000), None);
         assert_eq!(p.unpaired, 1);
         let pair = p.fix(2000, 1_060_000).unwrap();
         assert_eq!((pair.edge_us, pair.latency_us, pair.pulses, pair.unpaired), (1_000_000, 60_000, 1, 1));
-        // The edge is used once.
         assert_eq!(p.fix(3000, 1_070_000), None);
         assert_eq!(p.unpaired, 2);
-        // An edge 1 s old or older is not paired (the fix is whole-second but the edge was missed).
         p.edge(2_000_000);
         assert_eq!(p.fix(4000, 3_000_000), None);
         assert_eq!(p.unpaired, 3);
-        // An edge later than the fix is not paired.
         p.edge(5_000_000);
-        // (the unused edge at 2 s is replaced: unpaired too)
         assert_eq!(p.fix(5000, 4_999_999), None);
         assert_eq!(p.unpaired, 5);
-        // Figures: 40 ms and 90 ms after 60 ms.
         p.edge(6_000_000);
         assert_eq!(p.fix(6000, 6_040_000).unwrap().latency_us, 40_000);
         p.edge(7_000_000);
         assert_eq!(p.fix(7000, 7_090_000).unwrap().latency_us, 90_000);
         assert_eq!((p.paired, p.last_us, p.min_us, p.max_us), (3, 90_000, 40_000, 90_000));
-        // An edge replaced before a fix used it is unpaired.
         let before = p.unpaired;
         p.edge(8_000_000);
         p.edge(9_000_000);
@@ -674,12 +637,10 @@ mod tests {
         assert_eq!(r.begin(false), 1);
         assert_eq!(r.end(true, 100), RetryReport::Quiet);
         assert!(!r.due(u64::MAX));
-        // A first try fails: warned, due CONFIGURE_RETRY_MS later.
         assert_eq!(r.begin(false), 1);
         assert_eq!(r.end(false, 1000), RetryReport::Warn);
         assert!(!r.due(1000 + CONFIGURE_RETRY_MS - 1));
         assert!(r.due(1000 + CONFIGURE_RETRY_MS));
-        // Retries: quiet when they fail, not due while one runs.
         assert_eq!(r.begin(true), 2);
         assert!(!r.due(u64::MAX));
         assert_eq!(r.end(false, 7000), RetryReport::Quiet);
@@ -687,7 +648,6 @@ mod tests {
         assert_eq!(r.begin(true), 3);
         assert_eq!(r.end(true, 13000), RetryReport::Applied { tries: 3 });
         assert!(!r.due(u64::MAX));
-        // A later parameter write that fails starts a new count and warns again.
         assert_eq!(r.begin(false), 1);
         assert_eq!(r.end(false, 20000), RetryReport::Warn);
         assert_eq!(r.begin(false), 1);

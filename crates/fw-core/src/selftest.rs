@@ -39,8 +39,7 @@ pub struct Outcome {
 }
 
 impl Outcome {
-    /// The action's final result: ACCEPTED only when the test passed and the device came back Ok
-    /// (`device_ok`, the outcome of the restart with the same number), FAILED otherwise.
+    /// The action's final result: ACCEPTED only when the test passed and the device came back Ok (`device_ok`, the outcome of the restart with the same number), FAILED otherwise.
     pub fn result(&self, device_ok: bool) -> MavResult {
         if self.verdict == Verdict::Pass && device_ok {
             MavResult::MAV_RESULT_ACCEPTED
@@ -69,8 +68,7 @@ fn channels(device: MarvDevice) -> &'static [&'static str] {
 /// The magnetometer's entries, in mask order.
 const MAG_ENTRIES: [&str; 4] = ["X+", "X-", "Y+", "Y-"];
 
-/// The self-test's STATUSTEXT (at most 50 bytes for the names in use): `IMU1 self-test: PASS`,
-/// `IMU2 self-test FAIL: lowg X gyro YZ`, `MAG self-test FAIL: X+ Y-`, `IMU1 self-test: error bus`.
+/// The self-test's STATUSTEXT (at most 50 bytes for the names in use): `IMU1 self-test: PASS`, `IMU2 self-test FAIL: lowg X gyro YZ`, `MAG self-test FAIL: X+ Y-`, `IMU1 self-test: error bus`.
 pub struct Text<'a> {
     /// The device, for its mask layout.
     pub device: MarvDevice,
@@ -203,7 +201,6 @@ mod tests {
             text(IMU2, "IMU2", Verdict::Fail(axes(2, false, false, true))),
             "IMU2 self-test FAIL: highg Z"
         );
-        // Bits outside the device's layout are not named; none named, no colon.
         assert_eq!(
             text(IMU1, "IMU1", Verdict::Fail(axes(2, true, true, true))),
             "IMU1 self-test FAIL"

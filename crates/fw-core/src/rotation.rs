@@ -231,8 +231,7 @@ mod tests {
             + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
     }
 
-    /// all 16 values against ArduPilot's formulas on two vectors, each matrix orthonormal with
-    /// determinant +1, and the inverse undoes the rotation.
+    /// all 16 values against ArduPilot's formulas on two vectors, each matrix orthonormal with determinant +1, and the inverse undoes the rotation.
     #[test]
     fn all_sixteen_equal_ardupilots_formulas_and_are_proper_rotations() {
         for r in MIN..=MAX {
@@ -258,8 +257,7 @@ mod tests {
         assert_eq!(Rotation::default(), Rotation::None);
     }
 
-    /// ROLL_180 (the IMUs' mounting) turns chip gravity (0, 0, +g) into (0, 0, -g); ROLL_180_YAW_90
-    /// (the compass) maps chip +Y to body +X, chip +X to body +Y, chip +Z to body -Z.
+    /// ROLL_180 (the IMUs' mounting) turns chip gravity (0, 0, +g) into (0, 0, -g); ROLL_180_YAW_90 (the compass) maps chip +Y to body +X, chip +X to body +Y, chip +Z to body -Z.
     #[test]
     fn the_mountings_map_the_owners_axes() {
         assert_eq!(

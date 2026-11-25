@@ -240,9 +240,7 @@ pub const MOT: RecordDef = def(
     "QBBHHHHHHHH",
     "TimeUS,Arm,Mode,A0,A1,A2,A3,C0,C1,C2,C3",
 );
-/// ESC: raw eRPM, volts (centivolts) and temperature (degC) by DShot line, and flag bits (bit i:
-/// line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight
-/// throttles).
+/// ESC: raw eRPM, volts (centivolts) and temperature (degC) by DShot line, and flag bits (bit i: line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight throttles).
 pub const ESC: RecordDef = def(
     ID_ESC,
     "ESC",
@@ -253,21 +251,16 @@ pub const ESC: RecordDef = def(
 pub const RCS: RecordDef = def(ID_RCS, "RCS", "QffffB", "TimeUS,R,P,T,Y,Arm");
 /// FDS: the flight ring's statistics: records dropped since the log opened, smallest free space.
 pub const FDS: RecordDef = def(ID_FDS, "FDS", "QII", "TimeUS,Dp,FMn");
-/// GPA: the accuracy of one GNSS sample (`TimeUS` is the sample's, as in its GPS record): vertical DOP,
-/// horizontal and vertical accuracy in metres, milliseconds since the previous sample.
+/// GPA: the accuracy of one GNSS sample (`TimeUS` is the sample's, as in its GPS record): vertical DOP, horizontal and vertical accuracy in metres, milliseconds since the previous sample.
 pub const GPA: RecordDef = def(ID_GPA, "GPA", "QBcffH", "TimeUS,I,VDop,HAcc,VAcc,Delta");
-/// GPV: the velocity of one GNSS sample from the receiver's NAV-PVT (`TimeUS` is the sample's, as in its GPS
-/// record): velocity north, east and down (mm/s, down positive), the NAV-PVT's iTOW (GPS time of week, ms), ground
-/// speed gSpeed (mm/s) and heading headMot (0.01 degree). No position.
+/// GPV: the velocity of one GNSS sample from the receiver's NAV-PVT (`TimeUS` is the sample's, as in its GPS record): velocity north, east and down (mm/s, down positive), the NAV-PVT's iTOW (GPS time of week, ms), ground speed gSpeed (mm/s) and heading headMot (0.01 degree).
 pub const GPV: RecordDef = def(
     ID_GPV,
     "GPV",
     "QBiiiIIH",
     "TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg",
 );
-/// PPS: one whole-second GNSS fix paired with the PPS edge of its second (`TimeUS` is the fix's sample time, as in
-/// GPV): the edge's board time (us), the latency from the edge to `TimeUS` (us), the PPS edges counted and the
-/// unpaired ones counted since boot.
+/// PPS: one whole-second GNSS fix paired with the PPS edge of its second (`TimeUS` is the fix's sample time, as in GPV): the edge's board time (us), the latency from the edge to `TimeUS` (us), the PPS edges counted and the unpaired ones counted since boot.
 pub const PPS: RecordDef = def(ID_PPS, "PPS", "QQiII", "TimeUS,Edge,Dly,N,Unp");
 
 /// PIDT: the rate loop of one flight step: per axis X, Y, Z the rate target (rad/s) and the P, I and D torques (N.m).
@@ -277,8 +270,7 @@ pub const PIDT: RecordDef = def(
     "Qffffffffffff",
     "TimeUS,TarX,PX,IX,DX,TarY,PY,IY,DY,TarZ,PZ,IZ,DZ",
 );
-/// NTCH: the rate the loop used (rad/s, after the notch) per axis, the rotor frequency f1 (Hz) by DShot line (0: no
-/// valid eRPM) and whether the notch is on.
+/// NTCH: the rate the loop used (rad/s, after the notch) per axis, the rotor frequency f1 (Hz) by DShot line (0: no valid eRPM) and whether the notch is on.
 pub const NTCH: RecordDef = def(
     ID_NTCH,
     "NTCH",
@@ -286,9 +278,7 @@ pub const NTCH: RecordDef = def(
     "TimeUS,GX,GY,GZ,F0,F1,F2,F3,On",
 );
 
-/// GDN: the shadow guidance of one step (not a flight-step record: written on its own, every 8th step): the active target's
-/// index, the status bits (1 running, 2 arrived, 4 done, 8 invalid), the target and the setpoint position in NE (m), the
-/// setpoint velocity in NE (m/s), the distance (m) and the bearing (rad, clockwise from north) from the vehicle to the target.
+/// GDN: the shadow guidance of one step (not a flight-step record: written on its own, every 8th step): the active target's index, the status bits (1 running, 2 arrived, 4 done, 8 invalid), the target and the setpoint position in NE (m), the setpoint velocity in NE (m/s), the distance (m) and the bearing (rad, clockwise from north) from the vehicle to the target.
 pub const GDN: RecordDef = def(
     ID_GDN,
     "GDN",
@@ -296,36 +286,29 @@ pub const GDN: RecordDef = def(
     "TimeUS,Idx,St,TN,TE,PN,PE,VN,VE,Dist,Brg",
 );
 
-/// BFS: the low-battery monitor reached a level (Amendment BATT): the level (1 LOW, 2 CRITICAL), the critical action
-/// (`BATT_FS_CRT_ACT`: 0 warn, 1 descend), the pack voltage (V) and `BATT_CELLS`. Written once per rise, on its own.
+/// BFS: the low-battery monitor reached a level (Amendment BATT): the level (1 LOW, 2 CRITICAL), the critical action (`BATT_FS_CRT_ACT`: 0 warn, 1 descend), the pack voltage (V) and `BATT_CELLS`.
 pub const BFS: RecordDef = def(ID_BFS, "BFS", "QBBfB", "TimeUS,Level,Act,Volt,Cells");
 
-/// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the
-/// shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's. For I = 1 `TimeUS` is the
-/// horizon time, the time the state refers to.
+/// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's.
 pub const NKF1: RecordDef = def(
     ID_NKF1,
     "NKF1",
     "QBffffffffffB",
     "TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld",
 );
-/// NKF2: an estimator's gyro bias (rad/s) and accelerometer bias (m/s^2), and the sigmas of tilt, heading (rad),
-/// velocity NE and D (m/s), position NE and D (m); `TimeUS` as NKF1's.
+/// NKF2: an estimator's gyro bias (rad/s) and accelerometer bias (m/s^2), and the sigmas of tilt, heading (rad), velocity NE and D (m/s), position NE and D (m); `TimeUS` as NKF1's.
 pub const NKF2: RecordDef = def(
     ID_NKF2,
     "NKF2",
     "QBffffffffffff",
     "TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd",
 );
-/// NKI: one scalar fusion or reset of an estimator: source, innovation (or the applied change), its variance (or
-/// the new variance), outcome (codes: decision-nav-eskf-20261120, 8c, B5, C8); `TimeUS` as NKF1's.
+/// NKI: one scalar fusion or reset of an estimator: source, innovation (or the applied change), its variance (or the new variance), outcome (codes: decision-nav-eskf-20261120, 8c, B5, C8); `TimeUS` as NKF1's.
 pub const NKI: RecordDef = def(ID_NKI, "NKI", "QBBffB", "TimeUS,I,Src,Inn,Var,Ok");
 
-/// MODE: the flight mode the pilot selected and the one in effect, written at the first step and at every change of
-/// either. Codes as MOT's `Mode`: 0 Acro, 1 Angle, 2 Altitude, 3 Position.
+/// MODE: the flight mode the pilot selected and the one in effect, written at the first step and at every change of either.
 pub const MODE: RecordDef = def(ID_MODE, "MODE", "QBB", "TimeUS,Sel,Eff");
-/// SPN: the altitude-hold setpoint of one flight step: position NED (m), velocity NED (m/s) and heading (rad). In
-/// Altitude only PD (the target height, down positive) and VD (its rate feed-forward) are set; the rest are 0.
+/// SPN: the altitude-hold setpoint of one flight step: position NED (m), velocity NED (m/s) and heading (rad).
 pub const SPN: RecordDef = def(
     ID_SPN,
     "SPN",
@@ -343,7 +326,6 @@ pub const TYPES: [RecordDef; 30] = [
 pub const HEADER_SEQUENCE_LEN: usize = TYPES.len() * FMT.length as usize;
 
 /// The flight-step types (decision-first-pair-wiring-20261119, A6), the ones `encode_step` writes.
-/// They are in [`TYPES`], so [`write_header`] writes their FMTs.
 pub const FLIGHT_TYPES: [RecordDef; 6] = [NAV, SETP, DMD, MOT, PIDT, NTCH];
 
 /// Writes one record into the start of a buffer.
@@ -427,7 +409,6 @@ pub fn fmt_record(def: &RecordDef, out: &mut [u8]) -> usize {
 }
 
 /// Writes the header sequence: the FMT of FMT, then one FMT for each other type of [`TYPES`].
-/// Returns [`HEADER_SEQUENCE_LEN`], or 0 (nothing written) if `out` is shorter.
 pub fn write_header(out: &mut [u8]) -> usize {
     if out.len() < HEADER_SEQUENCE_LEN {
         return 0;
@@ -465,8 +446,7 @@ pub fn encode_msg(out: &mut [u8], time_us: u64, text: &[u8]) -> usize {
     w.pos
 }
 
-/// IMU: instance `inst` (0 or 1), angular rate in rad/s, acceleration in m/s^2, temperature in
-/// degC. `time_us` is the sample's own time. 40 bytes.
+/// IMU: instance `inst` (0 or 1), angular rate in rad/s, acceleration in m/s^2, temperature in degC.
 pub fn encode_imu(
     out: &mut [u8],
     time_us: u64,
@@ -490,7 +470,6 @@ pub fn encode_imu(
 /// `v` x 100 rounded to the nearest integer (halves away from zero), saturating; NaN gives 0.
 fn centi(v: f32) -> i32 {
     let scaled = v * 100.0;
-    // `as` from f32 to i32 saturates and maps NaN to 0.
     (if scaled < 0.0 {
         scaled - 0.5
     } else {
@@ -774,8 +753,7 @@ pub fn encode_pidt(
     w.pos
 }
 
-/// NTCH: the rate the loop used (rad/s) per axis, the rotor frequency f1 (Hz) by DShot line (0: no valid eRPM) and the
-/// notch switch. 40 bytes.
+/// NTCH: the rate the loop used (rad/s) per axis, the rotor frequency f1 (Hz) by DShot line (0: no valid eRPM) and the notch switch.
 pub fn encode_ntch(
     out: &mut [u8],
     time_us: u64,
@@ -794,8 +772,7 @@ pub fn encode_ntch(
     w.pos
 }
 
-/// GDN: the active target's index, the status bits, the target (TN, TE) and the setpoint position (PN, PE) in NE (m), the
-/// setpoint velocity (VN, VE, m/s), the distance (m) and the bearing (rad) to the target. 45 bytes.
+/// GDN: the active target's index, the status bits, the target (TN, TE) and the setpoint position (PN, PE) in NE (m), the setpoint velocity (VN, VE, m/s), the distance (m) and the bearing (rad) to the target.
 #[allow(clippy::too_many_arguments)]
 pub fn encode_gdn(
     out: &mut [u8],
@@ -822,9 +799,7 @@ pub fn encode_gdn(
     w.pos
 }
 
-/// ESC: raw eRPM, volts in centivolts, temperature in degC, by DShot line, and the flag bits (bit i:
-/// line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight
-/// throttles). 40 bytes.
+/// ESC: raw eRPM, volts in centivolts, temperature in degC, by DShot line, and the flag bits (bit i: line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight throttles).
 pub fn encode_esc(
     out: &mut [u8],
     time_us: u64,
@@ -875,12 +850,7 @@ pub fn encode_fds(out: &mut [u8], time_us: u64, dropped: u32, free_min: u32) -> 
     w.pos
 }
 
-/// GPA: the accuracy of one GNSS sample, instance 0. `vdop_x100` is the vertical DOP x 100 (`u16::MAX` when
-/// unknown, as the GPS record's HDop; values over 327.67 saturate). `HAcc` is sqrt(lat^2 + lon^2) in metres
-/// and needs both deviations. The SAM-M10Q gives lat and lon both its hAcc (`fw_settings::gnss::reading`), so with
-/// it `HAcc` logs sqrt(2) x hAcc, not hAcc; `VAcc` is the altitude deviation in metres; each is NaN when not available.
-/// `delta_ms` is the time since the previous GNSS sample (the caller keeps it; 0 for the first).
-/// 24 bytes.
+/// GPA: the accuracy of one GNSS sample, instance 0.
 pub fn encode_gpa(
     out: &mut [u8],
     time_us: u64,
@@ -910,9 +880,7 @@ pub fn encode_gpa(
     w.pos
 }
 
-/// GPV: the velocity of one GNSS sample, instance 0: north, east, down in mm/s, the GPS time of week in ms (0 when
-/// not known), ground speed in mm/s (`u32::MAX` when unknown) and heading in 0.01 degree (`u16::MAX` when unknown),
-/// all from the epoch's NAV-PVT. 34 bytes.
+/// GPV: the velocity of one GNSS sample, instance 0: north, east, down in mm/s, the GPS time of week in ms (0 when not known), ground speed in mm/s (`u32::MAX` when unknown) and heading in 0.01 degree (`u16::MAX` when unknown), all from the epoch's NAV-PVT.
 pub fn encode_gpv(
     out: &mut [u8],
     time_us: u64,
@@ -970,8 +938,7 @@ pub fn encode_nkf1(
     w.pos
 }
 
-/// NKF2: instance, gyro bias, accelerometer bias, then the sigmas tilt, heading, velocity NE, velocity D,
-/// position NE, position D. 60 bytes.
+/// NKF2: instance, gyro bias, accelerometer bias, then the sigmas tilt, heading, velocity NE, velocity D, position NE, position D.
 pub fn encode_nkf2(
     out: &mut [u8],
     time_us: u64,
@@ -1056,8 +1023,7 @@ pub fn encode_spn(
     w.pos
 }
 
-/// GPA's `delta_ms`: milliseconds from the previous GNSS sample's `t_us` to this one's, 0 for the first
-/// (`previous_us` `None`) and for a time that went backwards.
+/// GPA's `delta_ms`: milliseconds from the previous GNSS sample's `t_us` to this one's, 0 for the first (`previous_us` `None`) and for a time that went backwards.
 pub fn gpa_delta_ms(previous_us: Option<u64>, t_us: u64) -> u32 {
     previous_us.map_or(0, |p| {
         u32::try_from(t_us.saturating_sub(p) / 1000).unwrap_or(u32::MAX)
@@ -1082,10 +1048,7 @@ const GPS_EPOCH_DAYS: i64 = 3_657;
 const LEAP_SECONDS: i64 = 18;
 const SECONDS_PER_WEEK: i64 = 604_800;
 
-/// GPS week and milliseconds of the week for a UTC date and time, GPS time being UTC plus 18
-/// leap seconds. Integer arithmetic only. Returns `(0, 0)` ("no time known") for a date before
-/// the GPS epoch, a field out of range (month 1 to 12, day 1 to 31, hour under 24, minute under
-/// 60, second up to 60, millisecond under 1000) or a week beyond `u16`.
+/// GPS week and milliseconds of the week for a UTC date and time, GPS time being UTC plus 18 leap seconds.
 #[must_use]
 pub fn gps_week_ms(
     year: u16,
@@ -1203,8 +1166,7 @@ mod tests {
         out
     }
 
-    /// Q3-I1: the length of every encoded record equals the length its FMT announces, and the
-    /// table is consistent (one column per format character, unique types, distinct names).
+    /// Q3-I1: the length of every encoded record equals the length its FMT announces, and the table is consistent (one column per format character, unique types, distinct names).
     #[test]
     fn q3_i1_record_length_equals_fmt_length() {
         let samples = one_of_each();
@@ -1213,13 +1175,11 @@ mod tests {
         assert_eq!(write_header(&mut header), HEADER_SEQUENCE_LEN);
         for (i, def) in TYPES.iter().enumerate() {
             assert_eq!(samples[i].0, def.type_id);
-            // Length the FMT record of this type announces (byte 4 of the record).
             let fmt = &header[i * 89..(i + 1) * 89];
             assert_eq!(fmt[3], def.type_id);
             assert_eq!(usize::from(fmt[4]), samples[i].1.len(), "type {}", def.name);
             assert_eq!(usize::from(def.length), samples[i].1.len());
             assert_eq!(samples[i].1[..3], [HEAD1, HEAD2, def.type_id]);
-            // Columns: one name per format character, the first is TimeUS for data types.
             assert_eq!(
                 def.columns.split(',').count(),
                 def.format.len(),
@@ -1235,7 +1195,6 @@ mod tests {
                 assert_ne!(other.name, def.name);
             }
         }
-        // A reader that only knows the FMT lengths walks the sample to its exact end.
         let all: Vec<u8> = samples.iter().flat_map(|(_, b)| b.clone()).collect();
         let mut at = 0;
         for _ in 0..TYPES.len() {
@@ -1250,13 +1209,9 @@ mod tests {
     #[test]
     fn q3_i2_fmt_of_fmt_is_byte_exact() {
         let mut want = [0u8; 89];
-        // 0..3 header, 3 type 128, 4 length 89 (0x59).
         want[..5].copy_from_slice(&[0xA3, 0x95, 0x80, 0x80, 0x59]);
-        // 5..9 name "FMT" + NUL.
         want[5..9].copy_from_slice(&[0x46, 0x4D, 0x54, 0x00]);
-        // 9..25 format "BBnNZ" + 11 NUL.
         want[9..14].copy_from_slice(&[0x42, 0x42, 0x6E, 0x4E, 0x5A]);
-        // 25..89 columns "Type,Length,Name,Format,Columns" (31 bytes) + 33 NUL.
         want[25..56].copy_from_slice(b"Type,Length,Name,Format,Columns");
         let mut got = [0xEEu8; 100];
         assert_eq!(fmt_record(&FMT, &mut got), 89);
@@ -1282,17 +1237,14 @@ mod tests {
             assert_eq!(rec[3], def.type_id);
             assert_eq!(rec[4], def.length);
         }
-        // The FMT of GPS by hand: type 134 = 0x86, length 42 = 0x2A, "GPS", its format.
         let gps = &buf[6 * 89..7 * 89];
         assert_eq!(gps[3..9], [0x86, 0x2A, b'G', b'P', b'S', 0]);
         assert_eq!(gps[9..25], *b"QBBIHBcLLeff\0\0\0\0");
-        // The FMT of GPV by hand: type 152 = 0x98, length 34 = 0x22, "GPV", its format and columns.
         let gpv = &buf[19 * 89..20 * 89];
         assert_eq!(gpv[3..9], [0x98, 0x22, b'G', b'P', b'V', 0]);
         assert_eq!(gpv[9..25], *b"QBiiiIIH\0\0\0\0\0\0\0\0");
         assert_eq!(gpv[25..60], *b"TimeUS,I,VelN,VelE,VelD,GMS,Spd,Hdg");
         assert!(gpv[60..].iter().all(|&c| c == 0));
-        // The FMTs of NKF1, NKF2, NKI by hand: types 147-149 = 0x93-0x95, lengths 53, 60, 22.
         let nkf1 = &buf[20 * 89..21 * 89];
         assert_eq!(nkf1[3..9], [0x93, 53, b'N', b'K', b'F', b'1']);
         assert_eq!(nkf1[9..25], *b"QBffffffffffB\0\0\0");
@@ -1308,7 +1260,6 @@ mod tests {
         assert_eq!(nki[9..25], *b"QBBffB\0\0\0\0\0\0\0\0\0\0");
         assert_eq!(nki[25..48], *b"TimeUS,I,Src,Inn,Var,Ok");
         assert!(nki[48..].iter().all(|&c| c == 0));
-        // MODE and SPN by hand: types 150 and 151 = 0x96 and 0x97, lengths 13 and 39.
         let mode = &buf[23 * 89..24 * 89];
         assert_eq!(mode[3..9], [0x96, 13, b'M', b'O', b'D', b'E']);
         assert_eq!(mode[9..25], *b"QBB\0\0\0\0\0\0\0\0\0\0\0\0\0");
@@ -1319,7 +1270,6 @@ mod tests {
         assert_eq!(spn[9..25], *b"Qfffffff\0\0\0\0\0\0\0\0");
         assert_eq!(spn[25..53], *b"TimeUS,PN,PE,PD,VN,VE,VD,Hdg");
         assert!(spn[53..].iter().all(|&c| c == 0));
-        // PIDT and NTCH by hand: types 154 and 155 = 0x9A and 0x9B, lengths 59 and 40.
         let pidt = &buf[26 * 89..27 * 89];
         assert_eq!(pidt[3..9], [0x9A, 59, b'P', b'I', b'D', b'T']);
         assert_eq!(pidt[9..25], *b"Qffffffffffff   ");
@@ -1330,7 +1280,6 @@ mod tests {
         assert_eq!(ntch[9..25], *b"QfffffffB       ");
         assert_eq!(ntch[25..55], *b"TimeUS,GX,GY,GZ,F0,F1,F2,F3,On");
         assert!(ntch[55..].iter().all(|&c| c == 0));
-        // GDN by hand: type 156 = 0x9C, length 45.
         let gdn = &buf[28 * 89..29 * 89];
         assert_eq!(gdn[3..9], [0x9C, 45, b'G', b'D', b'N', 0]);
         assert_eq!(gdn[9..25], *b"QBBffffffff\0\0\0\0\0");
@@ -1381,7 +1330,6 @@ mod tests {
 
     #[test]
     fn golden_parm() {
-        // A3 95 81 | time 1 | "A" + 15 NUL | 1.0 = 00 00 80 3F | 2.0 = 00 00 00 40
         let mut b = [0u8; 35];
         assert_eq!(encode_parm(&mut b, 1, b"A", 1.0, 2.0), 35);
         let want = cat(&[
@@ -1397,7 +1345,6 @@ mod tests {
 
     #[test]
     fn golden_msg_and_text_rules() {
-        // A3 95 82 | time 2 | "Hi" + 62 NUL
         let mut b = [0u8; 75];
         assert_eq!(encode_msg(&mut b, 2, b"Hi"), 75);
         assert_eq!(
@@ -1407,12 +1354,10 @@ mod tests {
                 &[0; 62]
             ])
         );
-        // 70 bytes are cut at 64 (no terminator); text after a NUL is dropped.
         assert_eq!(encode_msg(&mut b, 2, &[b'x'; 70]), 75);
         assert_eq!(b[11..], [b'x'; 64]);
         assert_eq!(encode_msg(&mut b, 2, b"a\0b"), 75);
         assert_eq!(b[11..14], [b'a', 0, 0]);
-        // PARM name of 20 bytes is cut at 16.
         let mut p = [0u8; 35];
         encode_parm(&mut p, 0, &[b'N'; 20], 0.0, 0.0);
         assert_eq!(p[11..27], [b'N'; 16]);
@@ -1421,9 +1366,6 @@ mod tests {
 
     #[test]
     fn golden_imu() {
-        // A3 95 83 | time 3 | I 1 | gyro 1.0, 2.0, -1.0 | acc 0.5, 3.0, 4.0 | T 2.0
-        // 1.0 00 00 80 3F, 2.0 00 00 00 40, -1.0 00 00 80 BF, 0.5 00 00 00 3F,
-        // 3.0 00 00 40 40, 4.0 00 00 80 40
         let mut b = [0u8; 40];
         assert_eq!(
             encode_imu(&mut b, 3, 1, [1.0, 2.0, -1.0], [0.5, 3.0, 4.0], 2.0),
@@ -1440,7 +1382,6 @@ mod tests {
 
     #[test]
     fn golden_baro() {
-        // A3 95 84 | time 4 | I 0 | 100000.0 = 0x47C35000 = 00 50 C3 47 | 25.5 degC = 2550 = 0x09F6
         let mut b = [0u8; 18];
         assert_eq!(encode_baro(&mut b, 4, 0, 100_000.0, 25.5), 18);
         assert_eq!(
@@ -1449,7 +1390,6 @@ mod tests {
                 0xA3, 0x95, 0x84, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x50, 0xC3, 0x47, 0xF6, 0x09
             ]
         );
-        // -0.005 degC rounds away from zero to -1; saturation at the i16 range.
         encode_baro(&mut b, 4, 0, 0.0, -0.005);
         assert_eq!(b[16..], [0xFF, 0xFF]);
         encode_baro(&mut b, 4, 0, 0.0, 1000.0);
@@ -1458,7 +1398,6 @@ mod tests {
 
     #[test]
     fn golden_mag() {
-        // A3 95 85 | time 5 | I 1 | 1000 = E8 03 | -1 = FF FF | -1000 = 0xFC18 = 18 FC
         let mut b = [0u8; 18];
         assert_eq!(encode_mag(&mut b, 5, 1, [1000, -1, -1000]), 18);
         assert_eq!(
@@ -1471,9 +1410,6 @@ mod tests {
 
     #[test]
     fn golden_gps() {
-        // A3 95 86 | time 6 | I 0 | status 3 | GMS 18000 = 0x4650 = 50 46 00 00 | GWk 2445 =
-        // 0x098D = 8D 09 | NSats 12 | HDop 95 = 5F 00 | Lat 0x01020304 = 04 03 02 01 |
-        // Lng -1 = FF FF FF FF | Alt 123456 = 0x1E240 = 40 E2 01 00 | Spd 1.0 | GCrs 2.0
         let g = Gps {
             inst: 0,
             status: 3,
@@ -1496,7 +1432,6 @@ mod tests {
             &[0, 0, 0x80, 0x3F, 0, 0, 0, 0x40],
         ]);
         assert_eq!(b.as_slice(), want);
-        // HDop above the i16 range saturates.
         let mut g2 = g;
         g2.hdop_x100 = 60_000;
         encode_gps(&mut b, 6, &g2);
@@ -1505,7 +1440,6 @@ mod tests {
 
     #[test]
     fn golden_bat() {
-        // A3 95 87 | time 7 | Inst 0 | 3.0 = 00 00 40 40 | 0.5 = 00 00 00 3F
         let mut b = [0u8; 20];
         assert_eq!(encode_bat(&mut b, 7, 0, 3.0, 0.5), 20);
         assert_eq!(
@@ -1518,7 +1452,6 @@ mod tests {
 
     #[test]
     fn golden_rcin() {
-        // A3 95 88 | time 8 | C1 1500 = DC 05 | C2 1000 = E8 03 | C3..C14 0
         let mut ch = [0u16; 14];
         ch[0] = 1500;
         ch[1] = 1000;
@@ -1535,8 +1468,6 @@ mod tests {
 
     #[test]
     fn golden_dev() {
-        // A3 95 89 | time 9 | Id 7 | State 2 | Err 1 | Smp 0x01020304 | Errs 5 | TOs 6 | Rec 7 |
-        // Att 8 | Ovf 9
         let d = Dev {
             id: 7,
             state: 2,
@@ -1561,7 +1492,6 @@ mod tests {
 
     #[test]
     fn golden_dsf() {
-        // A3 95 8A | time 10 | Dp 1 | Blk 0x10001 stored as 0x0001 | Bytes 3 | FMn 4 | FMx 5 | FAv 6
         let d = Dsf {
             dropped: 1,
             blocks: 0x1_0001,
@@ -1583,8 +1513,6 @@ mod tests {
 
     #[test]
     fn golden_gpa() {
-        // A3 95 92 | time 7 | I 0 | VDop 150 = 96 00 | HAcc 5.0 = 00 00 A0 40 | VAcc 2.5 = 00 00 20 40 |
-        // Delta 200 = C8 00
         let mut b = [0u8; 24];
         assert_eq!(
             encode_gpa(&mut b, 7, 150, Some(3000), Some(4000), Some(2500), 200),
@@ -1604,7 +1532,6 @@ mod tests {
 
     #[test]
     fn golden_gpv() {
-        // A3 95 98 | time 7 | I 0 | N -12 | E 34 | D -1 | GMS 542618800 | Spd 450 | Hdg 25118
         let mut b = [0xEEu8; 40];
         assert_eq!(encode_gpv(&mut b, 7, [-12, 34, -1], 542_618_800, 450, 25_118), 34);
         let want = cat(&[
@@ -1629,7 +1556,6 @@ mod tests {
 
     #[test]
     fn golden_nkf1() {
-        // A3 95 93 | time 7 | I 1 | Q 1 0 0 -0.5 | V 0.25 -2 0 | P 3 -4 1.5 | Vld 0x55
         let mut b = [0xEEu8; 60];
         let n = encode_nkf1(&mut b, 7, 1, [1.0, 0.0, 0.0, -0.5], [0.25, -2.0, 0.0], [3.0, -4.0, 1.5], 0x55);
         assert_eq!(n, 53);
@@ -1641,7 +1567,6 @@ mod tests {
         want.push(0x55);
         assert_eq!(b[..53], want[..]);
         assert_eq!(b[53..], [0xEE; 7], "nothing beyond the record is touched");
-        // -0.5 = 0xBF000000 at Q4.
         assert_eq!(b[24..28], [0x00, 0x00, 0x00, 0xBF]);
         assert_eq!(NKF1.format, "QBffffffffffB");
         assert_eq!(NKF1.columns, "TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld");
@@ -1651,7 +1576,6 @@ mod tests {
 
     #[test]
     fn golden_nkf2() {
-        // A3 95 94 | time 7 | I 0 | GB 0 0 0 | AB 0 0 0.125 | S inf inf inf 0.5 inf 2
         let mut b = [0xEEu8; 64];
         let inf = f32::INFINITY;
         let n = encode_nkf2(&mut b, 7, 0, [0.0; 3], [0.0, 0.0, 0.125], [inf, inf, inf, 0.5, inf, 2.0]);
@@ -1663,7 +1587,6 @@ mod tests {
         }
         assert_eq!(b[..60], want[..]);
         assert_eq!(b[60..], [0xEE; 4], "nothing beyond the record is touched");
-        // +inf = 0x7F800000 at STlt.
         assert_eq!(b[36..40], [0x00, 0x00, 0x80, 0x7F]);
         assert_eq!(NKF2.format, "QBffffffffffff");
         assert_eq!(NKF2.columns, "TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd");
@@ -1673,12 +1596,10 @@ mod tests {
 
     #[test]
     fn golden_mode_and_spn() {
-        // A3 95 96 | time 7 | Sel 2 | Eff 1
         let mut b = [0u8; 13];
         assert_eq!(encode_mode(&mut b, 7, 2, 1), 13);
         assert_eq!(b, [0xA3, 0x95, 0x96, 7, 0, 0, 0, 0, 0, 0, 0, 2, 1]);
         assert_eq!(encode_mode(&mut [0u8; 12], 7, 2, 1), 0);
-        // A3 95 97 | time 7 | PN 1.0, PE 2.0, PD -1.5 | VN 0, VE 0, VD 0.5 | Hdg -2.0
         let mut b = [0u8; 39];
         assert_eq!(
             encode_spn(&mut b, 7, [1.0, 2.0, -1.5], [0.0, 0.0, 0.5], -2.0),
@@ -1707,7 +1628,6 @@ mod tests {
 
     #[test]
     fn golden_pidt_and_ntch() {
-        // A3 95 9A | time 7 | per axis X, Y, Z: Tar, P, I, D (1, 2, 3, 4 | 5, 6, 7, 8 | 9, 10, 11, 12)
         let mut b = [0xEEu8; 70];
         assert_eq!(
             encode_pidt(
@@ -1727,7 +1647,6 @@ mod tests {
         assert_eq!(b[..59], want[..]);
         assert_eq!(b[59..], [0xEE; 11], "nothing beyond the record is touched");
         assert_eq!(encode_pidt(&mut [0u8; 58], 7, [0.0; 3], [0.0; 3], [0.0; 3], [0.0; 3]), 0);
-        // A3 95 9B | time 7 | GX, GY, GZ = 1, 2, 3 | F0..F3 = 4, 5, 6, 7 | On 1
         let mut b = [0xEEu8; 50];
         assert_eq!(encode_ntch(&mut b, 7, [1.0, 2.0, 3.0], [4.0, 5.0, 6.0, 7.0], true), 40);
         let mut want = cat(&[&[0xA3, 0x95, 0x9B], &7u64.to_le_bytes()]);
@@ -1745,7 +1664,6 @@ mod tests {
 
     #[test]
     fn golden_gdn() {
-        // A3 95 9C | time 7 | Idx 2 | St 5 | TN, TE, PN, PE, VN, VE, Dist, Brg = 1 .. 8
         let mut b = [0xEEu8; 60];
         assert_eq!(
             encode_gdn(&mut b, 7, 2, 5, [1.0, 2.0], [3.0, 4.0], [5.0, 6.0], 7.0, 8.0),
@@ -1778,7 +1696,6 @@ mod tests {
 
     #[test]
     fn golden_nki() {
-        // A3 95 95 | time 7 | I 1 | Src 6 | Inn -1 | Var 0.25 | Ok 1
         let mut b = [0xEEu8; 30];
         assert_eq!(encode_nki(&mut b, 7, 1, 6, -1.0, 0.25, 1), 22);
         let want = cat(&[
@@ -1801,20 +1718,16 @@ mod tests {
     fn gpa_unknown_values_and_saturation() {
         let f = |b: &[u8], at: usize| f32::from_le_bytes([b[at], b[at + 1], b[at + 2], b[at + 3]]);
         let mut b = [0u8; 24];
-        // Unknown VDop is u16::MAX, which saturates to i16::MAX as the GPS record's HDop does.
         assert_eq!(encode_gpa(&mut b, 1, u16::MAX, None, None, None, 0), 24);
         assert_eq!(b[12..14], 32_767i16.to_le_bytes());
         assert!(f(&b, 14).is_nan() && f(&b, 18).is_nan());
-        // HAcc needs both lat and lon; VAcc is independent.
         encode_gpa(&mut b, 1, 0, Some(3000), None, Some(1500), 0);
         assert!(f(&b, 14).is_nan());
         assert_eq!(f(&b, 18), 1.5);
         encode_gpa(&mut b, 1, 0, None, Some(3000), None, 0);
         assert!(f(&b, 14).is_nan() && f(&b, 18).is_nan());
-        // 3-4-5 in metres.
         encode_gpa(&mut b, 1, 0, Some(3000), Some(4000), None, 0);
         assert!((f(&b, 14) - 5.0).abs() < 1e-6);
-        // Delta saturates at 65 535.
         encode_gpa(&mut b, 1, 0, None, None, None, 65_535);
         assert_eq!(b[22..24], [0xFF, 0xFF]);
         encode_gpa(&mut b, 1, 0, None, None, None, 70_000);
@@ -1830,7 +1743,6 @@ mod tests {
         assert_eq!(gpa_delta_ms(Some(5_000_000), 6_000_000), 1000);
         assert_eq!(gpa_delta_ms(Some(5_000_000), 4_000_000), 0);
         assert_eq!(gpa_delta_ms(Some(0), u64::MAX), u32::MAX);
-        // The record saturates it at 65 535.
         let mut b = [0u8; 24];
         encode_gpa(
             &mut b,
@@ -1873,29 +1785,17 @@ mod tests {
 
     #[test]
     fn gps_week_known_dates() {
-        // The GPS epoch, 1980-01-06 00:00:00 UTC: day 0, week 0; GPS time is 18 s ahead of UTC:
-        // 18 s = 18000 ms.
         assert_eq!(gps_week_ms(1980, 1, 6, 0, 0, 0, 0), (0, 18_000));
-        // 2026-11-15 00:00:00 UTC. Days from 1980-01-06 to 2026-01-06: 46 years x 365 = 16790
-        // plus 12 leap days (1980, 84, 88, 92, 96, 2000, 04, 08, 12, 16, 20, 24) = 16802. Day of
-        // year of Nov 15 = 304 + 15 = 319, of Jan 6 = 6: 313 more. 17115 days = 2445 x 7 exactly,
-        // so week 2445, day 0 of the week (a Sunday). Seconds into the week: 18 (leap) = 18000 ms.
         assert_eq!(gps_week_ms(2026, 11, 15, 0, 0, 0, 0), (2445, 18_000));
-        // The same date at 12:34:56.789 UTC: (12 x 3600 + 34 x 60 + 56 + 18) s = 45314 s
-        // = 45_314_000 ms + 789 ms.
         assert_eq!(
             gps_week_ms(2026, 11, 15, 12, 34, 56, 789),
             (2445, 45_314_789)
         );
-        // Across the week boundary: 2026-11-14 23:59:42.000 UTC + 18 s = 2026-11-15 00:00:00 GPS
-        // time = week 2445, 0 ms; one millisecond earlier it is the last millisecond of week 2444
-        // (604800 s x 1000 - 1 = 604_799_999).
         assert_eq!(gps_week_ms(2026, 11, 14, 23, 59, 42, 0), (2445, 0));
         assert_eq!(
             gps_week_ms(2026, 11, 14, 23, 59, 41, 999),
             (2444, 604_799_999)
         );
-        // A leap day: 2024-03-01 is one day (86_400 s) after 2024-02-29.
         let (w1, m1) = gps_week_ms(2024, 2, 29, 0, 0, 0, 0);
         let (w2, m2) = gps_week_ms(2024, 3, 1, 0, 0, 0, 0);
         assert_eq!(

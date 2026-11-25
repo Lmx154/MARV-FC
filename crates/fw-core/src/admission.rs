@@ -96,8 +96,7 @@ impl Action {
         }
     }
 
-    /// The time after which a running action ends FAILED by itself, in milliseconds: the compass
-    /// calibration has [`MAG_CALIBRATION_MAX_MS`], the other calibrations [`CALIBRATION_MAX_MS`].
+    /// The time after which a running action ends FAILED by itself, in milliseconds: the compass calibration has [`MAG_CALIBRATION_MAX_MS`], the other calibrations [`CALIBRATION_MAX_MS`].
     pub const fn max_duration_ms(self) -> u64 {
         match self.class() {
             ActionClass::Calibration => match self {
@@ -134,7 +133,6 @@ fn int(v: f32) -> Option<i32> {
     if !v.is_finite() || v.abs() >= 1.0e9 {
         return None;
     }
-    // In range, so the cast does not saturate.
     let n = v as i32;
     (n as f32 == v).then_some(n)
 }
@@ -187,7 +185,6 @@ fn classify_device(params: &[f32; 7]) -> Result<Classified, Refusal> {
         Some(5) => MarvDevice::MARV_DEVICE_GNSS,
         Some(6) => MarvDevice::MARV_DEVICE_BATT,
         Some(9) => MarvDevice::MARV_DEVICE_SD,
-        // RC, PSRAM, LED, ESC: devices of the dialect that this build does not serve.
         Some(7 | 10 | 11 | 12) => return Err(Refusal::Denied(NOT_YET)),
         _ => return Err(Refusal::Denied("unknown device")),
     };
@@ -202,9 +199,7 @@ fn classify_device(params: &[f32; 7]) -> Result<Classified, Refusal> {
     }
 }
 
-/// Classify a command and its seven parameters. Pure: it looks at nothing but its arguments.
-///
-/// A parameter counts as the integer `n` only if it is finite and exactly `n`.
+/// Classify a command and its seven parameters.
 pub fn classify(command: MavCmd, params: &[f32; 7]) -> Result<Classified, Refusal> {
     match command {
         MavCmd::MAV_CMD_PREFLIGHT_CALIBRATION => classify_calibration(params),
@@ -287,9 +282,6 @@ struct Running {
 }
 
 /// The books of the one long action that may run at a time, firmware-wide.
-///
-/// The action stays in the books until its final ACK has been handed out, so a new action cannot
-/// start while a final ACK is still owed (I5.3: exactly one final ACK per admitted long action).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ActionBook {
     slot: Option<Running>,
@@ -309,8 +301,7 @@ impl ActionBook {
             .map(|r| r.action)
     }
 
-    /// True when an action is in the books (running, or ended with its final ACK still owed): the
-    /// state in which [`ActionBook::admit`] answers TEMPORARILY_REJECTED.
+    /// True when an action is in the books (running, or ended with its final ACK still owed): the state in which [`ActionBook::admit`] answers TEMPORARILY_REJECTED.
     pub fn busy(&mut self, now_ms: u64) -> bool {
         self.expire(now_ms);
         self.slot.is_some()
@@ -341,17 +332,12 @@ impl ActionBook {
         }
     }
 
-    /// Apply the maximum durations at `now_ms`. Returns the action that has just ended FAILED by timeout,
-    /// so that the firmware can stop it. Every other method applies the same rule first.
+    /// Apply the maximum durations at `now_ms`.
     pub fn tick(&mut self, now_ms: u64) -> Option<Action> {
         self.expire(now_ms)
     }
 
     /// Decide what happens to a command that arrived on link `link`.
-    ///
-    /// The order: classification (UNSUPPORTED, DENIED); a retransmission of the running command
-    /// (IN_PROGRESS); the cancel; TEMPORARILY_REJECTED if `armed` or another action is in the books;
-    /// DENIED for a calibration when `hil`; otherwise the action is admitted and answered IN_PROGRESS 0 %.
     pub fn admit(
         &mut self,
         req: &CommandRequest,
@@ -429,9 +415,7 @@ impl ActionBook {
         }
     }
 
-    /// The firmware reports the end of the running action with its final result. Returns false (and
-    /// changes nothing) when nothing runs, when the action has already ended (including by timeout at
-    /// or before `now_ms`), or when `result` is IN_PROGRESS, which is not a final result.
+    /// The firmware reports the end of the running action with its final result.
     pub fn finish(&mut self, now_ms: u64, result: MavResult) -> bool {
         self.expire(now_ms);
         match self.slot.as_mut() {
@@ -444,10 +428,7 @@ impl ActionBook {
         }
     }
 
-    /// The next due COMMAND_ACK for link `link`, for the firmware's `Telemetry::acks` of that link: the
-    /// final ACK of the ended action (handed out once, then the books are free), or an IN_PROGRESS with
-    /// the percentage at most every [`PROGRESS_PERIOD_MS`]; `None` otherwise, and always `None` for a link
-    /// that is not the origin of the action.
+    /// The next due COMMAND_ACK for link `link`, for the firmware's `Telemetry::acks` of that link: the final ACK of the ended action (handed out once, then the books are free), or an IN_PROGRESS with the percentage at most every [`PROGRESS_PERIOD_MS`]; `None` otherwise, and always `None` for a link that is not the origin of the action.
     pub fn next_ack(&mut self, link: u8, now_ms: u64) -> Option<LateAck> {
         self.expire(now_ms);
         let run = self.slot.as_mut()?;
@@ -474,10 +455,7 @@ impl ActionBook {
         None
     }
 
-    /// Link `link` can no longer carry its ACKs (it is gone for good): if it is the origin of the
-    /// action, the ACKs owed are dropped (the books are freed at once if the action has ended; a running
-    /// action keeps running and its books are freed when it ends). Without this call an action whose
-    /// origin link is never polled again would block every later action.
+    /// Link `link` can no longer carry its ACKs (it is gone for good): if it is the origin of the action, the ACKs owed are dropped (the books are freed at once if the action has ended; a running action keeps running and its books are freed when it ends).
     pub fn link_lost(&mut self, link: u8) {
         if let Some(run) = self.slot.as_mut().filter(|r| r.link == link) {
             run.orphan = true;
@@ -486,16 +464,12 @@ impl ActionBook {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Motor test.
-// ---------------------------------------------------------------------------------------------
 
 /// The highest throttle of a motor test, in percent (param3).
 pub const MOTOR_TEST_PERCENT_MAX: f32 = 5.0;
 /// The longest spin of a motor test, in seconds (param4).
 pub const MOTOR_TEST_SECONDS_MAX: f32 = 3.0;
-/// Throttle levels per percent: 2000 levels are 100 % (`dshot_spin` `step_level`,
-/// `dshot/hil/src/bin/dshot_spin.rs` 202-206, "each at least 1"; 5 % is level 100).
+/// Throttle levels per percent: 2000 levels are 100 % (`dshot_spin` `step_level`, `dshot/hil/src/bin/dshot_spin.rs` 202-206, "each at least 1"; 5 % is level 100).
 const LEVELS_PER_PERCENT: f32 = 20.0;
 
 const _: () = assert!(
@@ -532,10 +506,7 @@ pub enum MotorTestRequest {
     },
 }
 
-/// The motor-test table: param1 a whole number 1-4, param2 0, param3 0 (stop) or
-/// above 0 up to 5.0, param4 above 0 up to 3.0 when param3 > 0 (ignored for a stop), param5 0 or 1,
-/// param6 0 or 2, param7 0. Anything else, NaN included, is refused with a "motor test: ..." text.
-/// Returns the motor (1..=4) with the request.
+/// The motor-test table: param1 a whole number 1-4, param2 0, param3 0 (stop) or above 0 up to 5.0, param4 above 0 up to 3.0 when param3 > 0 (ignored for a stop), param5 0 or 1, param6 0 or 2, param7 0.
 pub fn classify_motor_test(params: &[f32; 7]) -> Result<(u8, MotorTestRequest), &'static str> {
     let [p1, p2, p3, p4, p5, p6, p7] = *params;
     let motor = match int(p1) {
@@ -564,8 +535,6 @@ pub fn classify_motor_test(params: &[f32; 7]) -> Result<(u8, MotorTestRequest), 
     if !spin {
         return Ok((motor, MotorTestRequest::Stop));
     }
-    // p3 is above 0 and at most 5.0 here: adding 0.5 and truncating is round(), and the level is
-    // at least 1.
     let level = ((p3 * LEVELS_PER_PERCENT + 0.5) as u16).max(1);
     let duration_us = (p4 * 1.0e6) as u64;
     Ok((
@@ -593,8 +562,7 @@ pub struct MotorTestDecision {
     pub level: u16,
 }
 
-/// Core 0's record of the motor test: the `seq` of the last command it gave the flight core, and until
-/// when the last accepted spin runs. Pure: no clock, no cell.
+/// Core 0's record of the motor test: the `seq` of the last command it gave the flight core, and until when the last accepted spin runs.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MotorTest {
     seq: u32,
@@ -610,15 +578,12 @@ impl MotorTest {
         }
     }
 
-    /// True while a spin accepted here is not over: its `until_us` is not reached and no stop was
-    /// accepted since. The firmware passes this (or `armed`) as `armed` to [`ActionBook::admit`], so
-    /// every other action is TEMPORARILY_REJECTED during a spin.
+    /// True while a spin accepted here is not over: its `until_us` is not reached and no stop was accepted since.
     pub fn spin_active(&self, now_us: u64) -> bool {
         self.spin_until_us.is_some_and(|until| now_us < until)
     }
 
-    /// The next `seq`: counts from 1 and skips 0 on wrap (the flight core treats 0 as done, and
-    /// ignores a change of fields under the same `seq`).
+    /// The next `seq`: counts from 1 and skips 0 on wrap (the flight core treats 0 as done, and ignores a change of fields under the same `seq`).
     fn next_seq(&mut self) -> u32 {
         self.seq = match self.seq.wrapping_add(1) {
             0 => 1,
@@ -627,13 +592,7 @@ impl MotorTest {
         self.seq
     }
 
-    /// Decide a `MAV_CMD_DO_MOTOR_TEST` with `params` at board time `now_us`. `book_busy`: another long
-    /// action is in the books ([`ActionBook::busy`]); `armed` the vehicle is armed.
-    ///
-    /// DENIED for a parameter outside [`classify_motor_test`]'s table. A stop is ACCEPTED in every state.
-    /// A spin is TEMPORARILY_REJECTED if `book_busy` or `armed`; otherwise ACCEPTED at once, and it
-    /// replaces a running spin (a spin running here does not refuse it). Every accepted command, spin or
-    /// stop, gets a new `seq` and a whole [`TestCmd`].
+    /// Decide a `MAV_CMD_DO_MOTOR_TEST` with `params` at board time `now_us`.
     pub fn admit(
         &mut self,
         params: &[f32; 7],
@@ -679,7 +638,6 @@ impl MotorTest {
                 self.spin_until_us = Some(until_us);
                 TestCmd {
                     seq: self.next_seq(),
-                    // `motor` is 1..=4, so the mapping has an answer; 0 is a line that is a stop's.
                     line: line_of_element(usize::from(motor - 1)).map_or(0, |l| l as u8),
                     level,
                     until_us,
@@ -853,26 +811,21 @@ mod tests {
     fn admission_order() {
         let mut b = ActionBook::new();
         let t = MavCmd::MAV_CMD_NAV_TAKEOFF;
-        // UNSUPPORTED beats armed.
         let d = admit(&mut b, &req(t, [0.0; 7], GCS), true, false, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_UNSUPPORTED);
-        // DENIED beats armed, and carries its text.
         let d = admit(&mut b, &req(CAL, p(&[(0, 2.0)]), GCS), true, false, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
         assert_eq!(d.text, Some(NOT_YET));
-        // A valid command while armed.
         let d = admit(&mut b, &req(CAL, GYRO, GCS), true, false, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
         assert_eq!(d.effect, Effect::None);
         assert_eq!(b.running(), None);
-        // Another action runs.
         let d = admit(&mut b, &req(STO, SAVE, GCS), false, false, 0);
         assert_eq!(d.outcome, CommandOutcome::in_progress(0));
         assert_eq!(d.effect, Effect::Start(Action::StorageSave));
         let d = admit(&mut b, &req(CAL, GYRO, OTHER), false, false, 10);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
         assert_eq!(b.running(), Some(Action::StorageSave));
-        // HIL: calibration denied, storage admitted.
         let mut b = ActionBook::new();
         let d = admit(&mut b, &req(CAL, GYRO, GCS), false, true, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
@@ -884,31 +837,26 @@ mod tests {
 
     #[test]
     fn mag_calibration_admission() {
-        // Idle and not armed: admitted.
         let mut b = ActionBook::new();
         let d = admit(&mut b, &req(CAL, MAG, GCS), false, false, 0);
         assert_eq!(d.outcome, CommandOutcome::in_progress(0));
         assert_eq!(d.effect, Effect::Start(Action::MagCalibration));
         assert_eq!(b.running(), Some(Action::MagCalibration));
-        // Armed: TEMPORARILY_REJECTED, nothing starts.
         let mut b = ActionBook::new();
         let d = admit(&mut b, &req(CAL, MAG, GCS), true, false, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
         assert_eq!(d.effect, Effect::None);
         assert_eq!(b.running(), None);
-        // Another action runs: TEMPORARILY_REJECTED.
         admit(&mut b, &req(STO, SAVE, GCS), false, false, 0);
         let d = admit(&mut b, &req(CAL, MAG, OTHER), false, false, 10);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
         assert_eq!(b.running(), Some(Action::StorageSave));
-        // HIL: DENIED.
         let mut b = ActionBook::new();
         let d = admit(&mut b, &req(CAL, MAG, GCS), false, true, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
         assert_eq!(d.text, Some("calibration not allowed in HIL"));
         assert_eq!(d.effect, Effect::None);
         assert_eq!(b.running(), None);
-        // A retransmission from the same sender is IN_PROGRESS; another sender is rejected.
         let mut b = ActionBook::new();
         let r = req(CAL, MAG, GCS);
         admit(&mut b, &r, false, false, 0);
@@ -918,7 +866,6 @@ mod tests {
         assert_eq!(d.effect, Effect::None);
         let d = admit(&mut b, &req(CAL, MAG, OTHER), false, false, 200);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
-        // The all-zero 241 cancels it: one final CANCELLED, on the origin link only.
         let mut b = ActionBook::new();
         b.admit(&req(CAL, MAG, GCS), 1, false, false, 0);
         let d = admit(&mut b, &req(CAL, [0.0; 7], OTHER), false, false, 5_000);
@@ -950,14 +897,12 @@ mod tests {
             Effect::Start(Action::GyroCalibration)
         );
         b.set_progress(100, 42);
-        // Same command, same sender: IN_PROGRESS with the percentage, even if armed meanwhile.
         for armed in [false, true] {
             let d = admit(&mut b, &r, armed, false, 200);
             assert_eq!(d.outcome, CommandOutcome::in_progress(42));
             assert_eq!(d.effect, Effect::None);
         }
         assert_eq!(b.running(), Some(Action::GyroCalibration));
-        // Another sender, or other parameters from the same sender: rejected, nothing changed.
         let d = admit(&mut b, &req(CAL, GYRO, OTHER), false, false, 200);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
         let d = admit(&mut b, &req(CAL, p(&[(4, 4.0)]), GCS), false, false, 200);
@@ -969,7 +914,6 @@ mod tests {
             admit(&mut b, &r, false, false, 300).outcome,
             CommandOutcome::in_progress(42)
         );
-        // Progress above 100 is cut.
         b.set_progress(300, 250);
         assert_eq!(
             admit(&mut b, &r, false, false, 300).outcome,
@@ -984,14 +928,12 @@ mod tests {
         let d = admit(&mut b, &cancel, false, false, 0);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
         assert_eq!(d.text, Some("nothing to cancel"));
-        // Not while storage runs.
         admit(&mut b, &req(STO, SAVE, GCS), false, false, 0);
         let d = admit(&mut b, &cancel, false, false, 10);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
         assert_eq!(d.effect, Effect::None);
         assert!(b.finish(20, MavResult::MAV_RESULT_ACCEPTED));
         assert!(b.next_ack(0, 30).is_some());
-        // While a calibration runs, even if armed meanwhile or from another sender.
         let d = admit(&mut b, &req(CAL, GYRO, GCS), false, false, 100);
         assert_eq!(d.effect, Effect::Start(Action::GyroCalibration));
         let d = admit(&mut b, &cancel, true, false, 200);
@@ -1001,7 +943,6 @@ mod tests {
         );
         assert_eq!(d.effect, Effect::CancelCalibration);
         assert_eq!(b.running(), None);
-        // The firmware's own finish after the cancel changes nothing; the other link gets nothing.
         assert!(!b.finish(210, MavResult::MAV_RESULT_ACCEPTED));
         assert_eq!(b.next_ack(1, 700), None);
         let ack = b.next_ack(0, 700);
@@ -1015,7 +956,6 @@ mod tests {
         );
         assert_eq!(b.next_ack(0, 701), None);
         assert_eq!(b.next_ack(0, 5_000), None);
-        // A second cancel finds nothing.
         let d = admit(&mut b, &cancel, false, false, 800);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_DENIED);
     }
@@ -1067,7 +1007,6 @@ mod tests {
             );
             assert_eq!(b.tick(t0 + max - 1), None, "{cmd:?}");
             assert!(b.running().is_some());
-            // Polling just before the maximum gives no final ACK.
             assert_ne!(
                 b.next_ack(0, t0 + max - 1).map(|a| a.outcome.result),
                 Some(MavResult::MAV_RESULT_FAILED)
@@ -1077,7 +1016,6 @@ mod tests {
             let a = b.next_ack(0, t0 + max).unwrap();
             assert_eq!(a.outcome.result, MavResult::MAV_RESULT_FAILED, "{cmd:?}");
             assert_eq!(b.next_ack(0, t0 + max + 1), None);
-            // A finish at the maximum has lost against the timeout; one just before wins.
             let mut b = ActionBook::new();
             b.admit(&req(cmd, params, GCS), 0, false, false, t0);
             assert!(!b.finish(t0 + max, MavResult::MAV_RESULT_ACCEPTED));
@@ -1106,7 +1044,6 @@ mod tests {
         b.link_lost(0);
         assert!(b.next_ack(1, 30).is_some());
         assert_eq!(b.running(), None);
-        // Link lost while running: no more progress, no final, books free after the end.
         b.admit(&req(STO, SAVE, GCS), 1, false, false, 100);
         b.link_lost(1);
         assert_eq!(b.next_ack(1, 2_999), None);
@@ -1118,7 +1055,6 @@ mod tests {
         assert_eq!(d.effect, Effect::Start(Action::StorageSave));
     }
 
-    // ---- I5.3, property style ----
 
     struct Rng(u64);
     impl Rng {
@@ -1347,7 +1283,6 @@ mod tests {
                 }
             }
         }
-        // Drain: every action has ended by timeout and its final ACK is polled.
         for _ in 0..3 {
             now += 20_000;
             poll(src, &mut cur, 0, now, &mut finals, &mut last_progress)?;
@@ -1371,7 +1306,6 @@ mod tests {
             }
             free_at_end += u32::from(book.running().is_none());
         }
-        // The run is not vacuous.
         assert!(total > 10_000, "only {total} admitted actions");
         assert_eq!(free_at_end, 10_000);
     }
@@ -1411,7 +1345,6 @@ mod tests {
         );
     }
 
-    // ---- motor test ----
 
     /// A spin of motor `m` at `pct` percent for `secs` seconds, the rest of the table at its zeros.
     fn spin(m: f32, pct: f32, secs: f32) -> [f32; 7] {
@@ -1433,7 +1366,6 @@ mod tests {
         assert_eq!(ok(spin(1.0, 5.0, 3.0)), Ok((1, sp(1, 100, 3_000_000))));
         assert_eq!(ok(spin(4.0, 0.05, 0.1)), Ok((4, sp(4, 1, 100_000))));
         assert_eq!(ok(spin(2.0, 1.65, 2.0)), Ok((2, sp(2, 33, 2_000_000))));
-        // Count 0 or 1, order 0 or 2.
         for (count, order) in [(0.0, 0.0), (1.0, 0.0), (0.0, 2.0), (1.0, 2.0)] {
             let mut q = spin(3.0, 2.0, 1.0);
             q[4] = count;
@@ -1442,7 +1374,6 @@ mod tests {
         }
         assert_eq!(ok(stop(1.0)), Ok((1, MotorTestRequest::Stop)));
         assert_eq!(ok(stop(4.0)), Ok((4, MotorTestRequest::Stop)));
-        // The duration is ignored for a stop, even when it is nonsense.
         let mut q = stop(2.0);
         q[3] = f32::NAN;
         assert_eq!(ok(q), Ok((2, MotorTestRequest::Stop)));
@@ -1464,7 +1395,6 @@ mod tests {
             q
         };
         let rows: Vec<([f32; 7], &str)> = std::vec![
-            // param1
             (with(0, 0.0), MT_MOTOR),
             (with(0, 5.0), MT_MOTOR),
             (with(0, -1.0), MT_MOTOR),
@@ -1473,40 +1403,33 @@ mod tests {
             (with(0, inf), MT_MOTOR),
             (stop(0.0), MT_MOTOR),
             (stop(5.0), MT_MOTOR),
-            // param2
             (with(1, 1.0), MT_TYPE),
             (with(1, 2.0), MT_TYPE),
             (with(1, nan), MT_TYPE),
-            // param3
             (with(2, 5.01), MT_THROTTLE),
             (with(2, 100.0), MT_THROTTLE),
             (with(2, -0.1), MT_THROTTLE),
             (with(2, nan), MT_THROTTLE),
             (with(2, inf), MT_THROTTLE),
             (with(2, f32::NEG_INFINITY), MT_THROTTLE),
-            // param4 (a spin)
             (with(3, 0.0), MT_DURATION),
             (with(3, -1.0), MT_DURATION),
             (with(3, 3.01), MT_DURATION),
             (with(3, nan), MT_DURATION),
             (with(3, inf), MT_DURATION),
-            // param5
             (with(4, 2.0), MT_COUNT),
             (with(4, -1.0), MT_COUNT),
             (with(4, 0.5), MT_COUNT),
             (with(4, nan), MT_COUNT),
-            // param6
             (with(5, 1.0), MT_ORDER),
             (with(5, 3.0), MT_ORDER),
             (with(5, nan), MT_ORDER),
-            // param7
             (with(6, 1.0), MT_PARAM7),
             (with(6, -1.0), MT_PARAM7),
             (with(6, nan), MT_PARAM7),
         ];
         for (params, text) in rows {
             assert_eq!(classify_motor_test(&params), Err(text), "{params:?}");
-            // The decision is DENIED with the text, nothing for the flight core, in any state.
             for (busy, armed) in [(false, false), (true, false), (false, true), (true, true)] {
                 let mut mt = MotorTest::new();
                 let d = mt.admit(&params, busy, armed, 5);
@@ -1516,7 +1439,6 @@ mod tests {
                 assert!(!mt.spin_active(6));
             }
         }
-        // Stop rows of the other parameters are checked too.
         for i in [1, 4, 5, 6] {
             let mut q = stop(1.0);
             q[i] = 7.0;
@@ -1574,7 +1496,6 @@ mod tests {
             assert_eq!((d.motor, d.level, cmd.level), (motor, 100, 100));
             assert_eq!(cmd.until_us, 1_000 + 1_000_000);
         }
-        // M1 is line 3 and M4 line 0.
         let m1 = mt.admit(&spin(1.0, 1.0, 1.0), false, false, 0).cmd.unwrap();
         let m4 = mt.admit(&spin(4.0, 1.0, 1.0), false, false, 0).cmd.unwrap();
         assert_eq!((m1.line, m4.line), (3, 0));
@@ -1588,10 +1509,8 @@ mod tests {
             assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
             assert_eq!((d.cmd, d.text), (None, None));
             assert!(!mt.spin_active(11), "a refused spin is not a spin");
-            // And it took no seq.
             assert_eq!(mt.seq, 0);
         }
-        // With the real book: a long action in it.
         let mut b = ActionBook::new();
         let mut mt = MotorTest::new();
         assert!(!b.busy(0));
@@ -1599,7 +1518,6 @@ mod tests {
         assert!(b.busy(1));
         let d = mt.admit(&spin(1.0, 5.0, 1.0), b.busy(1), false, 1_000);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_TEMPORARILY_REJECTED);
-        // After the action's timeout and its final ACK the books are free.
         assert!(b.busy(CALIBRATION_MAX_MS));
         assert!(b.next_ack(0, CALIBRATION_MAX_MS).is_some());
         assert!(!b.busy(CALIBRATION_MAX_MS));
@@ -1647,7 +1565,6 @@ mod tests {
             .cmd
             .unwrap();
         assert!(mt.spin_active(2_000));
-        // The same bits again, and another motor, are new commands with new seqs.
         let again = mt.admit(&spin(1.0, 5.0, 3.0), false, false, 2_000);
         assert_eq!(again.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
         let again = again.cmd.unwrap();
@@ -1659,7 +1576,6 @@ mod tests {
             .unwrap();
         assert_ne!(other.seq, again.seq);
         assert_eq!((other.line, other.level), (1, 20));
-        // Core 0's record follows the latest spin.
         assert!(mt.spin_active(3_000 + 499_999));
         assert!(!mt.spin_active(3_000 + 500_000));
     }
@@ -1671,7 +1587,6 @@ mod tests {
         let now_us = 10_000_000;
         let d = mt.admit(&spin(2.0, 5.0, 2.0), b.busy(now_us / 1000), false, now_us);
         assert_eq!(d.outcome.result, MavResult::MAV_RESULT_ACCEPTED);
-        // The book holds nothing for a motor test.
         assert!(!b.busy(now_us / 1000));
         let save = req(STO, SAVE, GCS);
         let at = |t_us: u64, b: &mut ActionBook, mt: &MotorTest| {
@@ -1691,7 +1606,6 @@ mod tests {
             at(now_us + 2_000_000, &mut b, &mt),
             MavResult::MAV_RESULT_IN_PROGRESS
         );
-        // A stop frees the others at once.
         let mut b = ActionBook::new();
         let mut mt = MotorTest::new();
         mt.admit(&spin(2.0, 5.0, 3.0), false, false, now_us);
@@ -1704,7 +1618,6 @@ mod tests {
             at(now_us + 3, &mut b, &mt),
             MavResult::MAV_RESULT_IN_PROGRESS
         );
-        // And unsupported or denied commands keep their answers during a spin (classification first).
         let mut b = ActionBook::new();
         let mut mt = MotorTest::new();
         mt.admit(&spin(2.0, 5.0, 3.0), false, false, now_us);
@@ -1724,7 +1637,6 @@ mod tests {
         let first = mt.admit(&spin(1.0, 1.0, 1.0), false, false, 0).cmd.unwrap();
         assert_eq!(first.seq, 1);
         assert_ne!(first.seq, TestCmd::INITIAL.seq);
-        // Spin and stop alternate, each with a new seq.
         let mut last = first.seq;
         for i in 0..10u32 {
             let params = if i % 2 == 0 {
@@ -1736,7 +1648,6 @@ mod tests {
             assert_eq!(cmd.seq, last + 1);
             last = cmd.seq;
         }
-        // Wrap: 0 is skipped, and no seq within a window of the wrap repeats.
         let mut mt = MotorTest::new();
         mt.seq = u32::MAX - 3;
         let mut seen = Vec::new();
@@ -1753,7 +1664,6 @@ mod tests {
             std::vec![u32::MAX - 2, u32::MAX - 1, u32::MAX, 1, 2, 3, 4, 5]
         );
         assert!(!seen.contains(&0));
-        // Two neighbours differ always (a change under the same seq would be honoured live).
         assert!(seen.windows(2).all(|w| w[0] != w[1]));
     }
 }

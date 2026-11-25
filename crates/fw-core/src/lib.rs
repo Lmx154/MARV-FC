@@ -2,8 +2,6 @@
 //! Device health, parameters, record codecs, command admission, calibration maths and the lock-free
 //! cells between the two cores.
 #![no_std]
-// `deny`, not `forbid`: the `xcore` module (lock-free cells) uses `unsafe`, and `forbid` cannot be
-// relaxed for a single module.
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 #![cfg_attr(

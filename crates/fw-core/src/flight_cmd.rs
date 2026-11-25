@@ -55,9 +55,7 @@ pub fn decode(command: MavCmd, params: &[f32; 7]) -> Decoded {
 /// The ground station's (system, component): system 255, component 190.
 pub const STATION: (u8, u8) = (255, 190);
 
-/// The station's own latest HEARTBEAT time, from `kept` (the value so far) and the RC port's latest ground-station
-/// HEARTBEAT (`last_gcs_us`, `sender`; any sender of a HEARTBEAT of type GCS sets both): that time when the sender is
-/// exactly [`STATION`], else `kept` (another sender never moves it and never clears it).
+/// The station's own latest HEARTBEAT time, from `kept` (the value so far) and the RC port's latest ground-station HEARTBEAT (`last_gcs_us`, `sender`; any sender of a HEARTBEAT of type GCS sets both): that time when the sender is exactly [`STATION`], else `kept` (another sender never moves it and never clears it).
 pub fn station_heartbeat_us(kept: Option<u64>, last_gcs_us: Option<u64>, sender: Option<(u8, u8)>) -> Option<u64> {
     match (last_gcs_us, sender) {
         (Some(t), Some(s)) if s == STATION => Some(t),
@@ -165,8 +163,7 @@ impl Mailbox {
         }
     }
 
-    /// Core 0: claims the mailbox and posts `payload` with a new sequence number, returned; `None` when another command
-    /// is outstanding (claimed and not yet [`Mailbox::end`]ed).
+    /// Core 0: claims the mailbox and posts `payload` with a new sequence number, returned; `None` when another command is outstanding (claimed and not yet [`Mailbox::end`]ed).
     pub fn post(&self, payload: u8) -> Option<u32> {
         let mut seq = (self.last.load(Ordering::Relaxed).wrapping_add(1)) & SEQ_MASK;
         if seq == 0 {
@@ -174,8 +171,6 @@ impl Mailbox {
         }
         self.claim.compare_exchange(0, seq, Ordering::Acquire, Ordering::Relaxed).ok()?;
         self.last.store(seq, Ordering::Relaxed);
-        // The claim makes this the only poster; the slot is empty unless a request was neither taken nor withdrawn,
-        // which `end` rules out. Fail closed all the same.
         if self.req.compare_exchange(0, word(seq, payload), Ordering::Release, Ordering::Relaxed).is_err() {
             self.claim.store(0, Ordering::Release);
             return None;
@@ -189,23 +184,20 @@ impl Mailbox {
         (seq != 0 && a >> 8 == seq).then_some(a as u8)
     }
 
-    /// Core 0: withdraws the request `seq` (`payload` as posted). True: it was never taken, the flight step will not see
-    /// it. False: the flight step has taken it (its answer follows in the same step).
+    /// Core 0: withdraws the request `seq` (`payload` as posted).
     pub fn withdraw(&self, seq: u32, payload: u8) -> bool {
         self.req
             .compare_exchange(word(seq, payload), 0, Ordering::AcqRel, Ordering::Relaxed)
             .is_ok()
     }
 
-    /// Core 0: ends command `seq` (answered, or withdrawn, or given up), so the next can be posted. A request not yet
-    /// taken is withdrawn first.
+    /// Core 0: ends command `seq` (answered, or withdrawn, or given up), so the next can be posted.
     pub fn end(&self, seq: u32, payload: u8) {
         let _ = self.withdraw(seq, payload);
         let _ = self.claim.compare_exchange(seq, 0, Ordering::Release, Ordering::Relaxed);
     }
 
-    /// Flight step: takes the waiting request, at most once: (sequence number, payload). An empty slot is seen with a
-    /// plain load and left alone; a request posted after that load is taken by the next call.
+    /// Flight step: takes the waiting request, at most once: (sequence number, payload).
     pub fn take(&self) -> Option<(u32, u8)> {
         if self.req.load(Ordering::Relaxed) == 0 {
             return None;
@@ -245,10 +237,7 @@ impl Pending {
         Some(Pending { seq, payload, posted_us: now_us, taken: false })
     }
 
-    /// The answer, if it has come, or the timeout: the flight step has `bound_us` from the post to take the request
-    /// (then it is withdrawn untaken). A request it took was applied: it is never timed out, its answer (given in the
-    /// step that took it) is waited for until it comes or [`Pending::abandon`] (its link went down). `Some` ends the
-    /// command (the mailbox is free for the next); `None`: still waiting.
+    /// The answer, if it has come, or the timeout: the flight step has `bound_us` from the post to take the request (then it is withdrawn untaken).
     pub fn check(&mut self, mailbox: &Mailbox, now_us: u64, bound_us: u64) -> Option<Exchange> {
         if let Some(a) = mailbox.poll(self.seq) {
             mailbox.end(self.seq, self.payload);
@@ -386,15 +375,12 @@ mod tests {
 
     #[test]
     fn no_replay_after_a_restart_of_the_flight_side() {
-        // The flight side keeps no state: a restarted reader finds the slot empty once the request was taken.
         let m = Mailbox::new();
         let s = m.post(0x14).unwrap();
         assert_eq!(m.take(), Some((s, 0x14)));
-        // ... the flight side restarts here, before it answered ...
         for _ in 0..3 {
             assert_eq!(m.take(), None);
         }
-        // A board reset restarts both sides: every static is new and empty.
         let fresh = Mailbox::new();
         assert_eq!(fresh.take(), None);
         assert_eq!(fresh.poll(0), None, "sequence 0 is never an answer");
@@ -421,7 +407,6 @@ mod tests {
     #[test]
     fn pending_check_answers_and_times_out_both_ways_and_abandon_withdraws() {
         let m = Mailbox::new();
-        // Answered at the third check.
         let mut p = Pending::post(&m, 0x13, 0).unwrap();
         assert_eq!(p.check(&m, 10, 100), None);
         let (s, b) = m.take().unwrap();
@@ -429,19 +414,16 @@ mod tests {
         assert_eq!(p.check(&m, 20, 100), None);
         m.answer(s, 13);
         assert_eq!(p.check(&m, 30, 100), Some(Exchange::Answered(13)));
-        // Never taken: withdrawn at the bound; the flight step then finds nothing.
         let mut p = Pending::post(&m, 0x11, 1_000).unwrap();
         assert_eq!(Pending::post(&m, 0x12, 1_000), None, "one at a time");
         assert_eq!(p.check(&m, 1_099, 100), None);
         assert_eq!(p.check(&m, 1_100, 100), Some(Exchange::Timeout));
         assert_eq!(m.take(), None, "a withdrawn request is never applied");
-        // Taken before the bound, answered after it: the real answer.
         let mut p = Pending::post(&m, 0x14, 3_000).unwrap();
         let (s, _) = m.take().unwrap();
         assert_eq!(p.check(&m, 3_150, 100), None);
         m.answer(s, ACCEPTED);
         assert_eq!(p.check(&m, 3_160, 100), Some(Exchange::Answered(ACCEPTED)));
-        // Abandoned untaken: withdrawn, and the mailbox is free.
         let p = Pending::post(&m, 0x15, 4_000).unwrap();
         p.abandon(&m);
         assert_eq!(m.take(), None);
@@ -451,7 +433,6 @@ mod tests {
     #[test]
     fn a_taken_command_is_never_timed_out_only_answered_or_dropped_with_its_link() {
         let m = Mailbox::new();
-        // Taken, answered long after every bound: the real answer, never a timeout.
         let mut p = Pending::post(&m, 0x13, 0).unwrap();
         let (s, _) = m.take().unwrap();
         assert_eq!(p.check(&m, 100, 100), None, "taken: wait for its answer");
@@ -460,13 +441,11 @@ mod tests {
         }
         m.answer(s, ACCEPTED);
         assert_eq!(p.check(&m, 60_000_001, 100), Some(Exchange::Answered(ACCEPTED)));
-        // Taken, never answered: waiting until the link goes down, then dropped; the mailbox is free again.
         let mut p = Pending::post(&m, 0x14, 1_000).unwrap();
         let (old, _) = m.take().unwrap();
         assert_eq!(p.check(&m, 1_000_000, 100), None);
         assert_eq!(Pending::post(&m, 0x15, 1_000_000), None, "still outstanding");
         p.abandon(&m);
-        // The next command gets its own answer, not the old one's (late or not).
         let mut q = Pending::post(&m, 0x15, 2_000_000).unwrap();
         m.answer(old, 4);
         assert_eq!(q.check(&m, 2_000_010, 100), None, "the answer to {old} is not the next command's");

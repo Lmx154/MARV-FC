@@ -70,10 +70,7 @@ const CH: [[ParamDef; PER_CHANNEL]; CHANNELS] = [
     channel("RC8_MIN", "RC8_TRIM", "RC8_MAX", "RC8_REVERSED", "RC8_DZ"),
 ];
 
-/// The RC parameter table: for channels 1 to 8 MIN, TRIM, MAX, REVERSED, DZ, then the four function
-/// maps. None is a `calibration` parameter: MIN, TRIM and MAX are calibration results, but "reset
-/// calibration" (`PREFLIGHT_STORAGE` param1 = 3) resets sensor calibrations only; the end points come
-/// back through "reset all" (param1 = 2) or a new radio calibration.
+/// The RC parameter table: for channels 1 to 8 MIN, TRIM, MAX, REVERSED, DZ, then the four function maps.
 pub static TABLE: [ParamDef; COUNT] = build();
 
 #[allow(clippy::indexing_slicing)] // the loops run exactly over the sources' lengths
@@ -165,8 +162,7 @@ fn int(v: Option<ParamValue>, def: &ParamDef) -> i32 {
 }
 
 impl RcMap {
-    /// The mapping from the 44 values in table order (a value that is missing or not an integer
-    /// reads as its default); a channel number outside 1 to 8 reads as the function's default.
+    /// The mapping from the 44 values in table order (a value that is missing or not an integer reads as its default); a channel number outside 1 to 8 reads as the function's default.
     pub fn from_values(values: &[Option<ParamValue>; COUNT]) -> Self {
         let mut channels = [DEFAULT_CHANNEL; CHANNELS];
         let mut get = values.iter().zip(TABLE.iter());
@@ -256,7 +252,6 @@ pub fn angle(pwm: u16, ch: &Channel) -> f32 {
     if ch.max <= ch.min {
         return 0.0;
     }
-    // Not `clamp`: it panics when MIN is above MAX, and a user can write such values.
     #[allow(clippy::manual_clamp)]
     let r = i32::from(pwm).max(ch.min).min(ch.max);
     let hi = ch.trim + ch.dz;
@@ -291,8 +286,7 @@ pub fn range(pwm: u16, ch: &Channel) -> f32 {
     v.clamp(0.0, 1.0)
 }
 
-/// The arm switch's on threshold, us: ArduPilot's `AUX_SWITCH_PWM_TRIGGER_HIGH`. Applied to the raw
-/// channel 5 microseconds; no calibration or reversal.
+/// The arm switch's on threshold, us: ArduPilot's `AUX_SWITCH_PWM_TRIGGER_HIGH`.
 pub const ARM_SWITCH_HIGH_US: u16 = 1800;
 
 /// Channel 5 (raw us) in the arm position: strictly above [`ARM_SWITCH_HIGH_US`]. 0 (a missing
@@ -307,9 +301,7 @@ pub const MARK_GAP_US: u64 = 1_000_000;
 /// The longest hacc a mark reports, cm.
 pub const MARK_HACC_MAX_CM: u32 = 9999;
 
-/// Channel 9 (index 8) rising edges on MAVLink-receiver reports, counted from 1 (the waypoint mark switch,
-/// on above [`ARM_SWITCH_HIGH_US`] like the arm switch). The first report, and the first after a gap of
-/// [`MARK_GAP_US`], only records the state: a switch already high is no edge.
+/// Channel 9 (index 8) rising edges on MAVLink-receiver reports, counted from 1 (the waypoint mark switch, on above [`ARM_SWITCH_HIGH_US`] like the arm switch).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MarkTracker {
     prev: Option<(bool, u64)>,
@@ -322,8 +314,7 @@ impl MarkTracker {
         Self { prev: None, count: 0 }
     }
 
-    /// One stick report: `Some(n)` (the mark's number) on a rising edge of channel 9. Reports not from the
-    /// MAVLink receiver (`receiver` false) are ignored.
+    /// One stick report: `Some(n)` (the mark's number) on a rising edge of channel 9.
     pub fn update(&mut self, receiver: bool, ch9_us: u16, at_us: u64) -> Option<u32> {
         if !receiver {
             return None;
@@ -343,8 +334,7 @@ impl MarkTracker {
     }
 }
 
-/// The text of mark `n`: `MARK <n> <lat_e7> <lon_e7> <hacc_cm>` with a position, `MARK <n> NOFIX` without
-/// (at most 50 bytes). `hacc_cm` is clamped to [`MARK_HACC_MAX_CM`].
+/// The text of mark `n`: `MARK <n> <lat_e7> <lon_e7> <hacc_cm>` with a position, `MARK <n> NOFIX` without (at most 50 bytes).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkText {
     /// The mark's number, from 1.
@@ -374,12 +364,8 @@ pub const MODE_BAND_LOW: f32 = 1.0 / 3.0;
 /// The upper band edge of the mode switch: two thirds.
 pub const MODE_BAND_HIGH: f32 = 2.0 / 3.0;
 
-/// Channel 6 (raw us, with its calibration `ch`) as the three-position mode switch
-/// (`mode_switch`): n = [`range`] of the channel; n below one third is `Low`, above two thirds
-/// `High`, otherwise `Middle`. An absent channel (0 us, reversed or not) and RC6_MIN at or above RC6_MAX give n = 0, `Low`. No
-/// hysteresis, no debounce.
+/// Channel 6 (raw us, with its calibration `ch`) as the three-position mode switch (`mode_switch`): n = [`range`] of the channel; n below one third is `Low`, above two thirds `High`, otherwise `Middle`.
 pub fn mode_switch(ch6_us: u16, ch: &Channel) -> Switch3 {
-    // 0 us is "no such channel in the report", Low even when the channel is reversed (`range` would give 1).
     let n = if ch6_us == 0 { 0.0 } else { range(ch6_us, ch) };
     if n < MODE_BAND_LOW {
         Switch3::Low
@@ -611,7 +597,6 @@ mod tests {
         map.pitch = 1;
         let s = map.sticks(&pwm);
         assert_eq!((out(s.roll), out(s.pitch)), (-500, 500));
-        // A duplicate map is accepted: both read channel 1.
         map.roll = 1;
         map.yaw = 1;
         let s = map.sticks(&pwm);
@@ -622,7 +607,6 @@ mod tests {
     fn the_map_is_built_from_the_values_in_table_order() {
         let mut values = [None; COUNT];
         assert_eq!(RcMap::from_values(&values), RcMap::defaults());
-        // RC2_MIN, RC2_REVERSED, RCMAP_YAW.
         values[5] = Some(ParamValue::I32(900));
         values[8] = Some(ParamValue::I32(1));
         values[43] = Some(ParamValue::I32(8));
@@ -706,25 +690,20 @@ mod tests {
 
     #[test]
     fn the_mode_switch_decodes_thirds_with_edges_in_the_middle() {
-        // A span of 600 us makes both edges whole microseconds: 1100 + 200 = 1300 is exactly 1/3 and 1500 + 100.
         let (min, max) = (1100, 1700);
         let at = |pwm: u16| mode_at(pwm, min, max, false);
-        // Exactly one third and exactly two thirds are Middle (n < 1/3 is Low, n > 2/3 is High).
         assert_eq!(range(1300, &ch(min, 1400, max, 0, 0)), MODE_BAND_LOW);
         assert_eq!(range(1500, &ch(min, 1400, max, 0, 0)), MODE_BAND_HIGH);
         assert_eq!(at(1300), Switch3::Middle);
         assert_eq!(at(1500), Switch3::Middle);
-        // One microsecond either side.
         assert_eq!(at(1299), Switch3::Low);
         assert_eq!(at(1301), Switch3::Middle);
         assert_eq!(at(1499), Switch3::Middle);
         assert_eq!(at(1501), Switch3::High);
-        // The ends, and beyond them.
         assert_eq!(at(1100), Switch3::Low);
         assert_eq!(at(1700), Switch3::High);
         assert_eq!(at(900), Switch3::Low);
         assert_eq!(at(2100), Switch3::High);
-        // A reversed channel swaps the ends.
         assert_eq!(mode_at(1100, min, max, true), Switch3::High);
         assert_eq!(mode_at(1700, min, max, true), Switch3::Low);
         assert_eq!(mode_at(1400, min, max, true), Switch3::Middle);
@@ -732,11 +711,9 @@ mod tests {
 
     #[test]
     fn an_absent_or_invalid_channel_6_is_low() {
-        // 0 us: the channel is absent in the report.
         assert_eq!(mode_at(0, 1100, 1900, false), Switch3::Low);
         assert_eq!(mode_at(0, 1100, 1900, true), Switch3::Low);
         assert_eq!(mode_switch(0, &DEFAULT_CHANNEL), Switch3::Low);
-        // RC6_MIN at or above RC6_MAX gives n = 0 at every value, reversed or not.
         for (min, max) in [(1900, 1100), (1500, 1500)] {
             for pwm in [0, 1100, 1500, 1900, 2100] {
                 assert_eq!(mode_at(pwm, min, max, false), Switch3::Low);

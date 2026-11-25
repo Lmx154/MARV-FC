@@ -8,9 +8,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 /// ArduPilot's floor: the `timeout_ms = 4` default of `I2CDeviceManager::get_device_ptr`.
 pub const FLOOR_MS: u32 = 4;
 
-/// The deadline in ms of one transfer of `bytes` data bytes (sent plus received) at `bus_hz`:
-/// ArduPilot's `1 + 2 * (((8 * 1000000 / busclock) * (send_len + recv_len)) / 1000)`, at least
-/// [`FLOOR_MS`]. Saturates instead of overflowing or dividing by zero.
+/// The deadline in ms of one transfer of `bytes` data bytes (sent plus received) at `bus_hz`: ArduPilot's `1 + 2 * (((8 * 1000000 / busclock) * (send_len + recv_len)) / 1000)`, at least [`FLOOR_MS`].
 pub fn timeout_ms(bytes: usize, bus_hz: u32) -> u32 {
     let us_per_byte = 8_000_000u32.checked_div(bus_hz).unwrap_or(u32::MAX);
     let bytes = u32::try_from(bytes).unwrap_or(u32::MAX);
@@ -18,9 +16,7 @@ pub fn timeout_ms(bytes: usize, bus_hz: u32) -> u32 {
     wire_ms.saturating_mul(2).saturating_add(1).max(FLOOR_MS)
 }
 
-/// Whether a bus may be used: yes from its (re)build until one of its transfers timed out, then
-/// no until it is rebuilt (the timed-out transfer was abandoned, so the controller's state is
-/// unknown).
+/// Whether a bus may be used: yes from its (re)build until one of its transfers timed out, then no until it is rebuilt (the timed-out transfer was abandoned, so the controller's state is unknown).
 #[derive(Debug, Default)]
 pub struct Gate {
     dirty: AtomicBool,
@@ -56,7 +52,6 @@ mod tests {
 
     #[test]
     fn short_transfers_at_400_khz_get_the_floor() {
-        // 20 us per byte: up to 49 bytes are under 1 ms on the wire, so 1 ms -> the 4 ms floor.
         for bytes in [0, 1, 2, 7, 15, 34, 49] {
             assert_eq!(timeout_ms(bytes, 400_000), FLOOR_MS, "{bytes} bytes");
         }
@@ -64,14 +59,10 @@ mod tests {
 
     #[test]
     fn long_transfers_follow_ardupilots_formula() {
-        // 400 kHz, 20 us per byte: 100 bytes 2 ms on the wire -> 1 + 2 * 2 = 5 ms.
         assert_eq!(timeout_ms(100, 400_000), 5);
-        // 400 kHz, 250 bytes: 5 ms -> 11 ms.
         assert_eq!(timeout_ms(250, 400_000), 11);
-        // 100 kHz, 80 us per byte: 25 bytes 2 ms -> 5 ms; 12 bytes 0 ms (integer) -> the floor.
         assert_eq!(timeout_ms(25, 100_000), 5);
         assert_eq!(timeout_ms(12, 100_000), FLOOR_MS);
-        // 1 MHz, 8 us per byte: 1000 bytes 8 ms -> 17 ms.
         assert_eq!(timeout_ms(1000, 1_000_000), 17);
     }
 

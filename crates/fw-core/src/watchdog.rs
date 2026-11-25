@@ -27,8 +27,7 @@ pub const REBOOT_AFTER_ACK_MS: u32 = 100;
 /// The reset after the reboot action ended when no ACK has been handed by then (ms).
 pub const REBOOT_NO_ACK_MS: u32 = 1000;
 
-/// The ids written to `RUNNING0` (core 0's thread-mode tasks) and `RUNNING1` (the flight core's
-/// tasks) and kept in the scratch record. Names: [`task_name`].
+/// The ids written to `RUNNING0` (core 0's thread-mode tasks) and `RUNNING1` (the flight core's tasks) and kept in the scratch record.
 pub mod task {
     /// Nothing has run yet.
     pub const NONE: u8 = 0;
@@ -333,9 +332,7 @@ impl fmt::Display for Report {
     }
 }
 
-/// The boot report from the HAL's reset reason and the decoded scratch record. `None` (nothing to
-/// report) for a reset the watchdog did not cause (power-on, a debugger reset). A record whose
-/// reason does not fit the kind of reset counts as no record.
+/// The boot report from the HAL's reset reason and the decoded scratch record.
 pub const fn boot_report(reset: Option<ResetKind>, record: Option<Record>) -> Option<Report> {
     let reason = match record {
         Some(r) => Some((r.reason, r.task_id)),
@@ -496,7 +493,6 @@ mod tests {
 
     #[test]
     fn last_feed_comes_100_ms_before_the_record() {
-        // The reset comes PERIOD_MS after the last feed: 1700 ms after the last beat seen.
         let mut s = Sim::new(0);
         let mut last_feed = 0;
         let mut last_beat = 0;
@@ -541,7 +537,6 @@ mod tests {
         for _ in 0..10 {
             steps.push(s.check(false, true));
         }
-        // Core 0 resumes; PONG follows at the next ping.
         steps.push(s.check(true, false));
         steps.push(s.check(true, true));
         steps.push(s.check(true, true));
@@ -557,7 +552,6 @@ mod tests {
             }]
         );
         assert!(steps.iter().all(|st| !st.reset));
-        // The longest run without a feed is shorter than the watchdog's period.
         let mut gap = 0;
         let mut worst = 0;
         for st in &steps {
@@ -588,11 +582,9 @@ mod tests {
         s.epoch += 1;
         let st = s.check(false, true);
         assert!(!st.feed && st.began.is_none() && !st.record && st.save_check);
-        // Only one check is skipped.
         let st = s.check(false, true);
         assert_eq!(st.began, Some((Core::Core0, 300)));
         assert!(!st.save_check);
-        // A healthy check after a save still feeds.
         let mut s = Sim::new(0);
         s.epoch += 1;
         let st = s.check(true, true);
@@ -616,8 +608,7 @@ mod tests {
         assert!(st.feed && !st.clear && st.ended.is_some());
     }
 
-    /// One heartbeat stops while the other keeps changing: the first check with an age of 200 ms
-    /// or more stops the feed and asks for one record naming the core whose heartbeat stopped.
+    /// One heartbeat stops while the other keeps changing: the first check with an age of 200 ms or more stops the feed and asks for one record naming the core whose heartbeat stopped.
     fn one_heartbeat_stops(stopped: Core) {
         let (task_id, want_reason, want_text) = match stopped {
             Core::Core0 => (
@@ -718,7 +709,6 @@ mod tests {
         let st = s.check(true, false);
         assert_eq!(st.began, Some((Core::Flight, 200)));
         assert!(st.record);
-        // A reboot is requested (its REQUESTED record overwrites the stall record), due in 500 ms.
         s.reboot_at = Some(s.now + 500);
         let st = s.check(true, false);
         assert!(!st.feed && !st.clear && !st.reset);
@@ -729,7 +719,6 @@ mod tests {
         assert!(!s.check(true, true).reset);
         let st = s.check(true, true);
         assert!(st.reset && !st.clear);
-        // Without a reboot the same stall still clears its record.
         let mut s = Sim::new(0);
         s.check(true, true);
         s.check(true, false);

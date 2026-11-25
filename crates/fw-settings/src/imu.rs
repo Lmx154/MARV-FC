@@ -46,9 +46,7 @@ pub const ODR_HZ: [&str; IMUS] = ["IMU1_ODR_HZ", "IMU2_ODR_HZ"];
 /// [`Rotation`]).
 pub const AHRS_ORIENTATION: &str = "AHRS_ORIENTATION";
 
-/// IMU1's (ICM-45686) fixed chip-to-board rotation, an hwdef line in ArduPilot's terms: the owner's
-/// axes are +X forward, +Y left, +Z up, the board's FRD (x forward, y right, z down) is
-/// `ROLL_180` of them (`x, -y, -z`).
+/// IMU1's (ICM-45686) fixed chip-to-board rotation, an hwdef line in ArduPilot's terms: the owner's axes are +X forward, +Y left, +Z up, the board's FRD (x forward, y right, z down) is `ROLL_180` of them (`x, -y, -z`).
 pub const IMU1_MOUNT: Rotation = Rotation::Roll180;
 /// IMU2's (LSM6DSK320X) fixed chip-to-board rotation: the same axes as IMU1, so `ROLL_180`.
 pub const IMU2_MOUNT: Rotation = Rotation::Roll180;
@@ -98,9 +96,7 @@ pub static TABLE: [ParamDef; COUNT] = [
     acc(ACC_OFF[1][2], IMU2),
 ];
 
-/// The IMUs' chip settings, appended to the firmware's table after the radio's (indices 70 to 75):
-/// IMU1's accelerometer full scale, gyroscope full scale and rate, then IMU2's. The defaults are
-/// 16 g, 2000 dps and 800 Hz (Betaflight's); each default makes a setup, which the tests prove.
+/// The IMUs' chip settings, appended to the firmware's table after the radio's (indices 70 to 75): IMU1's accelerometer full scale, gyroscope full scale and rate, then IMU2's.
 pub static SETTINGS: [ParamDef; SETTINGS_COUNT] = [
     ParamDef::i32("IMU1_ACC_FS", IMU1, 16, 2, 32, Apply::Reboot),
     ParamDef::i32("IMU1_GYR_FS", IMU1, 2000, 125, 4000, Apply::Reboot),
@@ -113,11 +109,7 @@ pub static SETTINGS: [ParamDef; SETTINGS_COUNT] = [
 /// The number of orientation parameters the IMUs read.
 pub const BOARD_COUNT: usize = 1;
 
-/// `AHRS_ORIENTATION`, appended to the firmware's table after the IMUs' chip settings (index 76):
-/// the rotation from the board's frame to the vehicle's (body FRD), applied by both IMU adapters
-/// after the offsets (ArduPilot: board orientation, next boot). Device 0, the system: a refused
-/// IMU setup never resets it. `Reboot`: it reaches core 1 by value at boot, no cell. Default 0:
-/// the board lies in the vehicle's axes.
+/// `AHRS_ORIENTATION`, appended to the firmware's table after the IMUs' chip settings (index 76): the rotation from the board's frame to the vehicle's (body FRD), applied by both IMU adapters after the offsets (ArduPilot: board orientation, next boot).
 pub static BOARD: [ParamDef; BOARD_COUNT] = [ParamDef::i32(
     AHRS_ORIENTATION,
     0,
@@ -133,9 +125,7 @@ pub fn board_rotation(value: Option<i32>) -> Rotation {
     value.and_then(Rotation::from_i32).unwrap_or_default()
 }
 
-/// One IMU's configuration for the boot: the chip's whole `Config`, the full scales the adapter
-/// scales the samples with (the same values as in `config`), the nominal sample period and the
-/// board's orientation.
+/// One IMU's configuration for the boot: the chip's whole `Config`, the full scales the adapter scales the samples with (the same values as in `config`), the nominal sample period and the board's orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImuSetup<C, A, G> {
     /// The driver's configuration: the three values in place.
@@ -146,8 +136,7 @@ pub struct ImuSetup<C, A, G> {
     pub gyro_fs: G,
     /// The nominal sample period in microseconds, 1e6 / the rate.
     pub period_us: u32,
-    /// `AHRS_ORIENTATION`: applied after the offsets, read once at boot. The setup functions give
-    /// no rotation; [`ImuSetup::with_board`] sets it.
+    /// `AHRS_ORIENTATION`: applied after the offsets, read once at boot.
     pub board: Rotation,
 }
 
@@ -178,12 +167,7 @@ fn period_us(odr_hz: i32) -> Option<u32> {
         .and_then(|hz| 1_000_000u32.checked_div(hz))
 }
 
-/// IMU1's setup from `IMU1_ACC_FS` (g), `IMU1_GYR_FS` (dps) and `IMU1_ODR_HZ` (Hz): the
-/// accelerometer in 2, 4, 8, 16 or 32 g, the gyroscope in 125, 250, 500, 1000, 2000 or 4000 dps,
-/// both sensors at 25, 50, 100, 200, 400 or 800 Hz (the single-sample path stops at 800 Hz);
-/// everything else as the adapter has it: internal clock, the driver's default filters, no FIFO,
-/// INT1 data-ready LATCHED. The first value the chip does not offer gives its reason; then the
-/// driver's own `Config::validate`.
+/// IMU1's setup from `IMU1_ACC_FS` (g), `IMU1_GYR_FS` (dps) and `IMU1_ODR_HZ` (Hz): the accelerometer in 2, 4, 8, 16 or 32 g, the gyroscope in 125, 250, 500, 1000, 2000 or 4000 dps, both sensors at 25, 50, 100, 200, 400 or 800 Hz (the single-sample path stops at 800 Hz); everything else as the adapter has it: internal clock, the driver's default filters, no FIFO, INT1 data-ready LATCHED.
 pub fn imu1_setup(acc_fs: i32, gyr_fs: i32, odr_hz: i32) -> Result<Imu1Setup, &'static str> {
     use icm45686::{AccelFullScale, ClockSource, Config, GyroFullScale, Int1Config, Int1Mode, Odr};
     let accel_fs = match acc_fs {
@@ -233,11 +217,7 @@ pub fn imu1_setup(acc_fs: i32, gyr_fs: i32, odr_hz: i32) -> Result<Imu1Setup, &'
     })
 }
 
-/// IMU2's setup from `IMU2_ACC_FS` (g), `IMU2_GYR_FS` (dps) and `IMU2_ODR_HZ` (Hz): the low-g
-/// accelerometer in 2, 4, 8 or 16 g, the gyroscope in 250, 500, 1000, 2000 or 4000 dps, both at 25,
-/// 50, 100, 200, 400 or 800 Hz through the high-accuracy ODR set "800" (the ODR codes 30, 60, 120,
-/// 240, 480 and 960 are those rates there); everything else as the adapter has it: the driver's
-/// default filters, high-g off, no FIFO, the low-g data-ready on INT1 LATCHED.
+/// IMU2's setup from `IMU2_ACC_FS` (g), `IMU2_GYR_FS` (dps) and `IMU2_ODR_HZ` (Hz): the low-g accelerometer in 2, 4, 8 or 16 g, the gyroscope in 250, 500, 1000, 2000 or 4000 dps, both at 25, 50, 100, 200, 400 or 800 Hz through the high-accuracy ODR set "800" (the ODR codes 30, 60, 120, 240, 480 and 960 are those rates there); everything else as the adapter has it: the driver's default filters, high-g off, no FIFO, the low-g data-ready on INT1 LATCHED.
 pub fn imu2_setup(acc_fs: i32, gyr_fs: i32, odr_hz: i32) -> Result<Imu2Setup, &'static str> {
     use lsm6dsk320x::{
         AccelFullScale, Config, DataReady, DataReadyMode, GyroFullScale, HaodrSet, IntRouting, Odr,
@@ -321,7 +301,6 @@ mod tests {
 
     #[test]
     fn the_setups_with_todays_values_are_todays_configs() {
-        // src/imu1.rs `config()` with 4 g, 250 dps, 800 Hz.
         let today1 = icm45686::Config::new()
             .with_accel_fs(icm45686::AccelFullScale::G4)
             .with_gyro_fs(icm45686::GyroFullScale::Dps250)
@@ -336,7 +315,6 @@ mod tests {
         let s1 = imu1_setup(4, 250, 800).unwrap();
         assert_eq!(s1.config, today1);
         assert_eq!(s1.period_us, 1250);
-        // src/imu2.rs `config()` with 4 g, 500 dps, the code 960 in the set "800".
         use lsm6dsk320x as l;
         let today2 = l::Config::new()
             .with_accel_fs(l::AccelFullScale::G4)
@@ -407,14 +385,12 @@ mod tests {
         assert_eq!(NOT_ALLOWED, "combination not allowed by the chip");
     }
 
-    /// H2: both IMUs' mounting turns chip gravity (0, 0, +g) at rest, level, into (0, 0, -g) (FRD,
-    /// specific force up), and +X forward, +Y left stay forward and right.
+    /// H2: both IMUs' mounting turns chip gravity (0, 0, +g) at rest, level, into (0, 0, -g) (FRD, specific force up), and +X forward, +Y left stay forward and right.
     #[test]
     fn the_imu_mounts_turn_chip_axes_into_frd() {
         for mount in [IMU1_MOUNT, IMU2_MOUNT] {
             assert_eq!(mount.rotate([0.0, 0.0, 9.81]), [0.0, 0.0, -9.81]);
             assert_eq!(mount.rotate([1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
-            // Chip +Y is left: body -Y (right is positive).
             assert_eq!(mount.rotate([0.0, 1.0, 0.0]), [0.0, -1.0, 0.0]);
         }
     }

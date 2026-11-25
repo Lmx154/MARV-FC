@@ -31,9 +31,7 @@ pub fn relay<const S: usize, const D: usize>(
     relay_with(src, dst.map(|ring| |record: &[u8]| ring.push(record)))
 }
 
-/// [`relay`] into any destination: `push` takes one whole record and says whether it fitted
-/// (`false`: dropped, and the destination counts it). The board's collector relays into an
-/// [`ExtLogRing`](crate::extring::ExtLogRing) with it; `None` consumes and discards.
+/// [`relay`] into any destination: `push` takes one whole record and says whether it fitted (`false`: dropped, and the destination counts it).
 pub fn relay_with<const S: usize, F: FnMut(&[u8]) -> bool>(
     src: &mut LogConsumer<'_, S>,
     mut push: Option<F>,
@@ -134,7 +132,6 @@ mod tests {
         );
         let mut want = Vec::new();
         let mut t = 0;
-        // Rounds that leave the source's indexes at every offset: the records wrap around its end.
         for round in 0..20u64 {
             for rec in mix(3 + round % 4) {
                 let rec = record(rec[2], t);
@@ -163,7 +160,6 @@ mod tests {
             dst_ring.take_producer().unwrap(),
             dst_ring.take_consumer().unwrap(),
         );
-        // 5 RCS of 28 bytes: two fit in 64, three do not.
         let recs: Vec<Vec<u8>> = (0..5).map(|t| record(dflog::ID_RCS, t)).collect();
         for r in &recs {
             assert!(sp.push(r));
@@ -177,7 +173,6 @@ mod tests {
             "the source is consumed whatever the destination did"
         );
         assert_eq!(drain(&mut dc), [recs[0].clone(), recs[1].clone()].concat());
-        // The next tick: room again, the source's later records get through; no backlog.
         assert!(sp.push(&record(dflog::ID_FDS, 9)));
         let got = relay(&mut sc, Some(&mut dp));
         assert_eq!((got.copied, got.dropped), (1, 0));
@@ -213,7 +208,6 @@ mod tests {
             dst_ring.take_consumer().unwrap(),
         );
         let good = record(dflog::ID_FDS, 1);
-        // Junk, a header of an unknown type, a good record, then the head of a record cut short.
         assert!(sp.push(&[1, 2, HEAD1]));
         assert!(sp.push(&[HEAD1, HEAD2, 200]));
         assert!(sp.push(&good));
@@ -225,8 +219,7 @@ mod tests {
         assert_eq!(drain(&mut dc), good);
     }
 
-    /// The board's collector relays into an `ExtLogRing` (PSRAM): same records, same order, the
-    /// destination counts what does not fit, and the source is consumed all the same.
+    /// The board's collector relays into an `ExtLogRing` (PSRAM): same records, same order, the destination counts what does not fit, and the source is consumed all the same.
     #[test]
     #[allow(unsafe_code)] // `PsramReady::new`: a host test has no PSRAM to wait for.
     fn relay_with_an_external_ring_destination_copies_whole_records_and_counts_drops() {
@@ -251,7 +244,6 @@ mod tests {
             assert!(sp.push(r));
         }
         let got = relay_with(&mut sc, Some(|rec: &[u8]| dp.push(rec)));
-        // ESC 40 B fits in 64, RCS 28 B does not (24 left), FDS 19 B does.
         assert_eq!((got.copied, got.dropped), (2, 1));
         assert_eq!(dst_ring.dropped(), 1);
         assert_eq!(sc.readable(), 0);

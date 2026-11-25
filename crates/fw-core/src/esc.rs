@@ -33,9 +33,6 @@ pub const STARTING_US: u64 = 5_000_000;
 /// An eRPM value above this is AM32's "not started yet" report, not a speed: it is not stored.
 pub const ERPM_MAX: u32 = 1_000_000;
 
-// Motor test limits, the same as the `dshot_spin` example (DS =
-// `dshot/hil/src/bin/dshot_spin.rs`). The flight core checks
-// them on every frame (`fw_flight::esc`).
 
 /// The highest throttle level a motor test may send, of 2000: 5 % (DS:87-100, `CAP`).
 pub const TEST_CAP: u16 = 100;
@@ -51,8 +48,7 @@ pub const TEST_BURST_MAX_US: u64 = 3_000_000;
 /// Time allowed between a limit check and the push it guards, in us (DS:152-153, `PUSH_MARGIN_US`).
 pub const TEST_PUSH_MARGIN_US: u64 = 1_000;
 
-/// The motor-test command core 0 hands to the flight core (one `TripleBuffer<TestCmd>`). A new
-/// `seq` is a new command; core 0 numbers from 1 (0 is [`TestCmd::INITIAL`]'s).
+/// The motor-test command core 0 hands to the flight core (one `TripleBuffer<TestCmd>`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TestCmd {
     /// The command's number.
@@ -122,8 +118,7 @@ pub struct TestEnding {
     pub at_us: u64,
 }
 
-/// The driver line of message element `element` (0 = M1 = line 3 ... 3 = M4 = line 0). The mapping
-/// is its own inverse. `None` for an element above 3.
+/// The driver line of message element `element` (0 = M1 = line 3 ...
 pub fn line_of_element(element: usize) -> Option<usize> {
     LINES
         .checked_sub(1)
@@ -180,8 +175,7 @@ impl EscLine {
     }
 }
 
-/// Everything the ESC task publishes to core 0, after every exchange (and at the start sequence's
-/// two ends). Plain `Copy` data for an `xcore::Seqlock`.
+/// Everything the ESC task publishes to core 0, after every exchange (and at the start sequence's two ends).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct EscStatus {
     /// Exchanges (one frame to each of the four lines) since boot.
@@ -296,11 +290,7 @@ pub fn esc_status(status: &EscStatus, now_us: u64, poles: i32) -> Option<ESC_STA
     })
 }
 
-/// ESC_INFO (290). `None` when the snapshot is older than 1 s or no exchange has happened.
-///
-/// `counter` = exchanges mod 65536; `error_count` = non-replies per motor; `info` bit `e` = motor
-/// `e + 1` gave a good reply within 100 ms; `failure_flags` 0; `temperature` in cdegC when received
-/// within the last 1 s, else `i16::MAX`; `count` 4, `index` 0, connection type DSHOT.
+/// ESC_INFO (290).
 pub fn esc_info(status: &EscStatus, now_us: u64) -> Option<ESC_INFO_DATA> {
     if status.exchanges == 0 || !status.is_fresh(now_us) {
         return None;
@@ -393,10 +383,7 @@ pub fn verdict(status: &EscStatus, now_us: u64) -> Verdict {
     }
 }
 
-/// The ESC row's `MARV_DEVICE_STATUS`: samples = good replies (sum of four), errors = non-replies
-/// (sum), timeouts = dropouts (sum), attempts = starts, recoveries, overflows and config_restored
-/// 0, `last_sample_age_ms` = age of the newest good reply on any line. The state and error are
-/// [`verdict`]'s (a stale snapshot goes out as STUCK).
+/// The ESC row's `MARV_DEVICE_STATUS`: samples = good replies (sum of four), errors = non-replies (sum), timeouts = dropouts (sum), attempts = starts, recoveries, overflows and config_restored 0, `last_sample_age_ms` = age of the newest good reply on any line.
 pub fn device_status(status: &EscStatus, now_us: u64) -> MARV_DEVICE_STATUS_DATA {
     let v = verdict(status, now_us);
     let sum = |f: fn(&EscLine) -> u32| {
@@ -476,15 +463,12 @@ mod tests {
     #[test]
     fn rpm_uses_pole_pairs_rounds_down_and_follows_the_motor_order() {
         let mut s = live();
-        // line 3 = M1 = element 0; line 0 = M4 = element 3.
         s.lines[3].erpm = Some((70_000, NOW));
         s.lines[0].erpm = Some((70_013, NOW));
         let m = esc_status(&s, NOW, 14).unwrap();
         assert_eq!(m.rpm, [10_000, 0, 0, 10_001]);
         assert_eq!((m.index, m.time_usec), (0, NOW));
-        // 7 pole pairs vs 8 pole pairs.
         assert_eq!(esc_status(&s, NOW, 16).unwrap().rpm[0], 8_750);
-        // A stopped motor (0xFFF decodes to eRPM 0) is 0.
         s.lines[3].erpm = Some((0, NOW));
         assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[0], 0);
     }
@@ -544,7 +528,7 @@ mod tests {
         s.exchanges = 65_536 + 7;
         s.lines[3].non_replies = 11;
         s.lines[0].non_replies = 22;
-        s.lines[1].last_good_us = Some(NOW - ANSWER_US); // line 1 = M3: dropped out
+        s.lines[1].last_good_us = Some(NOW - ANSWER_US);
         let i = esc_info(&s, NOW).unwrap();
         assert_eq!(i.counter, 7);
         assert_eq!(i.error_count, [11, 0, 0, 22]);
@@ -604,15 +588,11 @@ mod tests {
         let old = Some(STARTING_US);
         let young = Some(STARTING_US - 1);
         let cases = [
-            // running start
             (status(0, false, 1, true, None), S::Starting, E::None),
             (status(4, true, 1, true, None), S::Starting, E::None),
-            // window: ended 5 s - 1 us ago, not all answering
             (status(3, true, 1, false, young), S::Starting, E::None),
             (status(0, false, 1, false, young), S::Starting, E::None),
-            // window with all four answering is OK
             (status(4, true, 1, false, young), S::Ok, E::None),
-            // window over
             (status(0, false, 1, false, old), S::Absent, E::None),
             (status(4, true, 1, false, old), S::Ok, E::None),
             (status(3, true, 1, false, old), S::Degraded, E::Timeout),
@@ -629,7 +609,6 @@ mod tests {
                 "case {k}"
             );
         }
-        // Stale: exactly 1 s old is fresh, 1 s and 1 us is FAILED STUCK; a running start is not.
         let s = status(4, true, 1, false, old);
         assert_ne!(verdict(&s, NOW + FRESH_US).last_error, ErrorKind::Stuck);
         let stale = verdict(&s, NOW + FRESH_US + 1);
@@ -642,7 +621,6 @@ mod tests {
             verdict(&running, NOW + 10 * FRESH_US).state,
             State::Starting
         );
-        // No start yet: STARTING while young, STUCK once a second has passed.
         let none = EscStatus::INITIAL;
         assert_eq!(verdict(&none, FRESH_US).state, State::Starting);
         assert_eq!(verdict(&none, FRESH_US + 1).last_error, ErrorKind::Stuck);

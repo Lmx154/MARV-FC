@@ -39,8 +39,7 @@ impl Reasons {
         self.0 & other.0 == other.0
     }
 
-    /// The WARNING STATUSTEXT of a refused arm: the first reason in the order P1..P4, or "busy"
-    /// when there is none (the permit was clear because a command was being admitted).
+    /// The WARNING STATUSTEXT of a refused arm: the first reason in the order P1..P4, or "busy" when there is none (the permit was clear because a command was being admitted).
     pub const fn refusal(self) -> &'static str {
         if self.contains(Self::BOOTING) {
             "Arming refused: booting"
@@ -54,9 +53,7 @@ impl Reasons {
     }
 }
 
-/// The reasons at `uptime_ms` (the clock the status LED reads): P1 uptime below
-/// [`ROLL_CALL_END_MS`]; P2 IMU1's row state not OK; P3 the ESC row state not OK; P4 `calibrating`,
-/// `book_busy` or `test_spin`.
+/// The reasons at `uptime_ms` (the clock the status LED reads): P1 uptime below [`ROLL_CALL_END_MS`]; P2 IMU1's row state not OK; P3 the ESC row state not OK; P4 `calibrating`, `book_busy` or `test_spin`.
 pub fn reasons(
     uptime_ms: u64,
     imu1: State,
@@ -129,7 +126,6 @@ mod tests {
             assert_eq!(r.refusal(), "Arming refused: busy");
         }
 
-        // The first reason in the order P1..P4 names the refusal; none gives "busy".
         let all = reasons(0, State::Failed, State::Absent, true, true, true);
         assert_eq!(all.bits(), 0b1111);
         assert_eq!(all.refusal(), "Arming refused: booting");

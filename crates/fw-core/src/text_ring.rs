@@ -53,8 +53,7 @@ impl<T: Copy, const LINKS: usize, const N: usize> TextRing<T, LINKS, N> {
         }
     }
 
-    /// Appends a text for every link. A link already `N` texts behind loses its oldest unread
-    /// text (counted in [`Self::dropped`]). Returns the number of links that lost one.
+    /// Appends a text for every link.
     pub fn push(&mut self, text: T) -> usize {
         if let Some(slot) = self.entries.get_mut(Self::index(self.head)) {
             *slot = Some(text);
@@ -73,8 +72,7 @@ impl<T: Copy, const LINKS: usize, const N: usize> TextRing<T, LINKS, N> {
         losers
     }
 
-    /// Keeps a text in a sticky slot until every link has taken it. Returns false (nothing kept)
-    /// when both slots are still owed to some link.
+    /// Keeps a text in a sticky slot until every link has taken it.
     pub fn push_sticky(&mut self, text: T) -> bool {
         let Some(free) = self.sticky.iter().position(Option::is_none) else {
             return false;
@@ -88,7 +86,6 @@ impl<T: Copy, const LINKS: usize, const N: usize> TextRing<T, LINKS, N> {
     }
 
     /// The next text for `link`: its oldest sticky text not yet taken, else the next ring entry.
-    /// `None` when it has read everything (or `link` is not below `LINKS`).
     pub fn pop(&mut self, link: usize) -> Option<T> {
         if let Some(text) = self.pop_sticky(link) {
             return Some(text);
@@ -214,11 +211,9 @@ mod tests {
         assert_eq!(ring.pop(0), Some(100));
         assert_eq!(drain(&mut ring, 0), [13, 14, 15, 16, 17, 18, 19, 20]);
         assert!(ring.push_sticky(101));
-        // Both slots are still owed to link 1: a third sticky text is refused.
         assert!(!ring.push_sticky(102));
         assert_eq!(ring.pop(0), Some(101));
         assert!(!ring.push_sticky(102));
-        // The link that connects late gets both sticky texts first, oldest first.
         assert_eq!(
             drain(&mut ring, 1),
             [100, 101, 13, 14, 15, 16, 17, 18, 19, 20]
@@ -234,7 +229,6 @@ mod tests {
         assert!(ring.push_sticky(2));
         assert_eq!(ring.pop(0), Some(1));
         assert_eq!(ring.pop(1), Some(1));
-        // Slot 0 is free again; text 3 lands there but is younger than text 2 in slot 1.
         assert!(ring.push_sticky(3));
         assert_eq!(drain(&mut ring, 0), [2, 3]);
         assert_eq!(drain(&mut ring, 1), [2, 3]);
@@ -284,7 +278,6 @@ mod tests {
         let mut ring = TextRing::<u32, 2>::new();
         let mut queues: [VecDeque<u32>; 2] = [VecDeque::new(), VecDeque::new()];
         let mut dropped = [0u32; 2];
-        // Sticky texts still owed: (text, owed per link), oldest first.
         let mut sticky: Vec<(u32, [bool; 2])> = Vec::new();
         let mut seed: u32 = 0x1234_5678;
         for step in 0..20_000u32 {

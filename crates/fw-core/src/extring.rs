@@ -56,10 +56,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, Ordering};
 
 use crate::xcore::{LogStats, PUSH_WITH_MAX, Seqlock, SeqlockWriter};
 
-/// `N` bytes of external memory for one [`ExtLogRing`]: the one type the board places in the
-/// `.psram` section. No initial value (`MaybeUninit`), so nothing is stored in the image and the
-/// bytes are undefined until the ring's producer writes them. 4-byte aligned, like `LogRing`'s
-/// storage, so a 4-byte-aligned file write can read from it.
+/// `N` bytes of external memory for one [`ExtLogRing`]: the one type the board places in the `.psram` section.
 #[repr(C, align(4))]
 pub struct PsramBuf<const N: usize>(UnsafeCell<MaybeUninit<[u8; N]>>);
 
@@ -82,8 +79,7 @@ impl<const N: usize> Default for PsramBuf<N> {
     }
 }
 
-/// Proof that the PSRAM is initialised and its canary verified. The board makes one after that
-/// and passes it to [`ExtLogRing::bind`]; it carries no data.
+/// Proof that the PSRAM is initialised and its canary verified.
 #[derive(Debug)]
 pub struct PsramReady(());
 
@@ -107,8 +103,7 @@ pub enum BindError {
     AlreadyBound,
 }
 
-/// The producer's running statistics of one window; `epoch` is the consumer's request counter
-/// at the time the window began (the same as `xcore`'s).
+/// The producer's running statistics of one window; `epoch` is the consumer's request counter at the time the window began (the same as `xcore`'s).
 #[derive(Clone, Copy)]
 struct Window {
     epoch: u32,
@@ -201,13 +196,7 @@ impl<const N: usize> ExtLogRing<N> {
         }
     }
 
-    /// Binds the ring to its external buffer, once: after `Ok` the handles can be taken. A second
-    /// call, with any buffer, is refused and changes nothing (the second buffer is not written).
-    /// `ready` is the proof that the memory is usable (see [`PsramReady`]).
-    ///
-    /// The `N` bytes are zeroed before the ring publishes the buffer, so that the `&mut [u8]` the
-    /// grants hand out never cover uninitialised memory: this writes the whole buffer once (64 KiB
-    /// of PSRAM is about 3 ms), in the caller's thread, before any handle exists.
+    /// Binds the ring to its external buffer, once: after `Ok` the handles can be taken.
     pub fn bind(&self, buf: &'static mut PsramBuf<N>, ready: &PsramReady) -> Result<(), BindError> {
         let _ = ready;
         if self.is_bound() {
@@ -271,8 +260,7 @@ impl<const N: usize> ExtLogRing<N> {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// Committed bytes not yet consumed. Readable from any core; a snapshot (`tail` is read
-    /// first, so the difference cannot wrap; see `LogRing::readable`).
+    /// Committed bytes not yet consumed.
     pub fn readable(&self) -> usize {
         let tail = self.tail.load(Ordering::Acquire);
         let head = self.head.load(Ordering::Acquire);
@@ -318,9 +306,7 @@ impl<const N: usize> LogProducer<'_, N> {
         self.ring.dropped()
     }
 
-    /// Puts `record` in whole, or not at all: `false` (nothing written, the drop counter
-    /// incremented) if fewer than `record.len()` bytes are free, which includes a record longer
-    /// than the ring. An empty record succeeds and writes nothing.
+    /// Puts `record` in whole, or not at all: `false` (nothing written, the drop counter incremented) if fewer than `record.len()` bytes are free, which includes a record longer than the ring.
     pub fn push(&mut self, record: &[u8]) -> bool {
         match self.reserve(record.len()) {
             Some(mut grant) => {
@@ -332,12 +318,7 @@ impl<const N: usize> LogProducer<'_, N> {
         }
     }
 
-    /// As `LogProducer::push_with` of `LogRing`: `encode` gets a CONTIGUOUS buffer of exactly
-    /// `len` bytes (write-only: its contents are not defined) and returns how many it wrote;
-    /// those bytes, at most `len`, are committed. `false`, with the drop counted and `encode` not
-    /// called, if `len` bytes are not free or `len` is over [`PUSH_WITH_MAX`]; otherwise `true`,
-    /// also when `encode` returns 0. When the free area wraps around the end of the buffer,
-    /// `encode` writes a stack buffer that is copied in.
+    /// As `LogProducer::push_with` of `LogRing`: `encode` gets a CONTIGUOUS buffer of exactly `len` bytes (write-only: its contents are not defined) and returns how many it wrote; those bytes, at most `len`, are committed.
     pub fn push_with(&mut self, len: usize, encode: impl FnOnce(&mut [u8]) -> usize) -> bool {
         if len > PUSH_WITH_MAX {
             self.sample(self.free());
@@ -359,11 +340,7 @@ impl<const N: usize> LogProducer<'_, N> {
         true
     }
 
-    /// Reserves `len` bytes for one record: `Some(grant)` to fill and [`Grant::commit`], or
-    /// `None` (nothing written, the drop counter incremented) if fewer than `len` bytes are
-    /// free. A grant dropped without `commit` publishes nothing. One grant at a time.
-    ///
-    /// Every call samples the free space for the statistics, whether it succeeds or not.
+    /// Reserves `len` bytes for one record: `Some(grant)` to fill and [`Grant::commit`], or `None` (nothing written, the drop counter incremented) if fewer than `len` bytes are free.
     pub fn reserve(&mut self, len: usize) -> Option<Grant<'_, N>> {
         let head = self.ring.head.load(Ordering::Relaxed);
         let tail = self.ring.tail.load(Ordering::Acquire);
@@ -400,9 +377,7 @@ impl<const N: usize> LogProducer<'_, N> {
     }
 }
 
-/// Space reserved in an [`ExtLogRing`] for one record, from [`LogProducer::reserve`]: one or two
-/// mutable slices (two when the area wraps around the end of the buffer), `len` bytes in all.
-/// Nothing is visible to the consumer until [`Grant::commit`].
+/// Space reserved in an [`ExtLogRing`] for one record, from [`LogProducer::reserve`]: one or two mutable slices (two when the area wraps around the end of the buffer), `len` bytes in all.
 pub struct Grant<'a, const N: usize> {
     ring: &'a ExtLogRing<N>,
     head: u32,
@@ -420,9 +395,7 @@ impl<const N: usize> Grant<'_, N> {
         self.len == 0
     }
 
-    /// The reserved area as two slices, in record order: the second is empty unless the area
-    /// wraps around the end of the buffer. Their contents are not defined until written: treat
-    /// them as write-only.
+    /// The reserved area as two slices, in record order: the second is empty unless the area wraps around the end of the buffer.
     pub fn slices(&mut self) -> (&mut [u8], &mut [u8]) {
         let start = self.head as usize & (N - 1);
         let len = self.len as usize;
@@ -442,8 +415,7 @@ impl<const N: usize> Grant<'_, N> {
         }
     }
 
-    /// Copies `src` to the start of the grant, as many bytes as `src` and the grant have in
-    /// common, across the wrap if there is one; returns how many.
+    /// Copies `src` to the start of the grant, as many bytes as `src` and the grant have in common, across the wrap if there is one; returns how many.
     pub fn copy_from(&mut self, src: &[u8]) -> usize {
         let (first, second) = self.slices();
         let n = src.len().min(first.len() + second.len());
@@ -477,9 +449,7 @@ impl<const N: usize> Grant<'_, N> {
     }
 }
 
-/// The one consumer of an [`ExtLogRing`], from [`ExtLogRing::take_consumer`]: `Send`, not
-/// `Clone`. Every method is wait-free except [`LogConsumer::take_stats`], which retries a bounded
-/// number of times.
+/// The one consumer of an [`ExtLogRing`], from [`ExtLogRing::take_consumer`]: `Send`, not `Clone`.
 pub struct LogConsumer<'a, const N: usize> {
     ring: &'a ExtLogRing<N>,
     /// Windows taken so far; a window the producer began after the last take has this epoch.
@@ -494,9 +464,7 @@ impl<const N: usize> LogConsumer<'_, N> {
         head.wrapping_sub(tail) as usize
     }
 
-    /// All committed bytes as at most two slices, in order, in place: the second is empty unless
-    /// they wrap around the end of the buffer. They stay valid until `consume`; bytes committed
-    /// after the call are not in them.
+    /// All committed bytes as at most two slices, in order, in place: the second is empty unless they wrap around the end of the buffer.
     pub fn peek(&self) -> (&[u8], &[u8]) {
         self.peek_up_to(usize::MAX)
     }
@@ -525,13 +493,11 @@ impl<const N: usize> LogConsumer<'_, N> {
         }
     }
 
-    /// Releases the first `n` committed bytes to the producer; returns how many were released
-    /// (`n` over `readable()` counts as `readable()`).
+    /// Releases the first `n` committed bytes to the producer; returns how many were released (`n` over `readable()` counts as `readable()`).
     pub fn consume(&mut self, n: usize) -> usize {
         let tail = self.ring.tail.load(Ordering::Relaxed);
         let head = self.ring.head.load(Ordering::Acquire);
         let n = (head.wrapping_sub(tail) as usize).min(n);
-        // `n` is at most `N <= 2^31`.
         self.ring
             .tail
             .store(tail.wrapping_add(n as u32), Ordering::Release);
@@ -548,8 +514,7 @@ impl<const N: usize> LogConsumer<'_, N> {
         N - self.readable().min(N)
     }
 
-    /// The statistics of the free space since the previous call (or the start), and a new
-    /// window begins; exactly as `LogConsumer::take_stats` of `LogRing`.
+    /// The statistics of the free space since the previous call (or the start), and a new window begins; exactly as `LogConsumer::take_stats` of `LogRing`.
     pub fn take_stats(&mut self) -> LogStats {
         if let Some(window) = self.ring.stats.try_read(STAT_READ_ATTEMPTS)
             && window.epoch == self.epoch
@@ -668,9 +633,7 @@ mod tests {
         assert_eq!(ring.dropped(), u32::MAX);
     }
 
-    /// `bind` writes zeroes over all `N` bytes of a buffer that held anything, before the ring
-    /// publishes it (so no `&mut [u8]` of a grant covers uninitialised bytes), and a refused
-    /// second bind writes nothing.
+    /// `bind` writes zeroes over all `N` bytes of a buffer that held anything, before the ring publishes it (so no `&mut [u8]` of a grant covers uninitialised bytes), and a refused second bind writes nothing.
     #[test]
     fn bind_zeroes_the_whole_buffer_and_a_refused_bind_writes_nothing() {
         const N: usize = 4096;
@@ -696,11 +659,7 @@ mod tests {
         }
     }
 
-    /// The buffer holds no initial value the ring may rely on: after the bind (which zeroes it) the
-    /// test fills it with a sentinel again, as stale bytes of an earlier lap would be, and whatever
-    /// the consumer is given, over many laps and wraps, is only bytes the producer wrote (a
-    /// sentinel byte never appears in the output, the output equals the input), and the producer
-    /// writes nothing outside its grants (the untouched tail of a fresh buffer stays sentinel).
+    /// The buffer holds no initial value the ring may rely on: after the bind (which zeroes it) the test fills it with a sentinel again, as stale bytes of an earlier lap would be, and whatever the consumer is given, over many laps and wraps, is only bytes the producer wrote (a sentinel byte never appears in the output, the output equals the input), and the producer writes nothing outside its grants (the untouched tail of a fresh buffer stays sentinel).
     #[test]
     fn consumer_reads_only_what_the_producer_wrote_never_the_sentinel() {
         const SENTINEL: u8 = 0xA5;
@@ -718,7 +677,6 @@ mod tests {
             "empty: no bytes at all"
         );
 
-        // Fresh buffer: 10 bytes in, only those 10 are written.
         let first: Vec<u8> = (1..=10).collect();
         assert!(producer.push(&first));
         // SAFETY: `base` is the bound buffer; only a read while no handle is writing.
@@ -730,7 +688,6 @@ mod tests {
         assert_eq!(consumer.peek(), (&first[..], &[][..]));
         assert_eq!(consumer.consume(first.len()), first.len());
 
-        // Many laps with random record and read sizes; no byte of the output is a sentinel.
         let mut rng = Rng(0xFEED);
         let (mut sent, mut got): (Vec<u8>, Vec<u8>) = (Vec::new(), Vec::new());
         let mut next = 0u8;
@@ -766,8 +723,7 @@ mod tests {
         assert!(sent.len() > 100 * N, "many laps: {}", sent.len());
     }
 
-    /// 10 million bytes in records of 1 to 200 bytes, one thread producing and one consuming, the
-    /// output byte for byte the input, no drop.
+    /// 10 million bytes in records of 1 to 200 bytes, one thread producing and one consuming, the output byte for byte the input, no drop.
     #[test]
     fn ten_million_bytes_two_threads_byte_identical() {
         const TOTAL: u64 = 10_000_000;

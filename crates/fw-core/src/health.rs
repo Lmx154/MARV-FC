@@ -124,9 +124,7 @@ pub enum Event {
     },
     /// A good sample.
     Good,
-    /// An error event: deadline miss ([`ErrorKind::Timeout`]), bus, checksum or decode error
-    /// ([`ErrorKind::Bus`]), wrong identity ([`ErrorKind::IdMismatch`]). Use
-    /// [`Event::VerifyMismatch`] for a `verify` mismatch.
+    /// An error event: deadline miss ([`ErrorKind::Timeout`]), bus, checksum or decode error ([`ErrorKind::Bus`]), wrong identity ([`ErrorKind::IdMismatch`]).
     Error(ErrorKind),
     /// `verify` found a mismatch: an error event, and the task must reconfigure at once.
     VerifyMismatch,
@@ -560,7 +558,6 @@ mod tests {
         }
 
         /// Run recovery attempts that all fail; `t` is the time of entry, each operation takes 10 ms.
-        /// Returns the times at which `Recover` was issued and the final step.
         fn fail_all(&mut self, t: u64, attempts: usize) -> (std::vec::Vec<u64>, Step) {
             let mut issued = std::vec::Vec::new();
             let mut now = t;
@@ -724,11 +721,8 @@ mod tests {
     fn sustained_error_rate_just_above_25_percent_recovers_just_below_does_not() {
         let e = Event::Error(ErrorKind::Bus);
         let g = Event::Good;
-        // 2 errors in 7 samples = 28.6 %: net +1 per period.
         assert!(reaches_recovering(&[e, g, e, g, g, g, g], 20));
-        // exactly 25 % (1 in 4): net 0, bounded.
         assert!(!reaches_recovering(&[e, g, g, g], 1000));
-        // 2 errors in 9 samples = 22.2 %: net -1 per period.
         assert!(!reaches_recovering(&[e, g, e, g, g, g, g, g, g], 1000));
     }
 
@@ -780,7 +774,6 @@ mod tests {
         r.at(14, Event::Good);
         r.at(15, Event::Good);
         assert_eq!(r.h.state(), State::Ok);
-        // A reconfigure result nobody asked for is ignored.
         r.at(16, Event::ReconfigureDone { ok: true });
         assert_eq!(r.h.counters().config_restored, 1);
     }
@@ -816,9 +809,7 @@ mod tests {
             st(Action::WaitUntil(1100), Some(Report::EnteredRecovering))
         );
         assert_eq!(r.at(1099, Event::Tick), quiet(Action::WaitUntil(1100)));
-        // Each operation takes 10 ms: the back-off counts from the failure of the previous attempt.
         let (issued, last) = r.fail_all(1100, 4);
-        // attempt 1 at 1100; its failure at 1120; attempt 2 at 1120+300; failure 1440; +1000 = 2440; failure 2460; +3000 = 5460
         assert_eq!(issued, [1100, 1420, 2440, 5460]);
         assert_eq!(last, st(Action::Park, Some(Report::Failed)));
         assert_eq!(r.h.state(), State::Failed);
@@ -901,7 +892,6 @@ mod tests {
         let (issued, last) = r.fail_all(0, 4);
         assert_eq!(issued.len(), 4);
         assert_eq!(last.report, Some(Report::Failed));
-        // No fifth attempt, whatever happens.
         for t in [10_000, 20_000, 1_000_000] {
             assert_eq!(r.at(t, Event::Tick), quiet(Action::Park));
         }
@@ -965,7 +955,6 @@ mod tests {
             Some(Report::EnteredRecovering)
         );
         assert_eq!(r.h.state(), State::Ok);
-        // The window slides: the next entry compares against the one at 20 000.
         assert_eq!(por_cycle(&mut r, 70_000).report, Some(Report::Failed));
     }
 
@@ -1025,40 +1014,33 @@ mod tests {
 
     #[test]
     fn restart_from_every_state_behaves_like_boot() {
-        // Starting
         let mut r = Rig::new();
         r.at(0, Event::Tick);
         r.at(0, Event::StartFailed { identified: true });
         assert_eq!(r.at(5, Event::Restart), quiet(Action::Start));
         assert_eq!(r.h.state(), State::Starting);
-        // The start retries are fresh: 3 retries again, from 100 ms.
         assert_eq!(
             r.at(6, Event::StartFailed { identified: false }),
             quiet(Action::WaitUntil(106))
         );
-        // Ok
         let mut r = Rig::booted();
         assert_eq!(r.at(5, Event::Restart), quiet(Action::Start));
         assert_eq!(r.h.state(), State::Starting);
-        // Degraded
         let mut r = Rig::booted();
         r.at(1, Event::Error(ErrorKind::Bus));
         assert_eq!(r.h.score(), 3);
         assert_eq!(r.at(5, Event::Restart), quiet(Action::Start));
         assert_eq!(r.h.state(), State::Starting);
         assert_eq!(r.h.score(), 0);
-        // Recovering
         let mut r = Rig::booted();
         r.at(0, Event::PowerOnReset);
         assert_eq!(r.at(5, Event::Restart), quiet(Action::Start));
         assert_eq!(r.h.state(), State::Starting);
-        // a late result of the abandoned recovery is ignored
         assert_eq!(
             r.at(6, Event::RecoverDone { ok: true }),
             quiet(Action::None)
         );
         assert_eq!(r.h.state(), State::Starting);
-        // Failed
         let mut r = Rig::booted();
         r.at(0, Event::PowerOnReset);
         r.fail_all(0, 4);
@@ -1067,7 +1049,6 @@ mod tests {
         assert_eq!(r.at(900_001, Event::StartOk), quiet(Action::None));
         assert_eq!(r.h.state(), State::Ok);
         assert_eq!(r.h.score(), 0);
-        // Absent
         let mut r = Rig::new();
         r.at(0, Event::Tick);
         for t in [0, 100, 400, 1400] {
@@ -1135,7 +1116,6 @@ mod tests {
         assert_eq!(r.at(u64::MAX, Event::Tick), quiet(Action::Start));
     }
 
-    // ----- the property test (invariants I2.1 and I2.2) -----
 
     struct Rng(u64);
 
@@ -1210,7 +1190,6 @@ mod tests {
             ErrorKind::Por,
             ErrorKind::Stuck,
         ];
-        // Mostly answer the last action, so that episodes run to their end.
         if rng.below(100) < 70 {
             let ok = rng.below(100) < 30;
             match last {
@@ -1266,8 +1245,7 @@ mod tests {
         ]
     }
 
-    /// Run `seqs` random sequences of `len` events through `limits` and check the design's
-    /// invariants (against the design's numbers, not against `limits`).
+    /// Run `seqs` random sequences of `len` events through `limits` and check the design's invariants (against the design's numbers, not against `limits`).
     fn check(limits: Limits, seed: u64, seqs: u64, len: usize) -> Result<Coverage, Violation> {
         let d = Limits::DESIGN;
         let max_score = d.threshold - 1 + d.error_weight;
@@ -1300,7 +1278,6 @@ mod tests {
                             });
                         }
                     } else {
-                        // I2.2
                         if state != prev_state {
                             return Err(Violation::LeftParked {
                                 seq,
@@ -1332,7 +1309,6 @@ mod tests {
                         action: out.action,
                     });
                 }
-                // Episodes: counted from entering Recovering; a RESTART ends them.
                 if event == Event::Restart
                     || (prev_state != State::Recovering && state == State::Recovering)
                 {
@@ -1344,7 +1320,6 @@ mod tests {
                     Action::Restart if state == State::Recovering => restarts += 1,
                     _ => {}
                 }
-                // I2.1
                 if recovers > u32::from(d.max_attempts) || restarts > u32::from(d.max_attempts) {
                     return Err(Violation::TooManyAttempts {
                         seq,
@@ -1429,7 +1404,6 @@ mod tests {
         let t = std::time::Instant::now();
         let cov = check(Limits::DESIGN, 0x00C0_FFEE_D00D_1234, 100_000, 80).unwrap();
         std::eprintln!("property test: {:?} in {:?}", cov, t.elapsed());
-        // The run must have reached the interesting states, or it proves nothing.
         assert!(cov.failed > 1000, "{cov:?}");
         assert!(cov.absent > 1000, "{cov:?}");
         assert!(cov.recovered > 1000, "{cov:?}");

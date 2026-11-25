@@ -16,8 +16,7 @@ pub const MAX_DEVICE: u8 = 31;
 /// How an accepted write takes effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Apply {
-    /// Through the device's `configure`: the device's whole candidate configuration is validated
-    /// before the value is stored, and the device's APPLY request is raised.
+    /// Through the device's `configure`: the device's whole candidate configuration is validated before the value is stored, and the device's APPLY request is raised.
     Configure,
     /// Only after a reboot.
     Reboot,
@@ -30,8 +29,7 @@ pub enum Apply {
 pub struct ParamDef {
     /// `<PREFIX>_<NAME>`, at most 16 characters of `A-Z`, `0-9`, `_`.
     pub name: &'static str,
-    /// The `MARV_DEVICE` id the parameter belongs to (1 IMU1, 2 IMU2, 3 BARO, 4 MAG, 5 GNSS,
-    /// 6 BATT, 7 RC); 0 is the system, no device. At most [`MAX_DEVICE`].
+    /// The `MARV_DEVICE` id the parameter belongs to (1 IMU1, 2 IMU2, 3 BARO, 4 MAG, 5 GNSS, 6 BATT, 7 RC); 0 is the system, no device.
     pub device: u8,
     /// The value after "all to defaults" and the value the flash record omits.
     pub default: ParamValue,
@@ -185,8 +183,7 @@ pub enum LoadError {
     OutOfRange,
 }
 
-/// A device's whole configuration as it would be after a write: every parameter reads as stored,
-/// except the one being written, which reads as the proposed value.
+/// A device's whole configuration as it would be after a write: every parameter reads as stored, except the one being written, which reads as the proposed value.
 #[derive(Clone, Copy, Debug)]
 pub struct Candidate<'a> {
     defs: &'a [ParamDef],
@@ -293,8 +290,7 @@ fn check_entry(defs: &[ParamDef], i: usize, def: &ParamDef) -> Result<(), TableE
     Ok(())
 }
 
-/// The parameter store: a validated static table, `N` value slots, and the polled state
-/// (dirty flag, per-device masks, last notice). `N` must be at least the table's length.
+/// The parameter store: a validated static table, `N` value slots, and the polled state (dirty flag, per-device masks, last notice).
 pub struct Params<const N: usize> {
     defs: &'static [ParamDef],
     values: [ParamValue; N],
@@ -337,7 +333,6 @@ impl<const N: usize> Params<N> {
     }
 
     /// Installs the validator run before a `Configure`-class write of any parameter of `device`.
-    /// Returns `false` (and installs nothing) if `device` is above [`MAX_DEVICE`].
     pub fn set_validator(&mut self, device: u8, validator: Validator) -> bool {
         match self.validators.get_mut(usize::from(device)) {
             Some(slot) => {
@@ -367,8 +362,7 @@ impl<const N: usize> Params<N> {
         self.dirty = false;
     }
 
-    /// Devices (bit = device id) with an accepted `Configure`-class change since the last call;
-    /// clears the mask. The firmware raises each device's APPLY request.
+    /// Devices (bit = device id) with an accepted `Configure`-class change since the last call; clears the mask.
     pub fn take_configure_mask(&mut self) -> u32 {
         core::mem::take(&mut self.configure_mask)
     }
@@ -394,9 +388,7 @@ impl<const N: usize> Params<N> {
             .filter_map(|(def, value)| Some((ParamName::new(def.name).ok()?, *value)))
     }
 
-    /// Boot-time load of one stored value: applied if the name exists, the type matches and the
-    /// value is in range. `Ok(true)` applied, `Ok(false)` skipped because the parameter is read
-    /// only. Marks nothing dirty, requests no apply, runs no validator.
+    /// Boot-time load of one stored value: applied if the name exists, the type matches and the value is in range.
     pub fn load(&mut self, name: &ParamName, value: ParamValue) -> Result<bool, LoadError> {
         let i = self
             .defs
@@ -417,9 +409,7 @@ impl<const N: usize> Params<N> {
         }
     }
 
-    /// MAV_CMD_PREFLIGHT_STORAGE "all to defaults". Returns the number of values that changed.
-    /// A change marks the store dirty and sets the masks of the devices whose values changed;
-    /// the validators are not run (defaults are valid by construction of the table).
+    /// MAV_CMD_PREFLIGHT_STORAGE "all to defaults".
     pub fn reset_all(&mut self) -> u16 {
         self.reset(false)
     }
@@ -555,17 +545,17 @@ mod tests {
     use std::vec::Vec;
 
     const TABLE: &[ParamDef] = &[
-        ParamDef::i32("SYS_BAUD", 0, 115_200, 9_600, 921_600, Apply::Reboot), // 0
-        ParamDef::i32("SYS_ID", 0, 1, 1, 250, Apply::Live),                   // 1
-        ParamDef::i32("SYS_VER", 0, 7, 0, 100, Apply::Live).with_read_only(), // 2
-        ParamDef::i32("IMU1_ODR", 1, 1000, 100, 8000, Apply::Configure),      // 3
-        ParamDef::i32("IMU1_LPF", 1, 200, 0, 4000, Apply::Configure),         // 4
-        ParamDef::f32("IMU1_GYR_OFFX", 1, 0.0, -1.0, 1.0, Apply::Live).with_calibration(), // 5
-        ParamDef::f32("IMU1_GYR_OFFY", 1, 0.0, -1.0, 1.0, Apply::Live).with_calibration(), // 6
-        ParamDef::i32("IMU2_ODR", 2, 1000, 100, 8000, Apply::Configure),      // 7
-        ParamDef::f32("IMU2_RANGE", 2, 16.0, 2.0, 32.0, Apply::Configure),    // 8
-        ParamDef::f32("IMU2_ACC_OFFX", 2, 0.0, -2.0, 2.0, Apply::Live).with_calibration(), // 9
-        ParamDef::i32("IMU1_MODE", 1, 0, 0, 3, Apply::Reboot),                // 10
+        ParamDef::i32("SYS_BAUD", 0, 115_200, 9_600, 921_600, Apply::Reboot),
+        ParamDef::i32("SYS_ID", 0, 1, 1, 250, Apply::Live),
+        ParamDef::i32("SYS_VER", 0, 7, 0, 100, Apply::Live).with_read_only(),
+        ParamDef::i32("IMU1_ODR", 1, 1000, 100, 8000, Apply::Configure),
+        ParamDef::i32("IMU1_LPF", 1, 200, 0, 4000, Apply::Configure),
+        ParamDef::f32("IMU1_GYR_OFFX", 1, 0.0, -1.0, 1.0, Apply::Live).with_calibration(),
+        ParamDef::f32("IMU1_GYR_OFFY", 1, 0.0, -1.0, 1.0, Apply::Live).with_calibration(),
+        ParamDef::i32("IMU2_ODR", 2, 1000, 100, 8000, Apply::Configure),
+        ParamDef::f32("IMU2_RANGE", 2, 16.0, 2.0, 32.0, Apply::Configure),
+        ParamDef::f32("IMU2_ACC_OFFX", 2, 0.0, -2.0, 2.0, Apply::Live).with_calibration(),
+        ParamDef::i32("IMU1_MODE", 1, 0, 0, 3, Apply::Reboot),
     ];
 
     const BAUD: u16 = 0;
@@ -603,7 +593,6 @@ mod tests {
         assert_eq!(p.take_live_mask(), 0);
     }
 
-    // ---- table validation ----
 
     fn table_err<const N: usize>(defs: &'static [ParamDef]) -> TableError {
         Params::<N>::new(defs).err().unwrap()
@@ -764,7 +753,6 @@ mod tests {
         assert!(!p.set_validator(32, v_imu1));
     }
 
-    // ---- set: refusals ----
 
     fn refused(p: &mut Params<16>, i: u16, v: ParamValue, err: ParamError, kind: NoticeKind) {
         let before = p.get(i);
@@ -866,7 +854,6 @@ mod tests {
     fn refusals_leave_other_state_alone() {
         let mut p = store();
         p.set(ODR1, ParamValue::I32(2000)).unwrap();
-        // dirty and mask of an earlier accepted write survive a later refusal
         assert_eq!(p.set(ID, ParamValue::I32(0)), Err(ParamError::OutOfRange));
         assert!(p.dirty());
         assert_eq!(p.take_configure_mask(), 1 << 1);
@@ -885,7 +872,6 @@ mod tests {
         assert_eq!(p.take_notice(), None);
     }
 
-    // ---- set: accepted (I3.1) ----
 
     #[test]
     fn echo_equals_stored_on_every_accepted_path() {
@@ -946,7 +932,6 @@ mod tests {
             assert_quiet(&mut p);
             assert_eq!(p.take_notice(), None);
         }
-        // a no-op after a real change is a no-op too
         p.set(ODR1, ParamValue::I32(2000)).unwrap();
         p.clear_dirty();
         let _ = p.take_configure_mask();
@@ -957,7 +942,6 @@ mod tests {
         assert_quiet(&mut p);
     }
 
-    // ---- APPLY exactly once per accepted CONFIGURE set ----
 
     #[test]
     fn configure_set_raises_exactly_that_device() {
@@ -1035,15 +1019,14 @@ mod tests {
         assert_eq!(NoticeKind::Rejected("why").text(), "why");
     }
 
-    // ---- the validator sees the candidate ----
 
     #[test]
     fn validator_sees_the_whole_candidate() {
         let mut p = store();
-        p.set(LPF1, ParamValue::I32(400)).unwrap(); // 400 <= 1000 / 2
+        p.set(LPF1, ParamValue::I32(400)).unwrap();
         let _ = p.take_configure_mask();
         p.clear_dirty();
-        let r = p.set(ODR1, ParamValue::I32(700)); // 400 > 350
+        let r = p.set(ODR1, ParamValue::I32(700));
         assert_eq!(r, Err(ParamError::Rejected));
         assert_eq!(p.get(ODR1), Some(ParamValue::I32(1000)));
         assert_eq!(
@@ -1051,7 +1034,7 @@ mod tests {
             NoticeKind::Rejected("IMU1 LPF above half the ODR")
         );
         assert_quiet(&mut p);
-        p.set(LPF1, ParamValue::I32(200)).unwrap(); // changed back
+        p.set(LPF1, ParamValue::I32(200)).unwrap();
         let _ = p.take_configure_mask();
         assert_eq!(p.set(ODR1, ParamValue::I32(700)), Ok(ParamValue::I32(700)));
         assert_eq!(p.take_configure_mask(), 1 << 1);
@@ -1101,17 +1084,16 @@ mod tests {
         assert_eq!(p.get(ODR1), Some(ParamValue::I32(1000)));
     }
 
-    // ---- persistence ----
 
     #[test]
     fn non_default_yields_exactly_the_changed_values() {
         let mut p = store();
         assert_eq!(p.non_default().count(), 0);
         p.set(BAUD, ParamValue::I32(57_600)).unwrap();
-        p.set(OFFX, ParamValue::F32(-0.0)).unwrap(); // bit-for-bit differs from 0.0
-        p.set(ODR2, ParamValue::I32(1000)).unwrap(); // no-op
+        p.set(OFFX, ParamValue::F32(-0.0)).unwrap();
+        p.set(ODR2, ParamValue::I32(1000)).unwrap();
         p.set(RANGE2, ParamValue::F32(8.0)).unwrap();
-        p.set(RANGE2, ParamValue::F32(16.0)).unwrap(); // back to default
+        p.set(RANGE2, ParamValue::F32(16.0)).unwrap();
         let got: Vec<_> = p.non_default().collect();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0], (name("SYS_BAUD"), ParamValue::I32(57_600)));
@@ -1181,7 +1163,6 @@ mod tests {
         assert_quiet(&mut p);
     }
 
-    // ---- resets ----
 
     fn changed_store() -> Params<16> {
         let mut p = store();
@@ -1232,13 +1213,11 @@ mod tests {
         assert_eq!(p.reset_calibration(), 0);
         assert_quiet(&mut p);
         assert_eq!(p.take_notice(), None);
-        // a pending dirty flag is not cleared by a no-change reset
         p.set(ID, ParamValue::I32(2)).unwrap();
         p.reset_calibration();
         assert!(p.dirty());
     }
 
-    // ---- property ----
 
     struct Rng(u64);
     impl Rng {

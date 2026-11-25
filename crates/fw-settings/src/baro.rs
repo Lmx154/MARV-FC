@@ -24,9 +24,7 @@ pub const IIR_T: &str = "BARO_IIR_T";
 /// The number of barometer parameters.
 pub const COUNT: usize = 5;
 
-/// The barometer's parameter table; defaults are `Config::new()`: 50 Hz, pressure x16, temperature
-/// x2, no filter. Ranges are the driver's extremes; the values in between that the chip does not
-/// offer are refused by [`validate`].
+/// The barometer's parameter table; defaults are `Config::new()`: 50 Hz, pressure x16, temperature x2, no filter.
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::i32(ODR_HZ, DEVICE, 50, 1, 240, Apply::Configure),
     ParamDef::i32(OSR_P, DEVICE, 16, 1, 128, Apply::Configure),
@@ -35,9 +33,7 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::i32(IIR_T, DEVICE, 0, 0, 127, Apply::Configure),
 ];
 
-/// The rates the chip offers that have a whole-hertz name: the printed rate and the chip's code
-/// (50 Hz is 50.056 Hz, 100 Hz is 100.299 Hz, and so on; the driver's rate list). The sub-hertz
-/// codes and 89.6, 110.164, 149.333 Hz have no whole-hertz name and are not offered.
+/// The rates the chip offers that have a whole-hertz name: the printed rate and the chip's code (50 Hz is 50.056 Hz, 100 Hz is 100.299 Hz, and so on; the driver's rate list).
 pub const RATES: [(i32, OutputDataRate); 26] = [
     (1, OutputDataRate::Hz1),
     (2, OutputDataRate::Hz2),
@@ -102,10 +98,7 @@ fn iir(x: i32) -> Option<IirFilter> {
     })
 }
 
-/// The device's whole `Config` from a view of the parameters (`get` returns the `I32` value of a
-/// name), or the reason it is not one the chip offers. Everything else in the `Config` is the
-/// driver's default. The rate against the oversampling is the driver's own check
-/// (`Config::validate`).
+/// The device's whole `Config` from a view of the parameters (`get` returns the `I32` value of a name), or the reason it is not one the chip offers.
 pub fn settings_to_config(get: impl Fn(&str) -> Option<i32>) -> Result<Config, &'static str> {
     let odr = get(ODR_HZ).ok_or(MISSING)?;
     let odr = RATES
@@ -236,7 +229,6 @@ mod tests {
             assert!(def.name.starts_with("BARO_") && def.name.len() <= 16);
             assert_eq!(def.device, DEVICE);
             assert_eq!(def.apply, Apply::Configure);
-            // Writing the default back is a no-op, and the all-defaults candidate is valid.
             let i = u16::try_from(i).unwrap();
             assert_eq!(params.set(i, def.default), Ok(def.default));
         }
@@ -264,12 +256,9 @@ mod tests {
                 .collect()
         };
         let rates: Vec<i32> = RATES.iter().map(|(hz, _)| *hz).collect();
-        // On top of the defaults (pressure 16x, temperature 2x) only the fastest rates are too fast.
         assert_eq!(refused(ODR_HZ, &rates), EXPECTED_RATES_REFUSED);
-        // At 50 Hz the largest oversamplings are too slow to keep up.
         assert_eq!(refused(OSR_P, &OSR), EXPECTED_OSR_P_REFUSED);
         assert_eq!(refused(OSR_T, &OSR), EXPECTED_OSR_T_REFUSED);
-        // The filters do not take part in the rule.
         assert!(refused(IIR_P, &IIR).is_empty());
         assert!(refused(IIR_T, &IIR).is_empty());
         for v in IIR {
@@ -296,7 +285,6 @@ mod tests {
         assert_eq!(p.get(odr), Some(ParamValue::I32(50)));
         assert_eq!(p.set(odr, ParamValue::I32(25)), Ok(ParamValue::I32(25)));
         assert_eq!(p.take_configure_mask(), 1 << DEVICE);
-        // The candidate is the whole configuration: 128x pressure is too slow at 25 Hz.
         assert_eq!(p.set(osr, ParamValue::I32(128)), Err(ParamError::Rejected));
         assert_eq!(p.take_notice().unwrap().kind.text(), TOO_FAST);
         assert_eq!(p.get(osr), Some(ParamValue::I32(16)));

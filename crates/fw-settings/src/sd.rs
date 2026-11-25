@@ -48,7 +48,6 @@ mod tests {
             Err(ParamError::OutOfRange)
         );
         assert_eq!(params.get(0), Some(ParamValue::I32(0)));
-        // Reboot: nothing to configure and nothing live.
         assert_eq!(params.take_configure_mask(), 0);
         assert_eq!(params.take_live_mask(), 0);
     }

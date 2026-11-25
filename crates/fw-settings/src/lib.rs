@@ -53,14 +53,10 @@ pub const COUNT: usize = baro::COUNT
     + flight::COUNT
     + batt::FS_COUNT;
 
-/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC,
-/// then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's
-/// soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, the ten `GDN_*` parameters, the 14 `ATC_*` gains, `GDN_SRC`, `GDN_ALT_MIN`, `GDN_ALT_MAX` and `FS_HOLD_EN`, then the five low-battery monitor parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` (appended, so the first 81 indices did not change).
+/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC, then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, the ten `GDN_*` parameters, the 14 `ATC_*` gains, `GDN_SRC`, `GDN_ALT_MIN`, `GDN_ALT_MAX` and `FS_HOLD_EN`, then the five low-battery monitor parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` (appended, so the first 81 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
-/// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters
-/// (settings) go back to their defaults in RAM; its `Live` parameters (the
-/// calibration offsets) are kept. Returns the number of parameters put back.
+/// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters (settings) go back to their defaults in RAM; its `Live` parameters (the calibration offsets) are kept.
 pub fn reset_device_settings<const N: usize>(params: &mut Params<N>, device: u8) -> usize {
     let mut n = 0;
     for def in TABLE
@@ -215,8 +211,7 @@ mod tests {
         assert!(expected.next().is_none());
     }
 
-    /// The first 70 parameters keep their indices (a stored record is indexed by name, but the tools list by index): the
-    /// six IMU chip settings are appended after them.
+    /// The first 70 parameters keep their indices (a stored record is indexed by name, but the tools list by index): the six IMU chip settings are appended after them.
     #[test]
     fn the_first_70_names_keep_their_indices() {
         const FIRST_70: [&str; 70] = [
@@ -360,9 +355,7 @@ mod tests {
         assert_eq!(70 + appended.len(), COUNT);
     }
 
-    /// The compass's soft-iron matrix and calibration record are indices 81 to 91 with the
-    /// types, defaults, ranges and classes;
-    /// each range is the whole check.
+    /// The compass's soft-iron matrix and calibration record are indices 81 to 91 with the types, defaults, ranges and classes; each range is the whole check.
     #[test]
     fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
         use mavlink_device::{ParamError, ParamValue};
@@ -406,9 +399,7 @@ mod tests {
         }
     }
 
-    /// "calibration to defaults" gives a coherent "not calibrated": 81 to 89 and `MAG_OFF*` at
-    /// their defaults (S the identity, offsets 0, type 0, no expected field); the two health
-    /// tolerances and `MAG_ORIENT` are not calibration results and keep their values.
+    /// "calibration to defaults" gives a coherent "not calibrated": 81 to 89 and `MAG_OFF*` at their defaults (S the identity, offsets 0, type 0, no expected field); the two health tolerances and `MAG_ORIENT` are not calibration results and keep their values.
     #[test]
     fn reset_calibration_returns_the_compass_calibration_to_not_calibrated() {
         use mavlink_device::ParamValue::{self, F32, I32};
@@ -448,14 +439,12 @@ mod tests {
         assert_eq!(p.get_named("MAG_ORIENT"), Some(I32(3)));
     }
 
-    /// The two orientation parameters are appended after the first 76 (names unchanged in
-    /// order), with their ranges, defaults and classes; the 0 to 15 range is the whole validator.
+    /// The two orientation parameters are appended after the first 76 (names unchanged in order), with their ranges, defaults and classes; the 0 to 15 range is the whole validator.
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
         assert_eq!(COUNT, 128);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        // The first 70 are pinned by `the_first_70_names_keep_their_indices`; the six after them:
         for (k, name) in [
             "IMU1_ACC_FS",
             "IMU1_GYR_FS",
@@ -490,7 +479,6 @@ mod tests {
         );
         assert_eq!(mag.apply, Apply::Live);
         assert!(!mag.calibration && !mag.read_only);
-        // The range is the validator: 0 and 15 are accepted, -1 and 16 refused.
         for (i, name) in [(76u16, "AHRS_ORIENTATION"), (77, "MAG_ORIENT")] {
             for ok in [0, 7, 15] {
                 assert_eq!(
@@ -507,7 +495,6 @@ mod tests {
                 );
             }
         }
-        // Every value of the range is a rotation.
         for v in 0..=15 {
             assert!(fw_core::rotation::Rotation::from_i32(v).is_some());
         }
@@ -567,8 +554,7 @@ mod tests {
         }
     }
 
-    /// A refused IMU setup puts `AHRS_ORIENTATION` back to nothing: it is device 0, never reset;
-    /// a refused magnetometer keeps `MAG_ORIENT` (`Live`).
+    /// A refused IMU setup puts `AHRS_ORIENTATION` back to nothing: it is device 0, never reset; a refused magnetometer keeps `MAG_ORIENT` (`Live`).
     #[test]
     fn a_refused_device_keeps_the_orientation_parameters() {
         use mavlink_device::ParamValue;
@@ -591,10 +577,7 @@ mod tests {
         assert_eq!(p.get_named("MAG_ORIENT"), Some(ParamValue::I32(3)));
     }
 
-    /// The start burst of a log (the header, a PARM for every parameter,
-    /// the boot texts that wait for the log's text cursor: the ring's depth and its sticky slots)
-    /// is at most 16 KiB, also with the writer's alignment filler (under one 4 KiB piece) in the
-    /// ring before it. Encoded from the table, not counted from literals.
+    /// The start burst of a log (the header, a PARM for every parameter, the boot texts that wait for the log's text cursor: the ring's depth and its sticky slots) is at most 16 KiB, also with the writer's alignment filler (under one 4 KiB piece) in the ring before it.
     #[test]
     fn the_start_burst_is_at_most_16_kib() {
         use fw_core::dflog::{HEADER_SEQUENCE_LEN, encode_msg, encode_parm, write_header};
@@ -629,14 +612,12 @@ mod tests {
         );
     }
 
-    /// The narrowed boot reset: a refused IMU setting resets the IMU's settings, not
-    /// its calibration offsets; the barometer's and the magnetometer's likewise (`MAG_OFF*` kept).
+    /// The narrowed boot reset: a refused IMU setting resets the IMU's settings, not its calibration offsets; the barometer's and the magnetometer's likewise (`MAG_OFF*` kept).
     #[test]
     fn a_refused_device_resets_its_settings_but_not_its_calibration() {
         use mavlink_device::ParamValue;
         let name = |n: &str| ParamName::new(n).unwrap();
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        // Stored values as a record can bring them (range checked only): 3 g is not a range.
         for (n, v) in [
             ("IMU1_ACC_FS", ParamValue::I32(3)),
             ("IMU1_ODR_HZ", ParamValue::I32(100)),
@@ -654,7 +635,6 @@ mod tests {
         assert_eq!(get(&p, "IMU1_ODR_HZ"), ParamValue::I32(800));
         assert_eq!(get(&p, "IMU1_ACC_OFFX"), ParamValue::F32(0.25));
         assert_eq!(get(&p, "IMU1_GYR_OFFZ"), ParamValue::F32(-0.01));
-        // The other IMU and the magnetometer are untouched.
         assert_eq!(get(&p, "IMU2_ACC_FS"), ParamValue::I32(8));
         assert_eq!(get(&p, "MAG_AVG"), ParamValue::I32(3));
         assert_eq!(reset_device_settings(&mut p, mag::TABLE[0].device), 2);
@@ -663,9 +643,7 @@ mod tests {
         assert!(!p.dirty());
     }
 
-    /// A record saved before `GPS_RATE_MS` existed (it can name only the first 80 parameters) loads by
-    /// the boot rule of `settings::load_from_flash` (`reset_all`, then each entry by name) with every one
-    /// of its 80 values and `GPS_RATE_MS` at its default, 200 ms, which the adapter accepts.
+    /// A record saved before `GPS_RATE_MS` existed (it can name only the first 80 parameters) loads by the boot rule of `settings::load_from_flash` (`reset_all`, then each entry by name) with every one of its 80 values and `GPS_RATE_MS` at its default, 200 ms, which the adapter accepts.
     #[test]
     fn a_record_of_the_first_80_parameters_loads_gps_rate_ms_at_its_default() {
         use fw_core::record::{self, Boot, Entry, SECTOR_LEN};
@@ -690,7 +668,6 @@ mod tests {
         };
         assert_eq!(record.declared_count(), 80);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        // A value from before (a reload after a set): the boot rule puts it back to the default.
         assert_eq!(p.set(80, ParamValue::I32(1000)), Ok(ParamValue::I32(1000)));
         p.reset_all();
         let mut loaded = 0;
@@ -715,9 +692,7 @@ mod tests {
         assert_eq!(gnss::rate_ms(stored), Ok(200));
     }
 
-    /// A record with only `MAG_OFF*` non-default loads by the boot rule
-    /// with S the identity, `MAG_CAL_TYPE` 0 and no expected field; the output is then
-    /// the plain offset subtraction.
+    /// A record with only `MAG_OFF*` non-default loads by the boot rule with S the identity, `MAG_CAL_TYPE` 0 and no expected field; the output is then the plain offset subtraction.
     #[test]
     fn an_offsets_only_record_loads_with_the_identity_matrix_and_type_0() {
         use fw_core::record::{self, Boot, Entry, SECTOR_LEN};

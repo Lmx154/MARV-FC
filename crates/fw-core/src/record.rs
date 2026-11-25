@@ -154,10 +154,6 @@ fn write_entry(out: &mut [u8], offset: usize, entry: &Entry) {
 }
 
 /// Encodes a record with `sequence` and `entries` into `out`, and returns the record's length.
-///
-/// The whole buffer is first set to 0xFF, so the unused tail stays erased and the buffer can be
-/// programmed as it is. When more than [`MAX_ENTRIES`] entries are given, `out` is left all 0xFF
-/// (no half record) and the error is returned.
 pub fn encode<I>(
     sequence: u32,
     entries: I,
@@ -337,9 +333,6 @@ pub struct Choice<'a> {
 }
 
 /// Picks the current record from both sectors' bytes.
-///
-/// The valid record with the highest sequence (plain `u32` comparison) wins; with equal
-/// sequences sector A wins.
 pub fn choose<'a>(a: &'a [u8; SECTOR_LEN], b: &'a [u8; SECTOR_LEN]) -> Choice<'a> {
     choose_impl(a, b, true)
 }
@@ -458,20 +451,20 @@ mod tests {
         let len = encode(0x0102_0304, list, &mut buf).unwrap();
         assert_eq!(len, 68);
         let mut expected: Vec<u8> = Vec::new();
-        expected.extend_from_slice(&[0x4D, 0x52, 0x56, 0x53]); // "MRVS"
-        expected.extend_from_slice(&[0x01, 0x00]); // version 1
-        expected.extend_from_slice(&[0x02, 0x00]); // count 2
-        expected.extend_from_slice(&[0x04, 0x03, 0x02, 0x01]); // sequence
-        expected.extend_from_slice(&[0x44, 0x00, 0x00, 0x00]); // length 68
-        expected.extend_from_slice(&[0x41, 0x5F, 0x42]); // "A_B"
+        expected.extend_from_slice(&[0x4D, 0x52, 0x56, 0x53]);
+        expected.extend_from_slice(&[0x01, 0x00]);
+        expected.extend_from_slice(&[0x02, 0x00]);
+        expected.extend_from_slice(&[0x04, 0x03, 0x02, 0x01]);
+        expected.extend_from_slice(&[0x44, 0x00, 0x00, 0x00]);
+        expected.extend_from_slice(&[0x41, 0x5F, 0x42]);
         expected.extend_from_slice(&[0u8; 13]);
-        expected.extend_from_slice(&[0x01, 0, 0, 0]); // I32, padding
-        expected.extend_from_slice(&[0xFE, 0xFF, 0xFF, 0xFF]); // -2
-        expected.extend_from_slice(&[0x50, 0x49]); // "PI"
+        expected.extend_from_slice(&[0x01, 0, 0, 0]);
+        expected.extend_from_slice(&[0xFE, 0xFF, 0xFF, 0xFF]);
+        expected.extend_from_slice(&[0x50, 0x49]);
         expected.extend_from_slice(&[0u8; 14]);
-        expected.extend_from_slice(&[0x02, 0, 0, 0]); // F32, padding
-        expected.extend_from_slice(&[0x00, 0x00, 0x80, 0x3F]); // 1.0
-        expected.extend_from_slice(&[0x22, 0xAD, 0xE4, 0x43]); // CRC-32 0x43E4AD22
+        expected.extend_from_slice(&[0x02, 0, 0, 0]);
+        expected.extend_from_slice(&[0x00, 0x00, 0x80, 0x3F]);
+        expected.extend_from_slice(&[0x22, 0xAD, 0xE4, 0x43]);
         expected.resize(SECTOR_LEN, 0xFF);
         assert_eq!(expected.len(), SECTOR_LEN);
         assert_eq!(buf.as_slice(), expected.as_slice());
@@ -549,8 +542,7 @@ mod tests {
         assert!(encode(1, entries(169), &mut buf).is_ok());
     }
 
-    /// Corrupts every position of the newest record with each of `xors`, in both sector orders,
-    /// and returns (cases, cases where the older record was NOT chosen).
+    /// Corrupts every position of the newest record with each of `xors`, in both sector orders, and returns (cases, cases where the older record was NOT chosen).
     fn corruption_run(check_crc: bool, n: usize, xors: &[u8]) -> (usize, usize) {
         let (old, _) = sector(5, 3);
         let (new, len) = sector(6, n);
@@ -611,7 +603,6 @@ mod tests {
         assert!(escapes > 0, "{escapes} of {cases}");
         let (_, escapes) = corruption_run(false, 1, &all);
         assert!(escapes > 0);
-        // the same harness with the CRC: none
         assert_eq!(corruption_run(true, 3, &[0x01, 0x80, 0xFF]).1, 0);
     }
 
@@ -623,7 +614,6 @@ mod tests {
             for seq in 6..40u32 {
                 let (new, len) = sector(seq, n);
                 if new[len - 1] == 0xFF {
-                    // a cut would leave the same bytes as the whole record
                     continue;
                 }
                 for k in 0..len {
@@ -671,7 +661,6 @@ mod tests {
         let zeros = [0u8; SECTOR_LEN];
         assert!(matches!(decode(&zeros), Decoded::Invalid));
 
-        // valid + invalid: the valid one is current, the invalid one is written next
         let c = choose(&junk, &valid);
         assert_eq!(current(&c), Some((Sector::B, 3)));
         assert_eq!(c.write_sector, Sector::A);
@@ -692,7 +681,6 @@ mod tests {
         let c = choose(&y, &x);
         assert_eq!(current(&c), Some((Sector::A, 7)));
 
-        // plain comparison: 0 does not beat u32::MAX
         let (zero, _) = sector(0, 1);
         let (max, _) = sector(u32::MAX, 1);
         assert_eq!(current(&choose(&zero, &max)), Some((Sector::B, u32::MAX)));
@@ -733,10 +721,10 @@ mod tests {
         let mut buf = [0u8; SECTOR_LEN];
         let len = encode(1, list, &mut buf).unwrap();
         let base = |i: usize| HEADER_LEN + i * ENTRY_LEN;
-        buf[base(1) + 16] = 9; // unknown type code
-        buf[base(2) + 18] = 1; // padding not zero
-        buf[base(3)] = b'a'; // lower case name
-        buf[base(5) + 12] = b'X'; // non-zero byte after the name's first zero
+        buf[base(1) + 16] = 9;
+        buf[base(2) + 18] = 1;
+        buf[base(3)] = b'a';
+        buf[base(5) + 12] = b'X';
         let crc = crc32(&buf[..len - 4]);
         buf[len - 4..len].copy_from_slice(&crc.to_le_bytes());
         let Decoded::Valid(r) = decode(&buf) else {
@@ -746,7 +734,6 @@ mod tests {
         assert_eq!(r.skipped(), 4);
         let got: Vec<Entry> = r.entries().collect();
         assert_eq!(got, [list[0], list[4]]);
-        // an empty name is also invalid
         buf[base(0)..base(0) + 16].fill(0);
         let crc = crc32(&buf[..len - 4]);
         buf[len - 4..len].copy_from_slice(&crc.to_le_bytes());
@@ -764,14 +751,12 @@ mod tests {
             let crc = crc32(&buf[..len - 4]);
             buf[len - 4..len].copy_from_slice(&crc.to_le_bytes());
         };
-        // each field wrong while the CRC is made right again: still Invalid
         for (pos, val) in [(0usize, b'X'), (4, 2), (6, 3), (12, 0x45), (13, 1)] {
             let mut b = good;
             b[pos] = val;
             refix(&mut b);
             assert!(matches!(decode(&b), Decoded::Invalid), "pos={pos}");
         }
-        // a count above 169 with a matching length
         let mut b = ERASED;
         b[..4].copy_from_slice(&MAGIC);
         b[4..6].copy_from_slice(&1u16.to_le_bytes());
@@ -791,7 +776,6 @@ mod tests {
             }
             let _ = choose(&buf, &ERASED);
         }
-        // a random body behind a valid header and a right CRC: entries are skipped, not trusted
         for i in 0..10_000u32 {
             rng.fill(&mut buf);
             let count = (rng.next() % 170) as usize;
@@ -801,7 +785,6 @@ mod tests {
             buf[6..8].copy_from_slice(&(count as u16).to_le_bytes());
             buf[8..12].copy_from_slice(&i.to_le_bytes());
             buf[12..16].copy_from_slice(&(len as u32).to_le_bytes());
-            // half of the cases get plausible names so that some entries survive
             if i % 2 == 0 {
                 for e in 0..count {
                     let o = HEADER_LEN + e * ENTRY_LEN;
@@ -820,7 +803,6 @@ mod tests {
             assert!(n <= MAX_ENTRIES);
             assert_eq!(n + r.skipped(), count);
         }
-        // valid records followed by a random tail stay valid and unchanged
         for i in 0..2_000usize {
             let n = i % 170;
             let (mut buf, len) = sector(i as u32, n);

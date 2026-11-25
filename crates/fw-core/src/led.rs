@@ -201,8 +201,7 @@ pub const fn roll_call_colour(state: State) -> Colour {
     }
 }
 
-/// The pulse's brightness in thousandths of the level at `now_ms`: a smoothstep up over the first half of each
-/// period and down over the second, between [`PULSE_MIN_PERMILLE`] and 1000.
+/// The pulse's brightness in thousandths of the level at `now_ms`: a smoothstep up over the first half of each period and down over the second, between [`PULSE_MIN_PERMILLE`] and 1000.
 pub const fn pulse_permille(now_ms: u32) -> u32 {
     let phase = now_ms % PULSE_MS;
     let half = PULSE_MS / 2;
@@ -211,7 +210,6 @@ pub const fn pulse_permille(now_ms: u32) -> u32 {
     } else {
         PULSE_MS - phase
     };
-    // smoothstep(x / half) in thousandths: 3t^2 - 2t^3
     let t = x * 1000 / half;
     let s = (3 * t * t * 1000 - 2 * t * t * t) / 1_000_000;
     PULSE_MIN_PERMILLE + (1000 - PULSE_MIN_PERMILLE) * s / 1000
@@ -291,8 +289,7 @@ impl Led {
         }
     }
 
-    /// A save or a calibration ended: good (accepted) or bad (failed). It is shown when the roll call
-    /// is over and no other flashes are running; a newer event replaces one still waiting.
+    /// A save or a calibration ended: good (accepted) or bad (failed).
     pub fn event(&mut self, good: bool) {
         self.pending = Some(good);
     }
@@ -441,7 +438,6 @@ mod tests {
             display(&inputs, ROLL_CALL_END_MS - 1),
             display(&inputs, ROLL_CALL_END_MS - 1 - 200)
         );
-        // From the end, the running display: a blue pulse for a healthy vehicle without a fix.
         assert_eq!(display(&inputs, ROLL_CALL_END_MS).colour, Colour::BLUE);
     }
 
@@ -568,10 +564,8 @@ mod tests {
         assert_eq!(pulse_permille(0), PULSE_MIN_PERMILLE);
         assert_eq!(pulse_permille(500), 1000);
         assert_eq!(pulse_permille(1000), PULSE_MIN_PERMILLE);
-        // Rises over the first half, falls over the second.
         assert!(pulse_permille(250) < pulse_permille(400));
         assert!(pulse_permille(750) > pulse_permille(900));
-        // The displayed brightness follows it at each level.
         for level in 1..=3 {
             let mut inputs = healthy();
             inputs.level = level;
@@ -663,7 +657,6 @@ mod tests {
             assert_eq!(led.show(&inputs, t), display(&inputs, t), "{t}");
         }
         assert_eq!(led.show(&inputs, 100), display(&inputs, 100));
-        // At its end the flashes start, whatever the roll call's last slot showed.
         assert_eq!(
             led.show(&inputs, ROLL_CALL_END_MS),
             Output {
@@ -686,7 +679,6 @@ mod tests {
         led.event(false);
         let green = Colour::GREEN;
         assert_eq!(led.show(&inputs, RUN).colour, Colour::RED);
-        // While it flashes, two more arrive: only the last one is shown, after it.
         led.event(true);
         led.event(false);
         led.event(true);
@@ -694,7 +686,6 @@ mod tests {
         assert_eq!(led.show(&inputs, RUN + 600).colour, green);
         assert_eq!(led.show(&inputs, RUN + 700), Output::DARK);
         assert_eq!(led.show(&inputs, RUN + 1200), display(&inputs, RUN + 1200));
-        // Nothing is left over.
         assert_eq!(led.show(&inputs, RUN + 1300), display(&inputs, RUN + 1300));
     }
 
@@ -713,8 +704,7 @@ mod tests {
         assert_eq!(display(&healthy(), 0).colour, Colour::WHITE);
     }
 
-    /// CRITICAL is red and LOW yellow at 5 Hz (100 ms on, 100 ms off), above the motor spin, the calibration
-    /// and the yellow pulse, below a failed vital device; level 0 changes nothing.
+    /// CRITICAL is red and LOW yellow at 5 Hz (100 ms on, 100 ms off), above the motor spin, the calibration and the yellow pulse, below a failed vital device; level 0 changes nothing.
     #[test]
     fn the_battery_levels_blink_at_5_hz_above_row_2_and_below_row_1() {
         let base = |battery| Inputs { battery, ..healthy() };
@@ -732,7 +722,6 @@ mod tests {
         }
         assert_eq!(mode(&base(2)), Mode::BatteryCritical);
         assert_eq!(mode(&Inputs { battery: 2, rows: { let mut r = all(OK); r[BATT] = State::Failed; r }, ..healthy() }), Mode::VitalFailed);
-        // Negative control: with no level the same inputs are the rows below.
         assert_eq!(mode(&busy(0)), Mode::MotorSpin);
         assert_eq!(mode(&base(0)), Mode::Normal);
     }

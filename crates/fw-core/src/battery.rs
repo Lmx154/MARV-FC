@@ -21,8 +21,7 @@ pub const STALE_MS: u64 = 5_000;
 /// The highest voltage of one lithium cell, V (full).
 pub const CELL_FULL_V: f32 = 4.2;
 
-/// A pack voltage above `cells` x [`CELL_FULL_V`] x this is implausible (PX4 `px4-battery.cpp:378-379`): the cell count is
-/// probably set too low.
+/// A pack voltage above `cells` x [`CELL_FULL_V`] x this is implausible (PX4 `px4-battery.cpp:378-379`): the cell count is probably set too low.
 pub const PLAUSIBLE_MARGIN: f32 = 1.05;
 
 /// Bit 2 of the cell byte: the critical action is "descend" and the critical level is reached.
@@ -43,8 +42,7 @@ pub enum Level {
     Critical = 2,
 }
 
-/// The monitor's settings, as stored (the parameters `BATT_CELLS`, `BATT_LOW_CELL`, `BATT_CRT_CELL`, `BATT_LOW_TIMER`,
-/// `BATT_FS_CRT_ACT`).
+/// The monitor's settings, as stored (the parameters `BATT_CELLS`, `BATT_LOW_CELL`, `BATT_CRT_CELL`, `BATT_LOW_TIMER`, `BATT_FS_CRT_ACT`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Config {
     /// Cells in series; 0 is off.
@@ -195,8 +193,7 @@ impl Monitor {
         }
     }
 
-    /// One step (call at 10 Hz): `now_ms` the time, `armed` the gate's armed state, `sample` the newest voltage sample (the
-    /// same one may be given again: it is used once).
+    /// One step (call at 10 Hz): `now_ms` the time, `armed` the gate's armed state, `sample` the newest voltage sample (the same one may be given again: it is used once).
     pub fn step(&mut self, cfg: &Config, now_ms: u64, armed: bool, sample: Option<Sample>) -> Update {
         let mut notices = 0u8;
         let setup = cfg.setup();
@@ -249,7 +246,6 @@ impl Monitor {
                 }
             }
         } else {
-            // Armed with no usable sample: the timers do not count across the gap.
             self.low_since_ms = None;
             self.crt_since_ms = None;
             self.last_t_ms = None;
@@ -299,8 +295,7 @@ impl Monitor {
         self.fresh
     }
 
-    /// The battery is known not to be critical: the monitor is on (cells, timer and thresholds set), the voltage is valid
-    /// and CRITICAL has not been reached.
+    /// The battery is known not to be critical: the monitor is on (cells, timer and thresholds set), the voltage is valid and CRITICAL has not been reached.
     pub fn known_not_critical(&self) -> bool {
         self.setup == Setup::On && self.fresh && self.level != Level::Critical
     }
@@ -329,7 +324,6 @@ mod tests {
 
     #[test]
     fn thresholds_are_per_cell_times_the_cell_count() {
-        // 4 cells: LOW 14.4 V, CRITICAL 14.0 V.
         let mut m = Monitor::new();
         let (_, first) = run(&mut m, &DEFAULT, 0, 20, 14.39, true);
         assert_eq!(first.map(|f| f.0), Some(Level::Low));
@@ -337,14 +331,12 @@ mod tests {
         let mut m = Monitor::new();
         let (_, first) = run(&mut m, &DEFAULT, 0, 20, 14.41, true);
         assert_eq!(first, None);
-        // CRITICAL: 4 x 3.5 = 14.0 V; at 13.99 V the critical timer runs too and both fire at the same sample.
         let mut m = Monitor::new();
         let (_, first) = run(&mut m, &DEFAULT, 0, 20, 13.99, true);
         assert_eq!(first.map(|f| f.0), Some(Level::Critical));
         let mut m = Monitor::new();
         run(&mut m, &DEFAULT, 0, 20, 14.01, true);
         assert_eq!(m.level(), Level::Low);
-        // 3 cells: LOW 10.8 V; 13 V is nothing.
         let three = Config { cells: 3, ..DEFAULT };
         let mut m = Monitor::new();
         let (_, first) = run(&mut m, &three, 0, 30, 13.0, true);
@@ -364,10 +356,8 @@ mod tests {
     #[test]
     fn the_timer_fires_after_it_and_not_before_and_any_sample_at_or_above_restarts_it() {
         let mut m = Monitor::new();
-        // Below LOW from t = 0: fires at the first sample more than 10 s after the first (10.1 s).
         let (_, first) = run(&mut m, &DEFAULT, 0, 30, 14.3, true);
         assert_eq!(first, Some((Level::Low, 10_100)));
-        // A sample exactly at the threshold restarts the timer.
         let mut m = Monitor::new();
         let mut t = 0;
         for _ in 0..2 {
@@ -385,7 +375,6 @@ mod tests {
 
     #[test]
     fn a_dip_shorter_than_the_timer_never_fires_the_negative_control_of_zero_timer_off() {
-        // 9.9 s below, then back: nothing.
         let mut m = Monitor::new();
         let (t, _) = run(&mut m, &DEFAULT, 0, 10, 13.0, true);
         assert_eq!(m.level(), Level::None);
@@ -399,17 +388,14 @@ mod tests {
         let mut m = Monitor::new();
         let (t, _) = run(&mut m, &DEFAULT, 0, 20, 13.5, true);
         assert_eq!(m.level(), Level::Critical);
-        // The voltage recovers (load off): the level stays.
         let (t, first) = run(&mut m, &DEFAULT, t, 20, 16.0, true);
         assert_eq!(first, None);
         assert_eq!(m.level(), Level::Critical);
         assert!(m.critical_reached() && m.warning_reached() && !m.known_not_critical());
-        // Disarm clears it.
         let u = m.step(&DEFAULT, t, false, Some(Sample { volts: 16.0, t_ms: t }));
         assert_eq!(u.level, Level::None);
         assert_eq!(u.cell, 0);
         assert!(!m.warning_reached() && m.known_not_critical());
-        // And it does not rise while disarmed, whatever the voltage.
         let (_, first) = run(&mut m, &DEFAULT, t + 100, 30, 12.0, false);
         assert_eq!(first, None);
         assert_eq!(m.level(), Level::None);
@@ -426,9 +412,7 @@ mod tests {
                 rises.push(l);
             }
         }
-        // Both timers start together: one rise, to CRITICAL (LOW is reached at the same sample).
         assert_eq!(rises, [Level::Critical]);
-        // A slow sag: LOW first, then CRITICAL.
         let mut m = Monitor::new();
         let mut rises = std::vec::Vec::new();
         for i in 0..1000u64 {
@@ -480,7 +464,6 @@ mod tests {
     fn stale_or_invalid_data_is_one_notice_restarts_the_timers_and_keeps_the_level() {
         let mut m = Monitor::new();
         let (t, _) = run(&mut m, &DEFAULT, 0, 9, 14.3, true);
-        // The sample stops: still usable for 5 s, no notice, no progress.
         let last = t - 100;
         let mut notices = 0;
         let mut u = m.step(&DEFAULT, t, true, Some(Sample { volts: 14.3, t_ms: last }));
@@ -494,17 +477,14 @@ mod tests {
         assert_eq!(notices, 1);
         assert!(!m.voltage_valid() && !m.known_not_critical());
         assert_eq!(m.level(), Level::None);
-        // Data returns below LOW: the 9 s before the gap do not count; it needs its own 10 s.
         let (_, first) = run(&mut m, &DEFAULT, now + 100, 12, 14.3, true);
         assert_eq!(first.map(|f| f.1 - (now + 100)), Some(10_100));
-        // No sample at all, and 0 V, and NaN are no data.
         for s in [None, Some(Sample { volts: 0.0, t_ms: now }), Some(Sample { volts: f32::NAN, t_ms: now })] {
             let mut m = Monitor::new();
             let u = m.step(&DEFAULT, 1_000, true, s);
             assert!(!m.voltage_valid());
             assert_eq!(u.volts, 0.0);
         }
-        // A level that was reached stays across a gap.
         let mut m = Monitor::new();
         run(&mut m, &DEFAULT, 0, 20, 13.0, true);
         m.step(&DEFAULT, 40_000, true, None);
@@ -520,7 +500,6 @@ mod tests {
 
     #[test]
     fn the_plausibility_notice_is_raised_once_per_rise_and_changes_no_level() {
-        // 4 x 4.2 x 1.05 = 17.64 V.
         let mut m = Monitor::new();
         let mut n = 0;
         for i in 0..50u64 {
@@ -530,13 +509,11 @@ mod tests {
             assert_eq!(u.level, Level::None);
         }
         assert_eq!(n, 1);
-        // 16.8 V (a full 4S) is plausible; 17.63 V too.
         for v in [16.8, 17.63] {
             let mut m = Monitor::new();
             let u = m.step(&DEFAULT, 0, true, Some(Sample { volts: v, t_ms: 0 }));
             assert!(!u.notices.contains(Notices::IMPLAUSIBLE), "{v}");
         }
-        // With the cell count off there is nothing to compare with.
         let off = Config { cells: 0, ..DEFAULT };
         let mut m = Monitor::new();
         let u = m.step(&off, 0, true, Some(Sample { volts: 40.0, t_ms: 0 }));
@@ -554,7 +531,6 @@ mod tests {
             assert_eq!(u.cell, cell);
             assert_eq!(cell_descends(u.cell), cfg.act == 1);
         }
-        // LOW with action 1 does not descend.
         let mut m = Monitor::new();
         run(&mut m, &descend, 0, 20, 14.3, true);
         let u = m.step(&descend, 20_000, true, Some(Sample { volts: 14.3, t_ms: 20_000 }));
@@ -576,8 +552,7 @@ mod tests {
         assert!(m.voltage_valid());
     }
 
-    /// By text: the monitor's source reaches no gate, no disarm and no throttle, and holds no voltage
-    /// literal outside the defaults and the plausibility constants.
+    /// By text: the monitor's source reaches no gate, no disarm and no throttle, and holds no voltage literal outside the defaults and the plausibility constants.
     #[test]
     fn the_source_reaches_no_gate_disarm_or_throttle() {
         let source = include_str!("battery.rs");
@@ -592,10 +567,7 @@ mod tests {
         }
     }
 
-    /// The recorded pack voltage of a flight log (BAT, instance 0, two armed windows, 10 Hz) replayed through the
-    /// monitor. Expected times come from an offline script that fires at `>=`; the monitor
-    /// fires at the first sample MORE than the timer after the first one below the level, so they may
-    /// differ by one sample (0.1 s). Timer 0 is off here and fires never.
+    /// The recorded pack voltage of a flight log (BAT, instance 0, two armed windows, 10 Hz) replayed through the monitor.
     #[test]
     fn log_286_replay_fires_where_the_pre_study_did() {
         let csv = include_str!("battery_log286_bat.csv");
@@ -608,7 +580,6 @@ mod tests {
             wins[w - 2].push((t, v));
         }
         assert_eq!((wins[0].len(), wins[1].len()), (606, 1176));
-        // Fire time (ms after the first sample) of the first LOW rise with the LOW level at `level_v` volts (4 cells).
         let fire = |win: usize, level_v: f32, timer_s: i32| -> Option<u64> {
             let cfg = Config { cells: 4, low_cell_v: level_v / 4.0, crt_cell_v: 1.0, timer_s, act: 0 };
             let mut m = Monitor::new();
@@ -625,10 +596,6 @@ mod tests {
             (Some(g), Some(w)) => (g as f32 - w * 1000.0).abs() <= 100.0,
             _ => false,
         };
-        // (level V, timer s, offline script's window 3 time s, this monitor's time s). The recorded volts are f32 at 0.01 V steps; the script
-        // compared them with an f64 threshold, so a reading equal to 14.4 or 13.2 as f32 (just under it as f64) counted as
-        // below there and is not below here (the threshold is f32 too). Those two levels therefore differ by
-        // more than a sample for 14.4 V and for 13.2 V / 10 s; 14.0 V (exact in both) and 13.2 V / 3 s agree.
         let w3 = [
             (14.4, 3, 50.2, 53.5),
             (14.4, 10, 57.3, 60.5),
@@ -644,7 +611,6 @@ mod tests {
                 assert!(near(got, Some(pb0)), "{level} V / {timer} s: {got:?} PB0 {pb0}");
             }
         }
-        // Window 2 (a 14.4 V / 0 s false fire in the script): nothing fires with a timer, and none with timer 0 (off).
         for level in [14.4, 14.0, 13.2] {
             for timer in [0, 3, 10] {
                 assert_eq!(fire(0, level, timer), None, "w2 {level} V / {timer} s");
@@ -653,7 +619,6 @@ mod tests {
         for level in [14.4, 14.0, 13.2] {
             assert_eq!(fire(1, level, 0), None, "w3 {level} V / 0 s");
         }
-        // The defaults (LOW 14.4 V, CRITICAL 14.0 V, 10 s): LOW at 60.5 s and CRITICAL at 95.6 s of window 3.
         let mut m = Monitor::new();
         let t0 = wins[1][0].0;
         let mut rises = std::vec::Vec::new();

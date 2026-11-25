@@ -226,7 +226,6 @@ macro_rules! ring_contract_tests {
             }
             assert_eq!(read_all!(consumer), [1, 2, 3, 4, 5]);
             consumer.consume(5);
-            // The head is at 3 now: a contiguous record, then one that wraps (6 bytes from index 3).
             assert!(producer.push_with(4, |buf| {
                 assert_eq!(buf.len(), 4);
                 buf.copy_from_slice(&[10, 11, 12, 13]);
@@ -260,7 +259,6 @@ macro_rules! ring_contract_tests {
             grant.commit_up_to(4);
             assert_eq!(read_all!(consumer), [1, 2, 3, 4]);
             assert_eq!(producer.free(), 4);
-            // `encode` writing less than `len`, and 0.
             assert!(producer.push_with(4, |b| {
                 b[..2].copy_from_slice(&[7, 8]);
                 2
@@ -286,8 +284,6 @@ macro_rules! ring_contract_tests {
                     free_avg: 64
                 }
             );
-            // Samples are the free bytes before each push: 64, 54, 44, then a dropped 100-byte push
-            // sees 34.
             assert!(producer.push(&[0; 10]));
             assert!(producer.push(&[0; 10]));
             assert!(producer.push(&[0; 10]));
@@ -302,7 +298,6 @@ macro_rules! ring_contract_tests {
                     free_avg: (64 + 54 + 44 + 34) / 4
                 }
             );
-            // No push since: an empty window, and the free bytes now.
             let stats = consumer.take_stats();
             assert_eq!(stats.samples, 0);
             assert_eq!(stats.free_avg, 34);
@@ -321,9 +316,7 @@ macro_rules! ring_contract_tests {
             );
         }
 
-        /// `ops` random operations against the model; every byte read equals the model's, in
-        /// order, `dropped` equals the model's count at every step, and the statistics windows
-        /// equal the model's.
+        /// `ops` random operations against the model; every byte read equals the model's, in order, `dropped` equals the model's count at every step, and the statistics windows equal the model's.
         fn model_run<const N: usize>(ops: u32, seed: u64) -> (u64, u64) {
             $setup!(ring, N);
             let mut producer = ring.take_producer().unwrap();

@@ -45,8 +45,7 @@ const fn digit(n: u32, scale: u32) -> u8 {
     b'0' + (n / scale % 10) as u8
 }
 
-/// The file name of log `n`: 8 decimal digits, zero padded, then `.BIN` (`00000007.BIN`). A number
-/// of more than 8 digits keeps its low 8 (log numbers never exceed 500).
+/// The file name of log `n`: 8 decimal digits, zero padded, then `.BIN` (`00000007.BIN`).
 pub const fn file_name(n: u32) -> [u8; FILE_NAME_LEN] {
     let n = n % 100_000_000;
     [
@@ -65,9 +64,7 @@ pub const fn file_name(n: u32) -> [u8; FILE_NAME_LEN] {
     ]
 }
 
-/// The log number a file name carries: exactly 8 ASCII digits, a dot and `BIN` in any case
-/// (an 8.3 name; no spaces, no long name), with a number from 1 to 500. Anything else
-/// (`P3TEST.BIN`, `LASTLOG.TXT`, `00000000.BIN`, `00000501.BIN`) is not a log: `None`.
+/// The log number a file name carries: exactly 8 ASCII digits, a dot and `BIN` in any case (an 8.3 name; no spaces, no long name), with a number from 1 to 500.
 pub fn parse_file_name(name: &[u8]) -> Option<u32> {
     let [d @ .., b'.', e1, e2, e3] = name else {
         return None;
@@ -89,9 +86,7 @@ pub fn parse_file_name(name: &[u8]) -> Option<u32> {
     (1..=MAX_LOG_NUMBER).contains(&n).then_some(n)
 }
 
-/// Writes the content of `LASTLOG.TXT` for log `n` into `out`: the decimal digits, then CR LF
-/// (as ArduPilot writes it). Returns the length (3 to 12), or 0, with nothing written, if `out`
-/// is too short.
+/// Writes the content of `LASTLOG.TXT` for log `n` into `out`: the decimal digits, then CR LF (as ArduPilot writes it).
 pub fn format_lastlog(n: u32, out: &mut [u8]) -> usize {
     let mut digits = [0u8; 10];
     let mut count = 0;
@@ -120,9 +115,7 @@ pub fn format_lastlog(n: u32, out: &mut [u8]) -> usize {
     total
 }
 
-/// The log number in the content of `LASTLOG.TXT`: one or more decimal digits, then anything
-/// of spaces, tabs, CR, LF, NUL and `D` (ArduPilot may append one). Empty, garbage (any other
-/// byte, including before the digits), 0 and numbers above 500 give `None`.
+/// The log number in the content of `LASTLOG.TXT`: one or more decimal digits, then anything of spaces, tabs, CR, LF, NUL and `D` (ArduPilot may append one).
 pub fn parse_lastlog(content: &[u8]) -> Option<u32> {
     let digits = content
         .iter()
@@ -146,10 +139,7 @@ pub fn parse_lastlog(content: &[u8]) -> Option<u32> {
     (n >= 1).then_some(n)
 }
 
-/// The last log number used: the number `LASTLOG.TXT` holds if it parsed (`lastlog`, from
-/// [`parse_lastlog`]), else the largest log number of the `LOGS/` listing (`listing_max`, from
-/// [`parse_file_name`]), else 0. A value that is not a log number (0 or above 500) counts as
-/// absent.
+/// The last log number used: the number `LASTLOG.TXT` holds if it parsed (`lastlog`, from [`parse_lastlog`]), else the largest log number of the `LOGS/` listing (`listing_max`, from [`parse_file_name`]), else 0.
 pub fn last_number(lastlog: Option<u32>, listing_max: Option<u32>) -> u32 {
     let valid = |n: &u32| (1..=MAX_LOG_NUMBER).contains(n);
     lastlog
@@ -360,7 +350,6 @@ mod tests {
         ] {
             assert_eq!(parse_lastlog(bad), None, "{bad:?}");
         }
-        // The rule: LASTLOG.TXT, else the largest number of the listing, else 0.
         assert_eq!(last_number(Some(7), Some(20)), 7);
         assert_eq!(last_number(None, Some(20)), 20, "missing or garbage file");
         assert_eq!(last_number(parse_lastlog(b"garbage"), Some(20)), 20);
@@ -368,7 +357,6 @@ mod tests {
         assert_eq!(last_number(Some(0), None), 0);
         assert_eq!(last_number(Some(501), Some(9)), 9);
         assert_eq!(last_number(Some(500), Some(20)), 500);
-        // 500 wraps to 1.
         assert_eq!(next_number(Some(last_number(Some(500), None))), 1);
         assert_eq!(next_number(Some(last_number(None, None))), 1);
         assert_eq!(next_number(Some(last_number(None, Some(499)))), 500);
@@ -399,7 +387,6 @@ mod tests {
     fn deletes_the_oldest_in_ring_order_with_wrap_around() {
         let big = 20 * GIB;
         let logs = [(5, big), (6, big), (498, big), (500, big), (1, big)];
-        // Current 6 (a lap later): 7.. up to 500, then 1.. : the first present is 498.
         assert_eq!(plan(6, &logs), CleanUp::Delete(498));
         assert_eq!(plan(3, &logs), CleanUp::Delete(5));
         assert_eq!(plan(499, &logs), CleanUp::Delete(500));
@@ -412,7 +399,6 @@ mod tests {
             CleanUp::Delete(1),
             "not a log number: as none"
         );
-        // The listing order does not matter.
         let mut shuffled = logs;
         shuffled.reverse();
         assert_eq!(plan(6, &shuffled), CleanUp::Delete(498));
@@ -420,7 +406,6 @@ mod tests {
 
     #[test]
     fn deleting_step_by_step_ends_nothing() {
-        // 40 logs of 2 GiB, numbered 481 to 500 and 1 to 20, current 21; limit about 59 GiB.
         let mut logs: Vec<(u32, u64)> = (481..=500).chain(1..=20).map(|n| (n, 2 * GIB)).collect();
         let mut deleted = Vec::new();
         for _ in 0..100 {
@@ -433,7 +418,6 @@ mod tests {
                 CleanUp::Full => panic!("not full"),
             }
         }
-        // 40 x 2 GiB = 80 GiB over 59.0 GiB: 11 deleted (the oldest after 21 first: 481...).
         assert_eq!(deleted, (481..=491).collect::<Vec<_>>());
         assert_eq!(logs.len(), 29);
         assert_eq!(
@@ -445,12 +429,8 @@ mod tests {
     #[test]
     fn a_single_huge_log() {
         let huge = VOLUME - 100 * MIB;
-        // Not the current one: delete it.
         assert_eq!(plan(2, &[(1, huge)]), CleanUp::Delete(1));
-        // The current one (being written, or the old file of that number): never chosen, and
-        // there is room beyond the 8 MiB: go on.
         assert_eq!(plan(1, &[(1, huge)]), CleanUp::Nothing);
-        // The current one fills the card: full.
         assert_eq!(plan(1, &[(1, VOLUME - 7 * MIB)]), CleanUp::Full);
         assert_eq!(
             plan(1, &[(1, VOLUME - 8 * MIB)]),
@@ -468,12 +448,9 @@ mod tests {
     #[test]
     fn the_current_log_among_the_listing_counts_but_is_never_deleted() {
         let limit = VOLUME - RESERVE_BYTES;
-        // Used = the current one plus another one: over the limit, the other one goes.
         assert_eq!(plan(7, &[(7, limit), (8, 1)]), CleanUp::Delete(8));
         assert_eq!(plan(7, &[(8, 1), (7, limit)]), CleanUp::Delete(8));
-        // Only the current one, over the limit: nothing more can be deleted.
         assert_eq!(plan(7, &[(7, limit + 1)]), CleanUp::Nothing);
-        // Never 7, whatever the other numbers: 6 is the newest, so last.
         assert_eq!(plan(7, &[(7, limit), (6, 1), (8, 1)]), CleanUp::Delete(8));
         assert_eq!(plan(7, &[(7, limit), (6, 1)]), CleanUp::Delete(6));
     }
@@ -486,7 +463,6 @@ mod tests {
             CleanUp::Nothing
         );
         assert_eq!(plan_cleanup(0, RESERVE_BYTES, 1, []), CleanUp::Full);
-        // A volume under the reserve but over 8 MiB: delete everything else, then go on.
         let small = 300 * MIB;
         assert_eq!(
             plan_cleanup(small, RESERVE_BYTES, 3, [(1, MIB), (2, MIB)]),
@@ -496,7 +472,6 @@ mod tests {
             plan_cleanup(small, RESERVE_BYTES, 3, [(3, MIB)]),
             CleanUp::Nothing
         );
-        // A reserve under 8 MiB counts as 8 MiB.
         assert_eq!(
             plan_cleanup(100 * MIB, 0, 3, [(1, 100 * MIB - 8 * MIB + 1)]),
             CleanUp::Delete(1)
@@ -522,7 +497,6 @@ mod tests {
     #[test]
     fn five_hundred_logs_in_one_pass() {
         let logs: Vec<(u32, u64)> = (1..=500).map(|n| (n, 200 * MIB)).collect();
-        // 100 000 MiB over a 59.5 GiB volume.
         assert_eq!(plan(250, &logs), CleanUp::Delete(251));
         assert_eq!(plan(500, &logs), CleanUp::Delete(1));
         assert_eq!(plan(1, &logs), CleanUp::Delete(2));

@@ -83,10 +83,6 @@ use core::task::Poll;
 use atomic_waker::AtomicWaker;
 
 /// One-writer, many-reader cell, flight core to core 0.
-///
-/// The one writer ([`SeqlockWriter`], taken once) never waits and never retries; readers copy the
-/// value and retry until the copy is consistent ([`Seqlock::read`]), or give up after a bounded
-/// number of attempts ([`Seqlock::try_read`]).
 pub struct Seqlock<T> {
     seq: AtomicU32,
     data: UnsafeCell<T>,
@@ -131,9 +127,6 @@ impl<T: Copy> Seqlock<T> {
     }
 
     /// A consistent copy of the latest value, retrying while a write overlaps the copy.
-    ///
-    /// Spins as long as the writer is inside a write (a few hundred cycles, or the length of a
-    /// pause of the writer's core in mid-write): for core 0 only, never the flight core.
     pub fn read(&self) -> T {
         loop {
             if let Some(value) = self.read_once() {
@@ -143,9 +136,7 @@ impl<T: Copy> Seqlock<T> {
         }
     }
 
-    /// A consistent copy of the latest value, or `None` if each of `max_attempts` copies overlapped
-    /// a write (for example the writer's core was paused in mid-write). `max_attempts == 0` gives
-    /// `None`.
+    /// A consistent copy of the latest value, or `None` if each of `max_attempts` copies overlapped a write (for example the writer's core was paused in mid-write).
     pub fn try_read(&self, max_attempts: u32) -> Option<T> {
         for _ in 0..max_attempts {
             if let Some(value) = self.read_once() {
@@ -301,8 +292,7 @@ pub struct TripleReader<'a, T> {
 }
 
 impl<T: Copy> TripleReader<'_, T> {
-    /// The latest published value, and `true` if at least one write was published since the
-    /// previous read. Wait-free: one load, at most one swap, one slot read.
+    /// The latest published value, and `true` if at least one write was published since the previous read.
     pub fn read(&mut self) -> (T, bool) {
         let fresh = self.buf.middle.load(Ordering::Relaxed) & FRESH != 0;
         if fresh {
@@ -317,11 +307,6 @@ impl<T: Copy> TripleReader<'_, T> {
 }
 
 /// The one cross-core wake: request bits plus one waiting task.
-///
-/// [`Kick::kick`] may be called from either core and from interrupt context (lock-free). One task
-/// waits with [`Kick::wait`], or polls with [`Kick::take`]. Two concurrent waiters are not
-/// supported: the second registration replaces the first task's waker, so the first can sleep
-/// through a kick, and the bits go to whichever task polls first.
 pub struct Kick {
     bits: AtomicU8,
     waker: AtomicWaker,
@@ -376,19 +361,16 @@ impl Default for Kick {
     }
 }
 
-/// Statistics of the free space of a [`LogRing`] over one window, from [`LogConsumer::take_stats`]
-/// (the DSF record's FMn, FMx and FAv).
+/// Statistics of the free space of a [`LogRing`] over one window, from [`LogConsumer::take_stats`] (the DSF record's FMn, FMx and FAv).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogStats {
     /// Samples in the window: one per [`LogProducer::reserve`] (so per push, dropped ones too).
-    /// 0 for an empty window; the three values below are then the free bytes now.
     pub samples: u32,
     /// Smallest free-byte count seen by a sample.
     pub free_min: u32,
     /// Largest free-byte count seen by a sample.
     pub free_max: u32,
-    /// Integer mean of the free-byte counts of the samples (their sum divided by `samples`,
-    /// rounded down; the sum is 64-bit, so it cannot overflow).
+    /// Integer mean of the free-byte counts of the samples (their sum divided by `samples`, rounded down; the sum is 64-bit, so it cannot overflow).
     pub free_avg: u32,
 }
 
@@ -422,8 +404,7 @@ impl Window {
     }
 }
 
-/// Attempts [`LogConsumer::take_stats`] makes to read the producer's statistics before it gives
-/// up for this call (a try fails only if the producer was inside its few-instruction write).
+/// Attempts [`LogConsumer::take_stats`] makes to read the producer's statistics before it gives up for this call (a try fails only if the producer was inside its few-instruction write).
 const STAT_READ_ATTEMPTS: u32 = 32;
 
 /// The ring's storage, 4-byte aligned so that a 4-byte-aligned file write can read from it.
@@ -542,15 +523,12 @@ impl<const N: usize> LogRing<N> {
         self.dropped.load(Ordering::Relaxed)
     }
 
-    /// Committed bytes not yet consumed. Readable from any core; a snapshot (the two indices
-    /// are read one after the other, `tail` first: `head` only grows, so the `head` read second
-    /// is never behind the `tail` read first and the difference cannot wrap).
+    /// Committed bytes not yet consumed.
     pub fn readable(&self) -> usize {
         self.readable_with(|| {})
     }
 
-    /// [`readable`](Self::readable) with `between` run after the first load and before the second
-    /// (the tests' hook for the other side's work between them).
+    /// [`readable`](Self::readable) with `between` run after the first load and before the second (the tests' hook for the other side's work between them).
     fn readable_with(&self, between: impl FnOnce()) -> usize {
         let tail = self.tail.load(Ordering::Acquire);
         between();
@@ -595,9 +573,7 @@ impl<const N: usize> LogProducer<'_, N> {
         self.ring.dropped()
     }
 
-    /// Puts `record` in whole, or not at all: `false` (nothing written, the drop counter
-    /// incremented) if fewer than `record.len()` bytes are free, which includes a record longer
-    /// than the ring. An empty record succeeds and writes nothing.
+    /// Puts `record` in whole, or not at all: `false` (nothing written, the drop counter incremented) if fewer than `record.len()` bytes are free, which includes a record longer than the ring.
     pub fn push(&mut self, record: &[u8]) -> bool {
         match self.reserve(record.len()) {
             Some(mut grant) => {
@@ -609,17 +585,7 @@ impl<const N: usize> LogProducer<'_, N> {
         }
     }
 
-    /// Encodes one record straight into the ring: `encode` gets a CONTIGUOUS buffer of exactly
-    /// `len` bytes (the maximum the record can need) and returns how many bytes it wrote
-    /// (`dflog`'s `encode_*` functions have this shape: `|b| encode_bat(b, t, 0, v, a)`); those
-    /// bytes, at most `len`, are committed. Returns `false`, with the drop counted and `encode`
-    /// not called, if `len` bytes are not free or `len` is over [`PUSH_WITH_MAX`]; otherwise
-    /// `true`, also when `encode` returns 0 (nothing is committed then).
-    ///
-    /// The buffer is the ring itself unless the free area wraps around the end of the storage
-    /// at that point; then `encode` writes a stack buffer of [`PUSH_WITH_MAX`] bytes that is
-    /// copied in (that is the reason for the limit). Use [`LogProducer::reserve`] to handle the
-    /// two slices yourself.
+    /// Encodes one record straight into the ring: `encode` gets a CONTIGUOUS buffer of exactly `len` bytes (the maximum the record can need) and returns how many bytes it wrote (`dflog`'s `encode_*` functions have this shape: `|b| encode_bat(b, t, 0, v, a)`); those bytes, at most `len`, are committed.
     pub fn push_with(&mut self, len: usize, encode: impl FnOnce(&mut [u8]) -> usize) -> bool {
         if len > PUSH_WITH_MAX {
             self.sample(self.free());
@@ -641,13 +607,7 @@ impl<const N: usize> LogProducer<'_, N> {
         true
     }
 
-    /// Reserves `len` bytes for one record: `Some(grant)` to fill and [`Grant::commit`], or
-    /// `None` (nothing written, the drop counter incremented) if fewer than `len` bytes are
-    /// free. A grant dropped without `commit` publishes nothing (the bytes written into it are
-    /// never seen by the consumer). One grant at a time (it borrows the producer).
-    ///
-    /// Every call samples the free space for the statistics (see [`LogConsumer::take_stats`]),
-    /// whether it succeeds or not.
+    /// Reserves `len` bytes for one record: `Some(grant)` to fill and [`Grant::commit`], or `None` (nothing written, the drop counter incremented) if fewer than `len` bytes are free.
     pub fn reserve(&mut self, len: usize) -> Option<Grant<'_, N>> {
         let head = self.ring.head.load(Ordering::Relaxed);
         let tail = self.ring.tail.load(Ordering::Acquire);
@@ -684,13 +644,10 @@ impl<const N: usize> LogProducer<'_, N> {
     }
 }
 
-/// The longest record [`LogProducer::push_with`] takes (it holds a stack buffer of this size for
-/// the case of a free area that wraps around the end of the storage).
+/// The longest record [`LogProducer::push_with`] takes (it holds a stack buffer of this size for the case of a free area that wraps around the end of the storage).
 pub const PUSH_WITH_MAX: usize = 320;
 
-/// Space reserved in a [`LogRing`] for one record, from [`LogProducer::reserve`]: one or two
-/// mutable slices (two when the area wraps around the end of the storage), `len` bytes in all.
-/// Nothing is visible to the consumer until [`Grant::commit`].
+/// Space reserved in a [`LogRing`] for one record, from [`LogProducer::reserve`]: one or two mutable slices (two when the area wraps around the end of the storage), `len` bytes in all.
 pub struct Grant<'a, const N: usize> {
     ring: &'a LogRing<N>,
     head: u32,
@@ -708,8 +665,7 @@ impl<const N: usize> Grant<'_, N> {
         self.len == 0
     }
 
-    /// The reserved area as two slices, in record order: the second is empty unless the area
-    /// wraps around the end of the storage. Their contents are not defined until written.
+    /// The reserved area as two slices, in record order: the second is empty unless the area wraps around the end of the storage.
     pub fn slices(&mut self) -> (&mut [u8], &mut [u8]) {
         let start = self.head as usize & (N - 1);
         let len = self.len as usize;
@@ -727,8 +683,7 @@ impl<const N: usize> Grant<'_, N> {
         }
     }
 
-    /// Copies `src` to the start of the grant, as many bytes as `src` and the grant have in
-    /// common, across the wrap if there is one; returns how many.
+    /// Copies `src` to the start of the grant, as many bytes as `src` and the grant have in common, across the wrap if there is one; returns how many.
     pub fn copy_from(&mut self, src: &[u8]) -> usize {
         let (first, second) = self.slices();
         let n = src.len().min(first.len() + second.len());
@@ -763,8 +718,6 @@ impl<const N: usize> Grant<'_, N> {
 }
 
 /// The one consumer of a [`LogRing`], from [`LogRing::take_consumer`]: `Send`, not `Clone`.
-/// Every method is wait-free except [`LogConsumer::take_stats`], which retries a bounded number
-/// of times.
 pub struct LogConsumer<'a, const N: usize> {
     ring: &'a LogRing<N>,
     /// Windows taken so far; a window the producer began after the last take has this epoch.
@@ -779,10 +732,7 @@ impl<const N: usize> LogConsumer<'_, N> {
         head.wrapping_sub(tail) as usize
     }
 
-    /// All committed bytes as at most two slices, in order, in place: the second is empty unless
-    /// they wrap around the end of the storage. They stay valid until `consume` (which needs
-    /// `&mut self`, so they cannot be held across it); bytes committed after the call are not
-    /// in them.
+    /// All committed bytes as at most two slices, in order, in place: the second is empty unless they wrap around the end of the storage.
     pub fn peek(&self) -> (&[u8], &[u8]) {
         self.peek_up_to(usize::MAX)
     }
@@ -809,13 +759,11 @@ impl<const N: usize> LogConsumer<'_, N> {
         }
     }
 
-    /// Releases the first `n` committed bytes to the producer; returns how many were released
-    /// (`n` over `readable()` counts as `readable()`).
+    /// Releases the first `n` committed bytes to the producer; returns how many were released (`n` over `readable()` counts as `readable()`).
     pub fn consume(&mut self, n: usize) -> usize {
         let tail = self.ring.tail.load(Ordering::Relaxed);
         let head = self.ring.head.load(Ordering::Acquire);
         let n = (head.wrapping_sub(tail) as usize).min(n);
-        // `n` is at most `N <= 2^31`.
         self.ring
             .tail
             .store(tail.wrapping_add(n as u32), Ordering::Release);
@@ -832,22 +780,7 @@ impl<const N: usize> LogConsumer<'_, N> {
         N - self.readable().min(N)
     }
 
-    /// The statistics of the free space since the previous call (or the start), and a new
-    /// window begins.
-    ///
-    /// The producer samples the free bytes at the start of every [`LogProducer::reserve`] (so
-    /// of every push, dropped ones included, before the record goes in) and keeps the minimum,
-    /// the maximum, the count and the 64-bit sum of the samples; `free_avg` is sum / count. The
-    /// window ends at the producer's last sample before this call reads the producer's record of
-    /// it, and the next window begins with the producer's first sample after it sees the
-    /// request. A sample made between this call's read of the window and the producer seeing the
-    /// request for a new one goes into the window already read, which is not read again: it is
-    /// in neither window, so a sample can be missed at a window boundary. It is never in both
-    /// and never half in each: `free_min`, `free_max` and `free_avg` always come from one
-    /// consistent window, the same samples. Returns `samples == 0` and the free bytes now when
-    /// the producer made no sample since the previous call, or (very rarely, the producer's
-    /// few-instruction update of the record overlapping every one of 32 reads) could not be
-    /// read: the window is then not closed, and the next call returns it.
+    /// The statistics of the free space since the previous call (or the start), and a new window begins.
     pub fn take_stats(&mut self) -> LogStats {
         if let Some(window) = self.ring.stats.try_read(STAT_READ_ATTEMPTS)
             && window.epoch == self.epoch
@@ -1078,10 +1011,7 @@ mod tests {
         assert_eq!(fut.as_mut().poll(&mut cx), Poll::Ready(0b1000));
     }
 
-    /// The cell under test plus a waker whose first `clone` kicks it. `AtomicWaker::register`
-    /// clones the waker while its state is `REGISTERING`, so the kick lands after `wait`'s first
-    /// `take` and before its second. `register` then wakes the clone itself (it sees `WAKING`),
-    /// so only the same poll returning `Ready` shows that the second `take` caught the kick.
+    /// The cell under test plus a waker whose first `clone` kicks it.
     struct KickOnClone {
         kick: Kick,
         bits: u8,
@@ -1129,8 +1059,7 @@ mod tests {
         }
     }
 
-    /// Minimal thread-park executor; `None` if `timeout` passes with the future still pending,
-    /// without polling it again after the deadline (so a lost wake is a failure, not a delay).
+    /// Minimal thread-park executor; `None` if `timeout` passes with the future still pending, without polling it again after the deadline (so a lost wake is a failure, not a delay).
     fn block_on_timeout<F: Future>(fut: F, timeout: Duration) -> Option<F::Output> {
         let waker = Waker::from(Arc::new(ThreadWaker(thread::current())));
         let mut cx = Context::from_waker(&waker);
@@ -1211,8 +1140,6 @@ mod log_ring_tests {
 
     #[test]
     fn readable_from_a_third_party_reads_tail_first_so_it_cannot_wrap() {
-        // The other side moves both indices past the first load: with `head` read first the
-        // difference would be 8 - 16 = about 2^32; with `tail` first it is 16 - 0.
         let ring = LogRing::<64>::new();
         let mut producer = ring.take_producer().unwrap();
         let mut consumer = ring.take_consumer().unwrap();
@@ -1366,7 +1293,6 @@ mod log_ring_tests {
         }
         assert_eq!(read_all(&consumer), [1, 2, 3, 4, 5]);
         consumer.consume(5);
-        // The head is at 3 now: a contiguous record, then one that wraps (6 bytes from index 3).
         assert!(producer.push_with(4, |buf| {
             assert_eq!(buf.len(), 4);
             buf.copy_from_slice(&[10, 11, 12, 13]);
@@ -1400,7 +1326,6 @@ mod log_ring_tests {
         grant.commit_up_to(4);
         assert_eq!(read_all(&consumer), [1, 2, 3, 4]);
         assert_eq!(producer.free(), 4);
-        // `encode` writing less than `len`, and 0.
         assert!(producer.push_with(4, |b| {
             b[..2].copy_from_slice(&[7, 8]);
             2
@@ -1452,8 +1377,6 @@ mod log_ring_tests {
                 free_avg: 64
             }
         );
-        // Samples are the free bytes before each push: 64, 54, 44, then a dropped 100-byte push
-        // sees 34.
         assert!(producer.push(&[0; 10]));
         assert!(producer.push(&[0; 10]));
         assert!(producer.push(&[0; 10]));
@@ -1468,7 +1391,6 @@ mod log_ring_tests {
                 free_avg: (64 + 54 + 44 + 34) / 4
             }
         );
-        // No push since: an empty window, and the free bytes now.
         let stats = consumer.take_stats();
         assert_eq!(stats.samples, 0);
         assert_eq!(stats.free_avg, 34);
@@ -1524,9 +1446,7 @@ mod log_ring_tests {
         }
     }
 
-    /// `ops` random operations against the model; every byte read equals the model's, in
-    /// order, `dropped` equals the model's count at every step, and the statistics windows
-    /// equal the model's.
+    /// `ops` random operations against the model; every byte read equals the model's, in order, `dropped` equals the model's count at every step, and the statistics windows equal the model's.
     fn model_run<const N: usize>(ops: u32, seed: u64) -> (u64, u64) {
         let ring = LogRing::<N>::new();
         let mut producer = ring.take_producer().unwrap();

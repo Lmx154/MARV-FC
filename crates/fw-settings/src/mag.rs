@@ -27,15 +27,13 @@ pub const OFF_Y: &str = "MAG_OFFY";
 /// As [`OFF_X`], Z axis.
 pub const OFF_Z: &str = "MAG_OFFZ";
 
-/// The external compass's orientation, chip to vehicle: ArduPilot's `COMPASS_ORIENT` numbering
-/// (0 to 15, see `fw_core::rotation::Rotation`), applied before the offsets.
+/// The external compass's orientation, chip to vehicle: ArduPilot's `COMPASS_ORIENT` numbering (0 to 15, see `fw_core::rotation::Rotation`), applied before the offsets.
 pub const ORIENT: &str = "MAG_ORIENT";
 
 /// The number of magnetometer parameters.
 pub const COUNT: usize = 5;
 
-/// The magnetometer's parameter table; the two configuration defaults are `Config::new()` as the
-/// driver (100 Hz, averaging 2). The offsets default to 0.
+/// The magnetometer's parameter table; the two configuration defaults are `Config::new()` as the driver (100 Hz, averaging 2).
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(ODR_HZ, DEVICE, 100.0, 1.5625, 400.0, Apply::Configure),
     ParamDef::i32(AVG, DEVICE, 2, 1, 8, Apply::Configure),
@@ -47,10 +45,7 @@ pub static TABLE: [ParamDef; COUNT] = [
 /// The number of orientation parameters, appended after the other tables.
 pub const ORIENT_COUNT: usize = 1;
 
-/// `MAG_ORIENT`, appended to the firmware's table at index 77: the rotation from the chip's axes
-/// to the vehicle's (body FRD), applied to every sample before `MAG_OFF*` is subtracted; the
-/// offsets are in the body frame. Default 10, `ROLL_180_YAW_90`: the BMM350 with +X right, +Y
-/// forward, +Z up (the owner's axes). `Live`: read for every sample, as the offsets are.
+/// `MAG_ORIENT`, appended to the firmware's table at index 77: the rotation from the chip's axes to the vehicle's (body FRD), applied to every sample before `MAG_OFF*` is subtracted; the offsets are in the body frame.
 pub static ORIENT_TABLE: [ParamDef; ORIENT_COUNT] = [ParamDef::i32(
     ORIENT,
     DEVICE,
@@ -93,8 +88,6 @@ pub const CAL_COUNT: usize = 11;
 pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT - crate::gnss::SET_COUNT - crate::flight::COUNT - crate::batt::FS_COUNT;
 
 /// Appended to the firmware's table at indices 81 to 91.
-/// All `Live`; 81 to 89 are calibration results (`param reset-calibration` resets them with
-/// `MAG_OFF*`: S the identity, type 0, no expected field), the two health tolerances are not.
 pub static CAL_TABLE: [ParamDef; CAL_COUNT] = [
     ParamDef::f32(DIAG_X, DEVICE, 1.0, 0.2, 5.0, Apply::Live).with_calibration(),
     ParamDef::f32(DIAG_Y, DEVICE, 1.0, 0.2, 5.0, Apply::Live).with_calibration(),
@@ -146,9 +139,7 @@ fn averaging(x: i32) -> Option<Averaging> {
     })
 }
 
-/// The device's whole `Config` from a view of the parameters (`rate` is `MAG_ODR_HZ`, `avg` is
-/// `MAG_AVG`), or the reason it is not one the chip offers. Everything else in the `Config` is the
-/// driver's default. The rate against the averaging is the driver's own check (`Config::validate`).
+/// The device's whole `Config` from a view of the parameters (`rate` is `MAG_ODR_HZ`, `avg` is `MAG_AVG`), or the reason it is not one the chip offers.
 pub fn settings_to_config(rate: Option<f32>, avg: Option<i32>) -> Result<Config, &'static str> {
     let rate = rate.ok_or(MISSING)?;
     let odr = RATES
@@ -174,8 +165,7 @@ pub fn period_us(odr: OutputDataRate) -> u32 {
     odr.period_us()
 }
 
-/// The calibration in force, as stored: the offsets o (`MAG_OFF*`) and the symmetric matrix S, its
-/// diagonal (`MAG_DIAGX/Y/Z`) and its off-diagonal terms (`MAG_ODIAGXY/XZ/YZ`), body frame.
+/// The calibration in force, as stored: the offsets o (`MAG_OFF*`) and the symmetric matrix S, its diagonal (`MAG_DIAGX/Y/Z`) and its off-diagonal terms (`MAG_ODIAGXY/XZ/YZ`), body frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Calibration {
     /// o, microtesla (X, Y, Z).
@@ -195,10 +185,7 @@ impl Calibration {
     };
 }
 
-/// m = S (r - o): the field `raw_ut` (r, microtesla, body frame after `MAG_ORIENT`) with the
-/// calibration applied. Single precision in this order: d = r - o, then per row
-/// m_i = (S_i0 d_0 + S_i1 d_1) + S_i2 d_2 (no fused multiply-add), with
-/// S = [[XX, XY, XZ], [XY, YY, YZ], [XZ, YZ, ZZ]].
+/// m = S (r - o): the field `raw_ut` (r, microtesla, body frame after `MAG_ORIENT`) with the calibration applied.
 pub fn apply(raw_ut: [f32; 3], cal: &Calibration) -> [f32; 3] {
     let [rx, ry, rz] = raw_ut;
     let [ox, oy, oz] = cal.offsets_ut;
@@ -215,14 +202,10 @@ pub fn apply(raw_ut: [f32; 3], cal: &Calibration) -> [f32; 3] {
 /// `MAG_CAL_TYPE` of the guided calibration, the only one whose expected field is used.
 pub const CAL_TYPE_GUIDED: i32 = 2;
 
-/// The index of `MAG_CAL_TYPE` in [`CAL_TABLE`]; it, `MAG_FLD_UT`, `MAG_FLD_INC`, `MAG_HLT_STR` and
-/// `MAG_HLT_INC` follow one another (pinned by a test), so [`expected_from_store`] reads them by index.
+/// The index of `MAG_CAL_TYPE` in [`CAL_TABLE`]; it, `MAG_FLD_UT`, `MAG_FLD_INC`, `MAG_HLT_STR` and `MAG_HLT_INC` follow one another (pinned by a test), so [`expected_from_store`] reads them by index.
 const EXPECTED_AT: usize = 6;
 
-/// The health test's expected field from the five stored values, `MAG_CAL_TYPE`, `MAG_FLD_UT` (microtesla),
-/// `MAG_FLD_INC` (degrees, positive down), `MAG_HLT_STR` (percent) and `MAG_HLT_INC` (degrees); `None` unless the type is 2
-/// and the field is above 0 (a value that could not be read is `None` too). The units are converted here, once:
-/// degrees to radians, percent to a fraction.
+/// The health test's expected field from the five stored values, `MAG_CAL_TYPE`, `MAG_FLD_UT` (microtesla), `MAG_FLD_INC` (degrees, positive down), `MAG_HLT_STR` (percent) and `MAG_HLT_INC` (degrees); `None` unless the type is 2 and the field is above 0 (a value that could not be read is `None` too).
 pub fn expected(
     cal_type: Option<i32>,
     field_ut: Option<f32>,
@@ -242,8 +225,7 @@ pub fn expected(
     })
 }
 
-/// [`expected`] from the store, five lookups by index (no name search: this runs inside the store's critical
-/// section, for every compass sample).
+/// [`expected`] from the store, five lookups by index (no name search: this runs inside the store's critical section, for every compass sample).
 pub fn expected_from_store<P: ParamStore>(params: &P) -> Option<MagExpected> {
     let at = |k: usize| {
         u16::try_from(CAL_OFFSET + EXPECTED_AT + k)
@@ -261,9 +243,7 @@ pub fn expected_from_store<P: ParamStore>(params: &P) -> Option<MagExpected> {
     expected(kind, f(1), f(2), f(3), f(4))
 }
 
-/// The quick calibration's result as one coherent set, written into `params` in one call: `MAG_OFF*`
-/// = `offsets_ut`, S = the identity, `MAG_CAL_TYPE` = 1 (best effort), `MAG_FLD_UT` = 0 (no field
-/// model). `MAG_FLD_INC` and `MAG_HLT_*` are left as they are. `false` when the store refused a value.
+/// The quick calibration's result as one coherent set, written into `params` in one call: `MAG_OFF*` = `offsets_ut`, S = the identity, `MAG_CAL_TYPE` = 1 (best effort), `MAG_FLD_UT` = 0 (no field model).
 pub fn write_quick_result<P: ParamStore>(params: &mut P, offsets_ut: [f32; 3]) -> bool {
     let [ox, oy, oz] = offsets_ut;
     let set = [
@@ -349,7 +329,6 @@ mod tests {
 
     #[test]
     fn every_offered_value_alone_is_accepted_or_refused_only_by_the_averaging_rule() {
-        // On top of the default averaging (2) only the fastest rate is refused.
         let refused_rates: Vec<f32> = RATES
             .iter()
             .map(|(hz, _)| *hz)
@@ -362,7 +341,6 @@ mod tests {
             })
             .collect();
         assert_eq!(refused_rates, [400.0]);
-        // On top of the default rate (100 Hz, up to 4x) only 8 is refused.
         let refused_avgs: Vec<i32> = AVGS
             .iter()
             .copied()
@@ -375,13 +353,11 @@ mod tests {
             })
             .collect();
         assert_eq!(refused_avgs, [8]);
-        // Every offered rate is accepted with no averaging, and the periods are the rates' inverses.
         for (hz, code) in RATES {
             assert_eq!(with(hz, 1).map(|c| c.odr), Ok(code), "{hz}");
             let p = period_us(code) as f32;
             assert!((p * hz / 1e6 - 1.0).abs() < 0.001, "{hz}");
         }
-        // The highest averaging each rate allows is accepted.
         for (hz, code) in RATES {
             let max = match code.max_averaging() {
                 Averaging::Avg1 => 1,
@@ -393,8 +369,7 @@ mod tests {
         }
     }
 
-    /// H2: the default `MAG_ORIENT` maps the BMM350's axes (+X right, +Y forward, +Z up) to FRD:
-    /// chip +Y to body +X, chip +X to body +Y, chip +Z to body -Z.
+    /// H2: the default `MAG_ORIENT` maps the BMM350's axes (+X right, +Y forward, +Z up) to FRD: chip +Y to body +X, chip +X to body +Y, chip +Z to body -Z.
     #[test]
     fn the_default_orientation_turns_the_chip_axes_into_frd() {
         let ParamValue::I32(default) = ORIENT_TABLE[0].default else {
@@ -435,9 +410,7 @@ mod tests {
         [x - ox, y - oy, z - oz]
     }
 
-    /// With the default S the output equals `r - o`: bit for bit, except that a
-    /// difference of -0.0 may come out as +0.0 (the S-row sum adds 0 * d of the other axes); those
-    /// are equal in value and compared by value.
+    /// With the default S the output equals `r - o`: bit for bit, except that a difference of -0.0 may come out as +0.0 (the S-row sum adds 0 * d of the other axes); those are equal in value and compared by value.
     #[test]
     fn with_the_default_matrix_the_output_is_the_old_offset_subtraction() {
         let mut state = 0x9E37_79B9_7F4A_7C15u64;
@@ -472,7 +445,6 @@ mod tests {
             }
         }
         assert!(neg_zero > 0, "the -0.0 case was exercised");
-        // -0.0 - 0.0 on X with a positive Y difference: +0.0.
         let new = apply([-0.0, 1.0, 0.0], &offsets([0.0; 3]));
         assert_eq!(new[0].to_bits(), 0.0f32.to_bits());
         assert_eq!(old_apply_offsets([-0.0, 1.0, 0.0], [0.0; 3])[0].to_bits(), (-0.0f32).to_bits());
@@ -495,9 +467,7 @@ mod tests {
         );
     }
 
-    /// The quick calibration's result writer leaves the coherent set in one call: the
-    /// offsets, S the identity, type 1, no expected field; `MAG_FLD_INC` and the health
-    /// tolerances as they were.
+    /// The quick calibration's result writer leaves the coherent set in one call: the offsets, S the identity, type 1, no expected field; `MAG_FLD_INC` and the health tolerances as they were.
     #[test]
     fn the_quick_result_is_written_as_one_coherent_set() {
         use crate::{COUNT as ALL, TABLE as FIRMWARE};
@@ -540,16 +510,13 @@ mod tests {
         }
         assert_eq!(p.take_configure_mask(), 0);
         assert!(p.dirty());
-        // An offset the store refuses is reported (the pure check keeps them in range).
         assert!(!write_quick_result(&mut p, [250.0, 0.0, 0.0]));
     }
 
-    /// The expected field exists only for the guided calibration (type 2) with a field above 0, in the
-    /// converted units; a tolerance written to the store shows in the next read.
+    /// The expected field exists only for the guided calibration (type 2) with a field above 0, in the converted units; a tolerance written to the store shows in the next read.
     #[test]
     fn the_expected_field_is_none_unless_guided_with_a_field() {
         use crate::{COUNT as ALL, TABLE as FIRMWARE};
-        // The five values are consecutive in the firmware's table, in the order `expected_from_store` reads.
         for (k, n) in [CAL_TYPE, FLD_UT, FLD_INC, HLT_STR, HLT_INC].into_iter().enumerate() {
             assert_eq!(FIRMWARE[CAL_OFFSET + EXPECTED_AT + k].name, n);
         }
@@ -558,7 +525,6 @@ mod tests {
             let i = p.find(&name(n)).unwrap();
             assert_eq!(p.set(i, v), Ok(v), "{n}");
         };
-        // The defaults: type 0, field 0.
         assert_eq!(expected_from_store(&p), None);
         put(&mut p, FLD_UT, ParamValue::F32(48.5));
         put(&mut p, FLD_INC, ParamValue::F32(58.0));
@@ -574,7 +540,6 @@ mod tests {
         assert_eq!(e.inclination_rad, 58.0f32.to_radians());
         assert_eq!(e.tol_strength_frac, 10.0f32 / 100.0);
         assert_eq!(e.tol_inclination_rad, 10.0f32.to_radians());
-        // A tolerance written now is in the next sample's value; so is a negative inclination.
         put(&mut p, HLT_STR, ParamValue::F32(25.0));
         put(&mut p, HLT_INC, ParamValue::F32(5.0));
         put(&mut p, FLD_INC, ParamValue::F32(-12.5));
@@ -582,16 +547,13 @@ mod tests {
         assert_eq!(e.tol_strength_frac, 0.25);
         assert_eq!(e.tol_inclination_rad, 5.0f32.to_radians());
         assert_eq!(e.inclination_rad, (-12.5f32).to_radians());
-        // The pure rule, and a value that could not be read.
         assert_eq!(expected(Some(2), Some(0.0), Some(1.0), Some(10.0), Some(10.0)), None);
         assert_eq!(expected(Some(3), Some(50.0), Some(1.0), Some(10.0), Some(10.0)), None);
         assert_eq!(expected(None, Some(50.0), Some(1.0), Some(10.0), Some(10.0)), None);
         assert_eq!(expected(Some(2), Some(50.0), Some(1.0), None, Some(10.0)), None);
     }
 
-    /// The quick calibration measures the raw field r (what the adapter hands it beside m),
-    /// so its offsets are the same whatever S and o are in force; undoing only the offsets of a
-    /// published m would not be, once S is not the identity.
+    /// The quick calibration measures the raw field r (what the adapter hands it beside m), so its offsets are the same whatever S and o are in force; undoing only the offsets of a published m would not be, once S is not the identity.
     #[test]
     fn the_quick_calibration_gives_the_same_offsets_whatever_calibration_is_in_force() {
         use fw_core::calib::{MagCal, MagOutcome};
@@ -633,14 +595,12 @@ mod tests {
         let reference = run(&|r| r);
         assert!(reference.iter().zip(CENTRE).all(|(a, b)| (a - b).abs() < 0.5));
         for cal in &in_force {
-            // The adapter publishes m = apply(r, cal) and hands r to the calibration.
             let fed = |r: [f32; 3]| {
                 let _published = apply(r, cal);
                 r
             };
             assert_eq!(run(&fed), reference, "{cal:?}");
         }
-        // Negative control: m + o with S not the identity is not r, and its offsets differ.
         let cal = in_force[2];
         let undone = run(&|r| {
             let m = apply(r, &cal);

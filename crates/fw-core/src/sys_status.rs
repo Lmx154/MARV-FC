@@ -126,17 +126,12 @@ fn masks_with(rows: &[DeviceRow], healthy: fn(&DeviceRow) -> bool) -> SensorMask
     masks
 }
 
-/// The SYS_STATUS masks for the given rows: `present` = answered its identity this boot,
-/// `enabled` = Starting, Ok, Degraded or Recovering, `health` = Ok and not stuck (the receiver:
-/// locked).
+/// The SYS_STATUS masks for the given rows: `present` = answered its identity this boot, `enabled` = Starting, Ok, Degraded or Recovering, `health` = Ok and not stuck (the receiver: locked).
 pub fn sensor_masks(rows: &[DeviceRow]) -> SensorMasks {
     masks_with(rows, is_healthy)
 }
 
-/// The HEARTBEAT `system_status`. The order of the rules: BOOT while some row is still Starting
-/// and `now_ms` is below [`BOOT_WINDOW_MS`] (at exactly 3 000 ms the window is over); else
-/// CALIBRATING while `calibrating`; else STANDBY. Never ACTIVE or CRITICAL. The state is the common
-/// dialect's, which the node's HEARTBEAT takes.
+/// The HEARTBEAT `system_status`.
 pub fn system_status(rows: &[DeviceRow], now_ms: u64, calibrating: bool) -> MavState {
     let starting = rows.iter().any(|row| row.state == State::Starting);
     if starting && now_ms < BOOT_WINDOW_MS {
@@ -205,9 +200,7 @@ fn age_field(age: Option<u32>) -> u16 {
     }
 }
 
-/// Builds the `MARV_DEVICE_STATUS` row. A stuck device is reported as Failed with last error
-/// STUCK whatever its machine says. The 16-bit fields saturate at 65535; the 32-bit counters are
-/// copied; the age is [`AGE_NEVER`] for `None` and saturates at [`AGE_MAX`].
+/// Builds the `MARV_DEVICE_STATUS` row.
 pub fn device_status(input: &StatusInput) -> MARV_DEVICE_STATUS_DATA {
     let (state, last_error) = if input.stuck {
         (State::Failed, ErrorKind::Stuck)
@@ -315,7 +308,6 @@ mod tests {
         assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_IMU2), 0x6_0000);
         assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_SD), 0x100_0000);
         assert_eq!(sensor_bits(MarvDevice::MARV_DEVICE_ESC), 0);
-        // 3D_MAG2 (0x80000) is unused by every device.
         for device in ALL_DEVICES {
             assert_eq!(sensor_bits(device) & 0x8_0000, 0);
         }
@@ -365,15 +357,13 @@ mod tests {
         rows
     }
 
-    /// Checks I4.1 and the present/enabled rules exhaustively against `f`; returns the number of
-    /// violations and the number of cases checked.
+    /// Checks I4.1 and the present/enabled rules exhaustively against `f`; returns the number of violations and the number of cases checked.
     fn check_exhaustive(f: fn(&[DeviceRow]) -> SensorMasks) -> (usize, usize) {
         let base = baseline();
         let mut violations = 0;
         let mut cases = 0;
         for (idx, device) in ALL_DEVICES.iter().enumerate() {
             let bits = literal_bits(*device);
-            // The rest of the table is the baseline without this device.
             let mut rest = base;
             rest[idx].present = false;
             rest[idx].state = State::Absent;
@@ -435,7 +425,6 @@ mod tests {
             masks_with(rows, ignores_stuck)
         }
         let (violations, _) = check_exhaustive(buggy);
-        // The 7 non-receiver devices with a bit, each with Ok + stuck, 2 present x 2 locked.
         assert!(violations > 0);
         assert_eq!(violations, 7 * 4);
     }
@@ -525,16 +514,13 @@ mod tests {
         let calib = MavState::MAV_STATE_CALIBRATING;
         assert_eq!(system_status(&starting, 0, false), boot);
         assert_eq!(system_status(&starting, 2_999, false), boot);
-        // The boundary: at exactly 3 000 ms the window is over.
         assert_eq!(system_status(&starting, 3_000, false), standby);
         assert_eq!(system_status(&starting, 10_000, false), standby);
         assert_eq!(system_status(&left, 100, false), standby);
         assert_eq!(system_status(&left, 0, false), standby);
-        // CALIBRATING overrides STANDBY but not BOOT.
         assert_eq!(system_status(&left, 5_000, true), calib);
         assert_eq!(system_status(&starting, 100, true), boot);
         assert_eq!(system_status(&starting, 3_000, true), calib);
-        // Never ACTIVE or CRITICAL.
         for state in ALL_STATES {
             let rows = [row(MarvDevice::MARV_DEVICE_IMU1, true, state, true, true)];
             for now in [0, 2_999, 3_000, 1_000_000] {
@@ -637,7 +623,6 @@ mod tests {
         assert_eq!(r.attempts, 255);
         assert_eq!(r.config_restored, 65_535);
         assert_eq!(r.overflows, 65_535);
-        // Below the limit the value is copied.
         let small = Counters {
             recoveries: 65_534,
             config_restored: 7,

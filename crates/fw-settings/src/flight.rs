@@ -45,26 +45,7 @@ pub const COUNT: usize = 16 + GAIN_COUNT;
 /// The index of [`SPEED_XY`] in the firmware's table: the one after `GPS_GNSS` (92).
 pub const SPEED_XY_AT: usize = 93;
 
-/// `PILOT_SPEED_XY`, appended to the firmware's table at index 93: `F32`, default 5.0 m/s (ArduPilot POSCONTROL_SPEED_MS),
-/// range 3 to 20 m/s (PX4 MPC_VEL_MANUAL's range), `Live`: core 0 pushes the stored value to the flight core, which takes
-/// the value in force at the arming step and keeps it until the next disarm (`fw_flight::step::Flight`). Device 0, the
-/// system, like `AHRS_ORIENTATION` and `LED_BRIGHT`: there is no flight device row. The range is the whole validator
-/// (`Params::set` refuses a value outside it, so does a load from flash).
-///
-/// `RPM_NOTCH_EN` follows at index 94: `I32`, 0 or 1, default 0 (off: one change per flight), `Live`: core 0 pushes the
-/// stored value to the flight core, which takes it at the arming step like `PILOT_SPEED_XY`. Device 0, the system.
-///
-/// The guidance's parameters follow, indices 95 to 104, all device 0 and `Live` (core 0 pushes them to the flight
-/// core, which takes new targets on a disarmed step): `GDN_COUNT` (`I32`, 0 to 4, default 0 = off), `GDN_RADIUS` (`F32`, m,
-/// default 2.0, range 0.05 to 10: ArduPilot WP_RADIUS_M 2.0, PX4 NAV_ACC_RAD 10), then `GDN_LAT1`, `GDN_LON1`, ...,
-/// `GDN_LAT4`, `GDN_LON4` (`I32`, 1e-7 degree, default 0; latitude -900000000 to 900000000, longitude -1800000000 to
-/// 1800000000). Whole-degree values at 1e-7 degree travel exactly as INT32 parameters.
-///
-/// The 14 gains follow, indices 105 to 118 (`GAINS_AT`): see [`gain`].
-///
-/// `GDN_SRC` follows at index 119 (`GDN_SRC_AT`): `I32`, 0 or 1, default 0, `Live`, device 0. 0 = the targets are the `GDN_*`
-/// parameters above, 1 = the targets are the waypoints of the committed mission (up to 16) with the radius still `GDN_RADIUS`;
-/// core 0 pushes the choice's result to the flight core, which takes new targets on a disarmed step.
+/// `PILOT_SPEED_XY`, appended to the firmware's table at index 93: `F32`, default 5.0 m/s (ArduPilot POSCONTROL_SPEED_MS), range 3 to 20 m/s (PX4 MPC_VEL_MANUAL's range), `Live`: core 0 pushes the stored value to the flight core, which takes the value in force at the arming step and keeps it until the next disarm (`fw_flight::step::Flight`).
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(SPEED_XY, 0, 5.0, 3.0, 20.0, Apply::Live),
     ParamDef::i32(RPM_NOTCH_EN, 0, 0, 0, 1, Apply::Live),
@@ -98,8 +79,7 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::i32(FS_HOLD_EN, 0, 0, 0, 1, Apply::Live),
 ];
 
-/// The index of [`GAIN_NAMES`]`[0]`, `ATC_ANG_RP_P`, in the firmware's table: the one after `GDN_LON4` (104). The other 13
-/// follow in the order of `GAIN_NAMES`.
+/// The index of [`GAIN_NAMES`]`[0]`, `ATC_ANG_RP_P`, in the firmware's table: the one after `GDN_LON4` (104).
 pub const GAINS_AT: usize = 105;
 
 /// The index of [`GDN_SRC`] in the firmware's table: the one after the last gain, `ATC_RAT_FLTD` (118).
@@ -108,15 +88,10 @@ pub const GDN_SRC_AT: usize = 119;
 /// The index of [`GDN_ALT_MIN`] in the firmware's table: the one after `GDN_SRC` (119). `GDN_ALT_MAX` is 121.
 pub const GDN_ALT_MIN_AT: usize = 120;
 
-/// The index of [`FS_HOLD_EN`] in the firmware's table: the one after `GDN_ALT_MAX` (121). `I32`, 0 or 1, default 0,
-/// `Live`, device 0: core 0 pushes the stored value to the flight core every change; the state machine takes it into force
-/// on disarmed steps only.
+/// The index of [`FS_HOLD_EN`] in the firmware's table: the one after `GDN_ALT_MAX` (121).
 pub const FS_HOLD_EN_AT: usize = 122;
 
-/// The definition of gain `i` of `GAIN_NAMES`: `F32`, device 0, `Live`; the default is the field of `Tuning::DEFAULT`
-/// and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own.
-/// Core 0 pushes the 14 stored values to the flight core as one set, which takes them at the next
-/// arming (`fw_flight::step::Flight::set_gains`).
+/// The definition of gain `i` of `GAIN_NAMES`: `F32`, device 0, `Live`; the default is the field of `Tuning::DEFAULT` and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own.
 #[allow(clippy::indexing_slicing)] // `i` is a literal below `GAIN_COUNT`; the table's length is checked by its type
 const fn gain(i: usize) -> ParamDef {
     const DEFAULT: Gains = Gains::of(&Tuning::DEFAULT);
@@ -126,8 +101,7 @@ const fn gain(i: usize) -> ParamDef {
 /// The index of [`RPM_NOTCH_EN`] in the firmware's table: the one after `PILOT_SPEED_XY` (93).
 pub const RPM_NOTCH_EN_AT: usize = 94;
 
-/// The index of [`GDN_COUNT`] in the firmware's table: the one after `RPM_NOTCH_EN` (94). `GDN_RADIUS` follows, then the
-/// latitude and longitude of each target in turn.
+/// The index of [`GDN_COUNT`] in the firmware's table: the one after `RPM_NOTCH_EN` (94).
 pub const GDN_COUNT_AT: usize = 95;
 
 #[cfg(test)]
@@ -194,7 +168,6 @@ mod tests {
             assert_eq!((def.device, def.default, def.min, def.max, def.apply), (0, default, min, max, Apply::Live), "{name}");
             assert!(!def.calibration && !def.read_only, "{name}");
             let i = u16::try_from(at).unwrap();
-            // The range is the whole check: both ends are accepted, one past either is refused.
             assert_eq!(p.set(i, min), Ok(min), "{name}");
             assert_eq!(p.set(i, max), Ok(max), "{name}");
             let (below, above) = match (min, max) {
@@ -257,7 +230,6 @@ mod tests {
             assert_eq!(p.get_named(name), Some(F32(77.5)), "a refused value leaves the stored one");
             assert!(p.set(i, ParamValue::I32(10)).is_err());
         }
-        // No cross-check: the minimum may be written above the maximum.
         let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
         assert_eq!(p.set(u16::try_from(GDN_ALT_MIN_AT).unwrap(), F32(100.0)), Ok(F32(100.0)));
         assert_eq!(p.get_named(GDN_ALT_MAX), Some(F32(50.0)));
@@ -329,8 +301,7 @@ mod tests {
         }
     }
 
-    /// The range is the whole check: both ends are accepted, one f32 step outside either is refused, and so are NaN and
-    /// the infinities; a refused value leaves the stored one.
+    /// The range is the whole check: both ends are accepted, one f32 step outside either is refused, and so are NaN and the infinities; a refused value leaves the stored one.
     #[test]
     fn the_gain_ranges_are_enforced_at_both_ends() {
         for k in 0..GAIN_COUNT {
@@ -346,7 +317,6 @@ mod tests {
                 assert_eq!(p.set(i, ParamValue::F32(bad)), Err(ParamError::OutOfRange), "{name} = {bad}");
             }
             assert_eq!(p.get_named(name), Some(ParamValue::F32(hi)), "{name}: a refused value leaves the stored one");
-            // A value of the other type is not a gain.
             assert!(p.set(i, ParamValue::I32(1)).is_err(), "{name}");
         }
     }

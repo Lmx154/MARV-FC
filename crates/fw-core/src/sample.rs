@@ -10,8 +10,7 @@ pub struct BaroReading {
     pub temperature_c: f32,
 }
 
-/// Compass: the calibrated field m = S (r - o), microtesla, body FRD (`MAG_ORIENT` applied, then the offsets and the
-/// soft-iron matrix, `fw_settings::mag::apply`); die temperature, deg C.
+/// Compass: the calibrated field m = S (r - o), microtesla, body FRD (`MAG_ORIENT` applied, then the offsets and the soft-iron matrix, `fw_settings::mag::apply`); die temperature, deg C.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MagReading {
     /// Microtesla, body FRD, calibrated.
@@ -21,7 +20,6 @@ pub struct MagReading {
 }
 
 /// What the compass should read where this vehicle was calibrated, for the flight core's health test.
-/// Units are converted once, where it is filled: strength in microtesla, angles in radians, tolerance as a fraction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MagExpected {
     /// Expected field strength, microtesla (`MAG_FLD_UT`, > 0).
@@ -66,8 +64,7 @@ pub struct GnssReading {
     pub lon_std_mm: Option<u32>,
     /// Standard deviation of the altitude error, mm, 1 sigma; `None` when not available for this epoch.
     pub alt_std_mm: Option<u32>,
-    /// Velocity north, east and down in mm/s (NED) from the receiver's NAV-PVT of this epoch (velN, velE, velD; down
-    /// positive); `None` when there is no 3D fix. Logged (GPV); the filter reads it.
+    /// Velocity north, east and down in mm/s (NED) from the receiver's NAV-PVT of this epoch (velN, velE, velD; down positive); `None` when there is no 3D fix.
     pub vel_ned_mm_s: Option<[i32; 3]>,
 }
 
@@ -156,8 +153,7 @@ pub struct MagSample {
     pub t_us: u64,
     /// +1 per publish.
     pub seq: u32,
-    /// The field the health test expects, filled by core 0's adapter on every sample from the stored parameters; `None`
-    /// unless `MAG_CAL_TYPE` is 2 and `MAG_FLD_UT` > 0 (`MagReading::sample` leaves it `None`).
+    /// The field the health test expects, filled by core 0's adapter on every sample from the stored parameters; `None` unless `MAG_CAL_TYPE` is 2 and `MAG_FLD_UT` > 0 (`MagReading::sample` leaves it `None`).
     pub expected: Option<MagExpected>,
 }
 
@@ -222,8 +218,7 @@ mod tests {
         assert_eq!((g.reading, g.t_us, g.seq), (GNSS, u64::MAX, 0));
     }
 
-    /// The flight core's view through the stick path's cell: a sample is fresh once, then stale until the next
-    /// write; only the newest of several writes is seen, and the gap shows in `seq`.
+    /// The flight core's view through the stick path's cell: a sample is fresh once, then stale until the next write; only the newest of several writes is seen, and the gap shows in `seq`.
     fn fresh_once<T: Copy + PartialEq + core::fmt::Debug>(initial: T, a: T, b: T, c: T) {
         let cell = crate::xcore::TripleBuffer::new(initial);
         let (mut w, mut r) = (cell.take_writer().unwrap(), cell.take_reader().unwrap());

@@ -56,8 +56,7 @@ pub struct Summary {
     pub types: [TypeStats; NUM_TYPES],
     /// Bytes skipped while looking for a header (saturating).
     pub bad_bytes: u32,
-    /// Bytes of an incomplete record at the end of what was fed (0 to 88): the tail of a cut
-    /// file. A header prefix of one or two bytes counts too.
+    /// Bytes of an incomplete record at the end of what was fed (0 to 88): the tail of a cut file.
     pub tail_bytes: usize,
     /// The very first bytes were the FMT of FMT, as the table writes it.
     pub began_with_fmt: bool,
@@ -410,7 +409,6 @@ mod tests {
         for piece in [1, 7, 512, 4096] {
             assert_eq!(walk(&s.bytes, piece), whole, "pieces of {piece}");
         }
-        // Empty slices change nothing.
         let mut walker = Walker::new();
         for chunk in s.bytes.chunks(100) {
             walker.feed(&[]);
@@ -477,13 +475,11 @@ mod tests {
                 assert!(got.began_with_fmt);
             }
         }
-        // Cut inside the header of the first record, and an empty stream.
         assert_eq!(walk(&s.bytes[..2], 1).tail_bytes, 2);
         assert_eq!(walk(&s.bytes[..2], 1).bad_bytes, 0);
         let empty = walk(&[], 1);
         assert_eq!((empty.bytes, empty.records, empty.tail_bytes), (0, 0, 0));
         assert!(!empty.began_with_fmt);
-        // The whole file ends at a record boundary: no tail.
         assert_eq!(walk(&s.bytes, 4096).tail_bytes, 0);
     }
 
@@ -506,7 +502,6 @@ mod tests {
 
     #[test]
     fn a_header_prefix_inside_garbage_is_not_lost() {
-        // A3 95 A3 95 83 ...: the first pair is not followed by a type, the second is a header.
         let mut data = vec![0xA3, 0x95];
         let mut b = [0u8; 128];
         let n = fmt_record(&FMT, &mut b);
@@ -520,7 +515,6 @@ mod tests {
     #[test]
     fn fmt_records_that_differ_from_the_table_are_counted_apart() {
         let s = sample();
-        // One column letter of BARO's FMT changed: matched 29, mismatched 1, nothing skipped.
         let (offset, _) = s.records[index_of(ID_BARO)];
         let mut data = s.bytes.clone();
         data[offset + 9] = b'Z';
@@ -529,11 +523,9 @@ mod tests {
         assert_eq!((got.bad_bytes, got.tail_bytes), (0, 0));
         assert!(got.began_with_fmt);
         assert_eq!(got.types, s.expected);
-        // An FMT of a type the table does not have.
         let mut data = s.bytes.clone();
         data[offset + 3] = 200;
         assert_eq!(walk(&data, 64).fmt_mismatched, 1);
-        // The FMT of FMT altered: the stream did not begin with it.
         let mut data = s.bytes.clone();
         data[9] = b'C';
         let got = walk(&data, 64);
@@ -548,7 +540,6 @@ mod tests {
         let got = walk(&s.bytes[offset..], 512);
         assert!(!got.began_with_fmt);
         assert_eq!(got.bad_bytes, 0);
-        // An FMT of another type first is not the FMT of FMT either.
         let (second, _) = s.records[1];
         assert!(!walk(&s.bytes[second..], 512).began_with_fmt);
     }
@@ -607,15 +598,12 @@ mod tests {
         assert_eq!(got.records, 59);
     }
 
-    /// GDN records (not part of the per-step block) interleaved in a log leave the walk of every other record as it
-    /// was: the same per-type counts and times, no bad bytes, no tail, the same FMT match; only GDN's own count and
-    /// times and the record total change. Whole, and in pieces of 1 and 7 bytes (a GDN may span two pieces).
+    /// GDN records (not part of the per-step block) interleaved in a log leave the walk of every other record as it was: the same per-type counts and times, no bad bytes, no tail, the same FMT match; only GDN's own count and times and the record total change.
     #[test]
     fn gdn_records_interleaved_leave_the_walk_of_the_other_records_unchanged() {
         let plain = sample();
         let want = walk(&plain.bytes, plain.bytes.len());
         expect_clean(&plain, &want);
-        // The same stream with a GDN after every 37th record, and one after the last.
         let mut mixed = Sample {
             bytes: Vec::new(),
             records: Vec::new(),
