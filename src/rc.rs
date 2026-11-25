@@ -36,7 +36,7 @@ use fw_core::sample::GnssReading;
 use fw_core::sys_status::{DeviceRow, StatusInput, device_status};
 use fw_core::watchdog::task;
 use fw_core::xcore::{TripleBuffer, TripleWriter};
-use fw_settings::rc::{RcMap, arm_switch, mode_switch};
+use fw_settings::rc::{MARK_HACC_MAX_CM, MarkText, MarkTracker, RcMap, arm_switch, mark_fix, mode_switch};
 use mavlink_device::dialect::{MANUAL_CONTROL_DATA, MavState, RC_CHANNELS_DATA};
 use mavlink_device::marv::{MARV_DEVICE_STATUS_DATA, MarvDevice};
 use mavlink_device::{
@@ -313,6 +313,8 @@ struct RcHooks {
     crsf_reports: u32,
     /// The arm switch in the previous stick report handed on.
     arm_on: bool,
+    /// Channel 9 edge tracking of the receiver reports (the waypoint mark).
+    marks: MarkTracker,
 }
 
 impl Hooks for RcHooks {
@@ -381,6 +383,29 @@ impl Hooks for RcHooks {
         // formatting and queueing here, and only on such an edge). The gate reads the permit on core 1 a few hundred
         // us apart from this read, so in that window a report without a refusal, or a refusal without a report, is
         // possible; both are harmless.
+        if let Some(n) = self.marks.update(matches!(source, RcSource::Receiver), ch[8], t_us) {
+            let pos = match GNSS.latest.try_get() {
+                Some(Sample {
+                    reading:
+                        Reading::Gnss(GnssReading {
+                            fix_type,
+                            lat_e7: Some(lat),
+                            lon_e7: Some(lon),
+                            lat_std_mm,
+                            ..
+                        }),
+                    t_us: gnss_us,
+                    ..
+                }) if mark_fix(fix_type) && crate::now_us().saturating_sub(gnss_us) < 2_000_000 => {
+                    Some((lat, lon, (lat_std_mm.unwrap_or(0) / 10).min(MARK_HACC_MAX_CM)))
+                }
+                _ => None,
+            };
+            crate::text_fmt(
+                mavlink_device::dialect::MavSeverity::MAV_SEVERITY_INFO,
+                format_args!("{}", MarkText { n, pos }),
+            );
+        }
         let arm = arm_switch(ch[4]);
         let edge = arm && !self.arm_on;
         self.arm_on = arm;
@@ -699,6 +724,7 @@ async fn rc_link(
         map: None,
         crsf_reports: 0,
         arm_on: false,
+        marks: MarkTracker::new(),
     };
     loop {
         let end = port

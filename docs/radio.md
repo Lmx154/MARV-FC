@@ -68,6 +68,15 @@ The port calls the telemetry hook at most every 100 ms. If the GNSS row has a ne
 0.1 km/h, heading in 0.01 degree, altitude in whole metres above sea level (clamped), satellites used; zeros before a fix and after a loss.
 The hook only copies the latest samples and encodes into the port's buffer.
 
+## Waypoint marks
+
+Channel 9 of the MAVLink receiver's reports (not CRSF) is the mark switch: -100 off, +100 on, on above 1800 us like the arm switch, armed or disarmed. Each rising edge queues one INFO STATUSTEXT in the text ring, so it reaches every link (the laptop over the backpack gets no RC channels, so the vehicle reports the position) and the SD log's MSG record. A switch already high at the first report, or at the first report after a gap of more than 1 s, is no edge.
+
+- With a 3D fix or better and a GNSS sample younger than 2 s: `MARK <n> <lat_e7> <lon_e7> <hacc_cm>`, for example `MARK 3 261886799 -981234567 120` (n counts from 1 since boot; latitude and longitude in 1e-7 degree, south and west negative; hacc in cm from the receiver's latitude deviation, at most 9999).
+- Otherwise: `MARK <n> NOFIX`.
+
+The edge rule and the text are `fw_settings::rc::MarkTracker` and `MarkText`; the hook is in `src/rc.rs` on core 0 only.
+
 ## Code
 
 | File | Role |

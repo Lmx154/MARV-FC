@@ -301,6 +301,74 @@ pub fn arm_switch(ch5_us: u16) -> bool {
     ch5_us > ARM_SWITCH_HIGH_US
 }
 
+/// Reports further apart than this start the waypoint-mark tracking over, us.
+pub const MARK_GAP_US: u64 = 1_000_000;
+
+/// The longest hacc a mark reports, cm.
+pub const MARK_HACC_MAX_CM: u32 = 9999;
+
+/// Channel 9 (index 8) rising edges on MAVLink-receiver reports, counted from 1 (the waypoint mark switch,
+/// on above [`ARM_SWITCH_HIGH_US`] like the arm switch). The first report, and the first after a gap of
+/// [`MARK_GAP_US`], only records the state: a switch already high is no edge.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MarkTracker {
+    prev: Option<(bool, u64)>,
+    count: u32,
+}
+
+impl MarkTracker {
+    /// A tracker that has seen no report.
+    pub const fn new() -> Self {
+        Self { prev: None, count: 0 }
+    }
+
+    /// One stick report: `Some(n)` (the mark's number) on a rising edge of channel 9. Reports not from the
+    /// MAVLink receiver (`receiver` false) are ignored.
+    pub fn update(&mut self, receiver: bool, ch9_us: u16, at_us: u64) -> Option<u32> {
+        if !receiver {
+            return None;
+        }
+        let on = arm_switch(ch9_us);
+        let was = match self.prev {
+            Some((was, t)) if at_us.saturating_sub(t) <= MARK_GAP_US => Some(was),
+            _ => None,
+        };
+        self.prev = Some((on, at_us));
+        if on && was == Some(false) {
+            self.count = self.count.saturating_add(1);
+            Some(self.count)
+        } else {
+            None
+        }
+    }
+}
+
+/// The text of mark `n`: `MARK <n> <lat_e7> <lon_e7> <hacc_cm>` with a position, `MARK <n> NOFIX` without
+/// (at most 50 bytes). `hacc_cm` is clamped to [`MARK_HACC_MAX_CM`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarkText {
+    /// The mark's number, from 1.
+    pub n: u32,
+    /// Latitude and longitude in 1e-7 degree, and hacc in cm.
+    pub pos: Option<(i32, i32, u32)>,
+}
+
+impl core::fmt::Display for MarkText {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self.pos {
+            Some((lat, lon, hacc)) => {
+                write!(f, "MARK {} {} {} {}", self.n, lat, lon, hacc.min(MARK_HACC_MAX_CM))
+            }
+            None => write!(f, "MARK {} NOFIX", self.n),
+        }
+    }
+}
+
+/// The MAVLink GPS_FIX_TYPE 3D fix or better.
+pub const fn mark_fix(fix_type: u8) -> bool {
+    fix_type >= 3
+}
+
 /// The lower band edge of the mode switch, as a share of the normalised channel: thirds (owner, 2026-11-21).
 pub const MODE_BAND_LOW: f32 = 1.0 / 3.0;
 /// The upper band edge of the mode switch: two thirds.
@@ -675,5 +743,54 @@ mod tests {
                 assert_eq!(mode_at(pwm, min, max, true), Switch3::Low);
             }
         }
+    }
+
+    #[test]
+    fn marks_count_rising_edges_only() {
+        let mut m = MarkTracker::new();
+        let mut t = 0u64;
+        let mut step = |m: &mut MarkTracker, us: u16| {
+            t += 100_000;
+            m.update(true, us, t)
+        };
+        assert_eq!(step(&mut m, 1000), None);
+        assert_eq!(step(&mut m, 2000), Some(1));
+        assert_eq!(step(&mut m, 2000), None);
+        assert_eq!(step(&mut m, 1000), None);
+        assert_eq!(step(&mut m, 1800), None);
+        assert_eq!(step(&mut m, 1801), Some(2));
+    }
+
+    #[test]
+    fn a_switch_already_high_at_the_first_report_or_after_a_gap_is_no_mark() {
+        let mut m = MarkTracker::new();
+        assert_eq!(m.update(true, 2000, 0), None);
+        assert_eq!(m.update(true, 2000, 100_000), None);
+        assert_eq!(m.update(true, 1000, 200_000), None);
+        assert_eq!(m.update(true, 2000, 300_000), Some(1));
+        assert_eq!(m.update(true, 1000, 400_000), None);
+        assert_eq!(m.update(true, 2000, 400_000 + MARK_GAP_US + 1), None);
+        assert_eq!(m.update(true, 1000, 400_000 + MARK_GAP_US + 2), None);
+        assert_eq!(m.update(true, 2000, 400_000 + MARK_GAP_US + 3), Some(2));
+    }
+
+    #[test]
+    fn other_sources_are_ignored() {
+        let mut m = MarkTracker::new();
+        assert_eq!(m.update(true, 1000, 0), None);
+        assert_eq!(m.update(false, 2000, 100), None);
+        assert_eq!(m.update(false, 1000, 200), None);
+        assert_eq!(m.update(true, 2000, 300), Some(1));
+    }
+
+    #[test]
+    fn mark_text_formats_and_fits() {
+        let t = |n, pos| std::format!("{}", MarkText { n, pos });
+        assert_eq!(t(3, Some((261886799, -981234567, 120))), "MARK 3 261886799 -981234567 120");
+        assert_eq!(t(7, None), "MARK 7 NOFIX");
+        assert_eq!(t(1, Some((-1, -2, 50_000))), "MARK 1 -1 -2 9999");
+        let worst = t(u32::MAX, Some((i32::MIN, i32::MIN, u32::MAX)));
+        assert!(worst.len() <= 50, "{worst}");
+        assert!(mark_fix(3) && mark_fix(4) && !mark_fix(2) && !mark_fix(1));
     }
 }
