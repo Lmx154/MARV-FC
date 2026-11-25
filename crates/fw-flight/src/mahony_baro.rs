@@ -574,7 +574,8 @@ mod tests {
         assert!(e.vert().fused() > fused);
     }
 
-    /// 2 s still, then a height step four gates wide held; returns (navs from the step on, the step's first sample k.
+    /// 2 s still, then a height step four gates wide held; returns (navs from the step on, the step's first sample k, h_b
+    /// of the faulted samples).
     fn step_fault(armed: bool, climb_ms: f64) -> (MahonyBaro, Vec<NavState>, u64, f32) {
         step_fault_with(&Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT }, armed, climb_ms)
     }

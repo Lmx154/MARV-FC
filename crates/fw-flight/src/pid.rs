@@ -12,7 +12,7 @@ use fw_core::calib::GRAVITY_MSS;
 use fw_core::esc::LINES;
 use marv_card::MASS;
 
-/// The thrust multiplier for a tilt whose cosine is `cos` (third component of the estimated down vector in the body):
+/// The thrust multiplier clamp(gain cos, 0, 1) / clamp(cos, cos_min, 1) for a tilt whose cosine is `cos`.
 fn tilt_factor(cos: f32, cos_min: f32, gain: f32) -> f32 {
     let inverted = (gain * cos).clamp(0.0, 1.0);
     let lift = if cos < cos_min {
@@ -54,8 +54,7 @@ impl Axis {
         }
     }
 
-    /// The terms [P, I, D], N.m, of the torque for rate error `err` and measured `rate`, rad/s, over `dt_s`; the torque
-    /// is P + I + D, summed in that order. `first`: the first step after a reset (dt 0, the D filter starts at the.
+    /// The terms [P, I, D], N.m, for rate error `err` and measured `rate` over `dt_s`; the torque is their sum. `first`: first step after a reset; `limited`: this axis's flag from the previous allocation; `ground`: the integrator is 0.
     fn step(
         &mut self,
         err: f32,
@@ -103,7 +102,7 @@ fn limit_length(v: [f32; 2], limit: f32) -> ([f32; 2], bool) {
     }
 }
 
-/// The cascaded PID. Accepts `Setpoint::Rates`, `Setpoint::Attitude`, `Setpoint::Altitude` and `Setpoint::Position`;
+/// The cascaded PID: accepts `Setpoint::Rates`, `Attitude`, `Altitude` and `Position`, refuses the rest.
 #[derive(Clone, Copy, Debug)]
 pub struct CascadedPid {
     /// Angle P for roll and pitch, 1/s.
@@ -138,8 +137,7 @@ pub struct CascadedPid {
     thrust_full_n: f32,
     /// The vertical integrator, m/s^2, down positive (NED), like the acceleration it adds to.
     alt_i: f32,
-    /// The previous setpoint was `Altitude` or `Position`: the integrator is live. False after `reset` and after any
-    /// other setpoint, so the first `Altitude` or `Position` setpoint starts the integrator at 0 and a change between.
+    /// The previous setpoint was `Altitude` or `Position`: the integrator is live.
     alt_active: bool,
     /// Position error to velocity setpoint, 1/s.
     posxy_p: f32,
@@ -181,7 +179,7 @@ pub struct CascadedPid {
 }
 
 impl CascadedPid {
-    /// Gains, limits and the D filter from `tuning`; integrators zero. `fs_hz`: the configured IMU1 rate, Hz, the sample.
+    /// Gains, limits and the D filter from `tuning`; integrators zero.
     pub fn new(tuning: &Tuning, fs_hz: f32) -> Self {
         let [p0, p1, p2] = tuning.atc_rat_p;
         let [i0, i1, i2] = tuning.atc_rat_i;
@@ -232,7 +230,8 @@ impl CascadedPid {
         }
     }
 
-    /// The collective of altitude hold, N. Signs: NED, down positive for height D, climb rate vD.
+    /// The collective of altitude hold, N. Signs: NED, down positive for height D, climb rate vD, acceleration a_d and
+    /// the integrator; the thrust is positive up.
     fn vertical_thrust(
         &mut self,
         nav: &NavState,
@@ -286,7 +285,7 @@ impl CascadedPid {
         self.xy_i
     }
 
-    /// The attitude setpoint of position hold: `target` and `v_ff` the setpoint's NED position and.
+    /// The attitude setpoint of position hold from `target`, `v_ff` (NED position and velocity feed-forward) and `heading_rad`; `entry`: the first `Position` setpoint, the integrator is 0 and does not advance.
     fn horizontal(
         &mut self,
         nav: &NavState,
@@ -346,7 +345,8 @@ impl CascadedPid {
         mul([libm::cosf(h), 0.0, 0.0, libm::sinf(h)], tilt)
     }
 
-    /// Body rate setpoint, rad/s, from an attitude setpoint: q_e = conj(q) (x) q_sp with w >= 0.
+    /// Body rate setpoint, rad/s, from an attitude setpoint: q_e = conj(q) (x) q_sp with w >= 0, e = 2 [x, y, z], rate =
+    /// [K_rp e_x, K_rp e_y, K_y e_z] + heading_rate * (NED down in the body).
     fn attitude_to_rates(&self, q: [f32; 4], q_sp: [f32; 4], heading_rate_rads: f32) -> [f32; 3] {
         let mut q_e = mul(conj(q), q_sp);
         if q_e[0] < 0.0 {
@@ -685,7 +685,7 @@ mod tests {
         }
     }
 
-    /// Runs `steps` Altitude steps at the target D = 0 on a vehicle at D = 0 with climb rate `v_d`; the first step is.
+    /// Runs `steps` Altitude steps at target D = 0 on a vehicle at D = 0 with climb rate `v_d`. Returns (integrator, last thrust N).
     fn run_alt(pid: &mut CascadedPid, v_ff: f32, v_d: f32, sat: Saturation, steps: u32) -> (f32, f32) {
         let mut thrust = 0.0;
         for k in 0..=steps {
@@ -865,7 +865,7 @@ mod tests {
         }
     }
 
-    /// The horizontal acceleration (north, east) m/s^2 of a point mass held at the weight's vertical share by an.
+    /// The horizontal acceleration (north, east) m/s^2 of a point mass held by an attitude exactly `q`: g tan(tilt) along the thrust vector's horizontal part.
     fn accel_ne(q: [f32; 4]) -> [f32; 2] {
         let [w, x, y, z] = q;
         let col = [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), w * w - x * x - y * y + z * z];
@@ -877,7 +877,8 @@ mod tests {
         libm::acosf((w * w - x * x - y * y + z * z).min(1.0))
     }
 
-    /// A point mass on a plane under the controller: ideal attitude (the vehicle takes the attitude setpoint at once).
+    /// A point mass on a plane under the controller: ideal attitude (the vehicle takes the attitude setpoint at once),
+    /// the vertical axis held, plus `extra(v)` the acceleration of the air on the mass.
     fn point_mass(
         pid: &mut CascadedPid,
         yaw: f32,
@@ -910,7 +911,7 @@ mod tests {
         3.0 * core::f32::consts::FRAC_PI_2,
     ];
 
-    /// The frames. The acceleration from the tilt is the commanded one for every heading and every direction of the.
+    /// The acceleration from the tilt is the commanded one for every heading and direction, with the Angle stick's sign convention.
     #[test]
     fn n5_the_tilt_gives_the_commanded_acceleration_at_every_heading() {
         let t = Tuning::DEFAULT;
@@ -937,7 +938,8 @@ mod tests {
         }
     }
 
-    /// A point mass 2 m from the target at each of the four headings converges; with the rotation's sign flipped it.
+    /// A point mass 2 m from the target at each of the four headings converges; with the rotation's sign flipped it
+    /// diverges at 90 and 270 degrees.
     #[test]
     fn n5_a_point_mass_converges_from_2_m_at_every_heading_and_the_flipped_rotation_diverges() {
         let t = Tuning::DEFAULT;
@@ -959,7 +961,7 @@ mod tests {
         }
     }
 
-    /// A point mass with the vehicle's linear drag in a steady wind. Without the integrator the offset.
+    /// A point mass with the vehicle's linear drag in a steady wind.
     #[test]
     fn n5_p1_drag_and_steady_wind_the_offset_without_the_integrator_and_zero_with_it() {
         let t = Tuning::DEFAULT;
@@ -989,7 +991,8 @@ mod tests {
         assert!((a - b).abs() <= tol, "{a} vs {b} (tol {tol})");
     }
 
-    /// The tilt never exceeds `angle_max_rad`, the horizontal integrator never exceeds `a_max`, and it does not grow.
+    /// The tilt never exceeds `angle_max_rad`, the horizontal integrator never exceeds `a_max`, and it does not grow
+    /// while the acceleration is clipped (control: the rule off lets it grow to the limit).
     #[test]
     fn n4_tilt_integrator_limit_and_anti_windup() {
         let t = Tuning::DEFAULT;
@@ -1040,7 +1043,7 @@ mod tests {
         assert!(worst <= t.angle_max_rad + 1e-5, "{worst}");
     }
 
-    /// The velocity setpoint is limited to the speed in force (`set_speed_limit_xy`); with a far target at rest the.
+    /// The velocity setpoint is limited to the speed in force (`set_speed_limit_xy`).
     #[test]
     fn the_velocity_setpoint_is_limited_to_the_speed_in_force() {
         let t = Tuning::DEFAULT;
@@ -1054,7 +1057,8 @@ mod tests {
         }
     }
 
-    /// The first Position setpoint after any other one, or a reset, starts the horizontal integrator.
+    /// The first Position setpoint after any other one, or a reset, starts the horizontal integrator at 0 and does not
+    /// advance it in that step (control: the integrator kept at the entry).
     #[test]
     fn n2_the_entry_zeroes_the_horizontal_integrator_and_does_not_advance_it() {
         let t = Tuning::DEFAULT;
@@ -1091,7 +1095,7 @@ mod tests {
         }
     }
 
-    /// Changing between Altitude and Position, either way, leaves the vertical integrator and the.
+    /// Changing between Altitude and Position, either way, leaves the vertical integrator and the thrust bit-identical to staying in Altitude.
     #[test]
     fn n3_altitude_and_position_share_the_vertical_loop_bit_for_bit() {
         let t = Tuning::DEFAULT;
@@ -1145,7 +1149,7 @@ mod tests {
         [0.3 * libm::sinf(2.0 * t) + tone + 0.05 * noise(), 0.2 * noise() + tone, 0.1 * noise()]
     }
 
-    /// Runs `steps` of the noisy rates through `pid` with a roll rate setpoint, returning the torques and the rates the.
+    /// Runs `steps` of the noisy rates through `pid` with a roll rate setpoint, returning the torques and the rates the loop used.
     fn run_noisy(pid: &mut CascadedPid, steps: u32, each: impl Fn(&mut CascadedPid)) -> Vec<([f32; 3], [f32; 3])> {
         let mut seed = 7;
         let mut out = Vec::new();
@@ -1160,7 +1164,8 @@ mod tests {
         out
     }
 
-    /// With the switch off, with no usable eRPM, with every h f1 below 50 Hz, with an eRPM of 0: the torques and the rate.
+    /// With the switch off, with no usable eRPM, with every h f1 below 50 Hz, with an eRPM of 0: the torques and the rate
+    /// the loop used are bit-identical to the controller that never had the notch set.
     #[test]
     fn a_notch_with_no_weight_leaves_the_torques_bit_identical() {
         let t = Tuning::DEFAULT;
@@ -1181,7 +1186,7 @@ mod tests {
         assert!(!same([Some(100.0), None, None, None], true), "control: one live line must differ");
     }
 
-    /// `rate_log` carries the usable frequencies (0 for the rest), the switch, the setpoint and the three terms, which.
+    /// `rate_log` carries the usable frequencies, the switch, the setpoint and the three terms, which sum to the torque.
     #[test]
     fn rate_log_reports_the_frequencies_the_switch_and_the_loop() {
         let t = Tuning::DEFAULT;

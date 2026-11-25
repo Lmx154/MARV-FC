@@ -288,7 +288,8 @@ mod tests {
         (2.0 * (w * y - z * x)).asin()
     }
 
-    /// One record of `ground-run-20261120.bin`: a recorded ground run, IMU1, the motors.
+    /// One record of `ground-run-20261120.bin`: a recorded ground run, IMU1, the motors spinning up with the vehicle on
+    /// the ground.
     const RECORD_BYTES: usize = 33;
     const GROUND_RUN: &[u8] = include_bytes!("../testdata/ground-run-20261120.bin");
 

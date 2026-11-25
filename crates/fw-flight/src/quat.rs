@@ -37,7 +37,7 @@ pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx]
 }
 
-/// NED down seen in the body frame (FRD, unit vector) for a body-to-NED q:
+/// NED down seen in the body frame (FRD, unit vector) for a body-to-NED q: the third row of R(q).
 pub(crate) fn down_in_body(q: [f32; 4]) -> [f32; 3] {
     let [w, x, y, z] = q;
     [

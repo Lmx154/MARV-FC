@@ -24,7 +24,8 @@ pub const REQ_CHECK: u8 = 1;
 pub const REQ_RESTART: u8 = 2;
 /// Kick bit: apply a new configuration. Reserved: taken and ignored (not built).
 pub const REQ_APPLY: u8 = 4;
-/// Kick bit: self-test the device, then restart it as for [`REQ_RESTART`] under the same number;
+/// Kick bit: self-test the device, then restart it as for [`REQ_RESTART`] under the same number; the request's number is
+/// in [`ImuCells`].
 pub const REQ_SELF_TEST: u8 = 8;
 /// Transitions kept in [`ImuStatus::ring`].
 pub const TRANSITIONS: usize = 4;
@@ -105,8 +106,7 @@ pub enum VerifyError {
     Failed(ErrorKind),
 }
 
-/// The flight-core side of one IMU, driven by [`ImuTask`]. The contract of the core-0
-/// `DeviceAdapter`: every method except [`data_ready`](Self::data_ready) may use the bus and is.
+/// `DeviceAdapter`: every method except [`data_ready`](Self::data_ready) may use the bus and is always awaited to completion; `Ok` from `start`, `recover` or `restart` only says the bus and device answer, success needs one fresh sample.
 #[allow(async_fn_in_trait)]
 pub trait ImuAdapter {
     /// Waits for the data-ready edge. No bus traffic: it may be dropped at any await.
@@ -118,8 +118,7 @@ pub trait ImuAdapter {
     async fn acquire(&mut self) -> Result<ImuReading, ErrorKind>;
     /// The one status read after a late CHECK.
     async fn status(&mut self) -> Result<Pending, ErrorKind>;
-    /// One step of the incremental configuration check, changing nothing: at most one register (one
-    /// or two bus transactions, a short busy wait at most); [`VerifyStep::PassComplete`] after the.
+    /// One step of the incremental check; [`VerifyStep::PassComplete`] after the last register of a pass.
     async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError>;
     /// K: one verify step after every K-th sample (at least 1).
     fn verify_every(&self) -> u32;
@@ -870,7 +869,8 @@ mod tests {
         calls: u32,
         starts: u32,
         restarts: u32,
-        /// What the self-test answers and how long it takes (us); like the ICM-45686's test it.
+        /// What the self-test answers and how long it takes (us); like the ICM-45686's test it leaves the device stopped
+        /// (no data-ready) until a start or a restart.
         self_test_verdict: Verdict,
         self_test_us: u64,
         self_tests: u32,
@@ -1421,7 +1421,7 @@ mod tests {
 
     use fw_core::selftest::axes;
 
-    /// The action's final result is FAILED (as for a pass whose device did not come back) and the.
+    /// The action's final result is FAILED and the device came back Ok.
     fn ends_failed_with_the_device_ok(done: &ImuStatus, number: u32) {
         let outcome = done.self_test.expect("the test's outcome");
         assert_eq!(
@@ -1437,7 +1437,7 @@ mod tests {
         assert_ne!(outcome.result(true), pass.result(true));
     }
 
-    /// Self-test request `number` on a running device, stepped (bounded) until the restart that.
+    /// Self-test request `number` on a running device, stepped until the restart that follows has published its outcome, then 20 more steps. Returns the status after the outcome and at the end.
     fn self_test_run(
         cells: &ImuCells,
         task: &mut Task,

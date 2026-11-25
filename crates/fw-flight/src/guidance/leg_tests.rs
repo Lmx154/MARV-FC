@@ -251,7 +251,8 @@ fn vertical_carrot_stops_without_lead() {
 }
 
 /// The vertical carrot's rate per step of `run` against the goal heights `goals` (m down, in order): |d rate| <= a dt
-/// (the snap step, from within `LEG_SNAP_M`, at most sqrt(2 a LEG_SNAP_M) + a dt), the climb and descent caps.
+/// (the snap step, from within `LEG_SNAP_M`, at most sqrt(2 a LEG_SNAP_M) + a dt), the climb and descent caps, rate <=
+/// sqrt(2 a r) + a dt with r the distance left, every goal reached exactly with rate 0.
 fn check_vertical(outs: &[LegOut], goals: &[f32]) -> f32 {
     let (a, eps) = (LEG_ACC_Z_MSS, 1e-4);
     let (mut prev, mut k, mut snap_dv) = (0.0f32, 0usize, 0.0f32);
@@ -347,8 +348,8 @@ fn check_accel(outs: &[LegOut]) -> f32 {
     naive_snap
 }
 
-/// The vertical carrot's acceleration is its rate's change before the snap, within +-`LEG_ACC_Z_MSS`, and 0 at
-/// Done and Home, over the climbs and the descent of an AUTO run and RETURN's climb. Control: the published rate's own.
+/// The vertical carrot's acceleration is its rate's change before the snap, within +-`LEG_ACC_Z_MSS`, and 0 at Done and
+/// Home, over the climbs and the descent of an AUTO run and RETURN's climb.
 #[test]
 fn vertical_accel_is_the_rate_change_before_the_snap_within_the_bound() {
     let m = mission(&[(10.0, 0.0, 35.0), (70.0, 0.0, 32.0), (70.0, 10.0, 33.0)], R);
@@ -370,8 +371,8 @@ fn vertical_accel_is_the_rate_change_before_the_snap_within_the_bound() {
     assert!(naive_auto > 2.0 * LEG_ACC_Z_MSS && naive_ret > 2.0 * LEG_ACC_Z_MSS);
 }
 
-/// The acceleration is 0 while the carrot is held (invalid or non-finite position), outside the lead cap and for a
-/// dt of 0 or not usable; an entry (`begin`) carries none over: entered while braking a climb (+a), the first step.
+/// The acceleration is 0 while the carrot is held (invalid or non-finite position), outside the lead cap and for a dt of
+/// 0 or not usable.
 #[test]
 fn vertical_accel_is_zero_when_held_and_restarts_at_entry() {
     let m = mission(&[(50.0, 0.0, 30.0)], R);
@@ -417,7 +418,7 @@ fn vertical_accel_is_zero_when_held_and_restarts_at_entry() {
 }
 
 /// Closed loop: the 25 m Start climb (5 -> 30 m in place) flown by `CascadedPid`'s altitude loop on a level vertical
-/// point mass (a = g - thrust / m, 800 Hz). Without the acceleration feed-forward the vehicle runs ahead of the braking.
+/// point mass (a = g - thrust / m, 800 Hz).
 #[test]
 fn closed_loop_vertical_lead_while_braking_shrinks_with_the_accel_feed_forward() {
     use crate::gnc::{Controller, Saturation, Valid};

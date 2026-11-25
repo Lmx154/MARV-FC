@@ -93,8 +93,9 @@ fn dot3(a: &[f32; 3], b: &[f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
-/// The nominal propagation of one IMU sample: the quaternion from the bias-corrected gyro (exact
-/// axis-angle increment, libm `sinf`/`cosf`), the bias-corrected specific force rotated to NED plus.
+/// The nominal propagation of one IMU sample: the quaternion from the bias-corrected gyro (exact axis-angle increment,
+/// libm `sinf`/`cosf`), the bias-corrected specific force rotated to NED plus gravity, velocity and (trapezoidal)
+/// position integration.
 #[inline(never)]
 pub fn nominal_step(n: &mut Nominal, gyro: &[f32; 3], accel: &[f32; 3], dt: f32) {
     let da = [
@@ -148,7 +149,7 @@ fn add_q(p: &mut Cov, dt: f32, noise: &Noise) {
     }
 }
 
-/// P <- F P F^T + Q over `dt` (the time summed since the last propagation), using F's structure:
+/// P <- F P F^T + Q over `dt` (the time summed since the last propagation), using the structure of F.
 #[inline(never)]
 pub fn covariance_predict(p: &mut Cov, q: &[f32; 4], dvel: &[f32; 3], dt: f32, noise: &Noise) {
     let (rdt, skew) = blocks(q, dvel, dt);
@@ -227,7 +228,7 @@ pub fn covariance_predict_dense(p: &mut Cov, q: &[f32; 4], dvel: &[f32; 3], dt: 
     add_q(p, dt, noise);
 }
 
-/// The error-state injection: attitude by a left (NED-frame) small-angle quaternion, normalised;
+/// The error-state injection: attitude by a left (NED-frame) small-angle quaternion, normalised; the others added.
 #[inline(always)]
 fn inject(n: &mut Nominal, dx: &[f32; N]) {
     let dq = [1.0, 0.5 * dx[ATT], 0.5 * dx[ATT + 1], 0.5 * dx[ATT + 2]];
@@ -240,8 +241,7 @@ fn inject(n: &mut Nominal, dx: &[f32; N]) {
     }
 }
 
-/// The rest of a scalar fusion once P H^T (`ph`) and the innovation variance `s` are known: the gate
-/// (innovation^2 <= gate^2 s), K = P H^T / s, the state correction K innovation injected into the.
+/// The rest of a scalar fusion once P H^T and the innovation variance `s` are known: gate, K = P H^T / s, the injection, and P <- P - K (H P) with the upper triangle mirrored and the diagonal held at or above 0.
 #[inline(always)]
 fn finish(n: &mut Nominal, p: &mut Cov, ph: &[f32; N], s: f32, innov: f32, gate: f32) -> bool {
     if s.is_nan() || s <= 0.0 || innov * innov > gate * gate * s {
@@ -387,7 +387,8 @@ mod tests {
         std::println!("structured vs dense: worst relative difference {worst:e}");
     }
 
-    /// The textbook scalar update: K = P H^T / (H P H^T + R), P = (I - K H) P with full products.
+    /// The textbook scalar update: K = P H^T / (H P H^T + R), P = (I - K H) P with full products, then (P + P^T) / 2 and
+    /// the diagonal floor; dx = K innovation.
     fn textbook(p: &Cov, h: &[f32; N], innov: f32, var: f32) -> (Cov, [f32; N]) {
         let mut ph = [0.0f32; N];
         for i in 0..N {

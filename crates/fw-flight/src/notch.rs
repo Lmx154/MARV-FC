@@ -74,8 +74,7 @@ impl Bank {
         delay: [[Delay::ZERO; LINES]; HARMONICS],
     };
 
-    /// `x` through the first `harmonics` rows of stages. `seed`: the first sample after a reset, each stage's memory
-    /// starts at its own input. A stage of weight 0 passes its.
+    /// `x` through the first `harmonics` rows of stages; `seed` starts each stage's memory at its own input. A stage of weight 0 passes its input untouched (a true bypass) but still runs, so its memory is current.
     fn apply(
         &mut self,
         x: f32,
@@ -223,7 +222,8 @@ mod tests {
         Notch::new(&Tuning::DEFAULT, FS)
     }
 
-    /// The RBJ notch's magnitude from its definition, in f64: with c = cos w - cos w0.
+    /// The RBJ notch's magnitude from its definition, in f64: with c = cos w - cos w0, |H| = |c| / sqrt(c^2 + (alpha sin
+    /// w)^2).
     fn rbj_magnitude(f_hz: f64, centre_hz: f64, q: f64) -> f64 {
         let (w, w0) = (
             core::f64::consts::TAU * f_hz / f64::from(FS),
@@ -259,7 +259,8 @@ mod tests {
         assert!((coef_magnitude(&c, 0.0) - 1.0).abs() < 1e-6);
     }
 
-    /// Steady-state amplitude of a unit sine of `f_hz` (a multiple of 0.5 Hz) through the filter, measured in the time.
+    /// Steady-state amplitude of a unit sine of `f_hz` (a multiple of 0.5 Hz) through the filter, measured in the time
+    /// domain: the rms over the last 1600 samples, a whole number of cycles, times sqrt 2.
     fn gain(n: &mut Notch, f_hz: f32) -> f32 {
         let mut sum = 0.0_f64;
         for i in 0..3200 {

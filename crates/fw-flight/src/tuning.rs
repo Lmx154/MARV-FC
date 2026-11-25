@@ -48,8 +48,7 @@ pub struct Tuning {
     pub rc_fs_timeout_us: u64,
     /// Highest throttle stick (0..1) that may arm. Betaflight's 1050 us = 0.05 (ARM_THR_MAX).
     pub arm_thr_max: f32,
-    /// Below this multiple of the weight m g the collective cannot lift the vehicle at any point of the thrust
-    /// spread, so the vehicle is treated as on the ground and the rate integrators are held at 0. 0.5/0.7 = 0.714:
+    /// Below this multiple of the weight m g the vehicle is treated as on the ground and the rate integrators are held at 0; 0.5/0.7 is half the hover collective at the weakest point of the +/-30 % thrust spread.
     pub ground_thrust_g: f32,
     /// `MahonyBaro`'s vertical filter: covariance propagation period, us.
     pub nav_predict_us: u64,
@@ -102,19 +101,17 @@ pub struct Tuning {
     pub psc_velxy_p: f32,
     /// Velocity error integral to horizontal acceleration, (m/s^2)/m. PX4 MPC_XY_VEL_I_ACC (ArduPilot 1.0).
     pub psc_velxy_i: f32,
-    /// Fastest horizontal speed the sticks ask for at full deflection, and the largest horizontal velocity setpoint,
-    /// m/s. The default of the runtime parameter `PILOT_SPEED_XY` (range 3 to 20): the.
+    /// Fastest horizontal speed the sticks ask for at full deflection, and the largest horizontal velocity setpoint, m/s. Default of the runtime parameter `PILOT_SPEED_XY` (range 3 to 20), read at the arming step.
     pub pilot_speed_xy_ms: f32,
     /// Dead zone of the roll and pitch sticks in position hold, as a share of full travel on each side of the centre.
     pub pilot_xy_dz: f32,
-    /// Dead zone of the yaw stick in every mode, as a share of full travel on each side of the centre. ArduPilot
-    /// `channel_yaw->set_default_dead_zone(15)` (ArduCopter/radio.cpp:13), 15 us of the 400 us half-range of the default.
+    /// Dead zone of the yaw stick in every mode, as a share of full travel on each side of the centre.
     pub pilot_y_dz: f32,
     /// Position hold: with the sticks centred the position is captured once the ground speed is below this, m/s. PX4
     /// MPC_HOLD_MAX_XY.
     pub pilot_hold_speed_ms: f32,
-    /// Position hold's airborne latch: the time the collective must stay below the ground
-    /// threshold, armed, before the vehicle counts as landed, us. ArduPilot LAND_DETECTOR_TRIGGER_SEC 1.0 s.
+    /// Position hold's airborne latch: the time the collective must stay below the ground threshold, armed, before the
+    /// vehicle counts as landed, us.
     pub land_detect_us: u64,
     /// `Eskf`: the IMU history the delayed horizon
     /// may use, us.
@@ -166,8 +163,8 @@ pub struct Tuning {
     pub nav_out_att_gain: f32,
     /// `EskfSteer` output predictor: gain of the integral term of the velocity and position tracking.
     pub nav_out_int_gain: f32,
-    /// RPM notch: harmonics of each
-    /// rotor's frequency that get a notch, at most 3 (the multiple-angle identities stop there). Betaflight.
+    /// RPM notch: harmonics of each rotor's frequency that get a notch, at most 3 (the multiple-angle identities stop
+    /// there).
     pub notch_harmonics: usize,
     /// RPM notch: Q of every notch. Betaflight pg/rpm_filter.c:36 (rpm_filter_q 500, shown /100 = 5).
     pub notch_q: f32,

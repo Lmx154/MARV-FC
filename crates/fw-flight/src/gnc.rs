@@ -6,8 +6,7 @@ use crate::tuning::Gains;
 use fw_core::esc::LINES;
 use fw_core::sample::{BaroSample, GnssSample, MagSample};
 
-/// What is new since the previous step, for the estimator. `imu1` is always present: its arrival makes the step and
-/// its `t_us` is the step time. Each `Option` is `Some` only for a sample newer than the one given at the previous.
+/// What is new since the previous step, for the estimator.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sensors {
     /// IMU1 (ICM-45686), the primary.
@@ -327,12 +326,11 @@ pub trait Controller {
     /// Clears integrators and filter memory. The step calls it on every step while the vehicle is disarmed.
     fn reset(&mut self);
     /// The largest horizontal velocity setpoint of `Setpoint::Position`, m/s: the pilot's horizontal speed in force,
-    /// capped at `hands_off::SPEED_XY_CAP_MS` in the hands-off states. `Flight::step`.
+    /// capped at `hands_off::SPEED_XY_CAP_MS` in the hands-off states.
     fn set_speed_limit_xy(&mut self, _ms: f32) {}
-    /// The 14 gains of the runtime parameters. `Flight::step` calls it on every disarmed
-    /// step, so the values cannot change in flight. Gains only: integrator and filter memories are not touched. The.
+    /// The 14 gains of the runtime parameters.
     fn set_gains(&mut self, _gains: &Gains) {}
-    /// The attitude setpoint [w, x, y, z] the latest `update` made from a `Setpoint::Position` (the SETP record of kind 3);
+    /// The attitude setpoint [w, x, y, z] the latest `update` made from a `Setpoint::Position`; [0; 4] when it was not one. The default has none.
     fn attitude_setpoint(&self) -> [f32; 4] {
         [0.0; 4]
     }

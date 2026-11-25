@@ -89,16 +89,14 @@ const MAG_RATE_HZ: u64 = 100;
 /// Barometer samples that can wait for the horizon: nav_buffer_us (the largest delay the constructor accepts) times the
 /// rate, 25.
 pub const BARO_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * BARO_RATE_HZ).div_ceil(1_000_000) as usize;
-/// Compass samples that can wait: the same window times the rate, 50. The once-per-second fusion does not shrink the
-/// worst case: which sample is used is decided at the horizon (the health test needs the horizon tilt, and a refused.
+/// Compass samples that can wait: the same window times the rate, 50.
 pub const MAG_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * MAG_RATE_HZ).div_ceil(1_000_000) as usize;
 /// Entries of the VelD option's S ring: nav_buffer_us / nav_predict_us + 1, 51.
 pub const VD_RING: usize = (Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_predict_us + 1) as usize;
 /// 360 degrees in 1e-7 degree.
 const E7_TURN: i64 = 3_600_000_000;
 
-/// North, east and down (m) of `point` from `origin`: i64 differences first, the longitude
-/// difference wrapped to [-180, 180) degrees, scaled on the tangent plane at the origin with the WGS 84 meridian and.
+/// North, east and down (m) of `point` from `origin` on the tangent plane (WGS 84 radii); down = -(alt difference) / 1000.
 pub fn ned_from_geo(origin: &GeoPoint, point: &GeoPoint) -> [f32; 3] {
     let e2 = WGS84_F * (2.0 - WGS84_F);
     let lat0 = origin.lat_e7 as f32 * 1e-7 * PI / 180.0;
@@ -439,7 +437,8 @@ pub struct EskfN<const R: usize> {
     /// Test control: the same scalar also leaves b_a,z alone.
     #[cfg(test)]
     baro_abias_z_mask: bool,
-    /// Test switch for a `Flight` test that must stay armed: the compass reset after the timeout also while armed (the rule.
+    /// Test switch for a `Flight` test that must stay armed: the compass reset after the timeout also while armed (the
+    /// rule before the latch), through the same `mag_job` -> `yaw_set` path.
     #[cfg(test)]
     pub(crate) armed_yaw_reset: bool,
     /// Test control: horizontal aiding stopping at the timeout leaves `started` set.
@@ -527,7 +526,7 @@ pub fn yaw_innov(q: &[f32; 4], m_b: &[f32; 3], dec: f32) -> f32 {
     wrap(dec - atan2f(m[1], m[0]))
 }
 
-/// The yaw row on the NED attitude error: the exact Jacobian of.
+/// The yaw row [-m_N m_D / c, -m_E m_D / c, 1] on the NED attitude error, c = m_N^2 + m_E^2, the exact Jacobian of atan2(m_E, m_N); `None` when the horizontal field is below sqrt(f32::EPSILON) of |m|.
 pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
     let m = mag_ned(q, m_b);
     let c = m[0] * m[0] + m[1] * m[1];
@@ -544,12 +543,12 @@ impl<const R: usize> EskfN<R> {
         Self::with_aiding(tuning, Aiding::Full)
     }
 
-    /// As [`EskfN::new`] with the aiding set `aiding`. Err with [`EskfError::RingTooSmall`] when `R` is 0, or the horizon delay.
+    /// As [`EskfN::new`] with the aiding set `aiding`.
     pub fn with_aiding(tuning: &Tuning, aiding: Aiding) -> Result<Self, EskfError> {
         Self::build(tuning, aiding, false)
     }
 
-    /// `ImuBaro` with the VelD option. Err as [`EskfN::with_aiding`], and with [`EskfError::RingTooSmall`] when.
+    /// `ImuBaro` with the VelD option. Err as [`EskfN::with_aiding`], and [`EskfError::RingTooSmall`] when nav_predict_us is 0 or the S ring is too short.
     pub fn with_gps_vd(tuning: &Tuning) -> Result<Self, EskfError> {
         if tuning.nav_predict_us == 0 || tuning.nav_buffer_us / tuning.nav_predict_us + 1 > VD_RING as u64 {
             return Err(EskfError::RingTooSmall);
@@ -698,11 +697,12 @@ impl<const R: usize> EskfN<R> {
     }
 
     /// The requested sample's time and nominal q, v, p right after its nominal step, in the `update` that integrated it;
+    /// none in every other step (with a repeated timestamp, the last integrated in the step).
     pub fn snapshot(&self) -> Option<(u64, [f32; 4], [f32; 3], [f32; 3])> {
         self.snap
     }
 
-    /// The reset of the nominal state the job of the last `update` was, if it was one; none after a fusion or a.
+    /// The reset the job of the last `update` made to the nominal state; none after a fusion or a re-initialisation.
     pub fn last_reset(&self) -> Option<Reset> {
         self.reset
     }
@@ -869,7 +869,7 @@ impl<const R: usize> EskfN<R> {
         self.aiding_prev = false;
     }
 
-    /// The tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step. True.
+    /// The tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step.
     fn realign_at_arming(&mut self, q_pre: &[f32; 4]) -> bool {
         let edge = self.arm_edge;
         self.arm_edge = false;
@@ -939,7 +939,7 @@ impl<const R: usize> EskfN<R> {
         (ok, s)
     }
 
-    /// A no-aid scalar on position `axis`: not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is.
+    /// A no-aid scalar on position `axis`: not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form.
     fn fuse_noaid(&mut self, axis: usize, innov: f32, var: f32) {
         let k = POS + axis;
         let ph = self.p[k];
@@ -974,7 +974,7 @@ impl<const R: usize> EskfN<R> {
         self.fuse_vertical_masked(POS + 2, innov, var)
     }
 
-    /// An `ImuBaro` scalar on state `k` (H a single 1: D for the barometer, v_D for the VelD option), gated as.
+    /// An `ImuBaro` scalar on state `k` (D for the barometer, v_D for the VelD option), gated as [`n0::fuse_position`]; K has support on D, v_D and b_a,z only. Returns (accepted, innovation variance).
     fn fuse_vertical_masked(&mut self, k: usize, innov: f32, var: f32) -> (bool, f32) {
         let ph = self.p[k];
         let s = ph[k] + var;
@@ -1081,7 +1081,7 @@ impl<const R: usize> EskfN<R> {
         self.baro_job = (job.stage < last && !self.horizontal_aiding()).then_some(job);
     }
 
-    /// Yaw := yaw + dpsi (a rotation about NED down); the yaw row and column of P re-initialised to the compass noise;
+    /// Yaw := yaw + dpsi (a rotation about NED down); the yaw row and column of P are re-initialised to the compass noise.
     fn yaw_set(&mut self, dpsi: f32) {
         let dq = [cosf(0.5 * dpsi), 0.0, 0.0, sinf(0.5 * dpsi)];
         self.nom.q = normalized(qmul(&dq, &self.nom.q));
@@ -1167,7 +1167,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A compass sample at the horizon: skipped inside the fusion period once aligned; the health test (cheap); a.
+    /// A compass sample at the horizon: skipped inside the fusion period once aligned; a healthy one queues the compass job.
     fn mag_due(&mut self, w: MagWait) {
         if !self.tilt_aligned {
             return;
@@ -1191,7 +1191,8 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A GNSS epoch on arrival (its time is the horizon's): acceptance, the origin, the arming rules.
+    /// A GNSS epoch on arrival (its time is the horizon's): acceptance, the origin, the arming rules, the frozen-fix and
+    /// near-zero-speed screens, and the plan: the Src 9 reset or the scalars.
     fn gnss_arrival(&mut self, g: &GnssSample) {
         self.stats.gps_epochs = self.stats.gps_epochs.wrapping_add(1);
         let r = &g.reading;
@@ -1359,7 +1360,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A GNSS epoch on arrival for the VelD option: acceptance as `Full`'s where it applies (a position with.
+    /// A GNSS epoch on arrival for the VelD option: acceptance as `Full`'s where it applies, a velocity, and an S entry at or before t_m.
     fn vd_arrival(&mut self, g: &GnssSample) {
         let r = &g.reading;
         let (Some(lat), Some(lon)) = (r.lat_e7, r.lon_e7) else {
@@ -1392,7 +1393,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only. A non-finite.
+    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only.
     fn vd_job(&mut self, (z, s_m): (f32, f32)) {
         #[cfg(test)]
         let s_m = if self.vd_align_off { self.vd_s } else { s_m };
@@ -2126,7 +2127,8 @@ pub(crate) mod tests {
         assert!(old.gps_unaccepted > new.gps_epochs / 3, "the control: the 219 ms half is refused at 215");
     }
 
-    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`) every 200 ms: a 3D fix whose.
+    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`) every 200 ms: a 3D fix whose `lat_std_mm` and `lon_std_mm`
+    /// are both the receiver's hAcc, `alt_std_mm` its vAcc, no HDOP or VDOP, no UTC time.
     fn m10_stream(without_std: bool) -> EskfStats {
         let t = Tuning::DEFAULT;
         let mut f = Eskf::new(&t).unwrap();
@@ -2948,7 +2950,9 @@ pub(crate) mod tests {
         assert!(bg[0] != 0.0 && bg[1] != 0.0, "the bias did not move: {bg:?}");
     }
 
-    /// The disarmed handling scenario: level at rest, tilt and yaw driven into the filter by a gyro pulse the vehicle did.
+    /// The disarmed handling scenario: level at rest, tilt and yaw driven into the filter by a gyro pulse the vehicle did
+    /// not make (0.5 s at [0.2, -0.1, 0.3] rad/s from 1 s: about 5.7 deg of roll, 2.9 deg of pitch, 8.6 deg of yaw), then
+    /// at rest until 4 s.
     fn handled(t: &Tuning, aiding: Aiding, accelerate: bool) -> (Eskf, Vec<Sensors>, bool) {
         let mut f = Eskf::with_aiding(t, aiding).unwrap();
         let mut w = World::new(t);
@@ -3195,7 +3199,7 @@ pub(crate) mod tests {
         assert!(after * PERIOD_US >= 30_000_000, "{after}");
     }
 
-    /// `base` armed after `first` of the `next` samples (re-alignment per `realign_first`), armed for 20 steps, disarmed for.
+    /// `base` armed after `first` of the `next` samples, armed for 20 steps, disarmed for `k` steps. Returns the filter before the next step and that index (24 + k).
     fn disarmed_again(base: &Eskf, next: &[Sensors], first: usize, realign_first: bool, k: usize) -> (Eskf, usize) {
         let mut f = base.clone();
         f.arm_realign = realign_first;
@@ -3366,14 +3370,15 @@ pub(crate) mod tests {
     }
 
 
-    /// Specific force, body frame, of a vehicle at rest rolled by `roll` and pitched by `pitch` (the inverse of the first.
+    /// Specific force, body frame, of a vehicle at rest rolled by `roll` and pitched by `pitch` (the inverse of the first
+    /// alignment's formulas), plus the constant accelerometer offset `off`.
     fn rest_force(roll: f64, pitch: f64, off: [f32; 3]) -> [f32; 3] {
         let g = f64::from(GRAVITY_MSS);
         let f = [g * pitch.sin(), -g * pitch.cos() * roll.sin(), -g * pitch.cos() * roll.cos()];
         core::array::from_fn(|i| f[i] as f32 + off[i])
     }
 
-    /// `secs` of an `ImuBaro` filter held tilted (`tilt` = roll, pitch, rad) at the World's constant barometer height with the.
+    /// `secs` of an `ImuBaro` filter held tilted (`tilt` = roll, pitch, rad) with the accelerometer offset `off`, armed after `arm_s` s. Returns the filter, the largest |b_a,x| and |b_a,y|, whether they stayed exactly 0.0, and the largest |v_D| over the last half.
     fn held_tilted(t: &Tuning, tilt: (f64, f64), off: [f32; 3], secs: f64, arm_s: f64, masked: bool) -> (Eskf, [f32; 2], bool, f32) {
         let mut f = Eskf::with_aiding(t, Aiding::ImuBaro).unwrap();
         f.baro_full_gain = !masked;
@@ -3659,7 +3664,8 @@ pub(crate) mod tests {
     }
 
 
-    /// One sample of the warm-up and gusty runs: the World moving (accelerations changing every 7 s, a yaw rate), the body.
+    /// One sample of the warm-up and gusty runs: the World moving (accelerations changing every 7 s, a yaw rate), the
+    /// body tilted by slow rolls and pitches, a constant accelerometer offset and a gyro x and y wobble.
     fn moving_sample(w: &mut World, sec: f64) -> Sensors {
         let phase = (sec / 7.0) as u32;
         w.a = [[0.0, 1.5, -1.0, 0.5][phase as usize % 4], [0.5, 0.0, 1.0, -2.0][phase as usize % 4], [0.3, -0.4, 0.0, 0.8][phase as usize % 4]];
@@ -3866,7 +3872,8 @@ pub(crate) mod tests {
     }
 
 
-    /// The 60 s stream of the ring tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite IMU.
+    /// The 60 s stream of the ring tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite
+    /// IMU sample (index 20 000), a repeated timestamp (24 000) and one 20 ms gap before index 30 000.
     fn g1_stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
         let mut w = World::new(t);
         w.yaw = 0.4;
@@ -4023,7 +4030,7 @@ pub(crate) mod tests {
         assert_eq!(big - small, (RING - 1) * entry);
     }
 
-    /// What `update` does to the nominal state before its job, rebuilt from the filter as it was before the step with.
+    /// What `update` does to the nominal state before its job, rebuilt with N0's nominal step only: the state just before the job, the state right after the sample at `req`, and the number of samples integrated.
     #[allow(clippy::type_complexity)]
     fn g1_after_integration<const R: usize>(pre: &EskfN<R>, s: &Sensors, req: Option<u64>) -> (([f32; 4], [f32; 3], [f32; 3]), Option<(u64, [f32; 4], [f32; 3], [f32; 3])>, usize) {
         let now = s.imu1.t_us;
@@ -4125,7 +4132,7 @@ pub(crate) mod tests {
         assert!(seen_front > 40_000);
     }
 
-    /// Rebuilds every step of `f` over `stream` with `g1_after_integration` and checks `last_reset` against it. `each` runs.
+    /// Rebuilds every step of `f` over `stream` with `g1_after_integration` and checks `last_reset` against it.
     fn g1_run_resets<const R: usize>(f: &mut EskfN<R>, stream: &[Sensors], armed: impl Fn(&Sensors) -> bool, mut each: impl FnMut(usize, &mut EskfN<R>)) -> ([Vec<usize>; 4], usize) {
         let (mut kinds, mut fusion_steps) = ([Vec::new(), Vec::new(), Vec::new(), Vec::new()], 0);
         for (k, s) in stream.iter().enumerate() {
@@ -4186,7 +4193,8 @@ pub(crate) mod tests {
         (kinds, fusion_steps)
     }
 
-    /// Level at rest with a gyro pulse the vehicle did not make (as `handled`) from 1 to 1.5 s, the barometer `baro_off_m`.
+    /// Level at rest with a gyro pulse the vehicle did not make (as `handled`) from 1 to 1.5 s, the barometer
+    /// `baro_off_m` too high from `baro_from_s`; `secs` long.
     fn g1_zero_delay_stream(t: &Tuning, secs: u64, baro_from_s: u64, baro_off_m: f64) -> Vec<Sensors> {
         let mut w = World::new(t);
         let mut out = Vec::new();
@@ -4654,7 +4662,7 @@ pub(crate) mod tests {
         assert!(tally[12][0] == 25 && mismatch[12] >= 23, "{:?} {}", tally[12], mismatch[12]);
     }
 
-    /// The VelD filter armed from 5 s, moving, VelD fused; `keep` the test control that keeps the S ring and S at a.
+    /// The VelD filter armed from 5 s, moving, VelD fused, to just before `secs` s; `keep` keeps the S ring and S at a re-initialisation.
     fn vd_warm(t: &Tuning, secs: u64, keep: bool) -> (Eskf, World) {
         let mut f = Eskf::with_gps_vd(t).unwrap();
         f.vd_keep_on_reinit = keep;

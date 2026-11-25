@@ -33,8 +33,7 @@ mod quat;
 pub mod step;
 pub mod tuning;
 
-/// The flight core's liveness answer (`fbeat`): waits on `kick`, then copies `ping` into `pong`,
-/// forever. Core 0 bumps `ping` and kicks; a `pong` that stops following `ping` means the flight.
+/// The flight core's liveness answer (`fbeat`): waits on `kick`, then copies `ping` into `pong`, forever.
 pub async fn liveness(kick: &Kick, ping: &AtomicU32, pong: &AtomicU32) -> ! {
     loop {
         kick.wait().await;
@@ -42,8 +41,8 @@ pub async fn liveness(kick: &Kick, ping: &AtomicU32, pong: &AtomicU32) -> ! {
     }
 }
 
-/// Runs `fut`, storing `id` into `running` each time the executor polls it, that is each time the
-/// task resumes after an await: the watchdog's record of the task that ran last. A plain atomic.
+/// Runs `fut`, storing `id` into `running` each time the executor polls it, that is each time the task resumes after an
+/// await: the watchdog's record of the task that ran last.
 pub async fn tagged<F: Future>(running: &AtomicU8, id: u8, fut: F) -> F::Output {
     let mut fut = pin!(fut);
     poll_fn(|cx| {

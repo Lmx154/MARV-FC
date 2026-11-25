@@ -124,7 +124,7 @@ impl<const N: usize> Guidance<N> {
     }
 
     /// The vehicle's NE position and velocity, for the next `step` to place the carrot on the leg: `s` at the vehicle's
-    /// projection on the leg clamped to [0, L], `v` at its speed along the leg clamped to [0, cruise]. Unusable input.
+    /// projection on the leg clamped to [0, L], `v` at its speed along the leg clamped to [0, cruise].
     pub fn anchor(&mut self, nav: &NavState) {
         let [pn, pe, _] = nav.position_m;
         let [vn, ve, _] = nav.velocity_ms;
@@ -271,8 +271,8 @@ pub const LAG_E_MAX_M: f32 = 2.0;
 pub const ARRIVAL_MARGIN_M: f32 = LAG_E_MAX_M + 1.0;
 /// The AUTO and RETURN cruise speed is min(speed in force, this), m/s.
 pub const LEG_SPEED_MAX_MS: f32 = 6.8;
-/// The carrot closer than this to the leg's end, m, is at the end and at rest (f32 rounding, not a tuning value: 2 km out,
-/// a 1 ms braking step this close to the end is below half an ulp of `s`). The stop from there is at most.
+/// The carrot closer than this to the leg's end, m, is at the end and at rest (f32 rounding, not a tuning value: 2 km
+/// out, a 1 ms braking step this close to the end is below half an ulp of `s`).
 const LEG_SNAP_M: f32 = 1e-3;
 
 /// Home: NE from the origin (m) and D_home (m down).
@@ -413,8 +413,7 @@ impl LegGuidance {
         }
     }
 
-    /// AUTO entry or re-entry: the waypoints of `mission` converted at `origin`, the
-    /// first leg from the vehicle to waypoint `start`, both carrots at the vehicle and at rest. The radius is the.
+    /// AUTO entry or re-entry: waypoints of `mission` at `origin`, first leg from the vehicle to waypoint `start`, both carrots at the vehicle and at rest. Refused (false, `Idle`) when the position or home is not finite or `start` is not a waypoint.
     pub fn enter(&mut self, position_m: [f32; 3], home: Home, origin: &GeoPoint, mission: &GdnTargets, start: u8, speed_ms: f32) -> bool {
         let [pn, pe, pd] = position_m;
         let count = usize::from(mission.count).min(GDN_TARGETS);
@@ -445,8 +444,8 @@ impl LegGuidance {
         true
     }
 
-    /// RETURN entry: H_r = max(`return_m` above home, the present height), latched here (a non-finite `return_m`
-    /// counts as the present height); climb in place, then the leg to home. Refused (false, `Idle`) when the position.
+    /// RETURN entry: H_r = max(`return_m` above home, the present height), latched here (a non-finite `return_m` counts
+    /// as the present height); climb in place, then the leg to home.
     pub fn enter_return(&mut self, position_m: [f32; 3], home: Home, return_m: f32, radius_m: f32, speed_ms: f32) -> bool {
         let [pn, pe, pd] = position_m;
         let finite = [pn, pe, pd, home.ne[0], home.ne[1], home.d].iter().all(|x| x.is_finite());
@@ -704,7 +703,7 @@ mod tests {
         }
     }
 
-    /// A vehicle that follows the setpoint exactly (a point mass with no lag): its position is the last setpoint's, its.
+    /// A vehicle that follows the setpoint exactly (a point mass with no lag), anchored once. Returns every output.
     fn follow(g: &mut Guidance<4>, start: NavState, speed: f32, max_steps: usize, stop_when_done: bool) -> Vec<GuidanceOut> {
         let mut outs = Vec::new();
         g.anchor(&start);
