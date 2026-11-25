@@ -202,13 +202,8 @@ pub const LINK_LOG: usize = 2;
 /// each cursor took them.
 type Ring = TextRing<(MavSeverity, TextLine), 3, TEXTS_DEPTH>;
 static TEXTS: Mutex<CriticalSectionRawMutex, RefCell<Ring>> = Mutex::new(RefCell::new(Ring::new()));
-/// 8; with `latency-text` 32, so that the boot's texts and the two sets of latency texts (4 each)
-/// all wait for a station that connects after 590 s.
-const TEXTS_DEPTH: usize = if cfg!(feature = "latency-text") {
-    32
-} else {
-    8
-};
+/// The text ring's depth.
+const TEXTS_DEPTH: usize = 8;
 /// The registry rows, the RC row (report only, `rc`) and the ESC row (report only, `esc`), in the
 /// order sent.
 pub const ROWS: usize = DEVICE_COUNT + 2;
@@ -995,8 +990,6 @@ async fn supervise() -> ! {
         let now = Instant::now();
         watchdog::report(&mut stalls_begun, &mut stalls_ended);
         devices.tick(now);
-        #[cfg(feature = "latency-text")]
-        devices.latency_text(now);
         actions::tick(now.as_millis());
         actions::permit(now.as_millis(), IMU1.row().state, esc::row().state);
         esc::report();

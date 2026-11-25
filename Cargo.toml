@@ -176,10 +176,6 @@ hang-flight = []
 spin-1s = []
 hang-irqoff = []
 
-# Latency experiment (src/device.rs `latency_text`): at 60 s a baseline of both IMUs' flight-core
-# figures, at 300 s and 590 s two STATUSTEXTs per IMU (and one log line) for the interval since it;
-# the text queue holds 32 instead of 8.
-latency-text = []
 # The supervisor's periodic `[STAT]` lines (uptime, devices, watchdog) are not printed.
 quiet-stat = []
 # Test hooks of the SD card's device task (src/sd.rs; the card cannot be pulled on the desk):
