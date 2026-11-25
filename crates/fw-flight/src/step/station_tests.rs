@@ -1,6 +1,5 @@
 //! Host tests of the station-command seam (`Flight::set_command`, `Flight::take_command_result`) with the real mailbox
-//! (`fw_core::flight_cmd`, `crate::station`): a command reaches the state machine on the step that takes it, and its
-//! answer comes back with the same sequence number; no command stops the motors.
+//! a command reaches the state machine on the step that takes it.
 
 extern crate std;
 
@@ -24,7 +23,7 @@ fn handshake() -> &'static Handshake {
     h
 }
 
-/// A receiver report (N19: these tests fly MAVLink flights at FS_HOLD_EN 1), the mission switch OFF.
+/// A receiver report, the mission switch OFF.
 fn rc(t: u64, arm: bool, throttle: f32) -> RcSample {
     RcSample {
         sticks: Sticks { roll: 0.0, pitch: 0.0, throttle, yaw: 0.0 },
@@ -36,7 +35,7 @@ fn rc(t: u64, arm: bool, throttle: f32) -> RcSample {
     }
 }
 
-/// The board's step: the waiting request, the step, its answer (`crate::flight::Stepper::sample`'s order).
+/// The board's step: the waiting request, the step, its answer (`crate::flight::Stepper::sample`'s order)
 fn board_step(f: &mut TestFlight, m: &Mailbox, t: u64, report: Option<RcSample>) -> StepOut {
     let taken = station::take(m);
     if let Some((_, c)) = taken {
@@ -67,14 +66,11 @@ fn a_command_through_the_mailbox_is_applied_on_the_step_that_takes_it_and_answer
         go(&mut f, Some((true, 0.5)));
     }
     assert!(f.airborne);
-    // PILOT with fresh sticks on a MAVLink flight: DENIED, code 4 (N19 section 5), with this command's number; the state
-    // is unchanged.
     let s = m.post(request_byte(FlightCommand::Land, true)).unwrap();
     go(&mut f, Some((true, 0.5)));
     assert_eq!(m.poll(s), Some(DenyReason::NotInThisState.code()));
     assert_eq!(f.hands_off_state(), State::Pilot);
     m.end(s, 0);
-    // Stick loss: HOLD.
     for _ in 0..2_000 {
         go(&mut f, None);
         if f.hands_off_state() != State::Pilot {
@@ -82,15 +78,12 @@ fn a_command_through_the_mailbox_is_applied_on_the_step_that_takes_it_and_answer
         }
     }
     assert_eq!(f.hands_off_state(), State::Hold);
-    // USB: DENIED, code 1.
     let s = m.post(request_byte(FlightCommand::Land, false)).unwrap();
     go(&mut f, None);
     assert_eq!(m.poll(s), Some(1));
     m.end(s, 0);
-    // A step with no request leaves no answer.
     go(&mut f, None);
     assert_eq!(f.take_command_result(), None);
-    // Land on the radio link: ACCEPTED, LAND at the step that took it, the answer tagged with its number only.
     let s = m.post(request_byte(FlightCommand::Land, true)).unwrap();
     assert_eq!(m.poll(s), None);
     let o = go(&mut f, None);
@@ -98,10 +91,8 @@ fn a_command_through_the_mailbox_is_applied_on_the_step_that_takes_it_and_answer
     assert_eq!(f.hands_off_state(), State::Land);
     assert!(o.armed, "Land is a descent, not a stop (N)");
     m.end(s, 0);
-    // Taken once: the next steps see no command.
     go(&mut f, None);
     assert_eq!(f.take_command_result(), None);
-    // Start: DENIED NoWaypoints or NoHome on this branch (this test sets no mission), never ACCEPTED.
     let s = m.post(request_byte(FlightCommand::Start, true)).unwrap();
     go(&mut f, None);
     assert_ne!(m.poll(s), Some(ACCEPTED));
@@ -124,12 +115,8 @@ impl Lcg {
     }
 }
 
-/// N: no command stops the motors. A random walk (reports, silences, coverage, motion, arming cycles; FS_HOLD_EN 1, the
-/// station heard on the radio link) with one of the five commands on a random link at 5 % of the steps, in whatever
-/// state the walk is in. Every disarm must have the pilot's switch (a report with arm OFF at that step), the touchdown
-/// rule (TD held at the previous step) or a stick loss on the ground as its cause. H3b: the 30 m square is uploaded and
-/// the battery known OK, so Start is ACCEPTED in HOLD and AUTO is flown (counted, required). H3b-2: Return is ACCEPTED
-/// in HOLD and AUTO and RETURN is flown (counted, required; it takes steps from AUTO, hence AUTO's lower count).
+/// N: no command stops the motors. A random walk.
+/// the station heard on the radio link) with one of the five commands on a random link at 5 % of the steps.
 #[test]
 fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
     let mut accepted = std::collections::BTreeMap::<(u8, u8), u32>::new();
@@ -139,8 +126,6 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
         let mut f = flight(&cell, handshake(), &Tuning::DEFAULT);
         f.set_fs_hold_en(true);
         f.set_mission(super::auto_tests::square());
-        // BATT-M: the battery through the monitor's byte at every step, known OK at first; now and then CRITICAL with
-        // action 0 or 1, LOW, or not known, from a generator of its own (the main sequence is unchanged).
         let (mut bat, mut batt) = (Lcg(seed ^ 0xb0b0), fw_core::battery::CELL_KNOWN_OK);
         let mut rng = Lcg(seed);
         let mut t = 1_000_000u64;
@@ -149,8 +134,6 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
         let (mut pos, mut vel) = ([0.0f32; 3], [0.0f32; 3]);
         let mut newest = None::<u64>;
         let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
-        // N19: receiver reports with the mission switch from a generator of its own (the main sequence is unchanged); the
-        // pilot arms with it OFF (a report with it ON never arms) and keeps it mostly ON in the air.
         let (mut ms, mut mission) = (Lcg(seed ^ 0x8888), false);
         for _ in 0..40_000 {
             t += DT_US;
@@ -243,9 +226,7 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
     assert!(disarms > 0, "the walk disarms");
 }
 
-/// Amendment A: a new plan id reaches the state machine through `Flight::set_plan_id` every step. While AUTO cannot be
-/// reached (no waypoints, no RETURN law) the feed changes nothing: the same flight with and without new plan ids, in
-/// PILOT, HOLD and LAND, gives bit-identical outputs.
+/// A new plan id reaches the state machine through `Flight::set_plan_id` every step.
 #[test]
 fn a_plan_id_feed_reaches_the_seam_and_without_auto_changes_no_output() {
     let run = |feed: bool| {

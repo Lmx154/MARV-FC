@@ -1,6 +1,5 @@
-//! Host tests of crash rule K in shadow (decision-mavlink-mode-20261123, Amendment N, N5 and N7): the real step with the
-//! fake estimator of `althold_tests`, FS_HOLD_EN 0, sticks present on every step (Angle, switch Low). IMU1 reads the
-//! specific force at rest for the estimate's attitude plus `extra_ned` (so the filtered acceleration settles at it).
+//! Host tests of crash rule K in shadow: the real step with the fake estimator of `althold_tests`, FS_HOLD_EN 0,
+//! sticks present on every step (Angle, switch Low)
 
 extern crate std;
 
@@ -8,7 +7,8 @@ use super::althold_tests::{ALTITUDE, ANGLE, DT_US, TestFlight, flight, input, na
 use super::*;
 use core::cell::Cell;
 
-/// Steps in N5's 2.0 s at `DT_US` (the design's number, not `CRASH_TRIGGER_US`, so the control with that set to 0 builds).
+/// Steps in the 2.0 s at `DT_US`.
+/// builds)
 const TRIGGER_STEPS: u32 = (2_000_000 / DT_US) as u32;
 
 /// Velocity NE and D valid besides Angle's needs.
@@ -36,7 +36,7 @@ struct Crash {
     t: u64,
     /// Added to the specific force at rest, NED, m/s^2: the filtered acceleration's input.
     extra_ned: [f32; 3],
-    /// The mode switch of every report (Low: Angle).
+    /// The mode switch of every report (Low: Angle)
     switch6: Switch3,
 }
 
@@ -77,7 +77,6 @@ impl Crash {
         let mut n = self.cell.get();
         n.attitude = q;
         self.cell.set(n);
-        // f_body = R(q)^T (-g down + extra), so that the earth-frame acceleration with gravity removed is `extra_ned`.
         let [e0, e1, e2] = self.extra_ned;
         let [_, fx, fy, fz] = quat::mul(quat::mul(quat::conj(q), [0.0, e0, e1, e2 - GRAVITY_MSS]), q);
         let mut i = input(self.t, Some(RcSample { sticks: Sticks { roll, pitch, throttle, yaw: 0.0 }, arm, switch6: self.switch6, source: fw_core::rc::RcSource::Crsf, mission: false, t_us: self.t }));
@@ -111,8 +110,8 @@ fn k_constants_are_arducopters() {
     assert_eq!((CRASH_TRIGGER_US, CRASH_ACCEL_MAX_MSS, CRASH_SPEED_MAX_MS), (2_000_000, 3.0, 10.0));
 }
 
-/// N7: upside down at rest after a flight (lean 180, the setpoint level, the throttle still at half so TD's (a) fails):
-/// K would fire after exactly 2.0 s of steps, not after 1.99 s; with the four terms set.
+/// Upside down at rest after a flight (lean 180, the setpoint level, the throttle still at half so TD's (a) fails): K
+/// would fire after exactly 2.0 s of steps, not after 1.99 s; with the four terms set.
 #[test]
 fn k_upside_down_fires_at_2_0_s_not_at_1_99_s() {
     let mut c = Crash::flown(ANGLE);
@@ -128,7 +127,7 @@ fn k_upside_down_fires_at_2_0_s_not_at_1_99_s() {
     assert!(c.fly(roll(180.0), [0.0, 0.0, 0.5]).would_fire(), "stays");
 }
 
-/// N7: on its side (90 deg) and caught tilted 40 deg against something, the controller commanding level and no
+/// On its side (90 deg) and caught tilted 40 deg against something, the controller commanding level and no
 /// acceleration: K would fire at 2.0 s; with the velocity valid and at rest too.
 #[test]
 fn k_on_its_side_and_caught_tilted_40_deg_fire() {
@@ -137,9 +136,6 @@ fn k_on_its_side_and_caught_tilted_40_deg_fire() {
         assert!(!c.fires_within(TRIGGER_STEPS - 1, roll(deg), [0.0, 0.0, 0.5]), "{deg} deg: not before 2.0 s");
         assert!(c.fly(roll(deg), [0.0, 0.0, 0.5]).would_fire(), "{deg} deg, {valid:?}: at 2.0 s");
     }
-    // Altitude (the setpoint's attitude) and Position (the controller's attitude setpoint), sticks centred: tilted 40 deg
-    // K would fire at 2.0 s. At 90 deg their tilt factor (pid.rs `tilt_factor`, 0 at or past sideways) puts the collective
-    // under the ground threshold, so TD holds at 1.0 s and K, which needs TD not held, never fires.
     for (switch6, valid, mode) in [(Switch3::Middle, ALTITUDE, Mode::Altitude), (Switch3::High, POSITION, Mode::Position)] {
         for deg in [40.0, 90.0] {
             let mut c = Crash::flown(valid);
@@ -161,9 +157,8 @@ fn k_on_its_side_and_caught_tilted_40_deg_fire() {
     }
 }
 
-/// N7: each term alone false keeps K from firing (4 s of steps, the timer at 0): lean 10 deg with the setpoint at -30
+/// Each term alone false keeps K from firing (4 s of steps, the timer at 0): lean 10 deg with the setpoint at -30
 /// (error 40); lean 20 deg tracking a 20 deg setpoint; the filtered acceleration at 3.5 m/s^2; |v| 10.5 m/s valid.
-/// Just inside each bound the same cases fire.
 #[test]
 fn k_each_term_alone_blocks_it() {
     let block = |c: &mut Crash, q: [f32; 4], sticks: [f32; 3], what: &str| {
@@ -199,13 +194,12 @@ fn k_each_term_alone_blocks_it() {
     let mut c = Crash::flown(VELOCITY);
     c.set_velocity([6.0, 7.9, 0.0]);
     assert!(c.fires_within(TRIGGER_STEPS, roll(90.0), [0.0, 0.0, 0.5]), "speed 9.9 fires");
-    // The same 10.5 m/s with the velocity not valid: the term is true.
     let mut c = Crash::flown(ANGLE);
     c.set_velocity([6.0, 8.0, 3.2]);
     assert!(c.fires_within(TRIGGER_STEPS, roll(90.0), [0.0, 0.0, 0.5]), "velocity not valid fires");
 }
 
-/// N7: one step with a term false restarts the timer: after it, a full 2.0 s is needed again.
+/// One step with a term false restarts the timer: after it, a full 2.0 s is needed again.
 #[test]
 fn k_a_one_step_break_restarts_the_timer() {
     let mut c = Crash::flown(ANGLE);
@@ -216,9 +210,8 @@ fn k_a_one_step_break_restarts_the_timer() {
     assert!(c.fly(roll(90.0), [0.0, 0.0, 0.5]).would_fire(), "2.0 s after the break");
 }
 
-/// N7: never before the first airborne latch since arming (armed on the ground at throttle 0, rocking at 30 deg/s so TD
-/// does not hold), upside down for 4 s; never while TD is held (after a flight, upside down and still with the throttle
-/// at 0: the timer runs until TD holds at 1.0 s, then K is reset); tilt or rates not valid: no terms, timer reset.
+/// Never before the first airborne latch since arming.
+/// does not hold), upside down for 4 s; never while TD is held (after a flight.
 #[test]
 fn k_never_before_ever_airborne_never_while_td_held_nor_without_tilt() {
     let mut c = Crash::armed(ANGLE);
@@ -253,9 +246,8 @@ fn k_never_before_ever_airborne_never_while_td_held_nor_without_tilt() {
     }
 }
 
-/// N7: recoverable manoeuvres do not fire: Angle at the 30 deg limit tracking its setpoint for 5 s (the IMU at rest, so
-/// lean, acceleration and speed hold; the error is 0); a 60 deg upset of 0.5 s against a level setpoint that recovers,
-/// repeated four times with 0.1 s level between.
+/// Recoverable manoeuvres do not fire: Angle at the 30 deg limit tracking its setpoint for 5 s.
+/// lean, acceleration and speed hold; the error is 0)
 #[test]
 fn k_recoverable_manoeuvres_do_not_fire() {
     let mut c = Crash::flown(ANGLE);
@@ -276,8 +268,8 @@ fn k_recoverable_manoeuvres_do_not_fire() {
     }
 }
 
-/// K touches no output: a non-finite estimate or acceleration gives false terms, and a crash that would fire leaves the
-/// step's outputs equal to those of the same flight with K's terms forced false (the same `StepOut`, bit for bit).
+/// K touches no output: a non-finite estimate or acceleration gives false terms, and a crash that would fire leaves
+/// The step's outputs equal to those of the same flight with K's terms forced false.
 #[test]
 fn k_non_finite_inputs_are_false_and_k_changes_no_output() {
     let nav = |q: [f32; 4], v: [f32; 3]| NavState { attitude: q, velocity_ms: v, ..nav_at(0.0, VELOCITY) };
@@ -290,7 +282,6 @@ fn k_non_finite_inputs_are_false_and_k_changes_no_output() {
     assert_eq!(crash_terms(&nav(roll(90.0), [0.0; 3]), None, [0.0; 3]), (true, false, true, true));
     assert_eq!(crash_terms(&nav(roll(90.0), [0.0; 3]), level, [f32::NAN, 0.0, 0.0]), (true, true, false, true));
     assert_eq!(crash_terms(&nav(roll(90.0), [f32::INFINITY, 0.0, 0.0]), level, [0.0; 3]), (true, true, true, false));
-    // The same crash flown twice, the twin with K's timer reset before every step (it never fires): equal outputs.
     let mut a = Crash::flown(ANGLE);
     let mut b = Crash::flown(ANGLE);
     for k in 0..2 * TRIGGER_STEPS {
@@ -303,9 +294,7 @@ fn k_non_finite_inputs_are_false_and_k_changes_no_output() {
 }
 
 /// The board's K MSG (`crash_msg`): nothing while K would not fire and none was logged, "K 1 1111" at the step it
-/// would fire, nothing while it stays, "K 0" at the step it clears; a dropped MSG (`logged` not updated) is offered again.
-/// Over a flight with an upset and a recovery that never fires, with FS_HOLD_EN 0, no MSG at all; a crash, then
-/// level again: exactly "K 1 1111" at 2.0 s and "K 0" at the first level step. The texts fit MSG's 64 bytes.
+/// would fire, nothing while it stays, "K 0" at the step it clears.
 #[test]
 fn k_msg_is_edge_triggered_and_absent_from_a_flight_that_never_fires() {
     let s = |held_us: u64| CrashStatus { lean: true, error: true, accel: true, speed: true, held_us };
@@ -320,7 +309,6 @@ fn k_msg_is_edge_triggered_and_absent_from_a_flight_that_never_fires() {
     let mut b = [0u8; 75];
     assert_eq!(dflog::encode_msg(&mut b, 1, &crash_msg(false, &s(CRASH_TRIGGER_US)).unwrap()), 75);
     assert_eq!(&b[11..20], b"K 1 1111\0", "whole, with its terminator");
-    // The board's loop over real steps.
     let board = |c: &mut Crash, script: &[(f32, u32)]| {
         let (mut logged, mut msgs) = (false, std::vec::Vec::new());
         for &(deg, steps) in script {

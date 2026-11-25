@@ -1,8 +1,5 @@
-//! Host tests of the in-air restart at the step level (decision-inair-restart-20261125): after an arm-switch STOP in
-//! the air, the arm switch back ON within `RESTART_WINDOW_US` while IMU1 reads free fall arms with any throttle and lean;
-//! the arming flies Altitude for an Angle selection (cancelled by a mode-switch change) and latches no home. Every other
-//! disarm, a STOP on the ground, an impact, a late edge, a non-finite sample, no tilt and the N19 rule are refused as
-//! today. The estimator is the fake of `althold_tests`; IMU1's specific force is set per step.
+//! Host tests of the in-air restart at the step level: after an arm-switch STOP in the air, the arm switch back ON
+//! within `RESTART_WINDOW_US` while IMU1 reads free fall arms with any throttle and lean.
 
 extern crate std;
 
@@ -20,7 +17,7 @@ const REST: [f32; 3] = [0.0, 0.0, -GRAVITY_MSS];
 /// Altitude covered (Position not: no NE velocity, no heading), the NE position valid so home can latch.
 const NE_ALTITUDE: Valid = Valid { position_ne: true, ..ALTITUDE };
 
-/// Log 346's STOP height, m above take-off (down negative).
+/// Log 346's STOP height, m above take-off (down negative)
 const STOP_D: f32 = -7.3;
 
 fn handshake() -> &'static Handshake {
@@ -86,10 +83,9 @@ impl Rig {
         self.step_at(self.t + DT_US, arm, throttle, f_ms2)
     }
 
-    /// Armed with the switch cycle, then 2 s at hover at `STOP_D` (the airborne latch forced, released
-    /// before the STOP step so that step reads it as the flight left it); a report every 8th step (10 ms).
+    /// Armed with the switch cycle, then 2 s at hover at `STOP_D`.
+    /// step so that step reads it as the flight left it); a report every 8th step (10 ms)
     fn hover(&mut self) {
-        // At the hover height from the start, so an Altitude target captured at arming is the hover's.
         self.nav(STOP_D, 0.0);
         self.step(Some(false), 0.0, REST);
         self.step(Some(true), 0.0, REST);
@@ -111,8 +107,8 @@ impl Rig {
         self.t
     }
 
-    /// `n` steps falling from `stop` (the estimate's height and v_D in free fall), the switch OFF in a report every 10 ms
-    /// at `throttle`, IMU1 reading `f(steps since the STOP)`; the free-fall notes with their step since the STOP.
+    /// `n` steps falling from `stop` (the estimate's height and v_D in free fall), the switch OFF in a report every 10
+    /// ms at `throttle`, IMU1 reading `f(steps since the STOP)`.
     fn fall(&mut self, stop: u64, n: u64, throttle: f32, f: impl Fn(u64) -> [f32; 3]) -> Vec<(u64, FallNote)> {
         let mut notes = Vec::new();
         for _ in 0..n {
@@ -145,20 +141,16 @@ fn after(stop: u64, ms: u64) -> u64 {
     stop + ms * 1_000
 }
 
-/// The first step after the STOP past `FALL_SETTLE_US` (the first that can set the latch).
+/// The first step after the STOP past `FALL_SETTLE_US` (the first that can set the latch)
 const SETTLED: u64 = FALL_SETTLE_US / DT_US + 1;
 
-/// Steps between the STOP and an edge at `ms` (exclusive).
+/// Steps between the STOP and an edge at `ms` (exclusive)
 fn steps_to(ms: u64) -> u64 {
     ms * 1_000 / DT_US - 1
 }
 
 /// Log 346 (2026-11-25, 621.167 s): a MAVLink flight hovering at 7.3 m, the arm switch OFF with the mission switch OFF
-/// (STOP "arm-ms-off"), free fall with |f| in the log's 0.3 to 1.6 m/s^2 band, the switch back ON 0.63 s later with the
-/// throttle at 0.74 (refused "thr" in the log). Now: "FALL on" at the first sample past `FALL_SETTLE_US`, the edge arms with
-/// "ARM fall t=630 thr=74", the motors run from that step, the next step is PILOT by the normal armed edge, the effective
-/// mode is Altitude (Angle raised, or the log's Position selection without Position coverage) with the collective
-/// demand above m g while falling at 6 m/s, and no home is latched. The raw samples: `raw_log_346_replay_restarts`.
+/// (STOP "arm-ms-off"), free fall with |f| in the log's 0.3 to 1.6 m/s^2 band.
 #[test]
 fn log_346_trace_restarts_at_0_63_s_into_altitude_with_no_home() {
     for switch6 in [Switch3::Low, Switch3::High] {
@@ -191,10 +183,9 @@ fn log_346_trace_restarts_at_0_63_s_into_altitude_with_no_home() {
 }
 
 /// The restart's Altitude needs the estimate to cover it (Angle otherwise), lasts for that arming, and a change of the
-/// mode switch cancels it until disarm (the low-battery descent's pattern).
+/// mode switch cancels it until disarm (the low-battery descent's pattern)
 #[test]
 fn the_restart_altitude_needs_coverage_and_a_mode_switch_change_cancels_it() {
-    // Not covered: Angle.
     let mut r = Rig::new(RcSource::Crsf, Switch3::Low, ANGLE);
     r.hover();
     let stop = r.stop();
@@ -203,7 +194,6 @@ fn the_restart_altitude_needs_coverage_and_a_mode_switch_change_cancels_it() {
     for _ in 0..20 {
         assert_eq!(r.step(Some(true), 0.74, band(0)).mode, Mode::Angle);
     }
-    // Covered: Altitude, then Middle (Altitude, selected), then Low again: Angle, cancelled.
     let mut r = Rig::new(RcSource::Crsf, Switch3::Low, ALTITUDE);
     r.hover();
     let stop = r.stop();
@@ -252,8 +242,7 @@ fn a_ground_stop_then_free_fall_is_refused() {
 }
 
 /// Negative control: after the latch is set, one sample at 0.26 g (an impact) clears it for good: low samples after it
-/// and the switch ON are refused "thr". Twin: the same with that sample at 0.24 g restarts. The same 0.26 g sample within
-/// `FALL_SETTLE_US` (the spin-down) changes nothing.
+/// and the switch ON are refused "thr".
 #[test]
 fn one_sample_at_or_above_0_25_g_after_the_latch_clears_it_for_good() {
     for (at, bump, restarts) in [(200u64, 0.26f32, false), (200, 0.24, true), (SETTLED - 1, 0.26, true)] {
@@ -273,8 +262,8 @@ fn one_sample_at_or_above_0_25_g_after_the_latch_clears_it_for_good() {
     }
 }
 
-/// Negative control: the window is 5 s from the STOP: an edge at 5.000 s restarts, at 5.001 s it is refused "thr" (and
-/// the first sample past 5 s logged "FALL off late").
+/// Negative control: the window is 5 s from the STOP: an edge at 5.000 s restarts, at 5.001 s it is refused "thr".
+/// the first sample past 5 s logged "FALL off late")
 #[test]
 fn the_restart_window_ends_5_s_after_the_stop() {
     assert_eq!(RESTART_WINDOW_US, 5_000_000);
@@ -285,7 +274,6 @@ fn the_restart_window_ends_5_s_after_the_stop() {
         let notes = r.fall(stop, steps_to(5_000), 0.74, |_| g_frac(0.05));
         assert_eq!(notes, [(SETTLED, FallNote::On)]);
         if !restarts {
-            // One more sample, past the window, before the edge.
             r.fall_nav(stop, stop + 5_000_500);
             r.step_at(stop + 5_000_500, None, 0.74, g_frac(0.05));
             assert_eq!(r.f.fall_note(), Some(FallNote::Off(FallOff::Late)));
@@ -313,7 +301,7 @@ fn a_non_finite_sample_clears_the_latch_for_good() {
 }
 
 /// Negative control: with the latch true, no tilt on the edge step is refused "tilt"; the cycle is cleared, and a new
-/// cycle with tilt back restarts (the window and the latch are still in force).
+/// cycle with tilt back restarts (the window and the latch are still in force)
 #[test]
 fn no_tilt_on_the_edge_is_refused_and_a_new_cycle_restarts() {
     let mut r = Rig::new(RcSource::Crsf, Switch3::Low, ALTITUDE);
@@ -335,7 +323,7 @@ fn no_tilt_on_the_edge_is_refused_and_a_new_cycle_restarts() {
     assert!(matches!(r.f.arm_note(), Some(ArmNote::Restart { t_ms: 660, .. })));
 }
 
-/// Negative control (N19): a receiver report with the mission switch ON never arms, the restart included ("ms").
+/// Negative control: a receiver report with the mission switch ON never arms, the restart included ("ms")
 #[test]
 fn a_receiver_report_with_the_mission_switch_on_is_refused() {
     let mut r = Rig::new(RcSource::Receiver, Switch3::High, ALTITUDE);
@@ -350,9 +338,7 @@ fn a_receiver_report_with_the_mission_switch_on_is_refused() {
 }
 
 /// Log 346's raw IMU1 samples (testdata/log346_imu1.csv, 621.160 to 621.900 s), replayed through the step on the log's
-/// times after a hover: the STOP at 621.167991 (arm-ms-off), the edge at 621.797555 with the throttle at 0.741. With
-/// `settle_off` (`FALL_SETTLE_US` as 0, the control) the spin-down clears the latch. Returns the edge step, the free-fall
-/// notes with their log times, the rig and the STOP's step time.
+/// times after a hover: the STOP at 621.167991 (arm-ms-off)
 fn raw_346(switch6: Switch3, settle_off: bool) -> (StepOut, Vec<(u64, FallNote)>, Rig, u64) {
     const STOP_T: u64 = 621_167_991;
     const EDGE_T: u64 = 621_797_555;
@@ -391,11 +377,8 @@ fn raw_346(switch6: Switch3, settle_off: bool) -> (StepOut, Vec<(u64, FallNote)>
     (edge.expect("the edge step"), notes, r, stop)
 }
 
-/// Acceptance (decision-inair-restart-20261125 with `FALL_SETTLE_US`): log 346's raw samples restart at the arm-ON of
-/// 621.7976 with "ARM fall t=629 thr=74", then fly Altitude with the collective above m g and no home. "FALL on" at the
-/// first sample past 150 ms (the spin-down's samples at up to 0.56 g are ignored), no "FALL off". Control: with the
-/// settle time 0 the same samples set the latch at 621.1941 and clear it at 621.1954 (0.37 g, spin-down): refused "thr",
-/// as in the log.
+/// Acceptance (with `FALL_SETTLE_US`): log 346's raw samples restart at the arm-ON of 621.7976 with "ARM fall t=629
+/// thr=74".
 #[test]
 fn raw_log_346_replay_restarts() {
     for switch6 in [Switch3::Low, Switch3::High] {
@@ -439,7 +422,8 @@ fn a_low_throttle_rearm_while_falling_is_a_restart_arming() {
     }
 }
 
-/// Negative control: throttle 0.74 with no in-air STOP (never armed, IMU1 reading free fall) is refused "thr" as today.
+/// Negative control: throttle 0.74 with no in-air STOP (never armed, IMU1 reading free fall) is refused "thr" as
+/// today.
 #[test]
 fn throttle_high_without_an_in_air_stop_is_refused() {
     let mut r = Rig::new(RcSource::Crsf, Switch3::Low, ALTITUDE);

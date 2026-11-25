@@ -1,6 +1,5 @@
-//! The flight step: one call per IMU1 sample, on core 1 (decision-sim-seams-20261119, sections 7 and 11).
-//! [`Flight::step`] runs the stages in the order of rule R1, each exactly once. No clock: the step time is
-//! `sensors.imu1.t_us`.
+//! The flight step: one call per IMU1 sample, on core 1. [`Flight::step`] runs the stages in a fixed order, each
+//! exactly once.
 
 use crate::alloc::CardAllocator;
 use crate::gate::{ArmNote, FallNote, Gate, MotorCommand};
@@ -31,13 +30,12 @@ pub struct FlightInputs {
     pub sensors: Sensors,
     /// This step's new stick report, if one arrived.
     pub rc: Option<RcSample>,
-    /// The latest eRPM of each ESC and the board time it was captured, us, by DShot line (`EscLine::erpm`); `None` for a
-    /// line without one, and for every line when the ESC status is not available. A value that is `notch_hold_us` or more
-    /// old at the step time counts as missing.
+    /// The latest eRPM of each ESC and the board time it was captured, us, by DShot line (`EscLine::erpm`); `None` for
+    /// a line without one, and for every line when the ESC status is not available.
     pub erpm: [Option<(u32, u64)>; LINES],
 }
 
-/// Everything one step decided, by value: the ESC command plus what the log records (firmware change 5).
+/// Everything one step decided, by value: the ESC command plus what the log records.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StepOut {
     /// The step time, `sensors.imu1.t_us`.
@@ -46,11 +44,10 @@ pub struct StepOut {
     pub motors: MotorCommand,
     /// The gate's state after this step.
     pub armed: bool,
-    /// The mode the pilot selected with the switch on channel 6 (Angle until the first stick report).
+    /// The mode the pilot selected with the switch on channel 6 (Angle until the first stick report)
     pub selected: Mode,
-    /// The mode in effect this step (decision-nav-eskf-20261120, 5e, F1; Amendment P, P3): Position if `selected` is
-    /// Position, the estimate covers what `Setpoint::Position` needs and the airborne latch is set; else Altitude if `selected` is Altitude or Position and the estimate covers what
-    /// `Setpoint::Altitude` needs; otherwise Angle. MOT's `Mode`.
+    /// The mode in effect this step: Position if `selected` is Position, the estimate covers what `Setpoint::Position`
+    /// needs and the airborne latch is set.
     pub mode: Mode,
     /// The estimator's state.
     pub nav: NavState,
@@ -60,16 +57,16 @@ pub struct StepOut {
     pub demand: Result<ThrustTorque, Refused>,
     /// `None` when the demand was refused.
     pub allocation: Option<Allocation>,
-    /// The attitude setpoint [w, x, y, z] the controller made from a `Setpoint::Position` this step (SETP kind 3); [0; 4]
-    /// in every other case.
+    /// The attitude setpoint [w, x, y, z] the controller made from a `Setpoint::Position` this step (SETP kind 3); [0;
+    /// 4] in every other case.
     pub attitude_sp: [f32; 4],
-    /// The rate loop of this step (PIDT and NTCH records): zero except the rotor frequencies and the notch switch when the
-    /// demand was refused.
+    /// The rate loop of this step (PIDT and NTCH records): zero except the rotor frequencies and the notch switch when
+    /// the demand was refused.
     pub rate: RateLog,
 }
 
-/// What the low-battery descent (Amendment BATT, `BATT_FS_CRT_ACT` 1) is doing, by value so core 0 can raise the texts
-/// (the flight core has none): [`Flight::batt_descent`].
+/// What the low-battery descent (`BATT_FS_CRT_ACT` 1) is doing, by value so core 0 can raise the texts:
+/// [`Flight::batt_descent`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BattDescent {
     /// Not asked for, or the arm state says nothing.
@@ -82,134 +79,124 @@ pub enum BattDescent {
     NoHeight = 3,
 }
 
-/// The default of the parameter `MOT_POLES`: poles, not pole pairs (`fw_settings::esc`).
+/// The default of the parameter `MOT_POLES`: poles, not pole pairs (`fw_settings::esc`)
 const NOTCH_POLES_DEFAULT: i32 = 14;
 
-/// The range of the parameter `MOT_POLES` (`fw_settings::esc`; the flight code checks it too, as for `PILOT_SPEED_XY`).
+/// The range of the parameter `MOT_POLES` (`fw_settings::esc`; the flight code checks it too, as for `PILOT_SPEED_XY`)
 const NOTCH_POLES_RANGE: core::ops::RangeInclusive<i32> = 2..=64;
 
-/// The throttle stick's centre in altitude hold: the dead zone is this plus and minus `pilot_thr_dz`
-/// (ArduPilot `Attitude.cpp:97-112`, the centre fixed at half travel).
+/// The throttle stick's centre in altitude hold: the dead zone is this plus and minus `pilot_thr_dz`.
+/// `Attitude.cpp:97-112`, the centre fixed at half travel)
 const THROTTLE_CENTRE: f32 = 0.5;
 
-/// LAND's descent, m/s down: the height target integrates at this rate (decision-mavlink-mode-20261123, A8 and Numbers
-/// "land 0.5 m/s", ArduPilot LAND_SPD_MS_DEFAULT, config.h:335-336).
+/// LAND's descent, m/s down: the height target integrates at this rate.
+/// config.h:335-336)
 pub const LAND_SPEED_MS: f32 = 0.5;
 
-/// E2's first stage, m/s down: LAND and the TAKEOVER descent above `LAND_ALT_LOW_M` over home (decision-mavlink-mode-20261123,
-/// E2, approved by the owner in section 17: the approved descent `pilot_speed_dn_ms`, tuning.rs; ArduPilot
-/// LAND_SPD_HIGH_MS, mode_land.cpp:22, mode.cpp:719-727; PX4 MPC_Z_V_AUTO_DN 1.5).
+/// First-stage LAND descent, m/s down: LAND and the TAKEOVER descent above `LAND_ALT_LOW_M` over home.
+/// `pilot_speed_dn_ms`; ArduPilot LAND_SPD_HIGH_MS, mode_land.cpp:22; PX4 MPC_Z_V_AUTO_DN 1.5)
 pub const LAND_SPEED_HIGH_MS: f32 = 1.5;
 
-/// E2: the height above home from which down LAND descends at `LAND_SPEED_MS`, m (ArduPilot LAND_ALT_LOW_M 10,
-/// mode_land.cpp:31; PX4 MPC_LAND_ALT1 10, multicopter_takeoff_land_params.yaml). With no home, `LAND_SPEED_MS` all the
-/// way (E2).
+/// The height above home from which down LAND descends at `LAND_SPEED_MS`, m.
+/// mode_land.cpp:31; PX4 MPC_LAND_ALT1 10, multicopter_takeoff_land_params.yaml)
 pub const LAND_ALT_LOW_M: f32 = 10.0;
 
-/// E2: how fast LAND's descent rate changes from one stage to the other, m/s^2, so the change steps neither the velocity
-/// setpoint nor the thrust (ArduPilot WP_ACC_Z default 1.0, AC_WPNav.cpp:14, the vertical acceleration LAND sets,
-/// mode_land.cpp:77).
+/// How fast LAND's descent rate changes from one stage to the other, m/s^2, so the change steps neither the velocity
+/// Setpoint nor the thrust.
 pub const LAND_RATE_ACC_MSS: f32 = 1.0;
 
-/// E2: the first stage ends this far above `LAND_ALT_LOW_M`, m: the height a descent that tracks the rate covers while
-/// `LAND_RATE_ACC_MSS` takes it from `LAND_SPEED_HIGH_MS` to `LAND_SPEED_MS`, so it is at `LAND_SPEED_MS` from
-/// `LAND_ALT_LOW_M` down (ArduPilot likewise slows above LAND_ALT_LOW_M, mode.cpp:732-737).
+/// The first stage ends this far above `LAND_ALT_LOW_M`, m: the height a descent that tracks the rate covers while
+/// `LAND_RATE_ACC_MSS` takes it from `LAND_SPEED_HIGH_MS` to `LAND_SPEED_MS`.
 const LAND_SLOW_MARGIN_M: f32 =
     (LAND_SPEED_HIGH_MS * LAND_SPEED_HIGH_MS - LAND_SPEED_MS * LAND_SPEED_MS) / (2.0 * LAND_RATE_ACC_MSS);
 
-/// FX-2 (3): RETURN reports Home only below this vertical speed, m/s, so LAND's first rate (N11 (2), v_D) is within
-/// `LAND_SPEED_MS` of rest and E2's first stage is reached within about 2 s at `LAND_RATE_ACC_MSS`.
+/// RETURN reports Home only below this vertical speed, m/s, so LAND's first rate is within `LAND_SPEED_MS` of rest and
+/// the first stage is reached within about 2 s at `LAND_RATE_ACC_MSS`.
 const HOME_VD_MAX_MS: f32 = LAND_SPEED_MS;
 
-/// FX-4 (1): RETURN reports Home this long after the guidance first reported it in this RETURN, us, whatever v_D reads:
-/// the time LAND's own rate ramp needs to absorb the largest climb rate (`LEG_CLIMB_MS` / `LAND_RATE_ACC_MSS`).
+/// RETURN reports Home this long after the guidance first reported it in this RETURN, us, whatever v_D reads: the time
+/// LAND's rate ramp needs to absorb the largest climb rate (`LEG_CLIMB_MS` / `LAND_RATE_ACC_MSS`)
 const HOME_WAIT_US: u64 = (guidance::LEG_CLIMB_MS / LAND_RATE_ACC_MSS * 1e6) as u64;
 
-/// BLIND's collective below hover, m/s^2 (decision-mavlink-mode-20261123, Numbers "BLIND 0.3 m/s^2 below hover", PX4
-/// FlightTaskDescend.cpp:55-58). UNVERIFIED: the decision marks it UNKNOWN (U-1) and for the simulator only.
+/// BLIND's collective below hover, m/s^2 (PX4 FlightTaskDescend.cpp:55-58). UNVERIFIED; simulator only.
 pub const BLIND_BELOW_HOVER_MSS: f32 = 0.3;
 
 /// BLIND's synthetic throttle: Angle's collective at it is m (g - `BLIND_BELOW_HOVER_MSS`), "hover" being the card's
-/// nominal m g, the collective Angle gives at half throttle (there is no height estimate to find the real hover). Only
-/// before H is valid: then H - m `BLIND_BELOW_HOVER_MSS` (N11 (1c); N16 (b) uses H for every synthetic Angle throttle).
+/// nominal m g (Angle's collective at half throttle)
 const BLIND_THROTTLE: f32 = THROTTLE_CENTRE * (1.0 - BLIND_BELOW_HOVER_MSS / GRAVITY_MSS);
 
-/// N11 (1a): the learned hover collective's low-pass time constant, s (ArduPilot AP_MOTORS_THST_HOVER_TC 10,
-/// AP_MotorsMulticopter.h:14-17, called from ArduCopter Attitude.cpp:62).
+/// The learned hover collective's low-pass time constant, s.
+/// AP_MotorsMulticopter.h:14-17, called from ArduCopter Attitude.cpp:62)
 const HOVER_TC_S: f32 = 10.0;
 
-/// N11 (1a): the learner runs only below this vertical speed, m/s (ArduCopter Attitude.cpp:59, 60 cm/s).
+/// The learner runs only below this vertical speed, m/s (ArduCopter Attitude.cpp:59, 60 cm/s)
 const HOVER_VD_MAX_MS: f32 = 0.6;
 
-/// N11 (1a): tan 5 deg and sin 5 deg, the roll and pitch bounds of the learner (ArduCopter Attitude.cpp:59-60, 5 deg each).
+/// Tan 5 deg and sin 5 deg, the roll and pitch bounds of the learner (ArduCopter Attitude.cpp:59-60, 5 deg each)
 const HOVER_TAN_ROLL_MAX: f32 = 0.087_488_66;
 const HOVER_SIN_PITCH_MAX: f32 = 0.087_155_74;
 
-/// N11 (1a), N14 (2): the learned hover collective's range, x the card's m g: the hover collective the real thrust gain
-/// range allows, [1 / `GAIN_MAX`, 1 / `GAIN_MIN`] = [0.685, 1.61].
+/// The learned hover collective's range, x the card's m g: the hover collective the real thrust gain range allows, [1
+/// / `GAIN_MAX`, 1 / `GAIN_MIN`] = [0.685, 1.61].
 const HOVER_MIN_G: f32 = 1.0 / GAIN_MAX;
 const HOVER_MAX_G: f32 = 1.0 / GAIN_MIN;
 
-/// N14 (1), (2): the strongest and the weakest real thrust gain against the card: the plant spread +-30 % (tuning.rs
-/// `ground_thrust_g`) times the measured gain range +-12 % (tune1 section 12), 1.30 x 1.12 = 1.456 and 0.70 x 0.88 =
-/// 0.616, as N14 rounds them.
+/// The strongest and the weakest real thrust gain against the card: the plant spread +-30 %.
+/// `ground_thrust_g`) times the measured gain range +-12 %: 1.30 x 1.12 = 1.456 and 0.70 x 0.88 = 0.616.
 const GAIN_MAX: f32 = 1.46;
 const GAIN_MIN: f32 = 0.62;
 
-/// N14 (1): "ever airborne" latches when the commanded collective first reaches this x the card's m g after arming:
-/// ArduPilot's hover/2 (ArduCopter Attitude.cpp:120) at the strongest end of the spread, 0.5 / `GAIN_MAX` = 0.34.
+/// "Ever airborne" latches when the commanded collective first reaches this x the card's m g after arming: ArduPilot's
+/// hover/2 (ArduCopter Attitude.cpp:120) at the strongest end of the spread, 0.5 / `GAIN_MAX` = 0.34.
 pub const EVER_AIRBORNE_G: f32 = 0.5 / GAIN_MAX;
 
-/// N14 (3): the card check reports H when it differs from the card's m g by more than this fraction: the measured thrust
-/// gain spread, +-12 % (tune1 section 12).
+/// The card check reports H when it differs from the card's m g by more than this fraction: the measured thrust gain
+/// spread, +-12 %.
 pub const CARD_CHECK_FRAC: f32 = 0.12;
 
-/// N11 (1a): the learned hover collective is used after this much qualifying time since arming, us.
+/// The learned hover collective is used after this much qualifying time since arming, us.
 const HOVER_VALID_US: u64 = 10_000_000;
 
-/// The touchdown backstop's acceleration filter, Hz (decision-mavlink-mode-20261123, E3: ArduPilot
-/// LAND_DETECTOR_ACCEL_LPF_CUTOFF 1.0, config.h:359-372).
+/// The touchdown backstop's acceleration filter, Hz (ArduPilot LAND_DETECTOR_ACCEL_LPF_CUTOFF 1.0, config.h:359-372)
 const TOUCHDOWN_ACCEL_LPF_HZ: f32 = 1.0;
 
-/// The touchdown backstop's largest filtered earth-frame acceleration, gravity removed, m/s^2 (E3: ArduPilot
-/// LAND_DETECTOR_ACCEL_MAX 1.0, config.h:359-372, land_detector.cpp:127).
+/// The touchdown backstop's largest filtered earth-frame acceleration, gravity removed, m/s^2.
+/// LAND_DETECTOR_ACCEL_MAX 1.0, land_detector.cpp:127)
 const TOUCHDOWN_ACCEL_MAX_MSS: f32 = 1.0;
 
-/// The touchdown rule's largest roll rate and largest pitch rate (each axis, the estimate's body rates), rad/s
-/// (decision-mavlink-mode-20261123, Amendment N, N4 (c): PX4 LNDMC_ROT_MAX 20 deg/s, land_detector_params_mc.yaml;
-/// approved by the owner 2026-11-24).
+/// The touchdown rule's largest roll rate and largest pitch rate (each axis, the estimate's body rates), rad/s.
+/// LNDMC_ROT_MAX 20 deg/s)
 const TOUCHDOWN_ROT_MAX_RADS: f32 = 20.0 * (core::f32::consts::PI / 180.0);
 
-/// BLIND's probe (Amendment N, N4; N14 (1)): the time over which its collective ramps linearly from BLIND's down to the
-/// allocator's idle floor, us. No outside source; approved by the owner 2026-11-24.
+/// BLIND's probe: the time over which its collective ramps linearly from BLIND's down to the allocator's idle floor,
+/// us.
 pub const BLIND_PROBE_RAMP_US: u64 = 1_000_000;
 
-/// N13: BLIND's one-shot correction is made this long after BLIND's entry, us, from the mean net vertical acceleration
-/// over that time. Approved by the owner 2026-11-24, no outside source.
+/// BLIND's one-shot correction is made this long after BLIND's entry, us, from the mean net vertical acceleration over
+/// that time.
 pub const BLIND_CORRECT_US: u64 = 1_000_000;
 
-/// Crash rule K (decision-mavlink-mode-20261123, Amendment N, N5, shadow): K would fire when its four terms have held
-/// together this long, us (ArduPilot CRASH_CHECK_TRIGGER_SEC 2, ArduCopter crash_check.cpp:4).
+/// Crash rule K: it would fire when its four terms have held together this long, us.
+/// 2, crash_check.cpp:4)
 pub const CRASH_TRIGGER_US: u64 = 2_000_000;
 
-/// K's lean term: the tilt from vertical over 15 deg, as its cosine (ArduPilot CRASH_CHECK_ANGLE_MIN_DEG 15,
-/// crash_check.cpp:6).
+/// K's lean term: the tilt from vertical over 15 deg, as its cosine.
+/// crash_check.cpp:6)
 const CRASH_COS_LEAN_MIN: f32 = 0.965_925_8;
 
-/// K's error term: the angle between the thrust axis of the attitude setpoint and that of the estimate over 30 deg, as its
-/// cosine (ArduPilot CRASH_CHECK_ANGLE_DEVIATION_DEG 30, crash_check.cpp:5; `get_att_error_angle_deg` is the thrust
-/// error angle, AC_AttitudeControl.h:345).
+/// K's error term: the angle between the thrust axis of the attitude setpoint and that of the estimate over 30 deg, as
+/// Its cosine.
 const CRASH_COS_ERROR_MIN: f32 = 0.866_025_4;
 
-/// K's acceleration term: the 1 Hz filtered earth-frame acceleration (gravity removed) under this, m/s^2 (ArduPilot
-/// CRASH_CHECK_ACCEL_MAX 3.0, crash_check.cpp:8).
+/// K's acceleration term: the 1 Hz filtered earth-frame acceleration (gravity removed) under this, m/s^2.
+/// CRASH_CHECK_ACCEL_MAX 3.0, crash_check.cpp:8)
 const CRASH_ACCEL_MAX_MSS: f32 = 3.0;
 
-/// K's speed term: |v| under this when the velocity is valid, m/s (ArduPilot CRASH_CHECK_SPEED_MAX 10, crash_check.cpp:7).
+/// K's speed term: |v| under this when the velocity is valid, m/s.
+/// crash_check.cpp:7)
 const CRASH_SPEED_MAX_MS: f32 = 10.0;
 
-/// Crash rule K's state after a step (Amendment N, N5, shadow: it reaches no output, the gate, the latch or the state
-/// machine). The four terms are false on a step K does not watch.
+/// Crash rule K's state after a step (log only: it reaches no output, the gate, the latch or the state machine)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CrashStatus {
     /// The lean over 15 deg.
@@ -231,8 +218,8 @@ impl CrashStatus {
     }
 }
 
-/// The mission facts of a set that is not the uploaded mission (`GDN_SRC` 0: the `GDN_*` parameters have no heights,
-/// section 36): none, so Start is DENIED NoWaypoints.
+/// The mission facts of a set that is not the uploaded mission (`GDN_SRC` 0: the `GDN_*` parameters have no heights):
+/// none, so Start is DENIED NoWaypoints.
 const NO_MISSION: MissionFacts = MissionFacts {
     plan_id: None,
     has_waypoints: false,
@@ -243,8 +230,8 @@ const NO_MISSION: MissionFacts = MissionFacts {
     alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
 };
 
-/// The target set before the first `set_mission`: off, not the mission; GDN_RADIUS's default (the board's `GDN_OFF`), so
-/// a RETURN before any push still arrives.
+/// The target set before the first `set_mission`: off, not the mission; GDN_RADIUS's default (the board's `GDN_OFF`),
+/// so a RETURN before any push still arrives.
 const MISSION_OFF: GdnTargets = GdnTargets {
     count: 0,
     radius_m: 2.0,
@@ -258,12 +245,7 @@ const MISSION_OFF: GdnTargets = GdnTargets {
     mission_stored: false,
 };
 
-/// The state machine's mission facts from `set`, the target set in force (Amendment A, A4: list, heights, return height
-/// and plan id of one push). Not the mission (`GDN_SRC` 0): [`NO_MISSION`] with the plan id of the station feed
-/// (`station_plan`). The mission: its plan id, waypoints and height check (core 0's, against `GDN_ALT_MIN`/`GDN_ALT_MAX`
-/// when pushed), the return height, and, only when `start` (a Start command at this step: A9 is checked at every Start
-/// and nowhere else), the largest horizontal distance of a waypoint from `home`, converted at `origin` as the guidance
-/// converts them; `None` without home or origin.
+/// The state machine's mission facts from `set`, the target set in force.
 fn mission_facts(
     set: &GdnTargets,
     station_plan: Option<u32>,
@@ -280,7 +262,7 @@ fn mission_facts(
             for &(lat_e7, lon_e7) in set.targets.iter().take(usize::from(set.count)) {
                 let [n, e, _] = ned_from_geo(&o, &GeoPoint { lat_e7, lon_e7, alt_mm: o.alt_mm });
                 let (dn, de) = (n - h.ne_m[0], e - h.ne_m[1]);
-                // Not `max`: a NaN distance must win (Start then answers WaypointDistanceUnknown).
+                // Not `max`: a NaN distance must win (Start then answers WaypointDistanceUnknown)
                 let d = libm::sqrtf(dn * dn + de * de);
                 if !(d <= far) {
                     far = d;
@@ -302,10 +284,9 @@ fn mission_facts(
     }
 }
 
-/// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle mode (decision-first-pair-20261119, section 4), altitude
-/// hold (decision-nav-eskf-20261120, F1, F2) and position hold (Amendment P, P1).
+/// Turns (mode, the newest sticks, nav) into a `Setpoint`: Angle, altitude hold and position hold.
 struct StickShaper {
-    /// The newest sticks; before the first report, throttle 0 and centred (4e).
+    /// The newest sticks; before the first report, throttle 0 and centred.
     sticks: Sticks,
     angle_max_rad: f32,
     pilot_y_rate_rads: f32,
@@ -314,7 +295,7 @@ struct StickShaper {
     pilot_speed_dn_ms: f32,
     pilot_thr_dz: f32,
     /// How far ahead of the vehicle the altitude target may run: seconds of the limit speed of its direction
-    /// (`pilot_alt_lead_s`).
+    /// (`pilot_alt_lead_s`)
     pilot_alt_lead_s: f32,
     /// Fastest horizontal speed at full stick, m/s: the runtime parameter `PILOT_SPEED_XY` as latched at the arming
     /// step (`Flight::step`); `Tuning::pilot_speed_xy_ms` until the first latch.
@@ -325,25 +306,24 @@ struct StickShaper {
     pilot_y_dz: f32,
     /// Position hold captures the position below this ground speed with the sticks centred, m/s.
     pilot_hold_speed_ms: f32,
-    /// The altitude target, m down (positive down); `None` outside Altitude and Position. Captured at the first step
-    /// whose effective mode is Altitude or Position, and kept across a change between the two.
+    /// The altitude target, m down (positive down); `None` outside Altitude and Position.
     target_d: Option<f32>,
     /// The position target, m north and east; `None` outside Position and while the sticks move the vehicle.
     target_ne: Option<[f32; 2]>,
-    /// LAND's law (decision-mavlink-mode-20261123, A8, E2): the height target's rate, m/s down, instead of the throttle
-    /// stick's; `None` outside LAND.
+    /// LAND's law: the height target's rate, m/s down, instead of the throttle stick's; `None` outside LAND.
     land_rate_d_ms: Option<f32>,
-    /// LAND's braking law (decision-heading-monitor-20261123, H14 (1)): the position target is this step's position at
-    /// every step, never captured; false outside it.
+    /// LAND's braking law: the position target is this step's position at every step, never captured; false outside
+    /// it.
     brake_only: bool,
-    /// The low-battery descent is in force: the throttle stick reads 0.0 in the vertical part of Altitude and Position.
+    /// The low-battery descent is in force: the throttle stick reads 0.0 in the vertical part of Altitude and
+    /// Position.
     descend: bool,
     /// The previous step's time, us; `None` before the first.
     t_prev_us: Option<u64>,
     /// Tests only: the lead cap is off.
     #[cfg(test)]
     lead_cap_off: bool,
-    /// Tests only: N18's seat is off (the control).
+    /// Tests only: the descent seat is off (the control)
     #[cfg(test)]
     seat_off: bool,
     /// Tests only: the position is captured at any speed.
@@ -352,8 +332,7 @@ struct StickShaper {
 }
 
 impl StickShaper {
-    /// The setpoint for the effective `mode` at step time `t_us`. Acro is declared only: Angle. The targets live only
-    /// while their mode does: `target_ne` in Position, `target_d` in Altitude and Position.
+    /// The setpoint for the effective `mode` at step time `t_us`.
     fn setpoint(&mut self, mode: Mode, nav: &NavState, t_us: u64) -> Setpoint {
         let dt_s = self
             .t_prev_us
@@ -373,14 +352,13 @@ impl StickShaper {
         }
     }
 
-    /// The throttle stick's climb rate, m/s, down positive (F2, ArduPilot's law): 0 within `pilot_thr_dz` of the
-    /// centre; below it `pilot_speed_dn_ms` x (distance below the dead zone / the travel left below it), reaching
-    /// `pilot_speed_dn_ms` at 0; above it minus `pilot_speed_up_ms` x the same, reaching it at 1.
+    /// The throttle stick's climb rate, m/s, down positive (ArduPilot's law): 0 within `pilot_thr_dz` of the centre;
+    /// below it `pilot_speed_dn_ms` x (distance below the dead zone / the travel left below it)
     fn stick_rate_d(&self, throttle: f32) -> f32 {
         let thr = throttle.clamp(0.0, 1.0);
         let low = THROTTLE_CENTRE - self.pilot_thr_dz;
         let high = THROTTLE_CENTRE + self.pilot_thr_dz;
-        // The travel on each side of the dead zone is `low` (= 1 - high).
+        // The travel on each side of the dead zone is `low` (= 1 - high)
         if thr < low {
             self.pilot_speed_dn_ms * (low - thr) / low
         } else if thr > high {
@@ -390,9 +368,8 @@ impl StickShaper {
         }
     }
 
-    /// Altitude hold (F1, F2): roll, pitch and yaw as Angle; the target height captured at the first call after any
-    /// other mode (no jump: it is the current height), then integrated at the stick's rate while the vehicle is
-    /// within `pilot_alt_lead_s` of the limit speed from it. Down is positive.
+    /// Altitude hold: roll, pitch and yaw as Angle; the target height captured at the first call after any other mode
+    /// (no jump: it is the current height)
     fn altitude(&mut self, nav: &NavState, dt_s: f32) -> Setpoint {
         let (attitude, heading_rate_rads, _) = self.attitude_setpoint(nav);
         let (down_m, velocity_d_ms) = self.height_target(nav, dt_s);
@@ -404,9 +381,8 @@ impl StickShaper {
         }
     }
 
-    /// The vertical part of Altitude and of Position (P1: exactly the same): the target height, captured at the first
-    /// call after any other mode, then integrated at the throttle stick's rate within the lead cap; and that rate.
-    /// Down is positive.
+    /// The vertical part of Altitude and of Position: the target height, captured at the first call after any other
+    /// mode, then integrated at the throttle stick's rate within the lead cap; and that rate.
     fn height_target(&mut self, nav: &NavState, dt_s: f32) -> (f32, f32) {
         let d = nav.position_m[2];
         let throttle = if self.descend { 0.0 } else { self.sticks.throttle };
@@ -414,9 +390,8 @@ impl StickShaper {
         let target = match self.target_d {
             None => d,
             Some(target) => {
-                // N18 (b): in the descent states the target is seated at the vehicle when the vehicle is below it (down
-                // positive), so the loop asks for v_ff from there and the lead cap cannot hold it (the fixed point
-                // d - target = v_ff / posz_p sits on the cap in the 1.5 m/s stage).
+                // In the descent states the target is seated at the vehicle when the vehicle is below it.
+                // positive), so the loop asks for v_ff from there and the lead cap cannot hold it.
                 #[cfg(not(test))]
                 let seat = self.land_rate_d_ms.is_some();
                 #[cfg(test)]
@@ -438,7 +413,8 @@ impl StickShaper {
         (target, v_ff)
     }
 
-    /// One roll or pitch stick through the dead zone: 0 within `pilot_xy_dz`, else (|s| - dz) / (1 - dz) with the sign.
+    /// One roll or pitch stick through the dead zone: 0 within `pilot_xy_dz`, else (|s| - dz) / (1 - dz) with the
+    /// sign.
     fn stick_xy(&self, s: f32) -> f32 {
         Self::dead_zone(s, self.pilot_xy_dz)
     }
@@ -457,15 +433,14 @@ impl StickShaper {
         }
     }
 
-    /// Position hold (P1; PX4 FlightTaskManualPosition.cpp:65-123): the sticks ask for a horizontal velocity in the
-    /// heading frame, the height as Altitude. With the sticks centred and the ground speed below `pilot_hold_speed_ms` the
-    /// position is captured and held; moving the sticks releases it. Unlocked, the position target is this step's
-    /// position, so only the velocity feed-forward acts. `psi` is the yaw of the estimate's twist, as Angle uses it.
+    /// Position hold (PX4 FlightTaskManualPosition.cpp:65-123): the sticks ask for a horizontal velocity in the
+    /// heading frame, the height as Altitude.
     fn position(&mut self, nav: &NavState, dt_s: f32) -> Setpoint {
         let (down_m, velocity_d_ms) = self.height_target(nav, dt_s);
         let [w, _, _, z] = nav.attitude;
         let psi = 2.0 * libm::atan2f(z, w);
-        // Forward is the stick that tilts the nose down in Angle (pitch > 0), right the one that lowers the right side.
+        // Forward is the stick that tilts the nose down in Angle (pitch > 0), right the one that lowers the right
+        // side.
         let (mut sx, mut sy) = (self.stick_xy(self.sticks.pitch), self.stick_xy(self.sticks.roll));
         let n = libm::sqrtf(sx * sx + sy * sy);
         if n > 1.0 {
@@ -497,7 +472,7 @@ impl StickShaper {
         }
     }
 
-    /// q_sp = twist(q) (x) q_tilt and the heading rate from yaw (4a, 4b), and the stick collective, N.
+    /// q_sp = twist(q) (x) q_tilt and the heading rate from yaw, and the stick collective, N.
     fn attitude_setpoint(&self, nav: &NavState) -> ([f32; 4], f32, f32) {
         let Sticks {
             roll,
@@ -515,15 +490,15 @@ impl StickShaper {
         } else {
             [1.0, 0.0, 0.0, 0.0]
         };
-        // Today's heading: the estimate's twist about down (identity while tilt is not valid, rule R5).
+        // The estimate's twist about down (identity while tilt is not valid)
         let [w, _, _, z] = nav.attitude;
         let heading = if nav.valid.tilt {
             quat::normalise([w, 0.0, 0.0, z])
         } else {
             [1.0, 0.0, 0.0, 0.0]
         };
-        // Collective, piecewise linear: 0 -> 0, 0.5 -> hover m g, 1 -> min(pilot_thrust_max_g m g, 4 T_hi)
-        // (Amendment C: 2.0 m g by default, one straight line; 4 T_hi is four rotors at full speed).
+        // Collective, piecewise linear: 0 -> 0, 0.5 -> hover m g, 1 -> min(pilot_thrust_max_g m g, 4 T_hi); 4 T_hi is
+        // four rotors at full speed.
         let hover = MASS * GRAVITY_MSS;
         let full = full_thrust_n(self.pilot_thrust_max_g);
         let thrust_n = if throttle <= 0.5 {
@@ -535,7 +510,7 @@ impl StickShaper {
     }
 
     /// The throttle at which [`StickShaper::attitude_setpoint`]'s collective is `thrust_n`: its piecewise-linear map
-    /// inverted (N11 (1c)).
+    /// inverted.
     fn throttle_for(&self, thrust_n: f32) -> f32 {
         let hover = MASS * GRAVITY_MSS;
         if thrust_n <= hover {
@@ -556,7 +531,7 @@ impl StickShaper {
     }
 }
 
-/// The flight code: estimator, controller, allocator, gate. Only [`Flight::step`] reaches them.
+/// The flight code: estimator, controller, allocator, gate.
 #[cfg_attr(
     not(feature = "sim"),
     doc = "\n\nWithout the feature `sim` (the board image) there is no `set_heading_ok` (decision-mavlink-mode-20261123, E5):\n\n```compile_fail\nfn f<E, C, A>(flight: &mut fw_flight::step::Flight<E, C, A>)\nwhere\n    E: fw_flight::gnc::Estimator,\n    C: fw_flight::gnc::Controller,\n    A: fw_flight::gnc::Allocator,\n{\n    flight.set_heading_ok(true);\n}\n```"
@@ -570,25 +545,23 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The mode the switch selects; the newest report's switch holds until the next report.
     selected: Mode,
     limited: Saturation,
-    /// The airborne latch (Amendment P, P3 second revision): false at construction and after any disarmed step; true once
-    /// an armed step's collective is at or above the ground threshold; false again when the demand has been refused or the
-    /// collective on the allocator's idle floor for `land_detect_us`. Position is in effect only while it is true.
+    /// The airborne latch: false at construction and after any disarmed step; true once an armed step's collective is
+    /// at or above the ground threshold.
     airborne: bool,
     /// How long the demand has been refused or on the idle floor in the armed steps since it was last neither, us.
     low_us: u64,
-    /// The low mark (N14 (1)): an armed step's collective has reached `EVER_AIRBORNE_G` x m g since arming; false after
-    /// any disarmed step. The state machine's "ever airborne" and the hover learner read it; Position and the integrator
-    /// hold keep the airborne latch.
+    /// The low mark: an armed step's collective has reached `EVER_AIRBORNE_G` x m g since arming; false after any
+    /// disarmed step.
     lifted: bool,
-    /// The time the collective must stay low before the latch clears, us (`land_detect_us`).
+    /// The time the collective must stay low before the latch clears, us (`land_detect_us`)
     land_detect_us: u64,
     /// The previous step's time, us; `None` before the first.
     last_us: Option<u64>,
-    /// The collective below which the vehicle counts as on the ground, N (`ground_thrust_g` x m g).
+    /// The collective below which the vehicle counts as on the ground, N (`ground_thrust_g` x m g)
     ground_thrust_n: f32,
-    /// The allocator's idle floor, N (`CardAllocator::collective_range`; N14 (1)).
+    /// The allocator's idle floor, N (`CardAllocator::collective_range`;)
     floor_n: f32,
-    /// The allocator's full thrust, N (`CardAllocator::collective_range`; N14 (2)).
+    /// The allocator's full thrust, N (`CardAllocator::collective_range`;)
     full_n: f32,
     /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
     /// controller take it at every disarmed step, so the value at the arming step is the one in force until disarm.
@@ -603,90 +576,87 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     gains_pending: Gains,
     /// The gains in force: the values of the latest disarmed step.
     gains: Gains,
-    /// An eRPM this old or older is missing, us (`notch_hold_us`).
+    /// An eRPM this old or older is missing, us (`notch_hold_us`)
     notch_hold_us: u64,
-    /// The newest value of the parameter `FS_HOLD_EN` (`set_fs_hold_en`); the hands-off state machine takes it into force
-    /// on disarmed steps only (decision-mavlink-mode-20261123, B9).
+    /// The newest value of the parameter `FS_HOLD_EN` (`set_fs_hold_en`); the hands-off state machine takes it into
+    /// force on disarmed steps only.
     fs_hold_en: bool,
-    /// The hands-off state machine (decision-mavlink-mode-20261123, Amendments A to D), stepped before the shaper and the
-    /// gate (WR3).
+    /// The hands-off state machine, stepped before the shaper and the gate.
     hands_off: HandsOff,
     /// The newest stick report, as the gate has seen it (not necessarily new this step); `None` before the first.
     rc_newest: Option<RcSample>,
-    /// Host tests and MARV-sim only: an override ANDed with this step's `Valid.heading` (`set_heading_ok`); true until set,
-    /// and on the board, where nothing sets it.
+    /// Host tests and MARV-sim only: an override ANDed with this step's `Valid.heading` (`set_heading_ok`); true until
+    /// set, and on the board, where nothing sets it.
     heading_ok: bool,
-    /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until set.
+    /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until
+    /// set.
     last_radio_heartbeat_us: Option<u64>,
     /// When the newest RADIO_STATUS arrived from the receiver, us (`set_last_radio_status_us`); `None` until set.
     last_radio_status_us: Option<u64>,
     /// The station command for the next step (`set_command`); taken by that step.
     command: Option<hands_off::StationCommand>,
-    /// The answer of the latest step to its command (`take_command_result`).
+    /// The answer of the latest step to its command (`take_command_result`)
     command_result: Option<hands_off::CommandResult>,
-    /// The plan id of the committed list (`set_plan_id`); `None` when none is stored. Read only while `mission` is not
-    /// the uploaded mission (with it, the set's own plan id, pushed with its list, is the plan).
+    /// The plan id of the committed list (`set_plan_id`); `None` when none is stored.
     plan_id: Option<u32>,
     /// The newest target set from core 0 (`set_mission`): the mission facts at every step, and AUTO's list at Start.
     mission: GdnTargets,
-    /// AUTO's leg law (A6, section 36): entered at Start (the list copied from `mission` then), stepped on AUTO's steps,
-    /// stopped on every other step; its index survives a stop (the kept place, A10).
+    /// AUTO's leg law: entered at Start (the list copied from `mission` then), stepped on AUTO's steps, stopped on
+    /// every other step; its index survives a stop (the kept place)
     legs: LegGuidance,
-    /// AUTO: the heading at Start, held for the whole of AUTO (section 30; the guidance commands no yaw), rad.
+    /// AUTO: the heading at Start, held for the whole of AUTO (the guidance commands no yaw), rad.
     leg_heading_rad: f32,
     /// The guidance was done (the last waypoint reached, or the entry refused) at the previous step: the state
-    /// machine's `last_waypoint_reached` (it runs before the law, as the track distance).
+    /// machine's `last_waypoint_reached` (it runs before the law, as the track distance)
     leg_done: bool,
-    /// RETURN's guidance was within GDN_RADIUS of home with |v_D| below `HOME_VD_MAX_MS` or for `HOME_WAIT_US` (or its
-    /// entry was refused) at the previous step: the state machine's `home_reached` (A7: LAND at once).
+    /// RETURN's guidance was within GDN_RADIUS of home with |v_D| below `HOME_VD_MAX_MS` or for `HOME_WAIT_US`.
+    /// entry was refused) at the previous step: the state machine's `home_reached`.
     leg_home: bool,
-    /// FX-4 (1): the step time at which the guidance first reported Home in this RETURN, us; `None` before.
+    /// The step time at which the guidance first reported Home in this RETURN, us; `None` before.
     home_since_us: Option<u64>,
-    /// H12: the horizontal distance between this step's position and the Position target the controller got this step,
-    /// m, for the state machine at the next step (it runs before the shaper); `None` when the setpoint was not Position.
+    /// The horizontal distance between this step's position and the Position target the controller got this step, m,
+    /// for the state machine at the next step (it runs before the shaper)
     track_error_m: Option<f32>,
-    /// E3: the earth-frame acceleration, gravity removed, low-passed at `TOUCHDOWN_ACCEL_LPF_HZ`, m/s^2 NED, from IMU1's
+    /// The earth-frame acceleration, gravity removed, low-passed at `TOUCHDOWN_ACCEL_LPF_HZ`, m/s^2 NED, from IMU1's
     /// specific force and the estimate's attitude; every step with a finite value.
     accel_ef_mss: [f32; 3],
-    /// The touchdown rule TD (Amendment N, N4; replaces E3; N14 (1)): how long (a) the collective on the allocator's idle
-    /// floor (its `thrust_low` flag; a refused demand counts), (b) `accel_ef_mss` at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch
-    /// rates each at most `TOUCHDOWN_ROT_MAX_RADS` have held together, in the armed steps of every state since one last
-    /// failed, us (N10).
+    /// The touchdown rule TD: how long (a) the collective on the allocator's idle floor.
+    /// refused demand counts)
     still_us: u64,
     /// Tests only: TD's (b) at the latest step, from a finite IMU sample.
     #[cfg(test)]
     still: bool,
-    /// N15 (a): the latest step flew LAND, TAKEOVER's descent or BLIND.
+    /// The latest step flew LAND, TAKEOVER's descent or BLIND.
     descent_prev: bool,
     /// BLIND's probe: how long (b) and (c) have held in the armed BLIND steps with no probe running, since one last
     /// failed, us.
     quiet_us: u64,
     /// BLIND's probe: how long its ramp has run, us; `None` when no probe runs.
     probe_us: Option<u64>,
-    /// E2: the descent rate LAND and the TAKEOVER descent flew at the latest step, m/s down; `None` outside them.
+    /// The descent rate LAND and the TAKEOVER descent flew at the latest step, m/s down; `None` outside them.
     land_rate_ms: Option<f32>,
-    /// N11 (1a): the learned hover collective H, N: the card's m g at every disarmed step, then a low-pass of the
-    /// commanded collective on the qualifying steps, within m g x [`HOVER_MIN_G`, `HOVER_MAX_G`].
+    /// The learned hover collective H, N: the card's m g at every disarmed step, then a low-pass of the commanded
+    /// collective on the qualifying steps, within m g x [`HOVER_MIN_G`, `HOVER_MAX_G`].
     hover_n: f32,
-    /// N11 (1a): the qualifying time since arming, us (H is used from `HOVER_VALID_US`); 0 at every disarmed step.
+    /// The qualifying time since arming, us (H is used from `HOVER_VALID_US`); 0 at every disarmed step.
     hover_us: u64,
-    /// N13: time in the present BLIND episode up to `BLIND_CORRECT_US`, us; the sum of its finite net vertical
+    /// Time in the present BLIND episode up to `BLIND_CORRECT_US`, us; the sum of its finite net vertical
     /// accelerations (m/s^2, down positive), their count and the count of its steps; 0 outside BLIND.
     blind_us: u64,
     blind_sum: f32,
     blind_finite: u32,
     blind_steps: u32,
-    /// N13: the correction was made (or skipped) in this BLIND episode; BLIND's collective after it, N, when made.
+    /// The correction was made (or skipped) in this BLIND episode; BLIND's collective after it, N, when made.
     blind_done: bool,
     blind_trim_n: Option<f32>,
-    /// Crash rule K, shadow (Amendment N, N5): its terms and timer after the latest step.
+    /// Crash rule K (log only): its terms and timer after the latest step.
     crash: CrashStatus,
-    /// The newest value of the low-battery monitor's descent request (core 0, `set_batt_descend`).
+    /// The newest value of the low-battery monitor's descent request (core 0, `set_batt_descend`)
     batt_request: bool,
     /// The request at the previous step.
     batt_prev_request: bool,
     /// A false-to-true edge of the request was seen while armed and the request has not fallen since; cleared while
-    /// disarmed, so a request already true at arming (disarm and re-arm within one supervisor tick) starts nothing.
+    /// disarmed.
     batt_started: bool,
     /// A change of the mode switch cancelled the descent; cleared at the first step the gate is disarmed.
     batt_cancelled: bool,
@@ -694,8 +664,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     prev_switch6: Option<Switch3>,
     /// What the descent did at the latest step.
     batt_state: BattDescent,
-    /// The in-air restart (decision-inair-restart-20261125): the gate armed this arming with the restart latch true;
-    /// cleared at the first step the gate is disarmed.
+    /// The in-air restart: the gate armed this arming with the restart latch true; cleared at the first step the gate
+    /// is disarmed.
     restart_armed: bool,
     /// A change of the mode switch cancelled the restart's Altitude; cleared at the first step the gate is disarmed.
     restart_cancelled: bool,
@@ -708,34 +678,33 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the latch never clears by the timer.
     #[cfg(test)]
     timer_off: bool,
-    /// Tests only: FX-4 (1)'s bound on RETURN's home wait is off (the control).
+    /// Tests only: the bound on RETURN's home wait is off (the control)
     #[cfg(test)]
     home_wait_off: bool,
-    /// Tests only: the old per-step rule: airborne is armed and the collective at or above the threshold, at every step.
+    /// Tests only: the per-step rule: airborne is armed and the collective at or above the threshold, at every step.
     #[cfg(test)]
     per_step_rule: bool,
-    /// Tests only: the previous latch rule: low is a collective below the ground threshold, not the idle floor.
+    /// Tests only: low is a collective below the ground threshold, not the idle floor.
     #[cfg(test)]
     threshold_rule: bool,
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
-    /// Tests only: TD's count does not restart on entry into a descent (N15 (a) removed).
+    /// Tests only: TD's count does not restart on entry into a descent.
     #[cfg(test)]
     td_restart_off: bool,
-    /// Tests only: TD's (a) is the old rule, the collective below the ground threshold (0.714 x the card's m g).
+    /// Tests only: TD's (a) is the collective below the ground threshold (0.714 x the card's m g)
     #[cfg(test)]
     td_card_rule: bool,
-    /// The state machine's battery critical (B1): the monitor's CRITICAL level (`set_battery_cell`); false until set.
+    /// The state machine's battery critical: the monitor's CRITICAL level (`set_battery_cell`); false until set.
     battery_critical: bool,
-    /// The state machine's `battery_ok` (Start): the monitor knows the battery is not critical (`set_battery_cell`, or
-    /// `set_battery_ok` in host tests and MARV-sim); false until set (Start answers BatteryNotOk).
+    /// The state machine's `battery_ok` (Start): the monitor knows the battery is not critical.
+    /// `set_battery_ok` in host tests and MARV-sim); false until set (Start answers BatteryNotOk)
     battery_ok: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// `tuning`: the gains and limits; `handshake`: where the gate stores the armed state for core 0.
-    /// The selected mode is `Mode::Angle` until the first stick report brings the switch.
     pub fn new(
         estimator: E,
         controller: C,
@@ -871,10 +840,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         }
     }
 
-    /// The newest value of the runtime parameter `PILOT_SPEED_XY`, m/s (Amendment P, P9). Accepted only if finite and
-    /// within `PILOT_SPEED_XY_MIN_MS` to `PILOT_SPEED_XY_MAX_MS` (the parameter table enforces the same range; this is the
-    /// flight core's own check). It takes effect at the next arming: every disarmed step latches the newest value, no
-    /// armed step does. Returns whether it was accepted.
+    /// The newest value of the runtime parameter `PILOT_SPEED_XY`, m/s.
     pub fn set_pilot_speed_xy(&mut self, ms: f32) -> bool {
         let ok = (PILOT_SPEED_XY_MIN_MS..=PILOT_SPEED_XY_MAX_MS).contains(&ms);
         if ok {
@@ -883,10 +849,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         ok
     }
 
-    /// The newest value of the runtime parameter `RPM_NOTCH_EN` (`on`) and of `MOT_POLES` (`poles`, poles and not pole
-    /// pairs). Accepted only if `poles` is within 2 to 64 (the parameter's range; this is the flight core's own check). It
-    /// takes effect at the next arming: every disarmed step latches the newest values, no armed step does. Returns whether
-    /// it was accepted.
+    /// The newest value of the runtime parameter `RPM_NOTCH_EN` (`on`) and of `MOT_POLES`.
+    /// pairs)
     pub fn set_notch(&mut self, on: bool, poles: i32) -> bool {
         let ok = NOTCH_POLES_RANGE.contains(&poles);
         if ok {
@@ -895,10 +859,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         ok
     }
 
-    /// The newest set of the 14 gain parameters (decision-gain-params-20261123). Accepted only if every value is finite and
-    /// within `Gains::MIN` to `Gains::MAX` (the parameter table enforces the same ranges; this is the flight core's own
-    /// check); a refused set keeps the previous one. It takes effect at the next arming: every disarmed step latches the
-    /// newest set, no armed step does. Returns whether it was accepted.
+    /// The newest set of the 14 gain parameters. Accepted only if every value is finite and within `Gains::MIN` to
+    /// `Gains::MAX` (the parameter table enforces the same ranges; this is the flight core's own check)
     pub fn set_gains(&mut self, gains: Gains) -> bool {
         let ok = gains.in_range();
         if ok {
@@ -907,91 +869,82 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         ok
     }
 
-    /// The newest value of the runtime parameter `FS_HOLD_EN` (decision-mavlink-mode-20261123). Given to the hands-off state
-    /// machine every step; it takes effect on a disarmed step (B9).
+    /// The newest value of the runtime parameter `FS_HOLD_EN`.
     pub fn set_fs_hold_en(&mut self, on: bool) {
         self.fs_hold_en = on;
     }
 
-    /// An override of the hands-off state machine's heading verdict (B4: T3' = position covered AND heading OK). The
-    /// verdict is this step's `Valid.heading` AND `ok` (H12 item 4 as amended by H14): false forces it false, true leaves
-    /// the estimate's flag (never true against it). Only in host tests and with the feature `sim`, which the board image
-    /// never enables; there the verdict is `Valid.heading` alone (E5).
+    /// An override of the hands-off state machine's heading verdict.
     #[cfg(any(test, feature = "sim"))]
     pub fn set_heading_ok(&mut self, ok: bool) {
         self.heading_ok = ok;
     }
 
-    /// The state machine's `battery_ok` (Start's battery check) alone: only in host tests and with the feature `sim`; the
-    /// board sets it with [`Flight::set_battery_cell`].
+    /// The state machine's `battery_ok` (Start's battery check) alone: only in host tests and with the feature `sim`;
+    /// the board sets it with [`Flight::set_battery_cell`].
     #[cfg(any(test, feature = "sim"))]
     pub fn set_battery_ok(&mut self, ok: bool) {
         self.battery_ok = ok;
     }
 
-    /// When the newest station HEARTBEAT arrived on the radio link, us (A1's link age). `None` (the default, and the board's
-    /// value until the station link is wired) makes the link age run from the newest stick report alone. A missing feed
-    /// means "link lost" (E5): 10 s (`LINK_LOSS_US`) after the last stick report HOLD leaves for RETURN, or LAND without
-    /// home (always on this branch), and Start is DENIED (no station); that fails safe.
+    /// When the newest station HEARTBEAT arrived on the radio link, us. `None`.
+    /// until the station link is wired) makes the link age run from the newest stick report alone.
     pub fn set_last_radio_heartbeat_us(&mut self, t_us: Option<u64>) {
         self.last_radio_heartbeat_us = t_us;
     }
 
-    /// When the newest RADIO_STATUS arrived from the receiver, us (the RC port's time of it). A RADIO_STATUS newer than
-    /// the entry into a hands-off state sets N12's M, which holds an arm-OFF report while K is clear; `None` (the
-    /// default) never sets it, so an arm-OFF report stops at once (a plain dropout).
+    /// When the newest RADIO_STATUS arrived from the receiver, us (the RC port's time of it)
     pub fn set_last_radio_status_us(&mut self, t_us: Option<u64>) {
         self.last_radio_status_us = t_us;
     }
 
-    /// A station command (link-contract section 10) for the next step, which gives it to the state machine and answers
-    /// it ([`Flight::take_command_result`]); a later call before that step replaces it.
+    /// A station command for the next step, which gives it to the state machine and answers it
+    /// ([`Flight::take_command_result`]); a later call before that step replaces it.
     pub fn set_command(&mut self, command: hands_off::StationCommand) {
         self.command = Some(command);
     }
 
-    /// The plan id of the committed list (link-contract section 17, Amendment A: a new one is the state machine's "new
-    /// plan"); `None` when none is stored. Given to the state machine every step.
+    /// The plan id of the committed list (a new one is the state machine's "new plan"); `None` when none is stored.
     pub fn set_plan_id(&mut self, plan_id: Option<u32>) {
         self.plan_id = plan_id;
     }
 
-    /// The newest target set core 0 pushed (`FLIGHT_GDN`, whole sets only), at any step, armed or not (Amendment A, A4):
-    /// the mission facts from the next step on; AUTO takes its list from it at Start only, never mid-leg.
+    /// The newest target set core 0 pushed (`FLIGHT_GDN`, whole sets only), at any step, armed or not: the mission
+    /// facts from the next step on; AUTO takes its list from it at Start only, never mid-leg.
     pub fn set_mission(&mut self, set: GdnTargets) {
         self.mission = set;
     }
 
     /// AUTO's active waypoint index while its guidance runs (on a leg or done at the last waypoint), else `None`: the
-    /// board logs [`leg_msg`] when it changes (an `Arrived` advances it).
+    /// board logs [`leg_msg`] when it changes (an `Arrived` advances it)
     pub fn leg_active(&self) -> Option<u8> {
         matches!(self.legs.phase(), LegPhase::Leg | LegPhase::Done).then(|| self.legs.active())
     }
 
-    /// The latest step's answer to its command; `None` when it had none (or the answer was taken).
+    /// The latest step's answer to its command; `None` when it had none (or the answer was taken)
     pub fn take_command_result(&mut self) -> Option<hands_off::CommandResult> {
         self.command_result.take()
     }
 
-    /// N12's M in force after the latest step: a hands-off state and a RADIO_STATUS after its entry (the log's M bit).
+    /// M in force after the latest step: a hands-off state and a RADIO_STATUS after its entry (the log's M bit)
     pub fn radio_status_seen(&self) -> bool {
         self.hands_off.radio_status_seen()
     }
 
-    /// N14 (3), the card check: H / the card's m g in percent (rounded, at most 999) once H is valid and differs from the
-    /// card's m g by more than `CARD_CHECK_FRAC`; `None` otherwise. No behaviour reads it; the board logs it once per arming.
+    /// The card check: H / the card's m g in percent (rounded, at most 999) once H is valid and differs from the
+    /// card's m g by more than `CARD_CHECK_FRAC`; `None` otherwise.
     pub fn card_check_pct(&self) -> Option<u16> {
         let r = self.hover_n / (MASS * GRAVITY_MSS);
         (self.hover_us >= HOVER_VALID_US && libm::fabsf(r - 1.0) > CARD_CHECK_FRAC).then(|| (r * 100.0 + 0.5).min(999.0) as u16)
     }
 
-    /// The hands-off state after the latest step (its HEARTBEAT and log code is `State::code`).
+    /// The hands-off state after the latest step (its HEARTBEAT and log code is `State::code`)
     pub fn hands_off_state(&self) -> State {
         self.hands_off.state()
     }
 
     /// Why the hands-off state after the latest step was entered (`None` before the first change): the board's HO MSG
-    /// ([`hands_off_reason_msg`]).
+    /// ([`hands_off_reason_msg`])
     pub fn hands_off_reason(&self) -> Option<hands_off::Reason> {
         self.hands_off.reason()
     }
@@ -1001,41 +954,36 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.last_radio_heartbeat_us
     }
 
-    /// The plan id the state machine is given at every step (from the set in force or from `set_plan_id`, as
+    /// The plan id the state machine is given at every step.
     /// `mission_facts` chooses) and the waypoints it sees (0 unless the set is the mission): the board's PLAN MSG.
     pub fn plan_seen(&self) -> (Option<u32>, u8) {
         let facts = mission_facts(&self.mission, self.plan_id, None, None, false);
         (facts.plan_id, if self.mission.from_mission { self.mission.count } else { 0 })
     }
 
-    /// FS_HOLD_EN in force after the latest step (B9: taken on disarmed steps). The board logs every change of the
-    /// hands-off state while it is true, and only the entries into and exits from a hands-off state while it is false
-    /// ([`hands_off_msg_due`], N10 (iv)), so the log of an image flown with 0 changes only after a stick loss.
+    /// FS_HOLD_EN in force after the latest step. The board logs every change of the hands-off state while it is true,
+    /// and only the entries into and exits from a hands-off state while it is false ([`hands_off_msg_due`])
     pub fn fs_hold_in_force(&self) -> bool {
         self.hands_off.fs_hold_in_force()
     }
 
-    /// Crash rule K after the latest step (Amendment N, N5, shadow): the four terms and how long they have held.
+    /// Crash rule K after the latest step: the four terms and how long they have held.
     pub fn crash_status(&self) -> CrashStatus {
         self.crash
     }
 
-    /// K would fire after the latest step (shadow: nothing acts on it but the board's log).
+    /// K would fire after the latest step (log only: nothing acts on it but the board's log)
     pub fn crash_would_fire(&self) -> bool {
         self.crash.would_fire()
     }
 
-    /// The low-battery monitor's descent request (Amendment BATT): true while CRITICAL is reached and `BATT_FS_CRT_ACT` is 1.
-    /// Core 0 sets it from one byte; every step reads the newest value. While true, armed and not cancelled the effective
-    /// mode is at least Altitude when the estimate covers it and the throttle stick reads 0.0 (F2's descent speed and lead
-    /// cap); false changes nothing, bit for bit.
+    /// The low-battery monitor's descent request: true while CRITICAL is reached and `BATT_FS_CRT_ACT` is 1.
     pub fn set_batt_descend(&mut self, on: bool) {
         self.batt_request = on;
     }
 
     /// The low-battery monitor's byte from core 0 (`fw_core::battery`'s cell byte), every step: the descent request
-    /// ([`Flight::set_batt_descend`]), the state machine's battery critical (CRITICAL reached, whatever `BATT_FS_CRT_ACT`)
-    /// and its `battery_ok` (`CELL_KNOWN_OK`).
+    /// ([`Flight::set_batt_descend`]), the state machine's battery critical.
     pub fn set_battery_cell(&mut self, cell: u8) {
         self.set_batt_descend(fw_core::battery::cell_descends(cell));
         self.battery_critical = fw_core::battery::cell_critical(cell);
@@ -1057,7 +1005,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.gate.fall_note()
     }
 
-    /// The estimator, read only (the log of its own counters, packet E2).
+    /// The estimator, read only (the log of its own counters)
     pub fn estimator(&self) -> &E {
         &self.estimator
     }
@@ -1073,9 +1021,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     }
 
     /// [`Flight::step`], then `publish` with its output (the board sends the command there), then the shadow estimator
-    /// (decision-nav-eskf-20261120, 8a): the gate's armed state after the step and the same sensors. The step's output
-    /// is computed and published before the shadow runs and nothing of the shadow reaches the flight code; its state is
-    /// returned for the log only. `None`: no shadow, the plain step.
+    /// with the gate's armed state after the step and the same sensors.
     pub fn step_with_shadow<S: Estimator>(
         &mut self,
         inputs: &FlightInputs,
@@ -1094,8 +1040,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// One call per IMU1 sample.
     pub fn step(&mut self, inputs: &FlightInputs) -> StepOut {
         let t_us = inputs.sensors.imu1.t_us;
-        // The pilot's horizontal speed is latched while disarmed (the gate's state the previous step left): the step that
-        // arms uses the newest value and no later step changes it until the next disarm.
+        // The pilot's horizontal speed is latched while disarmed (the gate's state the previous step left): the step
+        // that arms uses the newest value and no later step changes it until the next disarm.
         #[cfg(test)]
         let disarmed = !self.gate.armed() || self.latch_off;
         #[cfg(not(test))]
@@ -1114,8 +1060,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.batt_started = true;
         }
         self.batt_prev_request = self.batt_request;
-        // N19 1(3): a report the gate does not accept (the other source, or a receiver report at FS_HOLD_EN 0 while
-        // disarmed) reaches nothing in this step.
+        // A report the gate does not accept (the other source, or a receiver report at FS_HOLD_EN 0 while disarmed)
+        // reaches nothing in this step.
         let rc = inputs.rc.as_ref().filter(|r| self.gate.accepts(r, self.fs_hold_en));
         if let Some(&rc) = rc {
             self.rc_newest = Some(rc);
@@ -1164,9 +1110,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if !self.gate.armed() {
             self.controller.reset();
         }
-        // The effective mode (5e, F1; P3 replaced): Position if selected, the estimate covers it and the vehicle is
-        // airborne (the latch); else Altitude if selected (Position or Altitude) and the estimate covers it; otherwise Angle. Evaluated
-        // every step; Acro cannot be selected.
+        // The effective mode: Position if selected, the estimate covers it and the vehicle is airborne (the latch);
+        // else Altitude if selected (Position or Altitude) and the estimate covers it; otherwise Angle.
         #[cfg(test)]
         let (covered, position_ok) = (
             self.ignore_coverage || altitude_covered(&nav.valid),
@@ -1177,7 +1122,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             altitude_covered(&nav.valid),
             position_covered(&nav.valid) && self.airborne,
         );
-        // The hands-off state machine (WR3): the step time and the newest report as the gate sees them, the armed state and
+        // The hands-off state machine: the step time and the newest report as the gate sees them, the armed state and
         // the airborne latch the previous step left, this step's tier.
         let tier = if position_covered(&nav.valid) {
             Tier::T3
@@ -1188,7 +1133,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         let (battery_critical, battery_ok) = (self.battery_critical, self.battery_ok);
         let was = self.hands_off.state();
-        // N11 (1a): the low mark (N14 (1)) and TD as the state machine reads them at this step.
+        // The low mark and TD as the state machine reads them at this step.
         let (lifted_in, td_in) = (self.lifted, self.still_us >= self.land_detect_us);
         let command = self.command.take();
         let start = command.is_some_and(|c| c.command == hands_off::Command::Start);
@@ -1223,14 +1168,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             restart: self.restart_armed,
         });
         self.command_result = ho.command;
-        // H13 (2): v_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
+        // V_ho in the hands-off states, PILOT_SPEED_XY in force otherwise.
         self.controller.set_speed_limit_xy(ho.speed_limit_xy_ms);
-        // Outside PILOT the state machine is the only actor: the low-battery descent changes nothing there (its request,
-        // edge and cancel still run, so it acts again in PILOT as before; STOP included, the touchdown step's disarm).
+        // Outside PILOT the state machine is the only actor: the low-battery descent changes nothing there.
+        // request, edge and cancel still run, so it acts again in PILOT; STOP included, the touchdown step's disarm)
         let batt_on = batt_on && ho.state == State::Pilot;
-        // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling (I12).
-        // The low-battery descent lifts Angle to Altitude (when covered); Position stays under its own rule. So does a
-        // restart arming until the mode switch changes (decision-inair-restart-20261125).
+        // Hands-off: the switch treated as High (Position), and the state machine's demand is the ceiling.
         let selected = if ho.synthetic_sticks {
             Mode::Position
         } else if (batt_on || restart_on) && self.selected == Mode::Angle {
@@ -1248,12 +1191,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             (true, Demand::Altitude, Mode::Position) => Mode::Altitude,
             _ => mode,
         };
-        // Hands-off laws (Amendment D): centred synthetic sticks, no real stick reaching the shaper (I3); LAND's descent in
-        // LAND and in TAKEOVER's descent; BLIND's collective below hover, and its probe (N4, N14 (1)) linearly down to the
-        // idle floor over `BLIND_PROBE_RAMP_US`, then throttle 0 (the allocator holds the floor and flags `thrust_low`). AUTO and RETURN fly HOLD's here; the guidance's setpoint replaces it below. N11 (1c): BLIND's
-        // collective is H - m `BLIND_BELOW_HOVER_MSS` once H is valid (the throttle that gives it in Angle), else the card's.
-        // N13: after the one-shot correction, the corrected collective (the probe ramps from it, an aborted probe returns
-        // to it); N16 (a): the correction only cuts, so it never exceeds BLIND's entry collective.
+        // Hands-off laws: centred synthetic sticks, no real stick reaching the shaper; LAND's descent in LAND and in
+        // TAKEOVER's descent; BLIND's collective below hover.
         let hover_valid = self.hover_us >= HOVER_VALID_US;
         let blind_start = match self.blind_trim_n {
             Some(c) => self.shaper.throttle_for(c),
@@ -1271,17 +1210,15 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         let dt_us = self.last_us.map_or(0, |prev| t_us.saturating_sub(prev).min(DT_MAX_US));
         self.last_us = Some(t_us);
-        // E2: `LAND_SPEED_HIGH_MS` while the height above home is above `LAND_ALT_LOW_M` plus the slowing margin, else (no
-        // home, no valid height) `LAND_SPEED_MS`; later steps move towards it at `LAND_RATE_ACC_MSS`. N11 (2): the first
-        // descent step starts from the estimated v_D when it is valid (within the pilot's climb and descent speeds, the
-        // range of the altitude law's own rate; ArduPilot AC_PosControl.cpp:852), else from the stage rate.
+        // `LAND_SPEED_HIGH_MS` while the height above home is above `LAND_ALT_LOW_M` plus the slowing margin, else.
+        // home, no valid height) `LAND_SPEED_MS`; later steps move towards it at `LAND_RATE_ACC_MSS`.
         let high = ho
             .home
             .is_some_and(|h| nav.valid.position_d && h.d_m - nav.position_m[2] > LAND_ALT_LOW_M + LAND_SLOW_MARGIN_M);
         let rate = if high { LAND_SPEED_HIGH_MS } else { LAND_SPEED_MS };
         let v_d = nav.velocity_ms[2];
         let start = if nav.valid.velocity_d && v_d.is_finite() {
-            // max/min, not clamp: clamp's panic on runtime bounds formats floats (XIP code on the flight core).
+            // max/min, not clamp: clamp's panic on runtime bounds formats floats (XIP code on the flight core)
             v_d.max(-self.shaper.pilot_speed_up_ms).min(self.shaper.pilot_speed_dn_ms)
         } else {
             rate
@@ -1300,7 +1237,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 pitch: 0.0,
                 throttle: match ho.state {
                     State::Blind => blind_throttle,
-                    // N16 (b): flown in Angle, the centred synthetic throttle is the hover collective H once valid.
+                    // Flown in Angle, the centred synthetic throttle is the hover collective H once valid.
                     _ if mode == Mode::Angle && hover_valid => self.shaper.throttle_for(self.hover_n),
                     _ => THROTTLE_CENTRE,
                 },
@@ -1308,7 +1245,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             };
             self.shaper.land_rate_d_ms = self.land_rate_ms;
             self.shaper.brake_only = ho.land_law == Some(LandLaw::Brake);
-            // H13 (3): the first hands-off step drops the pilot's target; capture restarts under `pilot_hold_speed_ms`.
+            // The first hands-off step drops the pilot's target; capture restarts under `pilot_hold_speed_ms`.
             if matches!(was, State::Pilot | State::Stop) {
                 self.shaper.target_ne = None;
             }
@@ -1322,14 +1259,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         self.shaper.descend = batt_on;
         let mut setpoint = self.shaper.setpoint(mode, &nav, t_us);
-        // AUTO (A6, H3b): entered at the step Start is ACCEPTED, from the vehicle to waypoint 0, or to the kept index after
-        // a Pause (A10, L7); each AUTO step on Position flies the guidance's carrots (NE and D, with their rates as
-        // feed-forward) at the heading of Start with no heading rate, the cruise speed the hands-off limit in force. The
-        // shaper still runs (HOLD's law where the ladder is below Position) and is left with no NE target and the vertical
-        // carrot as its height target, so the HOLD that follows brakes, captures and keeps that height. Leaving AUTO stops
-        // the guidance. RETURN (A7, H3b-2) is flown the same way from its entry (from HOLD or AUTO): H_r as the state
-        // machine latched it, the climb in place, then the leg home with GDN_RADIUS of the target set in force; the
-        // heading of the entry; Home (or a refused entry) is the state machine's `home_reached` at the next step (LAND).
+        // AUTO: entered at the step Start is ACCEPTED, from the vehicle to waypoint 0, or to the kept index after a
+        // Pause; each AUTO step on Position flies the guidance's carrots.
         let mut leg_e_m = None;
         if !matches!(ho.state, State::Auto | State::Return) {
             self.legs.stop();
@@ -1367,10 +1298,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             let leg = self.legs.step(dt_us as f32 * 1e-6, nav.position_m, nav.valid.position_ne, lead_ok);
             let auto = ho.state == State::Auto;
             self.leg_done = auto && matches!(leg.phase, LegPhase::Done | LegPhase::Idle);
-            // FX-2 (3): Home is reported once the vertical speed is also below `HOME_VD_MAX_MS` (or not valid), so LAND does
-            // not start from the climb's v_D (N11 (2)) when the climb in place ends at home.
+            // Home is reported once the vertical speed is also below `HOME_VD_MAX_MS` (or not valid), so LAND does not
+            // start from the climb's v_D when the climb in place ends at home.
             let v_d = nav.velocity_ms[2];
-            // FX-4 (1): or `HOME_WAIT_US` after the guidance first reported Home in this RETURN.
+            // Or `HOME_WAIT_US` after the guidance first reported Home in this RETURN.
             if !auto && leg.phase == LegPhase::Home {
                 self.home_since_us.get_or_insert(t_us);
             }
@@ -1395,8 +1326,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.shaper.sticks = real;
         self.shaper.land_rate_d_ms = None;
         self.shaper.brake_only = false;
-        // H12: |p_NE - r_NE| of this step, r the target the controller gets (while unlocked, this step's position); in
-        // AUTO's law the guidance's e, vehicle to carrot (H13 (1) "moving target").
+        // |p_NE - r_NE| of this step, r the target the controller gets (while unlocked, this step's position); in
+        // AUTO's law the guidance's e, vehicle to carrot.
         self.track_error_m = match setpoint {
             _ if leg_e_m.is_some() => leg_e_m,
             Setpoint::Position { position_m: [tn, te, _], .. } => {
@@ -1436,8 +1367,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             self.limited = a.saturation;
         }
         let levels = allocation.as_ref().map(|a| &a.levels);
-        // WR2: STOP entered from an armed step disarms in this step, before the gate's own rules; an arm-switch STOP in the
-        // air starts the in-air restart's window. Then the restart's free-fall latch takes IMU1's specific force.
+        // STOP entered from an armed step disarms in this step, before the gate's own rules; an arm-switch STOP in the
+        // air starts the in-air restart's window.
         if ho.disarm {
             self.gate.stop(t_us, ho.arm_stop_ground);
         }
@@ -1447,10 +1378,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         if !was_armed && self.gate.armed() {
             self.restart_armed = matches!(self.gate.arm_note(), Some(ArmNote::Restart { .. }));
         }
-        // The airborne latch (P3 replaced), after the gate: a disarmed step clears it, so Position is never in effect on the
-        // arming step.
-        // Low: the demand was refused, or the allocator put the collective on the idle floor (its `thrust_low` flag, the
-        // value DMD logs as Sat bit 3). Start only above the ground threshold, end only after `land_detect_us` low.
+        // The airborne latch, after the gate: a disarmed step clears it, so Position is never in effect on the arming
+        // step.
         let thrust_ok = demand.is_ok_and(|d| d.thrust_n >= self.ground_thrust_n);
         let low = allocation.map_or(true, |a| a.saturation.thrust_low);
         let floor = low;
@@ -1458,7 +1387,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let floor = if self.td_card_rule { !thrust_ok } else { floor };
         #[cfg(test)]
         let low = if self.threshold_rule { !thrust_ok } else { low };
-        // N14 (1): the low mark, set by an armed step's collective at `EVER_AIRBORNE_G` x m g, cleared on a disarmed step.
+        // The low mark, set by an armed step's collective at `EVER_AIRBORNE_G` x m g, cleared on a disarmed step.
         self.lifted = self.gate.armed()
             && (self.lifted || demand.is_ok_and(|d| d.thrust_n >= EVER_AIRBORNE_G * MASS * GRAVITY_MSS));
         if !self.gate.armed() {
@@ -1479,12 +1408,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.airborne = false;
             }
         }
-        // TD, the touchdown rule (decision-mavlink-mode-20261123, Amendment N, N4 and N10; replaces E3): on every armed step,
-        // (a) the collective on the idle floor, `floor` (N14 (1): ArduPilot's throttle_lower), (b) the filtered
-        // acceleration at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch rates at most `TOUCHDOWN_ROT_MAX_RADS`,
-        // all for `land_detect_us`. Only the state machine's stops read it (WR1, stick loss with the latch false); in LAND,
-        // TAKEOVER's descent and BLIND it also clears the latch, so the next step's ground exit (WR1) stops and disarms.
-        // No vertical speed. A non-finite IMU sample is neither (b) nor (c).
+        // TD, the touchdown rule: on every armed step, (a) the collective on the idle floor, `floor`, (b) the filtered
+        // acceleration at most `TOUCHDOWN_ACCEL_MAX_MSS` and (c) the roll and pitch rates at most
         let mut a_down = None;
         if finite {
             let f = reading.accel_ms2;
@@ -1507,9 +1432,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             && libm::fabsf(p_rads) <= TOUCHDOWN_ROT_MAX_RADS
             && libm::fabsf(q_rads) <= TOUCHDOWN_ROT_MAX_RADS;
         let blind = self.gate.armed() && ho.state == State::Blind;
-        // N15 (a): entering LAND, TAKEOVER's descent or BLIND from a step that flew none of them restarts TD's count, so a
-        // count from PILOT or HOLD never clears the latch on the first descent step (`lost()` read the count the previous
-        // step left before the entry, so a vehicle already resting still stops there, N10 (iii)).
+        // Entering LAND, TAKEOVER's descent or BLIND from a step that flew none of them restarts TD's count, so a
+        // Count from PILOT or HOLD never clears the latch on the first descent step (`lost.
         let descent = ho.landing || ho.takeover_descent || blind;
         #[cfg(not(test))]
         let entry = descent && !self.descent_prev;
@@ -1531,10 +1455,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         {
             self.still = still;
         }
-        // Crash rule K, shadow (Amendment N, N5; ArduPilot crash_check.cpp:60-95): on an armed step, ever airborne since
-        // arming, TD not held, tilt and rates valid, the four terms; their time together. The setpoint's attitude is the
-        // one the controller tracked this step: Angle's and Altitude's from the setpoint, Position's from the controller;
-        // none when the demand was refused (Rates and Waypoint never fly here). Nothing reads it but `crash_status`.
+        // Crash rule K (log only): on an armed step, ever airborne since arming, TD not held, tilt and rates valid,
+        // the four terms; their time together.
         let q_sp = match setpoint {
             _ if demand.is_err() => None,
             Setpoint::Attitude { attitude, .. } | Setpoint::Altitude { attitude, .. } => Some(attitude),
@@ -1553,12 +1475,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         let held_us = if lean && error && accel && speed { self.crash.held_us.saturating_add(dt_us) } else { 0 };
         self.crash = CrashStatus { lean, error, accel, speed, held_us };
-        // N13: BLIND's one-shot correction, before the probe can start: the mean of the unfiltered earth-frame net
-        // acceleration down (the TD filter's input, gravity removed) over the episode's first `BLIND_CORRECT_US`, non-finite
-        // samples skipped; with at least half of them finite the collective becomes, once, the first second's collective
-        // - m (`BLIND_BELOW_HOVER_MSS` - a_m), kept in the allocator's physical range, idle floor to full thrust (N14 (2): it
-        // measures the real net force, so it bounds a poisoned or stale H; max/min, not clamp). A new BLIND entry starts
-        // again.
+        // BLIND's one-shot correction, before the probe can start: the mean of the unfiltered earth-frame net
+        // acceleration down (the TD filter's input, gravity removed) over the episode's first `BLIND_CORRECT_US`.
         if !blind {
             (self.blind_us, self.blind_sum, self.blind_finite, self.blind_steps) = (0, 0.0, 0, 0);
             (self.blind_done, self.blind_trim_n) = (false, None);
@@ -1576,12 +1494,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                     let mg = MASS * GRAVITY_MSS;
                     let first = if hover_valid { self.hover_n } else { mg } - MASS * BLIND_BELOW_HOVER_MSS;
                     let c = first - MASS * (BLIND_BELOW_HOVER_MSS - a_m);
-                    // N16 (a): one-sided, min(c, c - m (0.3 - a_m)): it can only cut the collective.
+                    // One-sided, min(c, c - m (0.3 - a_m)): it can only cut the collective.
                     self.blind_trim_n = c.is_finite().then(|| c.min(first).max(self.floor_n).min(self.full_n));
                 }
             }
         }
-        // BLIND's probe (N4): after (b) and (c) have held for `land_detect_us` it starts; (b) failing while it runs ends it
+        // BLIND's probe: after (b) and (c) have held for `land_detect_us` it starts; (b) failing while it runs ends it
         // at once (BLIND's collective at the next step) and a new `land_detect_us` of (b) and (c) is needed.
         match self.probe_us {
             _ if !blind => {
@@ -1610,11 +1528,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                 self.airborne = true;
             }
         }
-        // N11 (1a): the hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with a finite
-        // commanded collective (review F2), the low mark set (N14 (1)) and TD not held (as the state machine read them), the allocation
-        // neither `thrust_low` nor `thrust_high` (N14 (2)), not BLIND, v_D
-        // valid below `HOVER_VD_MAX_MS`, roll and pitch
-        // each under 5 deg, H follows the commanded collective with `HOVER_TC_S`, clamped; the card's m g when disarmed.
+        // The hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with a finite commanded
+        // collective, the low mark set and TD not held (as the state machine read them)
         if !self.gate.armed() {
             self.hover_n = MASS * GRAVITY_MSS;
             self.hover_us = 0;
@@ -1657,7 +1572,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     }
 }
 
-/// True when `valid` covers what an Altitude setpoint needs (`Setpoint::requires`, the single definition).
+/// True when `valid` covers what an Altitude setpoint needs (`Setpoint::requires`, the single definition)
 fn altitude_covered(valid: &Valid) -> bool {
     let probe = Setpoint::Altitude {
         attitude: [1.0, 0.0, 0.0, 0.0],
@@ -1668,7 +1583,7 @@ fn altitude_covered(valid: &Valid) -> bool {
     valid.covers(&probe.requires())
 }
 
-/// True when `valid` covers what a Position setpoint needs (`Setpoint::requires`, the single definition).
+/// True when `valid` covers what a Position setpoint needs (`Setpoint::requires`, the single definition)
 fn position_covered(valid: &Valid) -> bool {
     let probe = Setpoint::Position {
         position_m: [0.0; 3],
@@ -1680,10 +1595,8 @@ fn position_covered(valid: &Valid) -> bool {
     valid.covers(&probe.requires())
 }
 
-/// Crash rule K's terms (lean, error, accel, speed; Amendment N, N5) for the estimate `nav`, the attitude setpoint `q_sp`
-/// the controller tracked (`None`: no error term) and the filtered earth-frame acceleration `accel_mss`. The angles are
-/// those of the thrust axes, compared as cosines; a zero or non-finite quaternion, acceleration or valid velocity makes
-/// the terms it enters false.
+/// Crash rule K's terms (lean, error, accel, speed) for the estimate `nav`, the attitude setpoint `q_sp` the
+/// controller tracked (`None`: no error term) and the filtered earth-frame acceleration `accel_mss`.
 fn crash_terms(nav: &NavState, q_sp: Option<[f32; 4]>, accel_mss: [f32; 3]) -> (bool, bool, bool, bool) {
     // The thrust axis (body down) of [w, x, y, z] in NED, times |q|^2, and |q|^2.
     let axis = |[w, x, y, z]: [f32; 4]| {
@@ -1702,10 +1615,10 @@ fn crash_terms(nav: &NavState, q_sp: Option<[f32; 4]>, accel_mss: [f32; 3]) -> (
     (lean, error, accel, speed)
 }
 
-/// What the log writes at one flight step (decision-flight-logging-20261119, section 1).
+/// What the log writes at one flight step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LogDue {
-    /// Write the IMU1 sample this step (every step, armed or not).
+    /// Write the IMU1 sample this step (every step, armed or not)
     pub imu: bool,
     /// Write the six flight records (NAV, SETP, DMD, MOT, PIDT, NTCH) this step.
     pub block: bool,
@@ -1713,9 +1626,7 @@ pub struct LogDue {
     pub esc: bool,
 }
 
-/// The decimation rule. `step` counts flight steps (the caller adds 1 after each). The IMU1 sample is
-/// logged every step. Armed: the six flight records and an ESC record every step; disarmed:
-/// the six flight records and the ESC record every 8th step.
+/// The decimation rule. `step` counts flight steps (the caller adds 1 after each)
 pub fn log_due(step: u32, armed: bool) -> LogDue {
     if armed {
         LogDue {
@@ -1733,8 +1644,7 @@ pub fn log_due(step: u32, armed: bool) -> LogDue {
     }
 }
 
-/// Writes the six flight records of one step (NAV, SETP, DMD, MOT; decision-first-pair-wiring-20261119,
-/// A6; PIDT, NTCH: decision-rpm-notch-20261123) at the start of `buf`. Returns the bytes written, or 0 (nothing written) if `buf` is too small.
+/// Writes the six flight records of one step (NAV, SETP, DMD, MOT, PIDT, NTCH) at the start of `buf`.
 pub fn encode_step(out: &StepOut, buf: &mut [u8]) -> usize {
     let need: usize = FLIGHT_TYPES.iter().map(|d| usize::from(d.length)).sum();
     if buf.len() < need {
@@ -1834,8 +1744,7 @@ pub fn mode_code(mode: Mode) -> u8 {
     }
 }
 
-/// The MSG text logged at the first step and at each change of the hands-off state (decision-mavlink-mode-20261123,
-/// Amendment D: "Every state's code is logged at each change"): "HO", the `State::code`, the name.
+/// The MSG text logged at the first step and at each change of the hands-off state: "HO", the `State::code`, the name.
 pub fn hands_off_msg(state: State) -> &'static str {
     match state {
         State::Pilot => "HO 1 PILOT",
@@ -1849,20 +1758,15 @@ pub fn hands_off_msg(state: State) -> &'static str {
     }
 }
 
-/// Whether the board writes [`hands_off_msg`] of `state` at this step, `logged` the state of the last MSG written (`None`
-/// before the first; a dropped MSG is not written, so it is offered again). With FS_HOLD_EN in force 1, at the first
-/// step and at each change (Amendment D, E4). With 0, only at an entry into or an exit from a hands-off state (N10 (iv)):
-/// arming and disarming alone (PILOT and STOP) write nothing, so the log of an image flown with 0 changes only after a
-/// stick loss.
+/// Whether the board writes [`hands_off_msg`] of `state` at this step, `logged` the state of the last MSG written
+/// (`None` before the first; a dropped MSG is not written, so it is offered again)
 pub fn hands_off_msg_due(fs_hold_in_force: bool, logged: Option<State>, state: State) -> bool {
     let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
     logged != Some(state) && (fs_hold_in_force || hands_off(state) || logged.is_some_and(hands_off))
 }
 
-/// The MSG text the board writes for crash rule K (shadow, Amendment N, N5), `logged` the would-fire of the last one
-/// written (false before the first; a dropped MSG is not written, so it is offered again): "K 1 " and the term bits
-/// lean, error, accel, speed when K would fire and the last said not; "K 0" when it no longer would and the last said it
-/// would; `None` otherwise, in every configuration, so a flight in which K never fires logs nothing new. NUL padded.
+/// The MSG text the board writes for crash rule K, `logged` the would-fire of the last one written.
+/// first; a dropped MSG is not written, so it is offered again): "K 1 " and the term bits lean, error, accel.
 pub fn crash_msg(logged: bool, s: &CrashStatus) -> Option<[u8; 8]> {
     let bit = |b: bool| if b { b'1' } else { b'0' };
     match (logged, s.would_fire()) {
@@ -1872,7 +1776,7 @@ pub fn crash_msg(logged: bool, s: &CrashStatus) -> Option<[u8; 8]> {
     }
 }
 
-/// AUTO's waypoint MSG: "HO WP <k>", k the active index (0 to 99, two digits).
+/// AUTO's waypoint MSG: "HO WP <k>", k the active index (0 to 99, two digits)
 pub fn leg_msg(k: u8) -> [u8; 8] {
     let k = k.min(99);
     let mut m = *b"HO WP 00";
@@ -1880,7 +1784,7 @@ pub fn leg_msg(k: u8) -> [u8; 8] {
     m
 }
 
-/// N14 (3): the card check's MSG text, "HOVER <pct> % of card", `pct` right-aligned in three places (at most 999).
+/// The card check's MSG text, "HOVER <pct> % of card", `pct` right-aligned in three places (at most 999)
 pub fn card_msg(pct: u16) -> [u8; 19] {
     let p = pct.min(999);
     let digit = |n: u16| b'0' + (n % 10) as u8;
@@ -1899,7 +1803,7 @@ fn put(m: &mut [u8], at: usize, s: &[u8]) -> usize {
     (at + s.len()).min(m.len())
 }
 
-/// Writes `v` in decimal, no leading zeros, into `m` from `at`; the index after it. Not inlined: one copy in RAM.
+/// Writes `v` in decimal, no leading zeros, into `m` from `at`; the index after it.
 #[inline(never)]
 fn put_dec(m: &mut [u8], at: usize, v: u32) -> usize {
     let mut digits = [0u8; 10];
@@ -1929,8 +1833,8 @@ pub fn hands_off_reason_msg(state: State, reason: Option<hands_off::Reason>) -> 
     m
 }
 
-/// A station command and the step's answer: "CMD <NAME> ok", or "CMD <NAME> den <code>" with `DenyReason::code` (0 when
-/// the step gave no answer, as the mailbox's answer byte); NUL padded.
+/// A station command and the step's answer: "CMD <NAME> ok", or "CMD <NAME> den <code>" with `DenyReason::code`.
+/// when the step gave no answer, as the mailbox's answer byte); NUL padded.
 pub fn command_msg(command: hands_off::Command, result: Option<hands_off::CommandResult>) -> [u8; 20] {
     use hands_off::{Command, CommandResult};
     let mut m = [0u8; 20];
@@ -1972,9 +1876,8 @@ pub fn plan_msg(plan_id: Option<u32>, waypoints: u8) -> [u8; 24] {
     m
 }
 
-/// At AUTO's exit on station loss: the station HEARTBEAT's age, ms, and the sender of the RC port's latest
-/// ground-station HEARTBEAT (any sender of type GCS): "STN age 5012 ms gcs 255,190", "none" for either when unknown; NUL
-/// padded.
+/// At AUTO's exit on station loss: the station HEARTBEAT's age, ms, and the sender of the RC port's latest ground-
+/// station HEARTBEAT (any sender of type GCS): "STN age 5012 ms gcs 255,190", "none" for either when unknown.
 pub fn station_lost_msg(age_ms: Option<u32>, gcs: Option<(u8, u8)>) -> [u8; 40] {
     let mut m = [0u8; 40];
     let mut n = put(&mut m, 0, b"STN age ");
@@ -1998,8 +1901,8 @@ pub fn station_lost_msg(age_ms: Option<u32>, gcs: Option<(u8, u8)>) -> [u8; 40] 
     m
 }
 
-/// The switch-on edge's MSG (decision-inair-restart-20261125): "ARM no <token>" (`Refusal::token`) when refused, "ARM
-/// fall t=<ms since the STOP> f=<|f| x100, m/s^2> thr=<throttle x100>" when armed through the in-air restart; NUL padded.
+/// The switch-on edge's MSG: "ARM no <token>" (`Refusal::token`) when refused, "ARM fall t=<ms since the STOP> f=<|f|
+/// x100, m/s^2> thr=<throttle x100>" when armed through the in-air restart; NUL padded.
 pub fn arm_msg(note: ArmNote) -> [u8; 52] {
     let mut m = [0u8; 52];
     match note {
@@ -2034,9 +1937,7 @@ pub fn fall_msg(note: FallNote) -> [u8; 16] {
     m
 }
 
-/// When to write MODE (decision-nav-eskf-20261120, 8c, F6): at the first step and at every change of the selected or
-/// the effective mode. The caller asks [`ModeLog::pending`], writes [`encode_mode`] and only then calls
-/// [`ModeLog::done`], so a record the ring dropped is offered again at the next step.
+/// When to write MODE: at the first step and at every change of the selected or the effective mode.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ModeLog {
     /// (selected, effective) codes of the last record written; `None` before the first.
@@ -2060,17 +1961,13 @@ impl ModeLog {
     }
 }
 
-/// MODE of this step at the start of `buf`: `TimeUS` = `out.t_us`, the selected and the effective mode. Returns the
-/// bytes written (13), or 0 (nothing written) if `buf` is too small.
+/// MODE of this step at the start of `buf`: `TimeUS` = `out.t_us`, the selected and the effective mode.
 pub fn encode_mode(out: &StepOut, buf: &mut [u8]) -> usize {
     dflog::encode_mode(buf, out.t_us, mode_code(out.selected), mode_code(out.mode))
 }
 
-/// SPN of this step at the start of `buf` (decision-nav-eskf-20261120, 8c, F1; Amendment P, P5): only when the setpoint is
-/// Altitude or Position, `TimeUS` = `out.t_us`, PD the target height (down positive), VD the climb-rate feed-forward (down
-/// positive). In Altitude PN, PE, VN, VE and Hdg are 0; in Position PN, PE are the position target (this step's position
-/// while unlocked), VN, VE the velocity feed-forward and Hdg the heading of the setpoint. Returns the bytes written (39),
-/// or 0 (nothing written) if the setpoint is neither or `buf` is too small.
+/// SPN of this step at the start of `buf`: only when the setpoint is Altitude or Position, `TimeUS` = `out.t_us`, PD
+/// the target height (down positive), VD the climb-rate feed-forward (down positive)
 pub fn encode_spn(out: &StepOut, buf: &mut [u8]) -> usize {
     match out.setpoint {
         Setpoint::Altitude {
@@ -2094,8 +1991,8 @@ pub fn encode_spn(out: &StepOut, buf: &mut [u8]) -> usize {
     }
 }
 
-/// NAV's and NKF1's valid bits: tilt 1, heading 2, rates 4, velocity NE 8, velocity D 16, position NE 32,
-/// position D 64.
+/// NAV's and NKF1's valid bits: tilt 1, heading 2, rates 4, velocity NE 8, velocity D 16, position NE 32, position D
+/// 64.
 fn valid_bits(v: &Valid) -> u8 {
     let Valid {
         tilt,
@@ -2115,9 +2012,8 @@ fn valid_bits(v: &Valid) -> u8 {
         | u8::from(position_d) << 6
 }
 
-/// NKF1 then NKF2 of one estimator's state (decision-nav-eskf-20261120, 8c, B5) at the start of `buf`: instance
-/// `inst`, `TimeUS` = `nav.t_us`, the biases as given, the sigmas from `nav.sigma` (infinite when `None`). Returns the
-/// bytes written (113), or 0 (nothing written) if `buf` is too small.
+/// NKF1 then NKF2 of one estimator's state at the start of `buf`: instance `inst`, `TimeUS` = `nav.t_us`, the biases
+/// as given, the sigmas from `nav.sigma` (infinite when `None`)
 pub fn encode_nkf(
     buf: &mut [u8],
     inst: u8,
@@ -2190,7 +2086,7 @@ mod tests {
         }
     }
 
-    /// Amendment C: the stick-to-collective map, 0 -> 0, 0.5 -> m g, 1 -> min(cap m g, 4 K_F w_max^2).
+    /// The stick-to-collective map, 0 -> 0, 0.5 -> m g, 1 -> min(cap m g, 4 K_F w_max^2)
     #[test]
     fn collective_follows_the_capped_map() {
         let hover = MASS * GRAVITY_MSS;
@@ -2251,8 +2147,6 @@ mod tests {
         assert_eq!(out.nav.t_us, 1234);
         assert!(!out.armed);
 
-        // I5: a NaN gyro sample while armed gives Stop and disarm without a call to the estimator; the next good
-        // sample gives a finite nav.
         let level = |t_us: u64, gyro: [f32; 3]| {
             let mut i = inputs(t_us);
             i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -9.81];
@@ -2273,8 +2167,6 @@ mod tests {
             t_us,
         };
         let mut t = 2_000;
-        // The first sample (zero accel) seeds the accelerometer filter: the tilt is valid only once the filtered |f|
-        // reaches 0.9 g, tau x ln(10) after the first level step. Run the level steps that takes, plus two.
         const STEP_US: u64 = 1_000;
         let tau_s = 1.0 / (2.0 * core::f32::consts::PI * tuning.ins_accel_lpf_hz);
         let settle = (libm::logf(10.0) * tau_s / (STEP_US as f32 * 1e-6)).ceil() as u32 + 2;
@@ -2312,9 +2204,7 @@ mod tests {
         );
     }
 
-    /// Decision-nav-eskf-20261120, section 4 (packet F1): with Mahony the barometer, compass and GNSS samples change
-    /// nothing. The same step sequence (level, arm, sticks moving, a moving IMU) with and without the three samples
-    /// gives the same outputs, bit for bit (every field's exact `Debug` text and the step's log records).
+    /// With Mahony the barometer, compass and GNSS samples change nothing.
     #[test]
     fn slow_sensor_samples_do_not_change_a_mahony_step() {
         extern crate std;
@@ -2349,7 +2239,6 @@ mod tests {
                     -0.2 * libm::cosf(x),
                     -9.81 + 0.1 * libm::sinf(x),
                 ];
-                // Arm after 200 steps (throttle low), then sticks that move.
                 let stick = |k: f32| {
                     if n < 400 {
                         0.0
@@ -2428,7 +2317,6 @@ mod tests {
             assert_eq!(a.0, b.0, "step {n}: outputs differ");
             assert_eq!(a.1, b.1, "step {n}: log records differ");
         }
-        // The sequence is not trivial: it armed, and the motors ran with commands that change.
         let last = &with[with.len() - 1].2;
         assert!(last.armed && WITH.armed());
         let throttles: std::vec::Vec<_> =
@@ -2440,7 +2328,7 @@ mod tests {
     extern crate std;
 
     /// The sequence of `slow_sensor_samples_do_not_change_a_mahony_step` at step `n`, with the barometer, compass and
-    /// GNSS samples (`mag_expected` gives the compass samples an expected field).
+    /// GNSS samples (`mag_expected` gives the compass samples an expected field)
     fn slow_inputs(n: u32, mag_expected: Option<fw_core::sample::MagExpected>) -> FlightInputs {
         use fw_core::sample::{
             BaroReading, BaroSample, GnssReading, GnssSample, MagReading, MagSample, UtcTime,
@@ -2526,8 +2414,7 @@ mod tests {
     }
 
     /// The parts of a step output the flight uses and logs outside the vertical estimate: motors, armed, mode,
-    /// setpoint, demand, allocation, attitude, rates, the tilt, heading, rates and NE flags, and the step's records
-    /// with NAV's velocity-D and position-D bits cleared.
+    /// setpoint, demand, allocation, attitude, rates, the tilt, heading, rates and NE flags.
     fn flight_part(out: &StepOut) -> (std::string::String, std::vec::Vec<u8>) {
         let v = out.nav.valid;
         let text = std::format!(
@@ -2555,10 +2442,7 @@ mod tests {
         (text, records[..len].to_vec())
     }
 
-    /// Packet E2, item 1: the board's estimator `MahonyBaro` flies as `Mahony` did. The sequence of
-    /// `slow_sensor_samples_do_not_change_a_mahony_step` (with the barometer, compass and GNSS samples) gives the same
-    /// motors, setpoints, demands, allocations, attitude, rates and tilt flags, bit for bit, with either estimator; only
-    /// the vertical estimate (velocity D, position D, their flags and sigmas) differs, and it does.
+    /// The board's estimator `MahonyBaro` flies as `Mahony` did.
     #[test]
     fn mahony_baro_steps_as_mahony_bit_for_bit() {
         extern crate std;
@@ -2597,9 +2481,8 @@ mod tests {
         assert!(baro.estimator().vert().fused() > 100);
     }
 
-    /// Packet E2, item 6: the shadow never changes the step. The board's flight code over the same sequence with no
-    /// shadow, with the `Eskf` at the default tuning and with an `Eskf` of another tuning gives identical step outputs
-    /// and records (every field's exact `Debug` text), while the two shadows' states differ.
+    /// The shadow never changes the step. The board's flight code over the same sequence with no shadow, with the
+    /// `Eskf` at the default tuning and with an `Eskf` of another tuning gives identical step outputs and records
     #[test]
     fn the_shadow_never_changes_the_step() {
         extern crate std;
@@ -2717,8 +2600,8 @@ mod tests {
         assert!((0..6).all(|k| f(&buf, 65 + 24 + 4 * k) == f32::INFINITY));
     }
 
-    /// Estimator, controller and allocator in one: each call appends its digit to `log`
-    /// (1 estimate, 2 reset, 5 control, 6 allocate).
+    /// Estimator, controller and allocator in one: each call appends its digit to `log`.
+    /// control, 6 allocate)
     #[derive(Clone, Copy)]
     struct Rec<'a> {
         log: &'a Cell<u32>,
@@ -2793,7 +2676,6 @@ mod tests {
             rates: true,
             ..Valid::NONE
         };
-        // (valid, controller accepts, calls, allocation made)
         let cases = [
             (Valid::NONE, true, 12, false), // covers fails: no controller, no allocator
             (attitude, false, 125, false),  // the controller refuses: no allocator
@@ -2811,12 +2693,11 @@ mod tests {
             assert_eq!(log.get(), calls);
             assert_eq!(out.allocation.is_some(), allocated);
             assert_eq!(out.demand.is_ok(), allocated);
-            // The gate comes last and has no stick report: Stop whatever the allocator said.
             assert_eq!(out.motors, MotorCommand::STOP);
         }
     }
 
-    /// A6: the six records of one step, decoded by hand, field by field.
+    /// The six records of one step, decoded by hand, field by field.
     #[test]
     fn encode_step_writes_the_six_records() {
         extern crate std;
@@ -2879,39 +2760,33 @@ mod tests {
         let h = |at: usize| u16::from_le_bytes(buf[at..at + 2].try_into().unwrap());
         let fs = |at: usize, n: usize| (0..n).map(|i| f(at + 4 * i)).collect::<std::vec::Vec<_>>();
         let time = 0x0102_0304_0506u64.to_le_bytes();
-        // NAV at 0: header, time, Q1..Q4, GX..GZ, Vld (tilt 1 + rates 4 + position_d 64).
         assert_eq!(buf[0..3], [0xA3, 0x95, 139]);
         assert_eq!(buf[3..11], time);
         assert_eq!(fs(11, 4), out.nav.attitude);
         assert_eq!(fs(27, 3), out.nav.rates_rads);
         assert_eq!(buf[39], 1 | 4 | 64);
-        // SETP at 40: K 1, Q, RX RY 0, RZ the heading rate, Thr.
         assert_eq!(buf[40..43], [0xA3, 0x95, 140]);
         assert_eq!(buf[43..51], time);
         assert_eq!(buf[51], 1);
         assert_eq!(fs(52, 4), [0.9, 0.1, -0.2, 0.3]);
         assert_eq!(fs(68, 3), [0.0, 0.0, 1.5]);
         assert_eq!(f(80), 7.25);
-        // DMD at 84: Ok, Thr, TX..TZ, Sat (pitch 2 + yaw 4 + thrust_high 16).
         assert_eq!(buf[84..87], [0xA3, 0x95, 141]);
         assert_eq!(buf[87..95], time);
         assert_eq!(buf[95], 1);
         assert_eq!(fs(96, 4), [7.5, 0.01, -0.02, 0.03]);
         assert_eq!(buf[112], 2 | 4 | 16);
-        // MOT at 113: Arm, Mode (Angle 1), A0..A3, C0..C3.
         assert_eq!(buf[113..116], [0xA3, 0x95, 142]);
         assert_eq!(buf[116..124], time);
         assert_eq!(buf[124..126], [1, 1]);
         let levels: std::vec::Vec<u16> = (0..8).map(|i| h(126 + 2 * i)).collect();
         assert_eq!(levels, [120, 130, 140, 150, 111, 222, 333, 444]);
-        // PIDT at 142: per axis Tar, P, I, D.
         assert_eq!(buf[142..145], [0xA3, 0x95, 154]);
         assert_eq!(buf[145..153], time);
         assert_eq!(
             fs(153, 12),
             [1.0, 0.5, -0.5, 0.25, 2.0, 0.6, -0.6, 0.125, 3.0, 0.7, -0.7, 0.0625]
         );
-        // NTCH at 201: the rate the loop used, F0..F3, On.
         assert_eq!(buf[201..204], [0xA3, 0x95, 155]);
         assert_eq!(buf[204..212], time);
         assert_eq!(fs(212, 3), [0.1, -0.25, 0.5]);
@@ -2982,11 +2857,8 @@ mod tests {
         }
     }
 
-    /// P-G2 T6 (Amendment G, G1 "Resets and the controller"): a yaw reset of the core is invisible to the Angle
-    /// controller. `Flight` with the steering `EskfSteer` over a resting vehicle with the sticks off centre, run three
-    /// times: plain; with the compass turned 90 deg from 20 s, which makes the core reset its yaw about 5 s later; and
-    /// (the control) plain with a 2 deg tilt offset put into the output at that same step.
-    /// Returns every step's demand after 6 s and the step of the core's yaw reset.
+    /// A yaw reset of the core is invisible to the Angle controller. `Flight` with the steering `EskfSteer` over a
+    /// resting vehicle with the sticks off centre, run three times: plain.
     fn t6_run(
         handshake: &'static Handshake,
         mag_turn: bool,
@@ -2998,8 +2870,6 @@ mod tests {
         use crate::eskf_out::EskfSteer;
         let tuning = Tuning::DEFAULT;
         let mut core = Eskf::new(&tuning).unwrap();
-        // This run must stay armed (the Angle demand is asserted), and G6-B resets no yaw while armed: the test switch
-        // restores the compass reset after the timeout, through the same `mag_job` -> `yaw_set` path.
         core.armed_yaw_reset = true;
         let steer = EskfSteer::new(&mut core, &tuning).unwrap();
         let mut flight = Flight::new(steer, CascadedPid::new(&tuning, 800.0), CardAllocator::new(), &tuning, handshake);
@@ -3065,9 +2935,6 @@ mod tests {
             "t6: yaw reset at step {k}; largest torque in the run {scale:.4} N.m; before the reset: thrust {pre_t:.2e} N, torque {pre_q:.2e} N.m; reset step and after: thrust {post_t:.2e} N, torque {post_q:.2e} N.m; control (2 deg tilt offset): thrust {off_t:.2e} N, torque {off_q:.2e} N.m"
         );
         assert!(scale > 0.01, "the demand must be non-trivial: {scale}");
-        // Before the reset the runs differ only by a few ulp (the turned compass is gated, which the core notes in its
-        // timers); after it, by rounding: the heading twist is rebuilt from a quaternion the reset rotated by 90 deg,
-        // 1e-4 of the demand's scale (80 ulp of it measured, the control is 600 times that).
         assert!(pre_t == 0.0 && pre_q <= 1e-6, "before the reset: thrust {pre_t}, torque {pre_q}");
         assert!(post_q <= 1e-4 * scale && post_t <= 1e-4, "thrust {post_t}, torque {post_q}");
         assert!(off_q > 100.0 * post_q.max(1e-9) && off_q > 0.01 * scale, "the control must change the demand: {off_q}");
@@ -3092,8 +2959,7 @@ mod tests {
     }
 
     /// `Flight` steered by `SteerMix` over a vehicle climbing at `climb_ms` (yaw 0.4, level), armed from 2 s, Altitude
-    /// selected, the throttle stick at the centre from 3 s, 32 s. With `baro_off` the barometer reads 40 m too high
-    /// from 20 s; `poison_at` is the step before which ESKF2's nominal velocity is made non-finite.
+    /// selected, the throttle stick at the centre from 3 s, 32 s.
     fn mix_run(handshake: &'static Handshake, baro_off: bool, poison_at: Option<usize>, climb_ms: f64) -> std::vec::Vec<MixRec> {
         extern crate std;
         use crate::eskf::tests::{World, poison, pressure_at};
@@ -3144,9 +3010,8 @@ mod tests {
         recs
     }
 
-    /// P-G1m M2 (Amendment G-1, V3): the barometer 40 m too high from 20 s, armed. ESKF2's height reset moves D by about
-    /// 40 m in one step: the vertical flags are false in exactly that step, the effective mode is Angle for it, and
-    /// Altitude captures the new D (target = D, integrator 0) on the next step.
+    /// The barometer 40 m too high from 20 s, armed. ESKF2's height reset moves D by about 40 m in one step: the
+    /// vertical flags are false in exactly that step, the effective mode is Angle for it.
     #[test]
     fn m2_a_height_reset_of_eskf2_drops_the_vertical_flags_for_that_step_and_altitude_recaptures_the_new_height() {
         static H: Handshake = Handshake::new();
@@ -3163,24 +3028,18 @@ mod tests {
         );
         for (i, r) in recs.iter().enumerate().skip(from) {
             assert!(r.armed && r.tilt, "step {i}");
-            // The flags are false in the reset's step and in no other.
             assert_eq!((r.vd, r.pd), (i != k, i != k), "step {i}: flags");
-            // Altitude in every step but that one, which is Angle.
             assert_eq!(r.mode, if i == k { Mode::Angle } else { Mode::Altitude }, "step {i}: mode");
         }
-        // The reset moved D by the barometer's 40 m; Angle holds no target; the next step captures the new D, integrator 0.
         assert!((recs[k].d - recs[k - 1].d).abs() > 30.0, "D moved by {}", recs[k].d - recs[k - 1].d);
         assert_eq!(recs[k].target, None);
         assert_eq!(recs[k + 1].target, Some(recs[k + 1].d));
         assert_eq!(recs[k + 1].integrator, 0.0);
-        // Before it the target sat at the old height (within the lead cap of D), its integrator was wound, not 0.
         assert!(recs[k - 1].target.is_some_and(|t| (t - recs[k - 1].d).abs() < 2.0));
         assert!(recs[k - 1].integrator != 0.0);
     }
 
-    /// P-G1m M3 (Amendment G-1, I6): ESKF2 forced non-finite at 15 s while armed in Altitude. It re-initialises that
-    /// step (flags false) while the output predictor's tilt stays true: the effective mode goes 2 -> 1, and back to 2
-    /// when ESKF2 has re-aligned and re-initialised its height, with a fresh capture.
+    /// ESKF2 forced non-finite at 15 s while armed in Altitude.
     #[test]
     fn m3_a_non_finite_eskf2_drops_altitude_to_angle_while_tilt_stays_true_and_it_recaptures_after_the_realignment() {
         static H: Handshake = Handshake::new();
@@ -3200,7 +3059,6 @@ mod tests {
             recs[at].t_us, recs[back].t_us, (recs[back].t_us - recs[at].t_us) as f64 * 1e-6, recs[back].z_reinits, recs[back].target, recs[back].d, recs[back].integrator,
             (at..recs.len()).find(|&k| recs[k].z_moved)
         );
-        // ESKF2's height-init reset (D from its zeroed state to the barometer's height) is in the step before the return.
         assert_eq!((at..recs.len()).filter(|&k| recs[k].z_moved).collect::<std::vec::Vec<_>>(), [back - 1]);
         assert!(back > at + 1);
         for r in &recs[at..back] {
@@ -3224,9 +3082,8 @@ mod tests {
         resets: u32,
     }
 
-    /// Addendum P-2: `Flight` with `EskfSteer` in Position (selected from 2 s, hover collective), the vehicle moving north at
-    /// 2 m/s, no GNSS epoch from 20 s to 28 s (longer than the 5 s timeout). From 34 s it brakes to rest.
-    /// `keep` is the rule before P-2 (the control).
+    /// Addendum P-2: `Flight` with `EskfSteer` in Position (selected from 2 s, hover collective), the vehicle moving
+    /// north at 2 m/s, no GNSS epoch from 20 s to 28 s (longer than the 5 s timeout)
     fn p2_run(handshake: &'static Handshake, keep: bool) -> std::vec::Vec<P2Rec> {
         extern crate std;
         use crate::eskf::Eskf;
@@ -3238,7 +3095,6 @@ mod tests {
         let steer = EskfSteer::new(&mut core, &tuning).unwrap();
         let mut flight = Flight::new(steer, CascadedPid::new(&tuning, 800.0), CardAllocator::new(), &tuning, handshake);
         handshake.set_permit(true);
-        // The latch is not under test (as in position_tests): forced, the vehicle is taken to be in the air.
         flight.airborne_forced = true;
         let mut world = World::new(&tuning);
         world.yaw = 0.4;
@@ -3281,7 +3137,6 @@ mod tests {
         static H: [Handshake; 2] = [Handshake::new(), Handshake::new()];
         let recs = p2_run(&H[0], false);
         let after = |t: u64| recs.iter().position(|r| r.t_us >= t).unwrap();
-        // Position before the outage (moving: no target yet, the integrator wound).
         let (k0, k_end) = (after(15_000_000), after(28_000_000));
         assert!(recs[after(10_000_000)..after(20_000_000)].iter().all(|r| r.mode == Mode::Position && r.ne && r.target_ne.is_none()));
         let drop = (k0..k_end).find(|&k| recs[k].mode != Mode::Position).expect("Position ends at the timeout");
@@ -3290,19 +3145,16 @@ mod tests {
         assert!(!recs[drop].ne && recs[drop - 1].ne, "the NE flags drop in the same step");
         assert!(recs[drop - 1].xy_i != [0.0, 0.0], "the integrator was wound before the drop");
         let reset = (k_end..recs.len()).find(|&k| recs[k].resets > recs[k - 1].resets).expect("a Src 9 reset after the outage");
-        // No flicker: Altitude from the drop to the reset step inclusive, Position the step after, NE flags false in the reset step only.
         assert!(recs[drop..=reset].iter().all(|r| r.mode == Mode::Altitude && !r.ne), "Altitude and NE false from the drop to the reset");
         assert!(recs[reset + 1].mode == Mode::Position && recs[reset + 1].ne, "Eff 2 -> 3 the step after the reset");
         assert!(recs[reset + 1].target_ne.is_none(), "no target while moving");
         assert_eq!(recs[reset + 1].xy_i, [0.0, 0.0], "a fresh Position entry: the horizontal integrator is 0");
-        // Moving: no capture until the vehicle is stopped.
         let stop = recs.iter().position(|r| r.t_us > 34_000_000 && r.target_ne.is_some()).expect("captured once stopped");
         assert!(recs[reset + 1..stop].iter().all(|r| r.mode == Mode::Position && r.target_ne.is_none()));
         std::println!(
             "p2: drop at step {drop} ({} us), reset at step {reset} ({} us, {:.3} s after the outage ended), capture at step {stop} ({} us)",
             recs[drop].t_us, recs[reset].t_us, (recs[reset].t_us - 28_000_000) as f64 * 1e-6, recs[stop].t_us
         );
-        // The control, the rule before P-2: no reset at the first epoch back.
         let old = p2_run(&H[1], true);
         let old_reset = (k_end..old.len()).find(|&k| old[k].resets > old[k - 1].resets);
         std::println!("p2 control (started kept): reset after the outage {:?}", old_reset.map(|k| old[k].t_us));

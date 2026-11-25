@@ -1,6 +1,5 @@
-//! Host tests of the RPM notch at the step level (decision-rpm-notch-20261123): the eRPM age rule, the switch latched on
-//! disarmed steps, the controller's torques with no usable eRPM, and the P, I, D of the rate log against the demand. The
-//! estimator is the fake of `althold_tests`.
+//! Host tests of the RPM notch at the step level: the eRPM age rule, the switch latched on disarmed steps, the
+//! controller's torques with no usable eRPM, and the P, I, D of the rate log against the demand.
 
 extern crate std;
 
@@ -15,7 +14,7 @@ use std::vec::Vec;
 /// eRPM of a rotor at 100 Hz with 14 poles: 100 x 60 x 14 / 2.
 const ERPM_100_HZ: u32 = 42_000;
 
-/// One step with the arm switch `arm`, the sticks `[roll, pitch]` and the hover throttle once armed (the gate arms
+/// One step with the arm switch `arm`, the sticks `[roll, pitch]` and the hover throttle once armed.
 /// only with the throttle at the bottom); `erpm` is each line's value and its age, us.
 fn armed_step(
     f: &mut TestFlight,
@@ -59,7 +58,6 @@ fn rates(k: u32, seed: &mut u32, amp: f32) -> [f32; 3] {
 /// The outputs of 600 armed steps with the switch set to `on` (`None`: `set_notch` never called) and each line's eRPM
 /// `(value, age)`; the rates carry a tone of amplitude `amp` and the roll stick moves.
 fn run(on: Option<bool>, erpm: [Option<(u32, u64)>; LINES], amp: f32) -> Vec<StepOut> {
-    // A handshake of its own: the gate's `try_arm` fails while the flag a previous run set is still up.
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
@@ -68,7 +66,6 @@ fn run(on: Option<bool>, erpm: [Option<(u32, u64)>; LINES], amp: f32) -> Vec<Ste
     if let Some(on) = on {
         assert!(f.set_notch(on, 14));
     }
-    // The time starts above ANSWER_US, so that an eRPM's capture time is never clamped at 0.
     let mut t = 1_000_000;
     for arm in [false, false, true] {
         t += DT_US;
@@ -101,12 +98,10 @@ fn the_switch_off_no_erpm_or_low_frequencies_give_the_torques_of_a_controller_wi
     let live = [Some((ERPM_100_HZ, 0)); LINES];
     let base = run(None, [None; LINES], 0.4);
     assert!(base.iter().all(|o| o.armed && o.demand.is_ok()));
-    // The switch off with live eRPM; the switch on with none; on with eRPM giving f1 16 Hz (3 x 16 < 50).
     assert!(same_torques(&base, &run(Some(false), live, 0.4)), "off");
     assert!(same_torques(&base, &run(Some(true), [None; LINES], 0.4)), "on, no eRPM");
     assert!(same_torques(&base, &run(Some(true), [Some((6_720, 0)); LINES], 0.4)), "on, every h f1 below 50 Hz");
     assert!(same_torques(&base, &run(Some(true), [Some((0, 0)); LINES], 0.4)), "on, eRPM 0");
-    // Control: the same run with the notch live differs, and the rate the loop used is not the estimate's.
     let on = run(Some(true), live, 0.4);
     assert!(!same_torques(&base, &on), "control");
     assert!(on.iter().any(|o| o.rate.rate_rads != o.nav.rates_rads));
@@ -122,7 +117,6 @@ fn an_erpm_of_exactly_100_ms_is_missing_and_one_just_under_is_used() {
     let young = run(Some(true), [Some((ERPM_100_HZ, ANSWER_US - 1)); LINES], 0.4);
     assert!(!same_torques(&base, &young), "one us under: used");
     assert!(young.iter().all(|o| o.rate.f1_hz == [100.0; LINES]));
-    // A line at a time: only the old line stays out; the report names each line's frequency.
     let mixed = run(
         Some(true),
         [Some((ERPM_100_HZ, ANSWER_US)), Some((ERPM_100_HZ, 0)), None, Some((ERPM_100_HZ + 4_200, ANSWER_US - 1))],
@@ -136,7 +130,6 @@ fn p_i_and_d_of_the_rate_log_sum_to_the_demanded_torque_bit_for_bit() {
     let live = [Some((ERPM_100_HZ, 0)), Some((ERPM_100_HZ + 8_400, 0)), Some((ERPM_100_HZ - 8_400, 10_000)), None];
     let mut checked = 0;
     let mut nonzero = [false; 3];
-    // The tone of 0.4 rad/s, and a violent one that saturates the allocator.
     for (on, amp) in [(Some(true), 0.4), (Some(false), 0.4), (None, 0.4), (Some(true), 30.0)] {
         for o in run(on, live, amp) {
             let Ok(d) = o.demand else { continue };
@@ -172,18 +165,14 @@ fn the_switch_and_the_poles_are_taken_on_disarmed_steps_only() {
     assert!(step(&mut f, false).rate.on, "taken at a disarmed step");
     let armed = step(&mut f, true);
     assert!(armed.armed && armed.rate.on);
-    // 14 poles: 42 000 eRPM is 100 Hz.
     assert_eq!(armed.rate.f1_hz, [100.0; LINES]);
-    // Changed while armed: no effect, neither the switch nor the poles.
     assert!(f.set_notch(false, 28));
     let still = step(&mut f, true);
     assert!(still.armed && still.rate.on && still.rate.f1_hz == [100.0; LINES]);
-    // The step that disarms is still armed at its start; the next one is disarmed and takes the values.
     assert!(!step(&mut f, false).armed);
     let after = step(&mut f, false);
     assert!(!after.rate.on);
     assert_eq!(after.rate.f1_hz, [50.0; LINES]);
-    // The parameter's range: poles 2 to 64; a refused value changes nothing.
     assert!(!f.set_notch(true, 1) && !f.set_notch(true, 65) && !f.set_notch(true, 0) && !f.set_notch(true, -14));
     assert!(!step(&mut f, false).rate.on);
     assert!(f.set_notch(true, 2) && f.set_notch(true, 64));

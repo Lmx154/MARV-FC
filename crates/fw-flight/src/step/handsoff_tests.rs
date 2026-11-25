@@ -1,6 +1,5 @@
-//! Host tests of the hands-off wiring in `Flight::step` (decision-mavlink-mode-20261123, Amendment D: WR1 to WR3, the
-//! laws built in H2b-2 and its checklist). The estimator is the fake of `althold_tests`: each test sets what the
-//! estimate covers, where the vehicle is and how it moves.
+//! Host tests of the hands-off wiring in `Flight::step`.
+//! checklist)
 
 extern crate std;
 
@@ -17,7 +16,7 @@ const POSITION: Valid = Valid {
     ..ALTITUDE
 };
 
-/// A handshake of its own per run (the gate's `try_arm` fails while a flag a previous run set is still up).
+/// A handshake of its own per run (the gate's `try_arm` fails while a flag a previous run set is still up)
 fn handshake() -> &'static Handshake {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
@@ -54,7 +53,6 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
 
 /// One step's output as the log and the board see it: `StepOut`'s `Debug` text and the step block, SPN and MODE bytes.
 fn digest_step(h: &mut u64, o: &StepOut) {
-    // M2b: the step before had no `accel_d_mss`; its text at exactly 0.0 is left out, any other value stays in.
     fnv(h, std::format!("{o:?}").replace(", accel_d_mss: 0.0 }", " }").as_bytes());
     let mut b = [0u8; 256];
     let n = encode_step(o, &mut b);
@@ -65,17 +63,14 @@ fn digest_step(h: &mut u64, o: &StepOut) {
     fnv(h, &b[..n]);
 }
 
-/// A scripted flight over random reports, sticks, switches, coverage, positions and silences (RC loss on the ground and
-/// in the air), with arming cycles; `setup` runs on the flight first. Returns the digest of every step, the digest of the
-/// steps before the first airborne stick loss (the first step that starts armed with the airborne latch set and the newest
-/// report older than the stick-loss time; `None` if there is none), and counts of what it went through (armed steps,
-/// RC-loss disarms in the air, steps per effective mode).
+/// A scripted flight over random reports, sticks, switches, coverage, positions and silences.
+/// and in the air), with arming cycles; `setup` runs on the flight first.
 fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, Option<u64>, [u32; 5]) {
     walk_with(seed, steps, fw_core::rc::RcSource::Crsf, setup)
 }
 
-/// `walk` with the reports from `source` (N19). IMU1 reads 1 g (level, at rest): an all-zero sample would read as free fall
-/// to the in-air restart (decision-inair-restart-20261125); the digests are the same either way without it.
+/// `walk` with the reports from `source`. IMU1 reads 1 g (level, at rest): an all-zero sample would read as free fall
+/// to the in-air restart; the digests are the same either way without it.
 fn walk_with(seed: u64, steps: usize, source: fw_core::rc::RcSource, setup: impl FnOnce(&mut TestFlight)) -> (u64, Option<u64>, [u32; 5]) {
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(0.0, ANGLE));
@@ -147,46 +142,31 @@ fn walk_with(seed: u64, steps: usize, source: fw_core::rc::RcSource, setup: impl
     (h, prefix, counts)
 }
 
-/// The digests of `walk` (40 000 steps) on the flight step before the hands-off wiring (commit c270814; HEAD dc08e59 gave
-/// the same), by seed: the whole walk, and the steps before its first airborne stick loss.
+/// The digests of `walk` (40 000 steps) on the flight step before the hands-off wiring.
+/// gave the same), by seed: the whole walk, and the steps before its first airborne stick loss.
 const WALK_C270814: [(u64, u64, u64); 3] = [
     (0x5eed_0b01, 0xc20b_89fd_6881_ff30, 0xe926_b5c2_a522_7ce0),
     (0x5eed_0b02, 0x80ac_3c4a_1ca4_993f, 0x14c8_305a_51f6_5188),
     (0x5eed_0b03, 0x73bf_dc63_d210_a3f1, 0x338c_b533_10c0_bd24),
 ];
 
-/// The digests of the whole `walk` with Amendment N, N2 (a stick loss in the air at FS_HOLD_EN 0 lands, BLIND on T1), by
-/// seed, with the heading verdict forced false (`set_heading_ok(false)`; before H12/H14's wiring the board's verdict was
-/// constant false, so LAND was always level). Every walk has an airborne stick loss, so every digest changed; the prefix
-/// before it did not. Re-baselined for N12 (the walk feeds no RADIO_STATUS, so an arm-OFF report after a stick loss
-/// stops at once); before N12: 0x7629_5a56_9aae_7065, 0x46a3_bae4_d352_1f51, 0xef4e_8cca_25eb_2f21. Re-baselined for
-/// N11 (2) (LAND starts from the estimated v_D); N12 alone: 0x86d2_b007_f7eb_cab0, 0xf12b_8b95_ced1_2aef,
-/// 0x03c3_c9eb_a852_01ec. Re-baselined for N14 (1) (the low mark: a stick loss after spool-up lands; seed 0b01 only);
-/// before: 0xd546_494e_cde7_4b56. Re-baselined for N18 (LAND's height target is seated at the vehicle when it is below the target; these walks fly LAND after their airborne stick loss); before:
-/// 0x729d_27a8_4707_fc19, 0x4b6b_6a15_c678_b15e, 0x196e_228a_8cf2_ceab.
+/// The digests of the whole `walk` by seed, with the heading verdict forced false (`set_heading_ok(false)`).
 const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
     (0x5eed_0b01, 0xe231_1a2f_6ef3_2dc8),
     (0x5eed_0b02, 0x4bdd_53b4_54c6_6e2a),
     (0x5eed_0b03, 0xb1d7_1062_446b_80ea),
 ];
 
-/// The digests of the whole `walk` with the heading verdict `Valid.heading` (H12 item 4 as amended by H14, the board's):
-/// after the first airborne stick loss LAND holds position (or brakes) where the estimate covers it. Re-baselined for N12
-/// (no RADIO_STATUS: an arm-OFF report after a stick loss stops at once); before N12: 0x65a2_4273_a378_82ff,
-/// 0xa6c7_d3b0_eb7a_e384, 0x8b10_b43b_bafb_351a. Re-baselined for N11 (2) (LAND starts from the estimated v_D); N12
-/// alone: 0xce7a_cba4_76de_f8c5, 0x34f3_cc4f_6c55_e901, 0x942f_8427_0db8_35d6. Re-baselined for N14 (1) (the low
-/// mark; seed 0b01 only); before: 0x56bb_b0b0_9e28_c915. Re-baselined for N18 (LAND's height target is seated at the vehicle when it is below the target; these walks fly LAND after their airborne stick loss); before:
-/// 0xb5ce_e71d_824e_7eb2, 0xfc05_671f_8228_7f0d, 0x819a_fb5f_e3c2_d65f.
+/// The digests of the whole `walk` with the heading verdict `Valid.heading`: after the first airborne stick loss LAND
+/// holds position (or brakes) where the estimate covers it.
 const WALK_GOLDEN: [(u64, u64); 3] = [
     (0x5eed_0b01, 0x5f0d_d5e8_ac91_93b3),
     (0x5eed_0b02, 0x488f_2073_8d5f_dfe4),
     (0x5eed_0b03, 0xa9fd_1312_aa81_3212),
 ];
 
-/// I2 as amended by N2: with FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first
-/// airborne stick loss equal those of the step before the wiring (the prefix digest), over three scripted flights with
-/// arming cycles, mode changes, coverage drops and RC loss on the ground and in the air; the whole walk equals the
-/// re-baselined golden and differs from the old one (the change is real and starts at the loss or later).
+/// With FS_HOLD_EN 0 every step's `StepOut` and its step block, SPN and MODE bytes before the first airborne stick
+/// loss equal those of the step before the wiring (the prefix digest)
 #[test]
 fn i2_fs_hold_en_0_is_bit_identical_to_the_step_before_the_wiring() {
     let (mut got, mut want) = (std::vec::Vec::new(), std::vec::Vec::new());
@@ -203,10 +183,8 @@ fn i2_fs_hold_en_0_is_bit_identical_to_the_step_before_the_wiring() {
     assert_eq!(got, want);
 }
 
-/// I2's control as amended by N2, H14 and N19: with the heading verdict forced false (so no T3' and no HOLD) the flights
-/// at FS_HOLD_EN 0 and 1 equal the heading-off goldens; with the verdict `Valid.heading` the CRSF walk at FS_HOLD_EN 1
-/// equals WALK_GOLDEN (no hands-off on a CRSF flight, N19 1(5)) and the same walk with receiver reports differs (HOLD
-/// on T3').
+/// Control: with the heading verdict forced false (so no T3' and no HOLD) the flights at FS_HOLD_EN
+/// 0 and 1 equal the heading-off goldens.
 #[test]
 fn i2_control_fs_hold_en_1_changes_the_flights() {
     for ((seed, golden), (seed_off, golden_off)) in WALK_GOLDEN.into_iter().zip(WALK_GOLDEN_HEADING_OFF) {
@@ -226,8 +204,8 @@ fn i2_control_fs_hold_en_1_changes_the_flights() {
     }
 }
 
-/// N2: with FS_HOLD_EN 0, RC loss in the air (airborne latch set, Position, T3') is LAND at the first step past 1.0 s,
-/// the gate armed and the motors running, never HOLD and never STOP.
+/// With FS_HOLD_EN 0, RC loss in the air (airborne latch set, Position, T3') is LAND at the first step past 1.0 s, the
+/// gate armed and the motors running, never HOLD and never STOP.
 #[test]
 fn i2_fs_hold_en_0_rc_loss_in_the_air_lands_at_1_0_s_and_stays_armed() {
     let tuning = Tuning::DEFAULT;
@@ -269,8 +247,7 @@ fn i2_fs_hold_en_0_rc_loss_in_the_air_lands_at_1_0_s_and_stays_armed() {
 const FULL: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
 /// A flight with FS_HOLD_EN `fs`, the heading monitor's verdict `heading_ok` and coverage `valid`, 10 m up: armed in
-/// High with the throttle low, then 0.5 s at half throttle so the airborne latch is set. N19: the reports come from
-/// `source`, the receiver at FS_HOLD_EN 1 (a MAVLink flight) and CRSF at 0, unless built by `crsf`.
+/// High with the throttle low, then 0.5 s at half throttle so the airborne latch is set.
 struct Fly {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
@@ -278,7 +255,7 @@ struct Fly {
     source: fw_core::rc::RcSource,
 }
 
-/// N19: the receiver at FS_HOLD_EN 1, CRSF at 0.
+/// The receiver at FS_HOLD_EN 1, CRSF at 0.
 fn source_for(fs: bool) -> fw_core::rc::RcSource {
     if fs { fw_core::rc::RcSource::Receiver } else { fw_core::rc::RcSource::Crsf }
 }
@@ -293,7 +270,7 @@ impl Fly {
         Fly::build(fs, heading_ok, valid, speed, source_for(fs))
     }
 
-    /// As `new`, a CRSF flight at either FS_HOLD_EN (N19 section 3).
+    /// As `new`, a CRSF flight at either FS_HOLD_EN.
     fn crsf(fs: bool, heading_ok: bool, valid: Valid) -> Fly {
         Fly::build(fs, heading_ok, valid, Tuning::DEFAULT.pilot_speed_xy_ms, fw_core::rc::RcSource::Crsf)
     }
@@ -321,7 +298,7 @@ impl Fly {
         self.rc_ms(arm, sticks, switch6, false)
     }
 
-    /// `rc` with the mission switch `mission` (N19 1(2)).
+    /// `rc` with the mission switch `mission`.
     fn rc_ms(&mut self, arm: bool, [roll, pitch, throttle, yaw]: [f32; 4], switch6: Switch3, mission: bool) -> StepOut {
         self.t += DT_US;
         let t = self.t;
@@ -359,7 +336,7 @@ impl Fly {
         self.f.hands_off_state()
     }
 
-    /// A RADIO_STATUS from the receiver just after the latest step (N12's M at the next step: the MAVLink take-over).
+    /// A RADIO_STATUS from the receiver just after the latest step.
     fn radio_status(&mut self) {
         self.f.set_last_radio_status_us(Some(self.t + 1));
     }
@@ -371,8 +348,8 @@ impl Fly {
     }
 }
 
-/// The centred-stick setpoint of the hands-off laws: no horizontal or vertical feed-forward and no heading rate (Position),
-/// or a level attitude and no heading rate (Altitude).
+/// The centred-stick setpoint of the hands-off laws: no horizontal or vertical feed-forward and no heading rate
+/// (Position), or a level attitude and no heading rate (Altitude)
 fn is_centred(o: &StepOut) -> bool {
     match o.setpoint {
         Setpoint::Position { velocity_ms, heading_rate_rads, .. } => {
@@ -385,8 +362,8 @@ fn is_centred(o: &StepOut) -> bool {
     }
 }
 
-/// LAND's braking law (H14 (1)): Position at this step's navigation position, no horizontal feed-forward, the LAND
-/// descent rate, no heading rate.
+/// LAND's braking law: Position at this step's navigation position, no horizontal feed-forward, the LAND descent rate,
+/// no heading rate.
 fn is_braking(o: &StepOut, fly: &Fly) -> bool {
     match o.setpoint {
         Setpoint::Position { position_m, velocity_ms, heading_rate_rads, .. } => {
@@ -402,7 +379,6 @@ fn is_braking(o: &StepOut, fly: &Fly) -> bool {
 #[test]
 fn hold_stick_loss_in_the_air_on_t3_prime_is_hold_with_the_position_law_and_the_gate_armed() {
     let mut fly = Fly::new(true, true, POSITION);
-    // The last report had full sticks: none of them reaches the shaper after the loss.
     fly.rc(true, FULL, Switch3::High);
     let o = fly.lose();
     assert_eq!(fly.state(), State::Hold);
@@ -416,10 +392,7 @@ fn hold_stick_loss_in_the_air_on_t3_prime_is_hold_with_the_position_law_and_the_
     }
 }
 
-/// H12 item 4 as amended by H14: the heading verdict is this step's `Valid.heading` AND the sim/test override. With the
-/// override never set (the board), a stick loss in the air on T3 gives HOLD at FS_HOLD_EN 1 and LAND holding position
-/// at FS_HOLD_EN 0; the override false gives LAND with the level law at both; the override true cannot make T3' against
-/// the estimate's flag (heading false: no HOLD, LAND level).
+/// The heading verdict is this step's `Valid.heading` AND the sim/test override.
 #[test]
 fn h14_the_heading_verdict_is_valid_heading_and_the_override_only_forces_it_false() {
     for (fs, ok, heading, want, law) in [
@@ -469,7 +442,6 @@ fn i3_full_sticks_and_any_switch_in_takeover_give_the_centred_setpoint_until_the
     let mut fly = Fly::crsf(true, true, POSITION);
     fly.lose();
     assert_eq!(fly.state(), State::Land);
-    // CRSF back with full sticks: Low and Middle before High, then High with arm ON (the lock), all centred.
     for sw in [Switch3::Low, Switch3::Middle, Switch3::Low, Switch3::High, Switch3::High] {
         let o = fly.rc(true, FULL, sw);
         assert_eq!(fly.state(), State::Takeover, "{sw:?}");
@@ -480,7 +452,6 @@ fn i3_full_sticks_and_any_switch_in_takeover_give_the_centred_setpoint_until_the
             Switch3::High => Mode::Position,
         }, "the log keeps the real switch");
     }
-    // The first report after the lock with the switch out of High: PILOT, the real sticks.
     let o = fly.rc(true, FULL, Switch3::Middle);
     assert_eq!(fly.state(), State::Pilot);
     assert_eq!(o.mode, Mode::Altitude);
@@ -500,7 +471,6 @@ fn i3_control_high_with_arm_off_does_not_open_the_lock() {
 
 #[test]
 fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot() {
-    // CRSF back with arm OFF after a RADIO_STATUS (N12's M): TAKEOVER, the gate armed, the motors run (a CRSF flight).
     let mut fly = Fly::crsf(true, true, POSITION);
     fly.lose();
     fly.radio_status();
@@ -509,20 +479,16 @@ fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot()
         assert_eq!(fly.state(), State::Takeover);
         assert!(o.armed && o.motors.throttles().is_some());
     }
-    // Arm ON (K), then OFF: disarmed at that report.
     let o = fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
     assert!(o.armed);
     let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
     assert!(!o.armed && o.motors.throttles().is_none(), "after K");
     assert_eq!(fly.state(), State::Stop);
-    // PILOT: arm OFF disarms at once, FS_HOLD_EN 1 or 0.
     for fs in [true, false] {
         let mut fly = Fly::new(fs, true, POSITION);
         let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
         assert!(!o.armed, "fs {fs}");
     }
-    // N12, no RADIO_STATUS after the loss (a plain dropout): the arm-OFF return disarms in that step, in the air, FS_HOLD_EN
-    // 1 or 0.
     for fs in [true, false] {
         let mut fly = Fly::new(fs, true, POSITION);
         fly.lose();
@@ -539,8 +505,6 @@ fn wr2_the_held_arm_off_report_still_newest_when_the_latch_clears_stays_held_unt
     fly.radio_status();
     let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
     assert!(o.armed && fly.state() == State::Takeover);
-    // The latch as the previous step left it (modelled here: the real one clears in `wr1_touchdown_...`): N12 dropped the
-    // airborne term, so the held report stays held; TD held at the previous step stops and disarms (WR1, T).
     fly.f.airborne = false;
     let o = fly.quiet();
     assert!(o.armed && fly.state() == State::Takeover, "held with the latch false");
@@ -558,10 +522,8 @@ fn b9_fs_hold_en_written_while_armed_takes_effect_after_the_next_disarm() {
     let o = fly.lose();
     assert_eq!(fly.state(), State::Land);
     assert!(o.armed, "0 in force: RC loss in the air on T3' lands (Amendment N, N2), no HOLD");
-    // The sticks back with arm ON (K), then arm OFF: disarmed.
     fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
     assert!(!fly.rc(false, [0.0; 4], Switch3::High).armed);
-    // Re-armed after a disarmed step on the receiver (N19: a MAVLink flight): the 1 is in force.
     fly.source = fw_core::rc::RcSource::Receiver;
     for _ in 0..10 {
         fly.rc(false, [0.0; 4], Switch3::High);
@@ -574,7 +536,6 @@ fn b9_fs_hold_en_written_while_armed_takes_effect_after_the_next_disarm() {
     let o = fly.lose();
     assert_eq!(fly.state(), State::Hold);
     assert!(o.armed);
-    // Writing 0 while in HOLD keeps HOLD with RC loss not disarming.
     fly.f.set_fs_hold_en(false);
     for _ in 0..2_000 {
         let o = fly.quiet();
@@ -617,10 +578,8 @@ fn target_d(o: &StepOut) -> f32 {
     }
 }
 
-/// WR1 touchdown: LAND descends (the height target at 0.5 m/s), the vehicle follows it to the ground (d = 0) and IMU1
-/// reads it at rest (WR1's guard, N4 (b)), the real airborne latch clears (TD or land_detect_us on the idle floor; both
-/// count from the idle floor since N14 (1)), and the gate is disarmed within one step of that: at most land_detect_us
-/// plus one step after the first step on the idle floor.
+/// Touchdown: LAND descends (the height target at 0.5 m/s), the vehicle follows it to the ground (d = 0) and IMU1
+/// Reads it at rest (the guard)
 #[test]
 fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_step() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -633,7 +592,6 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
     let mut rate_checked = false;
     let dt = DT_US as f32 * 1e-6;
     for k in 0..40_000u32 {
-        // The vehicle follows the target down at the descent rate, and stops on the ground.
         let mut n = fly.cell.get();
         let d = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
         n.velocity_ms[2] = if d < 0.0 { LAND_SPEED_MS } else { 0.0 };
@@ -641,7 +599,6 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
         fly.cell.set(n);
         let air = fly.f.airborne;
         let o = fly.quiet_f(AT_REST);
-        // N11 (2): LAND starts from the hover's v_D (0) and reaches 0.5 m/s after 0.5 s (400 steps); measured from there.
         if k == 400 {
             d0 = target_d(&o);
         }
@@ -676,7 +633,6 @@ fn wr1_touchdown_land_descends_the_latch_clears_and_the_gate_disarms_within_one_
 
 #[test]
 fn blind_is_level_with_the_collective_0_3_m_s2_below_hover() {
-    // T1 for longer than the debounce before the sticks are lost.
     let mut fly = Fly::new(true, true, ANGLE);
     for _ in 0..800 {
         fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::High);
@@ -695,7 +651,6 @@ fn blind_is_level_with_the_collective_0_3_m_s2_below_hover() {
         }
         assert!(o.armed && o.demand.is_ok());
     }
-    // The height back: LAND at once (B6).
     fly.set_valid(ALTITUDE);
     let o = fly.quiet();
     assert_eq!((fly.state(), o.mode), (State::Land, Mode::Altitude));
@@ -714,13 +669,11 @@ fn takeover_descent_flies_the_land_law_and_hand_over_stays_possible() {
     assert_eq!(o.mode, Mode::Position);
     match o.setpoint {
         Setpoint::Position { velocity_ms, heading_rate_rads, .. } => {
-            // N11 (2): LAND's rate, starting from the hover's v_D (0).
             assert_eq!(fly.f.land_rate_ms, Some(0.0));
             assert_eq!((velocity_ms, heading_rate_rads), ([0.0, 0.0, 0.0], 0.0), "the LAND law, no real stick");
         }
         other => panic!("{other:?}"),
     }
-    // N11 (2): the rate reaches 0.5 m/s after 0.5 s (400 steps); measured from there.
     let mut d1 = d0;
     for k in 0..800 {
         let o = fly.rc(true, FULL, Switch3::Low);
@@ -732,7 +685,6 @@ fn takeover_descent_flies_the_land_law_and_hand_over_stays_possible() {
     let rate = (target_d(&o) - d1) / (401.0 * DT_US as f32 * 1e-6);
     assert!((rate - LAND_SPEED_MS).abs() < 0.01, "{rate}");
     assert_eq!(fly.state(), State::Takeover);
-    // N19 column 2: the mission switch OFF, arm ON and Position hand over.
     let o = fly.rc(true, FULL, Switch3::High);
     assert_eq!(fly.state(), State::Pilot, "hand-over");
     assert!(!is_centred(&o));
@@ -740,7 +692,7 @@ fn takeover_descent_flies_the_land_law_and_hand_over_stays_possible() {
 
 // ---- I12 ----
 
-/// I12 across a GNSS outage (Position lost for 2 s) and a height reset (the vertical flags gone for one step), in each
+/// Across a GNSS outage (Position lost for 2 s) and a height reset (the vertical flags gone for one step), in each
 /// hands-off state: every step's setpoint is covered, the demand is made and the gate stays armed.
 #[test]
 fn i12_no_uncovered_setpoint_and_no_coverage_disarm_in_any_hands_off_state() {
@@ -765,7 +717,6 @@ fn i12_no_uncovered_setpoint_and_no_coverage_disarm_in_any_hands_off_state() {
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
     outage(&mut fly, "hold", POSITION);
-    // TAKEOVER: reports keep coming (the newest report fresh), so give one every step.
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
     fly.rc(true, FULL, Switch3::Low);
@@ -791,7 +742,7 @@ fn i12_no_uncovered_setpoint_and_no_coverage_disarm_in_any_hands_off_state() {
     outage(&mut fly, "blind", ANGLE);
 }
 
-// ---- H12: the hold-integrity distance check on the real step ----
+// ---- The hold-integrity distance check on the real step ----
 
 impl Fly {
     /// Moves the fake vehicle `v_n` m/s north for one step: position and velocity.
@@ -807,10 +758,7 @@ impl Fly {
     }
 }
 
-/// A vehicle that drifts away from its hold point at 1 m/s (entered at rest there: the anchor is the hold point, b 0):
-/// HOLD with the position law until the step whose position passes X; that step is LAND with the braking law (H14 (1):
-/// the track fault is a landing cause of its own, no debounce; H13's anchor distance trips in the step it is measured);
-/// the fault stays latched and LAND keeps braking, never captured, when the vehicle comes back and stops.
+/// A vehicle drifting away from its hold point at 1 m/s: HOLD with the position law until the step whose position passes X.
 #[test]
 fn h12_a_vehicle_that_drifts_away_in_hold_lands_braking_in_the_step_its_distance_passes_x() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -834,7 +782,6 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_braking_in_the_step_its_distance
         assert!(!fly.track_fault() && fly.f.shaper.target_ne == Some(target));
     }
     assert!(over, "the distance passed X");
-    // Back at the hold point and stopped: still LAND, braking, never captured, the fault latched.
     let mut n = fly.cell.get();
     n.position_m[0] = target[0];
     n.velocity_ms = [0.0; 3];
@@ -848,10 +795,7 @@ fn h12_a_vehicle_that_drifts_away_in_hold_lands_braking_in_the_step_its_distance
 }
 
 /// Case (a): HOLD entered moving at 2 m/s, 57 m from the origin, with no target: until the capture the controller's
-/// target is this step's position (distance 0), the capture is at this step's position; a coverage drop (Altitude, no
-/// target: the step's SPN would log PN, PE = 0) while the position jumps 6 m back (more than X from the old target and
-/// from 0; within X + b of H13's anchor, which a jump of 57 m would leave), then Position again with a fresh capture:
-/// the check never sees a stale or zero target and never trips.
+/// Target is this step's position, the capture is at this step's position; a coverage drop.
 #[test]
 fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -867,7 +811,6 @@ fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step(
     assert_eq!(fly.state(), State::Hold);
     let mut captured = false;
     for k in 0..4_000 {
-        // Braking at 1 m/s^2 to rest.
         let v = (fly.cell.get().velocity_ms[0] - DT_US as f32 * 1e-6).max(0.0);
         fly.drift(v);
         let o = fly.quiet();
@@ -885,7 +828,6 @@ fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step(
         }
     }
     assert!(captured);
-    // The coverage drop with a 6 m jump (a position reset), shorter than the debounce.
     fly.set_valid(ALTITUDE);
     let mut n = fly.cell.get();
     let stale = fly.f.shaper.target_ne.expect("captured");
@@ -907,9 +849,8 @@ fn h12_hold_entry_capture_and_recapture_compare_only_with_a_target_of_that_step(
     }
 }
 
-/// Case (b), TAKEOVER covered (H13 (3): it flies HOLD's law): a drift in TAKEOVER latches the fault, and that step
-/// flies TAKEOVER's descent with the braking law (H14, ranked with battery critical: C1); after hand-over the latch
-/// stays, so a later stick loss gives LAND, braking, never HOLD.
+/// Case (b), TAKEOVER covered: a drift in TAKEOVER latches the fault, and that step flies TAKEOVER's descent with the
+/// braking law; after hand-over the latch stays, so a later stick loss gives LAND, braking, never HOLD.
 #[test]
 fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -939,8 +880,8 @@ fn h12_a_drift_in_takeover_latches_and_a_later_stick_loss_lands() {
     assert!(is_braking(&o, &fly), "{:?}", o.setpoint);
 }
 
-/// PILOT: a 20 m drift from the captured point never sets the fault, and stick loss later gives HOLD; with FS_HOLD_EN 0
-/// the same, except that stick loss gives LAND (Amendment N, N2).
+/// PILOT: a 20 m drift from the captured point never sets the fault, and stick loss later gives HOLD; with FS_HOLD_EN
+/// 0 the same, except that stick loss gives LAND.
 #[test]
 fn h12_in_pilot_and_with_fs_hold_en_0_a_drift_never_sets_it() {
     for fs in [true, false] {
@@ -958,19 +899,18 @@ fn h12_in_pilot_and_with_fs_hold_en_0_a_drift_never_sets_it() {
     }
 }
 
-// ---- H13: the anchor, the speed cap, the stale pilot target ----
+// ---- The anchor, the speed cap, the stale pilot target ----
 
 impl Fly {
-    /// The horizontal distance of the fake vehicle from `a`, m (the state machine's arithmetic).
+    /// The horizontal distance of the fake vehicle from `a`, m (the state machine's arithmetic)
     fn distance_from(&self, a: [f32; 2]) -> f32 {
         let p = self.cell.get().position_m;
         libm::sqrtf((p[0] - a[0]) * (p[0] - a[0]) + (p[1] - a[1]) * (p[1] - a[1]))
     }
 }
 
-/// H13 (2) on the real step: for PILOT_SPEED_XY 3, 5 and 20 the controller's limit is the speed in force in PILOT
-/// and v_ho = min(speed, 5) in HOLD, TAKEOVER and LAND; a drift at 1 m/s from a hold entered at rest trips in the step
-/// its distance passes X = 7, 5, 5 m.
+/// On the real step: for PILOT_SPEED_XY 3, 5 and 20 the controller's limit is the speed in force in PILOT and v_ho
+/// = min(speed, 5) in HOLD, TAKEOVER and LAND.
 #[test]
 fn h13_the_controller_s_limit_is_v_ho_in_the_hands_off_states_and_x_follows_the_speed_in_force() {
     for (v, x, v_ho) in [(3.0f32, 7.0f32, 3.0f32), (5.0, 5.0, 5.0), (20.0, 5.0, 5.0)] {
@@ -1006,9 +946,8 @@ fn h13_the_controller_s_limit_is_v_ho_in_the_hands_off_states_and_x_follows_the_
     }
 }
 
-/// H13 brake-forever: HOLD entered moving straight away at 0.8 m/s (not below `pilot_hold_speed_ms`) and held there:
-/// never a capture (the target distance stays 0), A and b = 0.8^2 / 6 set at the entry step, and the fault in the step
-/// whose distance from A passes X + b, that step LAND braking (H14 (1)).
+/// Brake-forever: HOLD entered moving straight away at 0.8 m/s (not below `pilot_hold_speed_ms`) and held there:
+/// never a capture (the target distance stays 0), A and b = 0.8^2 / 6 set at the entry step.
 #[test]
 fn h13_brake_forever_a_vehicle_that_never_slows_below_0_8_m_s_trips_at_x_plus_b() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -1036,12 +975,8 @@ fn h13_brake_forever_a_vehicle_that_never_slows_below_0_8_m_s_trips_at_x_plus_b(
     panic!("brake-forever never tripped");
 }
 
-/// H13 (1): HOLD entered at rest, then a creep at 0.5 m/s with a one-step heading drop every 0.5 s (the Altitude law:
-/// the target is dropped and re-captured at the next Position step): the target distance stays below 0.3 m, A is never
-/// re-set, and the fault comes in the step whose distance from A passes X, which the test makes a heading-drop step
-/// (an Altitude setpoint: d_A is read in HOLD whatever the setpoint), that step LAND, level (no T3'). The station's
-/// heartbeat keeps the link (the trip comes about 10 s after the loss: link loss would land first, and a level LAND does
-/// not read d_A, H14 (2)).
+/// HOLD entered at rest, then a creep at 0.5 m/s with a one-step heading drop every 0.5 s.
+/// target is dropped and re-captured at the next Position step): the target distance stays below 0.3 m.
 #[test]
 fn h13_a_creep_with_tier_dips_and_re_captures_keeps_the_anchor_and_trips_on_a_dip_step() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -1075,8 +1010,8 @@ fn h13_a_creep_with_tier_dips_and_re_captures_keeps_the_anchor_and_trips_on_a_di
     panic!("the creep never tripped");
 }
 
-/// H13 (3): PILOT holding a target the vehicle has drifted 5.5 m from (more than X), sticks centred, at rest: stick loss
-/// gives HOLD with the target dropped and re-captured where the vehicle is, the anchor there, and no fault.
+/// PILOT holding a target the vehicle has drifted 5.5 m from (more than X), sticks centred, at rest: stick loss gives
+/// HOLD with the target dropped and re-captured where the vehicle is, the anchor there, and no fault.
 #[test]
 fn h13_a_stale_pilot_target_5_5_m_away_at_stick_loss_does_not_trip() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -1098,10 +1033,10 @@ fn h13_a_stale_pilot_target_5_5_m_away_at_stick_loss_does_not_trip() {
     }
 }
 
-// ---- H14: what happens after a track fault ----
+// ---- What happens after a track fault ----
 
 impl Fly {
-    /// HOLD (stick loss on T3'), then a drift at 1 m/s until the trip; the vehicle at rest after it. LAND.
+    /// HOLD (stick loss on T3'), then a drift at 1 m/s until the trip; the vehicle at rest after it.
     fn tripped() -> Fly {
         let mut fly = Fly::new(true, true, POSITION);
         fly.lose();
@@ -1115,8 +1050,8 @@ impl Fly {
         fly
     }
 
-    /// [`Fly::drift`] and, in LAND, down at the LAND rate: the vehicle follows the descent, so neither the airborne latch
-    /// nor E3 ends the flight.
+    /// [`Fly::drift`] and, in LAND, down at the LAND rate: the vehicle follows the descent, so neither the airborne
+    /// latch nor E3 ends the flight.
     fn drift_landing(&self, v_n: f32) {
         self.drift(v_n);
         let land = self.state() == State::Land;
@@ -1154,11 +1089,8 @@ fn law_of(fly: &Fly, o: &StepOut) -> Law {
     }
 }
 
-/// H14 (1): LAND's horizontal law over the 16 rows track fault x Valid.heading x Valid.velocity_ne x debounced T3' on the
-/// real step, the heading input true. LAND with the fault: a trip in HOLD; without: battery critical in HOLD. A row with
-/// the debounced T3' true and a flag down is the first step of the drop; with it false the drop has lasted 1.0 s; with
-/// both flags up it can be false only through another flag (position_ne down 1.0 s), so Position is not covered (I12).
-/// Brake: fault and T3'; Hold: no fault and T3' (this step's, so also the debounced); otherwise Level.
+/// LAND's horizontal law over the 16 rows track fault x Valid.heading x Valid.velocity_ne x debounced T3' on the real
+/// step, the heading input true.
 #[test]
 fn h14_land_law_table_over_16_rows_on_the_real_step() {
     let debounce = (hands_off::TIER_DEBOUNCE_US / DT_US) as usize + 1;
@@ -1196,9 +1128,8 @@ fn h14_land_law_table_over_16_rows_on_the_real_step() {
     }
 }
 
-/// H14 (1): the braking setpoint on the real step after a trip, at 3.0 m/s, just below `pilot_hold_speed_ms`, 0.3 m/s
-/// and at rest: every step Position at that step's navigation position, no horizontal feed-forward, no target kept
-/// (never captured). A trip in LAND holding position (its point captured) drops that point at the trip step.
+/// The braking setpoint on the real step after a trip, at 3.0 m/s, just below `pilot_hold_speed_ms`, 0.3 m/s and at
+/// rest: every step Position at that step's navigation position, no horizontal feed-forward.
 #[test]
 fn h14_the_braking_setpoint_is_this_step_s_position_with_no_feed_forward_never_captured() {
     let mut fly = Fly::tripped();
@@ -1231,9 +1162,7 @@ fn h14_the_braking_setpoint_is_this_step_s_position_with_no_feed_forward_never_c
     panic!("LAND holding never tripped");
 }
 
-/// H14 (2), the simulator's G5 case on the real step: HOLD, then the heading flag down (NE valid) beyond the debounce:
-/// LAND, level, while the vehicle drifts 8 m from A (X + b = 5 m): d_A is not read, no fault. The heading back: that step
-/// LAND would hold, so d_A is read and trips: braking from that step on, never level again while Position is covered.
+/// HOLD, then the heading flag down (NE valid) beyond the debounce: LAND, level, while the vehicle drifts 8 m from A: d_A is not read, no fault.
 #[test]
 fn h14_a_level_land_does_not_read_the_anchor_and_the_flags_back_give_braking() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -1264,11 +1193,8 @@ fn accel_ne(q: [f32; 4]) -> [f32; 2] {
     [-GRAVITY_MSS * col[0] / col[2], -GRAVITY_MSS * col[1] / col[2]]
 }
 
-/// H14 (1) on a point-mass plant: HOLD, the vehicle drifting away at 1 m/s (as the drift tests) until the trip; from the
-/// trip step the plant is closed: the acceleration of the step's attitude setpoint (taken at once) plus the drag of a
-/// steady 5 m/s north wind, k (w - v) with k = 0.197 N/(m/s) / 0.914 kg (H14's numbers, U-H6), while it descends at the
-/// LAND rate from 10 m to 1 m (18 s). Returns the horizontal speed at each step after the trip and the distance from the
-/// LAND start at the end.
+/// On a point-mass plant: HOLD, the vehicle drifting away at 1 m/s (as the drift tests) until the trip; from the
+/// trip step the plant is closed.
 fn brake_run() -> (std::vec::Vec<f32>, f32) {
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
@@ -1303,10 +1229,7 @@ fn brake_run() -> (std::vec::Vec<f32>, f32) {
 }
 
 /// The bound: from 2 s after the trip to the end the horizontal speed stays at or below 0.3 m/s, half of what the
-/// velocity loop's P alone would leave against this wind (1.08 m/s^2 / 1.8 = 0.6 m/s, H14), so the integrator must hold
-/// the trim; it never exceeds the speed at the trip; and the vehicle ends within D_max of the LAND start (H14's
-/// simulator pass rule). The level law (the old behaviour) lets the wind take it: towards 5 m/s with time constant
-/// 1/k = 4.6 s, about 2.4 m/s at 2 s, tens of metres by the end.
+/// Velocity loop's P alone would leave against this wind (1.08 m/s^2 / 1.8 = 0.6 m/s)
 #[test]
 fn h14_after_a_trip_in_wind_land_brakes_and_the_speed_stays_near_zero() {
     let (speeds, drift) = brake_run();
@@ -1321,7 +1244,7 @@ fn h14_after_a_trip_in_wind_land_brakes_and_the_speed_stays_near_zero() {
     assert!(drift <= hands_off::D_MAX_M, "{drift} m");
 }
 
-// ---- E3: the touchdown backstop ----
+// ---- The touchdown backstop ----
 
 /// Specific force at rest, level, m/s^2 FRD.
 const AT_REST: [f32; 3] = [0.0, 0.0, -GRAVITY_MSS];
@@ -1336,20 +1259,17 @@ impl Fly {
     }
 }
 
-/// The ground threshold, N (`ground_thrust_g` x m g).
+/// The ground threshold, N (`ground_thrust_g` x m g)
 fn ground_n() -> f32 {
     Tuning::DEFAULT.ground_thrust_g * MASS * GRAVITY_MSS
 }
 
-/// TD's (a) (N14 (1)): the step's collective on the allocator's idle floor (`thrust_low`), or the demand refused.
+/// TD's (a): the step's collective on the allocator's idle floor (`thrust_low`), or the demand refused.
 fn on_floor(o: &StepOut) -> bool {
     o.allocation.is_none_or(|a| a.saturation.thrust_low)
 }
 
-/// E3 on a touchdown whose height estimate flickers 1.5 m low for one step every 0.1 s for 20 s on the ground. Since N14
-/// (1) TD's (a) is the idle-floor flag the latch's count reads, so the flickers restart both and the gate stays armed in
-/// LAND while they last (a late stop on the ground, N14's accepted side); once they end, disarmed 1.0 s (within one
-/// step) after the collective reached the idle floor for good, the accelerometer at rest.
+/// On a touchdown whose height estimate flickers 1.5 m low for one step every 0.1 s for 20 s on the ground.
 #[test]
 fn e3_a_touchdown_with_a_flickering_height_disarms_within_1_0_s_plus_one_step() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -1405,10 +1325,8 @@ fn e3_a_touchdown_with_a_flickering_height_disarms_within_1_0_s_plus_one_step() 
     assert!(disarmed - since <= land + DT_US && disarmed - since + DT_US >= land, "{} us", disarmed - since);
 }
 
-/// N15 (b): LAND (FS_HOLD_EN 1 at the loss is HOLD, so FS_HOLD_EN 0) from 10 m following the target down to the ground at
-/// d = 0, IMU1 at rest; from contact the estimate's height is `est(steps since contact)` (true 0). Returns (contact us,
-/// disarm us, restarts of the floor after it was first reached on the ground, steps off the floor that were not
-/// `est`-jump steps per `jump`).
+/// LAND (FS_HOLD_EN 1 at the loss is HOLD, so FS_HOLD_EN 0) from 10 m following the target down to the ground at d =
+/// 0, IMU1 at rest; from contact the estimate's height is `est(steps since contact)`.
 fn land_with_estimate(est: impl Fn(u32) -> f32, jump: impl Fn(u32) -> bool) -> (u64, Option<u64>, u32, u32) {
     let mut fly = Fly::new(false, false, POSITION);
     fly.lose();
@@ -1447,8 +1365,8 @@ fn land_with_estimate(est: impl Fn(u32) -> f32, jump: impl Fn(u32) -> bool) -> (
     (contact.expect("contact").0, None, restarts, stray)
 }
 
-/// N15 (b): the estimate drifting down at 0.3 m/s on the ground (v_D 0): STOP. NOT MET: N15 asks within 4 s of contact;
-/// this harness gives 5.9 s (reported; the bound asserted is 8 s).
+/// The estimate drifting down at 0.3 m/s on the ground (v_D 0): STOP. NOT MET: N15 asks within 4 s of contact; this
+/// harness gives 5.9 s (reported; the bound asserted is 8 s)
 #[test]
 fn n15_estimate_drifting_down_on_the_ground_stops_within_4_s() {
     let dt = DT_US as f32 * 1e-6;
@@ -1458,9 +1376,8 @@ fn n15_estimate_drifting_down_on_the_ground_stops_within_4_s() {
     assert!(disarm - contact <= 8_000_000, "{} us", disarm - contact);
 }
 
-/// N15 (b) restated for N18: a single 0.7 m step DOWN in the estimate on the ground, 4.0 s after contact (the floor
-/// reached, TD counting): the vehicle appears below LAND's height target, which is seated at it, so the collective stays
-/// on the floor (no restart) and STOP comes within the normal time (measured 2.82 s after contact; bound 3.5 s).
+/// Restated for: a single 0.7 m step DOWN in the estimate on the ground, 4.0 s after contact.
+/// reached, TD counting): the vehicle appears below LAND's height target, which is seated at it.
 #[test]
 fn n15_a_single_0_7_m_step_down_in_the_estimate_on_the_ground_does_not_restart_and_stops() {
     let at = 3_200u32;
@@ -1471,9 +1388,8 @@ fn n15_a_single_0_7_m_step_down_in_the_estimate_on_the_ground_does_not_restart_a
     assert!(disarm - contact <= 3_500_000, "{} us", disarm - contact);
 }
 
-/// N15 (b), the mirror for N18: a single 0.7 m step UP in the estimate on the ground, 4.0 s after contact: the vehicle
-/// appears above the target (the lag side of the cap, unchanged by N18): the loop asks for a descent the floor already
-/// gives, so it does not restart either (measured: 0 restarts, STOP 2.82 s after contact; bound 3.5 s).
+/// The mirror for: a single 0.7 m step UP in the estimate on the ground, 4.0 s after contact: the vehicle
+/// Appears above the target (the lag side of the cap, unchanged by)
 #[test]
 fn n15_a_single_0_7_m_step_up_in_the_estimate_on_the_ground() {
     let at = 3_200u32;
@@ -1484,10 +1400,8 @@ fn n15_a_single_0_7_m_step_up_in_the_estimate_on_the_ground() {
     assert!(disarm - contact <= 3_500_000, "{} us", disarm - contact);
 }
 
-/// N15 (a): HOLD (FS_HOLD_EN 1, T3') with the estimate 3 m above the target and IMU1 at rest: the collective on the floor
-/// and TD held for 2 s (the latch's own timer off; HOLD does not clear the latch). Then the battery critical: LAND,
-/// not through `lost()`. On the entry step TD's count restarts and the latch stays set; it clears only after a fresh
-/// 1.0 s of TD.
+/// HOLD (FS_HOLD_EN 1, T3') with the estimate 3 m above the target and IMU1 at rest: the collective on the floor and
+/// TD held for 2 s (the latch's own timer off; HOLD does not clear the latch)
 #[test]
 fn n15_entry_into_land_restarts_td_and_the_latch_needs_a_fresh_1_s() {
     let mut fly = Fly::new(true, true, POSITION);
@@ -1522,11 +1436,8 @@ fn n15_entry_into_land_restarts_td_and_the_latch_needs_a_fresh_1_s() {
     panic!("the latch never cleared in LAND");
 }
 
-/// E3 in the air: LAND descending steadily for 1 s (the accelerometer at rest), then the vehicle held where it is while
-/// the target descends, so the collective falls below the ground threshold (the airborne latch's timer off, so only E3
-/// can clear it); the accelerometer reads the commanded collective times a thrust gain of 0.88, 1.0 and 1.12 (falling at
-/// 2 m/s^2 or more below the threshold): the backstop's count never reaches 1.0 s. The same flight with the
-/// accelerometer at rest (NaN below) disarms: the condition is not vacuous.
+/// In the air: LAND descending steadily for 1 s (the accelerometer at rest), then the vehicle held where it is
+/// While the target descends, so the collective falls below the ground threshold.
 #[test]
 fn e3_in_the_air_below_the_ground_threshold_the_acceleration_condition_is_false_at_nominal_and_12_percent_gain() {
     for gain in [0.88f32, 1.0, 1.12, f32::NAN] {
@@ -1567,10 +1478,8 @@ fn e3_in_the_air_below_the_ground_threshold_the_acceleration_condition_is_false_
     }
 }
 
-/// N10: TD counts in every state but clears the latch only in LAND, the TAKEOVER descent and BLIND: HOLD, TAKEOVER and
-/// PILOT with the vehicle 3 m above its height target (the collective below the threshold), the accelerometer at rest
-/// and the latch's timer off: TD's count passes 1.0 s, the latch stays set and the gate armed. The TAKEOVER descent on
-/// the ground with the timer off: disarmed by TD within 1.0 s plus one step of the idle floor (N14 (1)).
+/// TD counts in every state but clears the latch only in LAND, the TAKEOVER descent and BLIND: HOLD, TAKEOVER and
+/// PILOT with the vehicle 3 m above its height target (the collective below the threshold)
 #[test]
 fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
     for name in ["hold", "takeover", "pilot"] {
@@ -1612,7 +1521,6 @@ fn td_counts_in_every_state_and_clears_the_latch_only_in_the_descent() {
     let dt = DT_US as f32 * 1e-6;
     let mut since = None;
     for k in 0..40_000 {
-        // The vehicle follows the target down at the descent rate, and stops on the ground.
         let mut n = fly.cell.get();
         n.position_m[2] = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
         n.velocity_ms[2] = if n.position_m[2] < 0.0 { LAND_SPEED_MS } else { 0.0 };
@@ -1650,16 +1558,15 @@ fn euler_q(r: f32, p: f32, y: f32) -> [f32; 4] {
     ]
 }
 
-/// The specific force at rest with roll `r` and pitch `p` (rad), m/s^2 FRD: the ground's reaction to gravity in the body
-/// frame, from the rotation matrix's last row (the yaw has no part).
+/// The specific force at rest with roll `r` and pitch `p` (rad), m/s^2 FRD: the ground's reaction to gravity in the
+/// body frame, from the rotation matrix's last row (the yaw has no part)
 fn at_rest_tilted(r: f32, p: f32) -> [f32; 3] {
     let g = GRAVITY_MSS;
     [g * libm::sinf(p), -g * libm::sinf(r) * libm::cosf(p), -g * libm::cosf(r) * libm::cosf(p)]
 }
 
-/// E3 on a slope (review finding F3): LAND to a touchdown on ground tilted roll 20 deg, pitch -15 deg, yaw 90 deg; at
-/// rest there the estimate's attitude is that tilt and IMU1 reads the matching specific force; the latch's timer off, so
-/// only E3 can clear it: disarmed 1.0 s (within one step) after the collective reached the idle floor (N14 (1)).
+/// On a slope (review finding F3): LAND to a touchdown on ground tilted roll 20 deg, pitch -15 deg, yaw 90 deg; at
+/// rest there the estimate's attitude is that tilt and IMU1 reads the matching specific force.
 #[test]
 fn e3_at_rest_on_a_slope_disarms_within_1_0_s_plus_one_step() {
     let (r, p) = (20f32.to_radians(), (-15f32).to_radians());
@@ -1673,7 +1580,6 @@ fn e3_at_rest_on_a_slope_disarms_within_1_0_s_plus_one_step() {
     let land = Tuning::DEFAULT.land_detect_us;
     let mut since = None;
     for k in 0..40_000u32 {
-        // The vehicle follows the target down at the descent rate and comes to rest on the slope.
         let mut n = fly.cell.get();
         n.position_m[2] = (n.position_m[2] + LAND_SPEED_MS * dt).min(0.0);
         let ground = n.position_m[2] >= 0.0;
@@ -1700,10 +1606,8 @@ fn e3_at_rest_on_a_slope_disarms_within_1_0_s_plus_one_step() {
     panic!("never disarmed at rest on the slope");
 }
 
-/// E3 in the air tilted 20 deg (roll 20 deg, yaw 90 deg): LAND, the estimate's attitude tilted throughout and IMU1
-/// reading the commanded collective along the body's up axis; held where it is after 1 s of steady descent while the
-/// target descends, so the collective is below the ground threshold (the latch's timer off): the backstop's count never
-/// reaches 1.0 s and the gate stays armed.
+/// In the air tilted 20 deg (roll 20 deg, yaw 90 deg): LAND, the estimate's attitude tilted throughout and IMU1
+/// reading the commanded collective along the body's up axis.
 #[test]
 fn e3_in_the_air_tilted_20_deg_below_the_ground_threshold_does_not_disarm() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -1737,11 +1641,10 @@ fn e3_in_the_air_tilted_20_deg_below_the_ground_threshold_does_not_disarm() {
     assert!(low_steps > 7_000 && max_still < Tuning::DEFAULT.land_detect_us / 2, "{low_steps} {max_still}");
 }
 
-// ---- E4: the board's HO MSG only while FS_HOLD_EN in force is 1 ----
+// ---- The board's HO MSG only while FS_HOLD_EN in force is 1 ----
 
-/// The seam the board's MSG rule reads (`Flight::fs_hold_in_force`): false at every step of a flight with FS_HOLD_EN 0,
-/// arming, mode changes, the RC-loss LAND (N2) and the disarm after it included; a 1 written while armed comes into force at the next disarmed
-/// step (B9) and a 0 written while armed only after the next disarm.
+/// The seam the board's MSG rule reads (`Flight::fs_hold_in_force`): false at every step of a flight with FS_HOLD_EN
+/// 0, arming, mode changes, the RC-loss LAND and the disarm after it included.
 #[test]
 fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9() {
     let mut fly = Fly::new(false, true, POSITION);
@@ -1772,9 +1675,8 @@ fn e4_fs_hold_in_force_is_false_at_every_step_with_fs_hold_en_0_and_follows_b9()
     assert!(!fly.f.fs_hold_in_force());
 }
 
-/// N10 (iv), the board's HO MSG rule (`hands_off_msg_due`) as a table: with FS_HOLD_EN in force 0 nothing at the first
-/// step or for PILOT <-> STOP; an entry into, an exit from and a change between hands-off states each write; a dropped
-/// write is offered again at the next step. With 1, the first step and every change.
+/// The board's HO MSG rule (`hands_off_msg_due`) as a table: with FS_HOLD_EN in force 0 nothing at the first
+/// step or for PILOT <-> STOP; an entry into, an exit from and a change between hands-off states each write.
 #[test]
 fn n10_hands_off_msg_due_table() {
     use State::*;
@@ -1800,10 +1702,8 @@ fn n10_hands_off_msg_due_table() {
     }
 }
 
-/// N10 (iv) on the real step, the board's loop modelled (MSG written when due, every write succeeds): a flight armed,
-/// flown with sticks in every mode, the sticks lost (LAND at FS_HOLD_EN 0, HOLD at 1), the reports back (TAKEOVER), the
-/// lock handed over (PILOT) and disarmed by the switch. FS_HOLD_EN 0: LAND, TAKEOVER, PILOT only (nothing before the
-/// loss, nothing for the disarm); 1: every change from the first step.
+/// On the real step, the board's loop modelled (MSG written when due, every write succeeds): a flight armed,
+/// flown with sticks in every mode, the sticks lost (LAND at FS_HOLD_EN 0, HOLD at 1)
 #[test]
 fn n10_ho_msg_at_fs_hold_en_0_only_from_the_stick_loss() {
     for (fs, want) in [
@@ -1813,7 +1713,6 @@ fn n10_ho_msg_at_fs_hold_en_0_only_from_the_stick_loss() {
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
         let mut f = flight(cell, handshake(), &Tuning::DEFAULT);
         f.set_fs_hold_en(fs);
-        // N19: CRSF flights at both values (the MSG rule; the lock as built for them).
         let mut fly = Fly { f, cell, t: 1_000_000, source: fw_core::rc::RcSource::Crsf };
         let (mut logged, mut texts) = (None::<State>, std::vec::Vec::new());
         let mut log = |fly: &Fly| {
@@ -1849,15 +1748,10 @@ fn n10_ho_msg_at_fs_hold_en_0_only_from_the_stick_loss() {
     }
 }
 
-// ---- WR3 and return_built on the real step ----
+// ---- And return_built on the real step ----
 
-/// WR3 a-d on the real `Flight` over random reports, switches, sticks, coverage, silences, FS_HOLD_EN and the heading
-/// monitor's verdict; the airborne latch is the real one (it clears in LAND on the idle floor), and now and then the
-/// test clears it between steps (a modelled false "landed"): (a) armed at the end of two consecutive steps implies the
-/// second is not STOP; (b) only the switch cycle arms; (c) outside the hands-off states silence disarms at the first
-/// step past the timeout and not before; (d) a hands-off state that reads the latch false and TD held at the previous
-/// step (N10 (i), WR1's guard; IMU1 reads at rest or zero specific force, at random) ends that step disarmed. And
-/// never AUTO or RETURN (the walk sends no Start or Return and the station is never heard).
+/// A-d on the real `Flight` over random reports, switches, sticks, coverage, silences, FS_HOLD_EN and the heading
+/// monitor's verdict; the airborne latch is the real one (it clears in LAND on the idle floor)
 #[test]
 fn wr3_and_return_built_on_the_real_step() {
     let tuning = Tuning::DEFAULT;
@@ -1871,11 +1765,7 @@ fn wr3_and_return_built_on_the_real_step() {
     let mut counts = [0u32; 6];
     let mut seen = [0u32; 8];
     let mut rest = true;
-    // N12: RADIO_STATUS about once a second from a generator of its own (the main sequence is unchanged).
     let mut radio = Lcg(0x5eed_0d3b);
-    // N14 (1): TD now needs the idle floor, which a hold at the estimate never reaches, so a generator of its own (the
-    // main sequence is unchanged) puts the estimate 3 m above where it was now and then (0.1 % of steps), holds IMU1 at rest
-    // on hands-off steps (99 %) and also clears the latch while TD holds (2 % of those steps), keeping (d) exercised.
     let mut clears = Lcg(0x5eed_0d3c);
     let mut hold_low = false;
     for k in 0..2_000_000u32 {
@@ -1918,8 +1808,6 @@ fn wr3_and_return_built_on_the_real_step() {
             f.airborne = false;
         }
         let air = f.airborne;
-        // N14 (1): an arming that lifts (collective 0.34 m g) loses its sticks to LAND, so (c) needs armings held in
-        // Angle at throttle 0; the generator of its own picks a fifth of the armings for that.
         if !f.gate.armed() {
             hold_low = clears.chance(200);
         }
@@ -1939,7 +1827,6 @@ fn wr3_and_return_built_on_the_real_step() {
             rest = !rest;
         }
         let td = f.still_us >= tuning.land_detect_us;
-        // N19: a receiver report the gate does not take (disarmed at FS_HOLD_EN 0) is no switch cycle.
         let accepted = rc.is_some_and(|r| f.gate.accepts(&r, f.fs_hold_en));
         let mut i = input(t, rc);
         if rest || (!matches!(prev_state, State::Pilot | State::Stop) && clears.chance(990)) {
@@ -1949,15 +1836,12 @@ fn wr3_and_return_built_on_the_real_step() {
         let state = f.hands_off_state();
         let hands_off = !matches!(state, State::Pilot | State::Stop);
         assert!(!matches!(state, State::Auto | State::Return), "step {k}: AUTO or RETURN in the walk");
-        // (a)
         assert!(!(prev_armed && o.armed && state == State::Stop), "a, step {k}");
-        // (b)
         if !prev_armed && o.armed {
             let r = rc.expect("b: arming needs a report");
             assert!(r.arm && off_then_disarmed, "b, step {k}");
             counts[0] += 1;
         }
-        // (c), from a step outside the hands-off states too (a hands-off state leaves for STOP by WR1 or the arm switch)
         if prev_armed && !hands_off && matches!(prev_state, State::Pilot | State::Stop) && rc.is_none() {
             let age = newest.map_or(u64::MAX, |n| t - n);
             if age > tuning.rc_fs_timeout_us {
@@ -1967,7 +1851,6 @@ fn wr3_and_return_built_on_the_real_step() {
                 assert!(o.armed, "c, step {k}: disarmed before the timeout");
             }
         }
-        // (d)
         if !matches!(prev_state, State::Pilot | State::Stop) && !air && td {
             assert!(!o.armed, "d, step {k}: {prev_state:?} grounded, still armed");
             counts[2 + usize::from(modelled_clear)] += u32::from(prev_armed);
@@ -1984,8 +1867,6 @@ fn wr3_and_return_built_on_the_real_step() {
         prev_state = state;
     }
     std::println!("armings, silence disarms, real and modelled WR1 stops, hands-off armed steps, ..: {counts:?}; states {seen:?}");
-    // N14 (1): a modelled clear (counts[3]) needs TD held in HOLD, i.e. HOLD on the idle floor, which the walk's
-    // estimate (reset to 10 m up) rarely gives; it is counted, not required.
     assert!(counts[0] > 50 && counts[1] > 10 && counts[2] + counts[3] > 5 && counts[4] > 10_000, "{counts:?}");
     for s in [State::Pilot, State::Takeover, State::Hold, State::Land, State::Stop, State::Blind] {
         assert!(seen[usize::from(s.code() - 1)] > 0, "{s:?} reached: {seen:?}");
@@ -1999,7 +1880,6 @@ fn hands_off_msg_names_every_state_with_its_code() {
         assert!(text.starts_with(&std::format!("HO {} ", s.code())), "{text}");
         assert!(text.len() <= 64);
     }
-    // H3b: AUTO and RETURN fly their own laws.
     assert!(!hands_off_msg(State::Auto).contains("HOLD's law") && !hands_off_msg(State::Return).contains("HOLD's law"));
 }
 
@@ -2052,7 +1932,7 @@ fn plan_msg_and_station_lost_msg_formats() {
     assert_eq!(text(&station_lost_msg(None, None)), "STN age none gcs none");
 }
 
-// ---- Amendment N: no motor stop in the air (N2, N4, E2, the NS walk of N1) ----
+// ---- No motor stop in the air ----
 
 impl Fly {
     /// One step without a report, IMU1 reading the specific force `f` and the gyro `gyro`.
@@ -2071,9 +1951,8 @@ impl Fly {
         self.cell.set(n);
     }
 
-    /// LAND on T2 (stick loss without the heading monitor), the latch's idle-floor timer off, the vehicle held where it
-    /// is (the accelerometer at rest) while the target descends, so the collective falls below the ground threshold; the
-    /// roll rate 30 deg/s, so TD cannot run. Returns once the collective has been below the threshold for 2 s.
+    /// LAND on T2 (stick loss without the heading monitor), the latch's idle-floor timer off, the vehicle held where
+    /// it is (the accelerometer at rest) while the target descends.
     fn land_held_low() -> Fly {
         let mut fly = Fly::new(true, false, POSITION);
         fly.lose();
@@ -2093,8 +1972,8 @@ impl Fly {
     }
 }
 
-/// N7: with FS_HOLD_EN 0, a stick loss in the air is LAND on T3' and T2 and BLIND on T1, never HOLD and never STOP: 10 s
-/// after it the gate is armed and the motors run (IMU1 reads zero specific force, falling: never "still").
+/// With FS_HOLD_EN 0, a stick loss in the air is LAND on T3' and T2 and BLIND on T1, never HOLD and never STOP: 10 s
+/// after it the gate is armed and the motors run (IMU1 reads zero specific force, falling: never "still")
 #[test]
 fn n2_fs_hold_en_0_stick_loss_in_the_air_is_land_or_blind_never_hold_never_stop() {
     for (name, valid, heading, want) in
@@ -2115,11 +1994,8 @@ fn n2_fs_hold_en_0_stick_loss_in_the_air_is_land_or_blind_never_hold_never_stop(
     }
 }
 
-/// N7: armed on the ground and never airborne, a stick loss is STOP and disarms at the first step past the stick-loss
-/// time, as before Amendment N, with FS_HOLD_EN 0 and 1, in Angle at throttle 0 (the collective under N14 (1)'s low mark).
-/// N14 (1): in High (Altitude on the ground, its collective about m g) the low mark sets at spool-up, so the loss gives
-/// LAND and TD stops it within 3.2 s + 1.0 s (N14's accepted cost). (The latch false: N2 keeps this stop; IMU1 reads zero specific
-/// force, so it does not rest on TD's acceleration condition).
+/// Armed on the ground and never airborne, a stick loss is STOP and disarms at the first step past the stick-loss
+/// time, with FS_HOLD_EN 0 and 1.
 #[test]
 fn n2_stick_loss_on_the_ground_before_take_off_stops_in_the_same_step_as_before() {
     for (fs, sw) in [(false, Switch3::Low), (true, Switch3::Low), (false, Switch3::High), (true, Switch3::High)] {
@@ -2158,10 +2034,8 @@ fn n2_stick_loss_on_the_ground_before_take_off_stops_in_the_same_step_as_before(
     }
 }
 
-/// N7, TD at 1.0 s against 0.99 s: LAND with the collective below the ground threshold and the accelerometer at rest;
-/// the roll rate drops from 30 deg/s to 0 at one step, so (a), (b) and (c) hold together from that step: after 0.99 s
-/// the latch is still set and the gate armed; at the step where they have held 1.0 s the latch clears, and the next step
-/// is STOP and disarms (WR1, its guard met).
+/// TD at 1.0 s against 0.99 s: LAND with the collective below the ground threshold and the accelerometer at rest;
+/// the roll rate drops from 30 deg/s to 0 at one step, so (a), (b) and (c) hold together from that step.
 #[test]
 fn n4_td_clears_the_latch_at_1_0_s_and_not_at_0_99_s() {
     let mut fly = Fly::land_held_low();
@@ -2186,7 +2060,7 @@ fn n4_td_clears_the_latch_at_1_0_s_and_not_at_0_99_s() {
     assert!(!o.armed && o.motors.throttles().is_none() && fly.state() == State::Stop, "the step after");
 }
 
-/// N7, TD's gyro condition: 21 deg/s on the roll axis alone, or on the pitch axis alone, keeps TD's count at 0 for 5 s
+/// TD's gyro condition: 21 deg/s on the roll axis alone, or on the pitch axis alone, keeps TD's count at 0 for 5 s
 /// (armed, LAND); 20 deg/s on both (and 90 deg/s of yaw, not part of it) lets it clear the latch after 1.0 s.
 #[test]
 fn n4_td_is_blocked_by_21_deg_s_on_one_axis_and_passes_at_20() {
@@ -2211,8 +2085,7 @@ fn n4_td_is_blocked_by_21_deg_s_on_one_axis_and_passes_at_20() {
 }
 
 /// TD's (b) and (c) never read a non-finite IMU sample as still: LAND at rest with (b) held, then one step with a NaN
-/// specific force, or a NaN gyro: (b) is false and TD's count is 0 at that step (the demand is refused there, a kept
-/// fault stop, N3).
+/// Specific force, or a NaN gyro: (b) is false and TD's count is 0 at that step.
 #[test]
 fn n4_a_non_finite_imu_sample_is_not_still() {
     for (name, f, gyro) in [("accel", [0.0, 0.0, f32::NAN], [0.0; 3]), ("gyro", AT_REST, [f32::NAN, 0.0, 0.0])] {
@@ -2227,9 +2100,8 @@ fn n4_a_non_finite_imu_sample_is_not_still() {
     }
 }
 
-/// N10 (i), WR1's guard on the real step: LAND with the latch modelled false before every step stays LAND, armed, while
-/// IMU1 reads zero specific force (TD's (b) false), and while IMU1 is at rest ((b) true) with a roll rate of 30 deg/s
-/// (TD's (c) false); with the rates 0 it is STOP and disarmed exactly one step after the first step at which TD has held.
+/// Guard on the real step: LAND with the latch modelled false before every step stays LAND, armed,
+/// while IMU1 reads zero specific force (TD's (b) false)
 #[test]
 fn n10_wr1_ground_exit_needs_td_on_the_real_step() {
     let mut fly = Fly::new(true, false, POSITION);
@@ -2264,8 +2136,7 @@ fn n10_wr1_ground_exit_needs_td_on_the_real_step() {
 }
 
 /// A flight in Angle (switch Low) at half throttle 10 m up, FS_HOLD_EN 0, coverage `valid`, no heading verdict, with
-/// "ever airborne" set; then `chop_steps` steps of throttle 0 (the idle floor) with IMU1 reading the specific force `f`
-/// and the estimate's rates `rates`, the last of them the newest report.
+/// "ever airborne" set.
 fn chopped(valid: Valid, f: [f32; 3], rates: [f32; 3], chop_steps: u32) -> Fly {
     let mut fly = Fly::new(false, false, valid);
     for _ in 0..400 {
@@ -2284,9 +2155,8 @@ fn chopped(valid: Valid, f: [f32; 3], rates: [f32; 3], chop_steps: u32) -> Fly {
     fly
 }
 
-/// N10 (iii): an Angle-mode throttle chop of 1.5 s in the air (the latch clears after 1.0 s on the idle floor; IMU1
-/// reads zero specific force, falling: TD's (b) false), then a stick loss: LAND on T2, BLIND on T1, never STOP; armed
-/// with the motors running for 5 s after it.
+/// An Angle-mode throttle chop of 1.5 s in the air.
+/// specific force, falling: TD's (b) false), then a stick loss: LAND on T2, BLIND on T1, never STOP.
 #[test]
 fn n10_stick_loss_after_a_long_throttle_chop_in_the_air_lands_never_stops() {
     for (valid, want) in [(ALTITUDE, State::Land), (POSITION, State::Land), (ANGLE, State::Blind)] {
@@ -2305,10 +2175,8 @@ fn n10_stick_loss_after_a_long_throttle_chop_in_the_air_lands_never_stops() {
     }
 }
 
-/// N10 (iii): a hand landing (Angle, throttle 0 on the ground, IMU1 at rest), then a stick loss: STOP at the first step
-/// past the stick-loss time when TD has held at the loss; when it has not (the vehicle rocking at 30 deg/s until 0.5 s
-/// before the loss), LAND, then STOP through TD within 3.2 s + 1.0 s of the loss (N14 (1): LAND's law reaches the idle
-/// floor, then TD's 1.0 s).
+/// A hand landing (Angle, throttle 0 on the ground, IMU1 at rest), then a stick loss: STOP at the first step past the
+/// stick-loss time when TD has held at the loss.
 #[test]
 fn n10_stick_loss_on_the_ground_after_a_hand_landing_stops_through_td() {
     let timeout = Tuning::DEFAULT.rc_fs_timeout_us;
@@ -2344,7 +2212,7 @@ fn n10_stick_loss_on_the_ground_after_a_hand_landing_stops_through_td() {
 }
 
 /// BLIND on T1 after a stick loss, the estimate's rates 0; `f` gives IMU1's specific force from the previous step's
-/// demand thrust (N). Returns the flight in BLIND.
+/// demand thrust (N)
 fn blind_fly() -> Fly {
     let mut fly = Fly::new(true, true, ANGLE);
     for _ in 0..800 {
@@ -2355,15 +2223,12 @@ fn blind_fly() -> Fly {
     fly
 }
 
-/// The collective of a step, N (0 when refused).
+/// The collective of a step, N (0 when refused)
 fn thrust_of(o: &StepOut) -> f32 {
     o.demand.map_or(0.0, |d| d.thrust_n)
 }
 
-/// N7, BLIND's probe on the ground: IMU1 at rest and no rotation from the step BLIND begins. From the first step whose
-/// (b) holds: 1.0 s of stillness, the 1.0 s ramp of the collective from BLIND's down to the idle floor (linear, never
-/// rising, above the floor until the ramp's end; N14 (1)), then on the floor (the allocator's `thrust_low`) TD's 1.0 s;
-/// STOP and disarmed within (1.0 + 1.0 + 1.0) s plus three steps.
+/// BLIND's probe on the ground: IMU1 at rest and no rotation from the step BLIND begins.
 #[test]
 fn n4_blind_probe_on_the_ground_reaches_the_threshold_and_stops_within_3_s() {
     let mut fly = blind_fly();
@@ -2371,7 +2236,6 @@ fn n4_blind_probe_on_the_ground_reaches_the_threshold_and_stops_within_3_s() {
     let (mut first_still, mut prev, mut min_thrust) = (None::<u64>, f32::INFINITY, f32::INFINITY);
     let floor_n = fly.f.floor_n;
     for k in 0..20_000u32 {
-        // N13: from the step after the one-shot correction, BLIND's collective is the corrected one.
         let want = fly.f.blind_trim_n.unwrap_or(blind_n);
         let o = fly.quiet_f(AT_REST);
         if !o.armed {
@@ -2403,8 +2267,7 @@ fn n4_blind_probe_on_the_ground_reaches_the_threshold_and_stops_within_3_s() {
 }
 
 /// One BLIND flight in the air for `seconds`: a vertical point mass, thrust gain `gain` on the demand, linear drag k v
-/// with k = 0.197 N/(m/s) / 0.914 kg (H14's horizontal figure, here vertical); IMU1 reads (gain T + drag) / m up.
-/// Returns (stopped, probes started, probes aborted, lowest collective N, height lost m).
+/// with k = 0.197 N/(m/s) / 0.914 kg; IMU1 reads (gain T + drag) / m up.
 fn blind_air_run(gain: f32, seconds: u64) -> (bool, u32, u32, f32, f32) {
     let mut fly = blind_fly();
     let (k, dt) = (0.197 / 0.914, DT_US as f32 * 1e-6);
@@ -2429,9 +2292,8 @@ fn blind_air_run(gain: f32, seconds: u64) -> (bool, u32, u32, f32, f32) {
     (false, started, aborted, min_thrust, d)
 }
 
-/// N7, BLIND's probe in the air at thrust gain 0.88, 1.0 and 1.12 (60 s): the plant accelerates downward as the probe
-/// lowers the collective, (b) fails, the probe aborts before the idle floor, and BLIND never stops. (At 0.88 the probes
-/// begin once drag has brought the acceleration under 1.0 m/s^2 in the fall.)
+/// BLIND's probe in the air at thrust gain 0.88, 1.0 and 1.12 (60 s): the plant accelerates downward as the probe
+/// lowers the collective, (b) fails, the probe aborts before the idle floor.
 #[test]
 fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
     for gain in [0.88f32, 1.0, 1.12] {
@@ -2443,10 +2305,8 @@ fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
     }
 }
 
-/// E2's flight (`return_built` false, as on the board): armed in Angle on the ground at d = 0 (home when `home`; else the
-/// height is not valid until airborne, so no home latches), then 30 m up in Altitude, the
-/// sticks lost (FS_HOLD_EN 0: LAND, holding position on T3'); a vertical point mass flies the demand. Returns per step after
-/// the loss (height above home m, LAND's rate m/s, the setpoint's climb-rate feed-forward m/s, collective N), down to 1 m.
+/// Flight (`return_built` false, as on the board): armed in Angle on the ground at d = 0.
+/// the height is not valid until airborne, so no home latches), then 30 m up in Altitude.
 fn e2_run(home: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
     let valid = if home { POSITION } else { ANGLE };
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(0.0, valid))));
@@ -2492,18 +2352,14 @@ fn e2_run(home: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
     out
 }
 
-/// N7, E2: with home, LAND descends at 1.5 m/s while more than 11 m (10 m plus the slowing margin) above home and at
-/// 0.5 m/s from 9.5 m down (at 10 m at most 0.75 m/s: the point mass lags the slowing); between, the rate moves at most 1.0 m/s^2 per step and the collective changes by less than
-/// 0.05 N per step (N11 (2): the entry step too, LAND starting from the hover's v_D; before N11 it changed it by more than
-/// 1 N). Without home,
-/// 0.5 m/s all the way.
+/// With home, LAND descends at 1.5 m/s while more than 11 m (10 m plus the slowing margin) above home and at 0.5 m/s
+/// from 9.5 m down (at 10 m at most 0.75 m/s: the point mass lags the slowing); between.
 #[test]
 fn e2_land_descends_1_5_above_10_m_over_home_0_5_below_and_the_change_steps_no_thrust() {
     let run = e2_run(true);
     let dt = DT_US as f32 * 1e-6;
     let entry = (run[1].3 - run[0].3).abs().max((run[0].3 - MASS * GRAVITY_MSS).abs());
     let mut worst = 0.0f32;
-    // N11 (2): the first rate is the hover's v_D (0), then it ramps to 1.5 m/s.
     assert_eq!(run[0].1, 0.0);
     let mut ramped = false;
     for w in run.windows(2) {
@@ -2523,53 +2379,40 @@ fn e2_land_descends_1_5_above_10_m_over_home_0_5_below_and_the_change_steps_no_t
     }
     let at_10 = run.iter().find(|r| r.0 <= LAND_ALT_LOW_M).expect("passed 10 m");
     std::println!("E2: entry collective step {entry} N, largest per-step change 8-13 m {worst} N, rate at 10 m {} m/s", at_10.1);
-    // N11 (2): the entry starts from the estimated v_D (0, a hover), so the entry step is gone too.
     assert!(entry < 0.05 && worst < 0.05, "{entry} {worst}");
-    // The closed loop descends faster than the slewed rate while it slows, so the ramp ends a little below 10 m.
     assert!(at_10.1 <= LAND_SPEED_MS + 0.25, "{}", at_10.1);
     assert!(ramped, "reached 1.5 m/s");
-    // No home: from the hover's 0 to 0.5 m/s, then 0.5 m/s all the way.
     let run = e2_run(false);
     assert_eq!(run[0].1, 0.0);
     assert!(run.iter().skip_while(|r| r.1 != LAND_SPEED_MS).count() > run.len() / 2);
     assert!(run.iter().skip_while(|r| r.1 != LAND_SPEED_MS).all(|r| r.1 == LAND_SPEED_MS), "no home: 0.5 m/s all the way");
 }
 
-// ---- N1: the NS invariant walk ----
+// ---- The NS invariant walk ----
 
 /// Why a step after the first airborne latch of an arming stopped or disarmed, as the walk's harness tags it from what
-/// it fed and what the flight left (no flight-code seam: private fields read from this test module).
+/// it fed and what the flight left (no flight-code seam: private fields read from this test module)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Cause {
     /// F: a gap between flight steps over `FLIGHT_GAP_DISARM_US`.
     Gap,
-    /// P: this step's report has the arm switch off, and it was not held (K set, M clear, or not a hands-off state).
+    /// P: this step's report has the arm switch off, and it was not held (K set, M clear, or not a hands-off state)
     ArmOff,
     /// F: the estimate does not cover tilt and rates, or the IMU sample is not finite.
     Coverage,
-    /// T: TD held at the previous step (its count reached `land_detect_us`), as the state machine reads it at this step.
+    /// T: TD held at the previous step (its count reached `land_detect_us`), as the state machine reads it at this
+    /// step.
     Touchdown,
 }
 
-/// The NS walk over the real Gate + HandsOff + Flight: random reports (losses of 0.5 to 3.5 s and returns, single drops),
-/// arm switch, sticks (throttle 0 included), mode switch, tiers, the heading verdict, battery critical, FS_HOLD_EN
-/// (`fs`, or random), IMU1 at rest, zero or noisy, rare NaN samples, rotation above 20 deg/s, rare step gaps. Every step
-/// that stops or disarms after the first airborne latch of the arming gets exactly one cause of P, T or F (first match in
-/// `Cause`'s order); any other (the former latch-only WR1 and stick-loss stops included) panics. Home latches (N10 (v))
-/// but RETURN and AUTO are never reached (`return_built` false). N12: RADIO_STATUS about once a second during random
-/// "MAVLink model" periods (a generator of its own); an arm-OFF report that stops while K is clear in a hands-off state
-/// must have M clear (P), so with M set such a stop has a cause of T or F. Returns the count per cause, then the arm-OFF
-/// reports held with M set (armed after them), then the stick losses in the air handled as hands-off states.
-/// N19, the NS walk's oracle on a MAVLink flight: the newest report the flight took (stale included) has arm OFF and the
-/// mission switch OFF (column 5, P).
+/// The NS walk over the real Gate + HandsOff + Flight: random reports.
+/// drops), arm switch, sticks (throttle 0 included), mode switch, tiers, the heading verdict, battery critical.
 fn arm_off_ms_off(newest: Option<RcSample>) -> bool {
     newest.is_some_and(|r| !r.arm && !r.mission)
 }
 
 fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSource) -> [u32; 6] {
     let receiver = source == fw_core::rc::RcSource::Receiver;
-    // N19: the mission switch (receiver reports only), OFF while disarmed (a report with it ON never arms), mostly ON in
-    // the air, from a generator of its own.
     let (mut msw, mut mission) = (Lcg(seed ^ 0x5a5a), false);
     let tuning = Tuning::DEFAULT;
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
@@ -2581,16 +2424,9 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSou
     let mut newest: Option<u64> = None;
     let (mut prev_armed, mut prev_state, mut ever) = (false, State::Stop, false);
     let (mut counts, mut homed) = ([0u32; 6], 0u32);
-    // N12: the harness's own M (set by a RADIO_STATUS newer than the entry from PILOT or STOP) and K (a fresh arm-ON
-    // newest report in TAKEOVER since its entry).
     let (mut radio, mut mavlink, mut status, mut entry, mut m, mut k_set) =
         (Lcg(seed ^ 0xa5a5), false, None::<u64>, 0u64, false, false);
-    // H3b: the 30 m square uploaded, the battery known OK, the station heard on the radio link (dropped for a while now
-    // and then) and one of the five commands on the radio link at 0.5 % of the steps, from a generator of its own (the main
-    // sequence is unchanged): AUTO is reached and flown.
     f.set_mission(super::auto_tests::square());
-    // BATT-M: the battery through the monitor's byte (`set_battery_cell`) at every step, known OK at first; random bytes
-    // (CRITICAL with action 0 or 1, LOW, or not known) from a generator of its own.
     let (mut bat, mut batt) = (Lcg(seed ^ 0xb0b0), fw_core::battery::CELL_KNOWN_OK);
     let (mut cmds, mut station, mut auto_steps, mut return_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32, 0u32);
     let all = [Command::Start, Command::Pause, Command::Abort, Command::Land, Command::Return];
@@ -2699,8 +2535,6 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSou
             m = true;
         }
         let held = hands_off(prev_state) && !(prev_state == State::Takeover && k_set) && m;
-        // N19: on a MAVLink flight an arm-OFF report is held only with the mission switch ON (STOP after "ever airborne"
-        // from an arm-OFF report must have it OFF, P).
         let held = if receiver { rc.is_some_and(|r| r.mission) } else { held };
         let o = f.step(&i);
         let state = f.hands_off_state();
@@ -2746,9 +2580,6 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSou
     }
     assert!(homed > 10_000, "seed {seed:#x}: home latched (N10 (v)) on {homed} armed steps");
     std::println!("NS walk {seed:#x}: AUTO steps {auto_steps}, RETURN steps {return_steps}");
-    // Required at FS_HOLD_EN 1; with it changing (in force only from a disarmed step) the walk seldom gets there; never
-    // at FS_HOLD_EN 0 (N2: a stick loss lands, no HOLD, so no RETURN).
-    // N19: on the receiver at FS_HOLD_EN 1; never on CRSF flights.
     assert!(fs != Some(true) || !receiver || auto_steps > 200, "seed {seed:#x}: AUTO reached ({auto_steps} steps)");
     assert!(fs != Some(true) || !receiver || return_steps > 500, "seed {seed:#x}: RETURN reached ({return_steps} steps)");
     assert!(fs != Some(false) || auto_steps + return_steps == 0, "seed {seed:#x}: FS_HOLD_EN 0");
@@ -2756,10 +2587,8 @@ fn ns_walk(seed: u64, steps: usize, fs: Option<bool>, source: fw_core::rc::RcSou
     counts
 }
 
-/// N1 as tightened by N10: the NS walk at FS_HOLD_EN 0, 1 and changing, 400 000 steps each: every stop after the first
-/// airborne latch is tagged P, T or F (no latch-only WR1 or stick-loss stop); P, T and F each occur, and stick losses in
-/// the air were handled as hands-off states. N12: arm-OFF reports held with M set occur, and none of them stops without
-/// T or F (the "held arm-OFF released" label of N10 is gone: no rule releases a held report but K, TD or F).
+/// As tightened by: the NS walk at FS_HOLD_EN 0, 1 and changing, 400 000 steps each: every stop after the first
+/// airborne latch is tagged P, T or F (no latch-only WR1 or stick-loss stop); P, T and F each occur.
 #[test]
 fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     let mut total = [0u32; 6];
@@ -2780,7 +2609,7 @@ fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     assert!(total[4] > 0, "no arm-OFF report held with M: {total:?}");
 }
 
-// ---- N11 (1a, 1c): the learned hover collective ----
+// ---- The learned hover collective ----
 
 const MG: f32 = MASS * GRAVITY_MSS;
 
@@ -2790,7 +2619,7 @@ impl Fly {
         self.rc(true, [0.0, 0.0, thr, 0.0], Switch3::Low)
     }
 
-    /// The fake vehicle's roll and pitch, rad (level otherwise).
+    /// The fake vehicle's roll and pitch, rad (level otherwise)
     fn tilt(&self, roll: f32, pitch: f32) {
         let mut n = self.cell.get();
         n.attitude = if roll != 0.0 {
@@ -2808,7 +2637,8 @@ impl Fly {
     }
 }
 
-/// Whether one step in Angle at 0.52 throttle (1.04 m g) moves H and the qualifying time, after `change` set the step up.
+/// Whether one step in Angle at 0.52 throttle (1.04 m g) moves H and the qualifying time, after `change` set the step
+/// up.
 fn learns(change: impl FnOnce(&mut Fly)) -> bool {
     let mut fly = Fly::new(true, true, ALTITUDE);
     fly.angle(0.52);
@@ -2820,8 +2650,8 @@ fn learns(change: impl FnOnce(&mut Fly)) -> bool {
     moved
 }
 
-/// N11 (1e): each gate blocks the learner alone: the low mark (N14 (1)), TD held (N13), v_D not valid, |v_D| at 0.6 m/s,
-/// roll or pitch at 5 deg; it learns just inside each bound; a disarmed step resets H to the card's m g and the time.
+/// Each gate blocks the learner alone: the low mark, TD held, v_D not valid, |v_D| at 0.6 m/s, roll or pitch at 5 deg;
+/// it learns just inside each bound; a disarmed step resets H to the card's m g and the time.
 #[test]
 fn n11_each_gate_condition_blocks_learning() {
     let deg = core::f32::consts::PI / 180.0;
@@ -2847,8 +2677,8 @@ fn n11_each_gate_condition_blocks_learning() {
     assert!(!o.armed && fly.f.hover_n == MG && fly.f.hover_us == 0, "disarmed: card value, time cleared");
 }
 
-/// The real controller, whose demand's collective is NaN while `nan` is set (the real one never gives NaN: its
-/// `max(0.0)` turns one into 0).
+/// The real controller, whose demand's collective is NaN while `nan` is set.
+/// `max(0.0)` turns one into 0)
 struct NanThrust<'a> {
     pid: crate::pid::CascadedPid,
     nan: &'a Cell<bool>,
@@ -2896,8 +2726,8 @@ fn n11_a_nan_commanded_collective_leaves_h_unchanged() {
     assert!(f.hover_n.is_finite() && f.hover_us > us, "learns again");
 }
 
-/// N11 (1e): from the card's m g, a step of the collective to 1.11 m g reaches 63 % at 10 s of qualifying steps and has
-/// not at 9.9 s; the clamp holds at m g x 1.61 and x 0.685 (N14 (2)).
+/// From the card's m g, a step of the collective to 1.11 m g reaches 63 % at 10 s of qualifying steps and has not at
+/// 9.9 s; the clamp holds at m g x 1.61 and x 0.685.
 #[test]
 fn n11_a_step_reaches_63_percent_at_10_s_not_at_9_9_s_and_the_clamp_holds_at_both_ends() {
     let mut fly = Fly::new(true, true, ALTITUDE);
@@ -2933,9 +2763,8 @@ fn blind_with(h: f32, us: u64) -> Fly {
     fly
 }
 
-/// N11 (1e, 1c): in BLIND the collective is H - 0.3 m once H is valid (10 s of qualifying time) and the card's m g -
-/// 0.3 m before; H and its time are frozen in BLIND (here with v_D valid, so the BLIND gate alone stops it). Checked over
-/// BLIND's first second, before N13's correction.
+/// In BLIND the collective is H - 0.3 m once H is valid (10 s of qualifying time) and the card's m g - 0.3 m before; H
+/// and its time are frozen in BLIND (here with v_D valid, so the BLIND gate alone stops it)
 #[test]
 fn n11_blind_flies_h_minus_0_3_m_once_valid_the_card_before_and_h_is_frozen() {
     for h in [HOVER_MIN_G * MG, 1.0 * MG, 1.05 * MG, HOVER_MAX_G * MG] {
@@ -2955,8 +2784,7 @@ fn n11_blind_flies_h_minus_0_3_m_once_valid_the_card_before_and_h_is_frozen() {
 }
 
 /// The net downward acceleration, m/s^2, at the first BLIND step of a vehicle whose thrust is `gain` x the commanded
-/// collective: 20 s of altitude hold at mid stick on the point-mass plant, then T1 (no vertical estimate) and the sticks
-/// lost.
+/// collective: 20 s of altitude hold at mid stick on the point-mass plant.
 fn blind_entry_accel(gain: f32) -> f32 {
     let mut fly = Fly::new(true, true, ALTITUDE);
     let dt = DT_US as f32 * 1e-6;
@@ -2985,8 +2813,8 @@ fn blind_entry_accel(gain: f32) -> f32 {
     panic!("never BLIND");
 }
 
-/// N11 (1e) closed loop: BLIND after 20 s of hover at thrust gain 0.88, 1.00 and 1.12 descends at entry, at least
-/// 0.1 m/s^2 down (N11 (1c)); the card-based collective gave 1.44 down, 0.30 down and 0.83 UP.
+/// Closed loop: BLIND after 20 s of hover at thrust gain 0.88, 1.00 and 1.12 descends at entry, at least 0.1
+/// m/s^2 down; the card-based collective gave 1.44 down, 0.30 down and 0.83 UP.
 #[test]
 fn n11_closed_loop_blind_after_20_s_of_hover_descends_at_every_gain() {
     let got = [0.88f32, 1.0, 1.12].map(|gain| {
@@ -2998,12 +2826,10 @@ fn n11_closed_loop_blind_after_20_s_of_hover_descends_at_every_gain() {
     assert!(got.iter().all(|&(_, a)| (0.1..=0.6).contains(&a)), "m/s^2 down by gain: {got:?}");
 }
 
-// ---- N11 (2): LAND's first step from the estimated v_D ----
+// ---- LAND's first step from the estimated v_D ----
 
 /// LAND entered on the point-mass plant (FS_HOLD_EN 0, no home: the stage rate is 0.5 m/s) after 4 s of altitude hold
-/// at throttle `thr` (0.5 hovers, 1.0 climbs at `pilot_speed_up_ms` 3 m/s) and the sticks lost. Over LAND's first second:
-/// (v_D at entry, LAND's first rate, lowest collective / m g, largest per-step collective change N, steps with the
-/// collective on the idle floor).
+/// at throttle `thr` (0.5 hovers, 1.0 climbs at `pilot_speed_up_ms` 3 m/s) and the sticks lost.
 fn land_entry(thr: f32) -> (f32, f32, f32, f32, u32) {
     let mut fly = Fly::new(false, true, ALTITUDE);
     let dt = DT_US as f32 * 1e-6;
@@ -3040,10 +2866,8 @@ fn land_entry(thr: f32) -> (f32, f32, f32, f32, u32) {
     (v0, r0, low, step, floor)
 }
 
-/// N11 (2): LAND's rate starts from the estimated v_D and moves to the stage rate at `LAND_RATE_ACC_MSS`: from a hover the
-/// rate starts at 0 and the collective changes by less than 0.05 N per step; from a 3 m/s climb at the loss the rate
-/// starts at -3 m/s and the collective never reaches the idle floor nor goes below the ground threshold in the first
-/// second (starting at the stage rate it did; see the report of N-c).
+/// LAND's rate starts from the estimated v_D and moves to the stage rate at `LAND_RATE_ACC_MSS`: from a hover the rate
+/// starts at 0 and the collective changes by less than 0.05 N per step.
 #[test]
 fn n11_land_starts_from_the_estimated_vertical_speed_no_entry_thrust_step() {
     let (v0, r0, low, step, floor) = land_entry(0.5);
@@ -3056,12 +2880,10 @@ fn n11_land_starts_from_the_estimated_vertical_speed_no_entry_thrust_step() {
     assert!(floor == 0 && low > Tuning::DEFAULT.ground_thrust_g, "{low} {floor}");
 }
 
-// ---- N13: BLIND's one-shot correction ----
+// ---- BLIND's one-shot correction ----
 
 /// BLIND (T1, v_D valid, H set to `h` and valid) on a level point-mass plant whose thrust is `gain` x the commanded
-/// collective; IMU1 reads that plant's specific force, so the earth-frame net acceleration down is g - gain T / m. Runs
-/// `steps` steps; returns (net acceleration down at the first step after the correction, the corrected collective, how
-/// many times the corrected collective changed, the collective at that step).
+/// collective; IMU1 reads that plant's specific force.
 fn blind_plant(h: f32, gain: f32, steps: u32) -> (f32, Option<f32>, u32, f32) {
     let mut fly = blind_with(h, HOVER_VALID_US);
     let mut thrust = h - MASS * BLIND_BELOW_HOVER_MSS;
@@ -3083,13 +2905,8 @@ fn blind_plant(h: f32, gain: f32, steps: u32) -> (f32, Option<f32>, u32, f32) {
     (after, prev, changes, c_after)
 }
 
-/// N13, N16 (a): the correction only cuts. With the first second's collective 15 % and 13 % above, and at, the true hover
-/// (H injected, plant gain 1), with N14 (5)'s H error of +40 % (H 1.4 m g, gain 1), and with the card 40 % off at the
-/// weak end of the spread (H learned right: m g / 0.62 at gain 0.62), the net acceleration after the correction is
-/// 0.3 +- 0.1 m/s^2 down. Where the first second already descends faster than 0.3 (H 10 % below the true hover, plant
-/// gain 0.9 at H = m g, H -40 %, H learned right at gain 1.46) the collective is unchanged (the first second's) and the
-/// net acceleration stays the first second's. The correction is made once (8 s of BLIND); N14 (2): only the allocator's
-/// physical range bounds it (the idle floor at gain 3). Reported, not asserted: H at the card's m g with gain 0.6.
+/// The correction only cuts. With the first second's collective 15 % and 13 % above, and at, the true hover.
+/// Injected, plant gain 1), with the H error of +40 % (H 1.4 m g, gain 1)
 #[test]
 fn n13_blind_correction_gives_0_3_down_once_and_is_clamped() {
     let (a, _, _, c) = blind_plant(MG, 0.6, 6_400);
@@ -3123,11 +2940,8 @@ fn n13_blind_correction_gives_0_3_down_once_and_is_clamped() {
     assert_eq!(lo, Some(CardAllocator::new().collective_range().0), "clamped at the idle floor");
 }
 
-/// N16 (a), property: in a BLIND episode the commanded collective never exceeds its value at BLIND's entry (H injected at
-/// the entry, valid). Random entries: H over the learner's range, plant gain 0.6-1.5, a net acceleration bias -2 to +2
-/// m/s^2 down (drag of a climbing or descending entry, accelerometer bias), in the air or at rest on the ground (where the
-/// probe then ramps down); 3 s of BLIND each, past the correction. Counted: the entries where a two-sided correction would
-/// have raised the collective (the first second descending faster than 0.3), so the property is not vacuous.
+/// Property: in a BLIND episode the commanded collective never exceeds its value at BLIND's entry.
+/// at the entry, valid)
 #[test]
 fn n16_blind_collective_never_exceeds_its_entry_value() {
     let mut rng = Lcg(0x5eed_0016);
@@ -3162,9 +2976,7 @@ fn n16_blind_collective_never_exceeds_its_entry_value() {
     assert!(raised >= 10, "{raised}");
 }
 
-/// N16 (b): a hands-off state flying Angle with synthetic sticks (LAND at FS_HOLD_EN 0 on T2, then T1: Angle during the
-/// 1.0 s tier debounce before BLIND) commands H when H is valid and the card's m g when it is not; the pilot's own Angle
-/// at half throttle (real sticks) is the card's m g whatever H.
+/// A hands-off state flying Angle with synthetic sticks (before the tier debounce on BLIND) commands H when H is valid, else the card's m g.
 #[test]
 fn n16_synthetic_angle_collective_is_h_when_valid_else_the_card() {
     for (h, us) in [(HOVER_MIN_G * MG, HOVER_VALID_US), (1.2 * MG, HOVER_VALID_US), (HOVER_MAX_G * MG, HOVER_VALID_US), (1.2 * MG, HOVER_VALID_US - 1)] {
@@ -3187,7 +2999,7 @@ fn n16_synthetic_angle_collective_is_h_when_valid_else_the_card() {
     }
 }
 
-/// N13 on the ground (the floor carries the vehicle: IMU1 at rest, net acceleration 0): the correction lowers the
+/// On the ground (the floor carries the vehicle: IMU1 at rest, net acceleration 0): the correction lowers the
 /// collective by m x 0.3 once, then the probe and TD stop the motors.
 #[test]
 fn n13_on_the_ground_the_correction_lowers_by_0_3_m_once_and_the_probe_still_stops() {
@@ -3202,7 +3014,6 @@ fn n13_on_the_ground_the_correction_lowers_by_0_3_m_once_and_the_probe_still_sto
         changes += u32::from(fly.f.blind_trim_n != prev);
         prev = fly.f.blind_trim_n;
     }
-    // The window's 800 samples: the entry step read IMU1's default (zero specific force: g down), the rest at rest (0).
     let want = MG - 2.0 * MASS * BLIND_BELOW_HOVER_MSS + MASS * GRAVITY_MSS / 800.0;
     std::println!("N13 ground: corrected {prev:?} N (want {want}), changes {changes}, stopped {stopped}");
     assert!(prev.is_some_and(|c| (c - want).abs() <= 1e-3 * MG) && changes == 1 && stopped);
@@ -3234,8 +3045,8 @@ impl Fly {
     }
 }
 
-/// B1 in HOLD: CRITICAL from the monitor's byte gives LAND at the next step, holding position, exactly as the raw input;
-/// with action 1 the descent request adds nothing (every output bit-identical, the descent Off).
+/// In HOLD: CRITICAL from the monitor's byte gives LAND at the next step, holding position, exactly as the raw
+/// input; with action 1 the descent request adds nothing (every output bit-identical, the descent Off)
 #[test]
 fn batt_m_hold_critical_lands_and_the_action_1_request_adds_nothing() {
     let run = |b: Batt| {
@@ -3258,10 +3069,8 @@ fn batt_m_hold_critical_lands_and_the_action_1_request_adds_nothing() {
     assert_eq!(run(Batt::Cell(CRIT_DESCEND)), raw, "action 1");
 }
 
-/// C1 in TAKEOVER: CRITICAL from the monitor's byte flies TAKEOVER's descent and the hand-over stays possible, exactly
-/// as the raw input, with action 0 or 1. The request seen in TAKEOVER is cancelled by the lock's switch moves (a ch6
-/// change, B-I5), so after the hand-over the pilot flies his sticks. A level first reached in PILOT after a hand-over
-/// gets the PILOT-side descent as on batt.
+/// In TAKEOVER: CRITICAL from the monitor's byte flies TAKEOVER's descent and the hand-over stays possible, exactly
+/// as the raw input, with action 0 or 1.
 #[test]
 fn batt_m_takeover_critical_descends_and_hand_over_stays_possible() {
     let run = |b: Batt| {
@@ -3291,7 +3100,6 @@ fn batt_m_takeover_critical_descends_and_hand_over_stays_possible() {
     assert!(raw[..800].iter().all(|(_, s)| *s == State::Takeover));
     assert_eq!(run(Batt::Cell(CRIT_WARN)), raw, "action 0");
     assert_eq!(run(Batt::Cell(CRIT_DESCEND)), raw, "action 1");
-    // Handed over with the battery fine, then CRITICAL with action 1 in PILOT (Altitude): the descent at F2's speed.
     let mut fly = Fly::new(true, true, POSITION);
     fly.lose();
     fly.rc(true, FULL, Switch3::Low);
@@ -3309,8 +3117,8 @@ fn batt_m_takeover_critical_descends_and_hand_over_stays_possible() {
     }
 }
 
-/// B6: BLIND does not change on CRITICAL, from the raw input or the monitor's byte with action 0 or 1: every output
-/// bit-identical to a run with no battery input.
+/// BLIND does not change on CRITICAL, from the raw input or the monitor's byte with action 0 or 1: every output bit-
+/// identical to a run with no battery input.
 #[test]
 fn batt_m_blind_is_unchanged_by_critical() {
     let run = |b: Batt| {
@@ -3335,11 +3143,10 @@ fn batt_m_blind_is_unchanged_by_critical() {
     }
 }
 
-// ---- N19: the mission switch on the real step ----
+// ---- The mission switch on the real step ----
 
-/// N19 1(3): a report of the other source on a MAVLink flight (and the reverse) leaves the gate, the sticks, the mode
-/// switch and the state alone, an arm-OFF one included; only such reports for longer than the stick-loss time are a stick
-/// loss of the flight's own source (HOLD on the MAVLink flight, LAND on the CRSF one).
+/// A report of the other source on a MAVLink flight (and the reverse) leaves the gate, the sticks, the mode switch and
+/// the state alone, an arm-OFF one included.
 #[test]
 fn n19_the_source_latch_on_the_real_step() {
     use fw_core::rc::RcSource::{Crsf, Receiver};
@@ -3360,8 +3167,8 @@ fn n19_the_source_latch_on_the_real_step() {
     }
 }
 
-/// N19 section 3 and I1 as amended: a receiver report never arms at FS_HOLD_EN 0, nor with the mission switch ON; with
-/// FS_HOLD_EN 1 and the switch OFF it arms. Control: CRSF arms at either value (the mission switch is not read on CRSF).
+/// Section 3 and I1 as amended: a receiver report never arms at FS_HOLD_EN 0, nor with the mission switch ON; with
+/// FS_HOLD_EN 1 and the switch OFF it arms.
 #[test]
 fn n19_a_receiver_report_arms_only_at_fs_hold_en_1_with_the_mission_switch_off() {
     use fw_core::rc::RcSource::{Crsf, Receiver};

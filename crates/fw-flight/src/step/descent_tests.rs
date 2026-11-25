@@ -1,6 +1,5 @@
-//! Host tests of the vertical descent laws on a vertical point mass with a lag: LAND's E2 stages from a hover (FX-2
-//! item 3) and the descent review's cases (decision-mavlink-mode-20261123, section 48) on quadratic drag. The estimator is
-//! `althold_tests`' fake; the estimate is exact.
+//! Host tests of the vertical descent laws on a vertical point mass with a lag: LAND's E2 stages from a hover.
+//! item 3) and the descent review's cases on quadratic drag.
 
 extern crate std;
 
@@ -8,7 +7,7 @@ use super::althold_tests::{DT_US, TestFlight, flight, input, nav_at, report};
 use super::*;
 use core::cell::Cell;
 
-/// Everything Position needs (T3).
+/// Everything Position needs.
 const POSITION: Valid = Valid {
     heading: true,
     velocity_ne: true,
@@ -23,8 +22,7 @@ fn handshake() -> &'static Handshake {
 }
 
 /// The vertical point mass: thrust `gain` x the commanded collective through a first-order motor lag `tau` (s), linear
-/// drag `k` (1/s) and quadratic drag `kq` (1/m), the ground at d = 0 (no bounce). IMU1 reads the specific force; the
-/// estimate (height, v_D) is exact unless `vd_frozen` holds a v_D.
+/// drag `k` (1/s) and quadratic drag `kq` (1/m), the ground at d = 0 (no bounce)
 struct Plant {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
@@ -40,9 +38,9 @@ struct Plant {
     vd_frozen: Option<f32>,
     /// The station is heard on the radio link at every step.
     station: bool,
-    /// The height estimate's error, m down (the estimate is d + this).
+    /// The height estimate's error, m down (the estimate is d + this)
     d_off: f32,
-    /// Where the reports come from (N19: the receiver for the MAVLink flights at FS_HOLD_EN 1).
+    /// Where the reports come from.
     source: fw_core::rc::RcSource,
 }
 
@@ -104,15 +102,13 @@ impl Plant {
     }
 }
 
-/// The plant of the LAND tests: gain 1, a 50 ms motor lag, the linear drag of `n14_tests` (0.197 / 0.914 1/s).
+/// The plant of the LAND tests: gain 1, a 50 ms motor lag, the linear drag of `n14_tests` (0.197 / 0.914 1/s)
 fn land_plant() -> Plant {
     Plant::new(1.0, 0.05, 0.197 / 0.914, 0.0)
 }
 
-/// LAND's descent from its entry to 0.3 m above the ground (FX-2 item 3): (entry height, highest rise above it, time from
-/// the entry to 2 m below it, mean rate from 2 m below the entry to 11 m, the largest |v_D - 1.5| from 3 s after the entry to
-/// 11 m, the largest |v_D - 0.5| at 9 m and below, the largest thrust change in one step between 12 m and 9 m, the largest
-/// stage rate). Every step armed with the motors running and in LAND.
+/// LAND's descent from its entry to 0.3 m above the ground.
+/// from the entry to 2 m below it, mean rate from 2 m below the entry to 11 m.
 struct Descent {
     h0: f32,
     rise: f32,
@@ -187,7 +183,7 @@ fn return_at_home(top: f32) -> Plant {
     p
 }
 
-/// A 10 s hover at `h` m in Position, then the sticks lost with FS_HOLD_EN 0: LAND (T3) at once.
+/// A 10 s hover at `h` m in Position, then the sticks lost with FS_HOLD_EN 0: LAND at once.
 fn pilot_hover_lost(h: f32) -> Plant {
     let mut p = land_plant();
     p.hover_at(h, 10.0);
@@ -197,12 +193,8 @@ fn pilot_hover_lost(h: f32) -> Plant {
     p
 }
 
-/// FX-2 item 3 (section 56, TO LOOK AT 1): LAND from a hover at 20 m and at 50 m on a plant with a lag, after RETURN's
-/// climb in place at home and after a stick loss: no climb after the entry (at most 0.3 m above it), 2 m below the entry
-/// within 3 s, the mean rate from 2 m below the entry to 11 m at least 1.35 m/s, 1.5 m/s +- 0.15 from 3 s after the entry
-/// to 11 m, 0.5 m/s +- 0.05 at 9 m and below, no thrust step at the stage change (under 0.05 N per step between 12 m and
-/// 9 m). Before the fix RETURN reported Home while the vehicle still climbed at 3 m/s, 0.6 m below H_r, and LAND's first
-/// rate was that climb (N11 (2)): it rose 5.2 m above the entry and took 13.5 s from 19.4 m to 10.5 m.
+/// LAND from a hover at 20 m and at 50 m on a plant with a lag, after RETURN's climb in place at home and
+/// after a stick loss: no climb after the entry (at most 0.3 m above it), 2 m below the entry within 3 s.
 #[test]
 fn fx2_land_from_a_hover_at_20_and_50_m_reaches_e2s_first_stage() {
     for (name, top) in [("RETURN at home", 20.0f32), ("RETURN at home", 50.0), ("stick loss", 20.0), ("stick loss", 50.0)] {
@@ -219,7 +211,8 @@ fn fx2_land_from_a_hover_at_20_and_50_m_reaches_e2s_first_stage() {
     }
 }
 
-/// FX-2 item 3: LAND from a 5 m hover is unchanged: the stage rate is 0.5 m/s throughout (from v_D 0 at the entry), no rise.
+/// LAND from a 5 m hover is unchanged: the stage rate is 0.5 m/s throughout (from v_D 0 at the entry), no
+/// rise.
 #[test]
 fn fx2_land_from_5_m_descends_at_0_5_m_s() {
     let mut p = pilot_hover_lost(5.0);
@@ -228,18 +221,16 @@ fn fx2_land_from_5_m_descends_at_0_5_m_s() {
     assert!(r.rate_max <= LAND_SPEED_MS && r.rise <= 0.1);
 }
 
-/// The quadratic-drag plant of section 48: no linear drag, a 50 ms motor lag, gain `gain`, and kq such that the terminal
-/// fall at the allocator's idle floor is 15 m/s: kq = (g - gain floor / m) / 15^2 (1/m).
+/// The quadratic-drag plant of section 48: no linear drag, a 50 ms motor lag, gain `gain`, and kq such that the
+/// terminal fall at the allocator's idle floor is 15 m/s: kq = (g - gain floor / m) / 15^2 (1/m)
 fn quadratic_plant(gain: f32) -> Plant {
     let mut p = Plant::new(gain, 0.05, 0.0, 0.0);
     p.kq = (GRAVITY_MSS - gain * p.f.floor_n / MASS) / (15.0 * 15.0);
     p
 }
 
-/// FX-2 item 4 (a), section 48: a pilot throttle chop in Angle of 5 s from 60 m, then a stick loss (FS_HOLD_EN 0): the
-/// accepted residual. On this plant the 5 s chop reaches the ground before the loss, so a 3 s chop is flown too.
-/// Asserted only what the code is designed to do: a loss in the air gives LAND, or STOP when TD already held at the
-/// loss (WR1); the numbers printed.
+/// A pilot throttle chop in Angle of 5 s from 60 m, then a stick loss (FS_HOLD_EN 0): the
+/// accepted residual.
 #[test]
 fn fx2_quadratic_drag_throttle_chop_5_s_from_60_m_then_stick_loss() {
   for chop_s in [5.0f32, 3.0] {
@@ -279,9 +270,8 @@ fn fx2_quadratic_drag_throttle_chop_5_s_from_60_m_then_stick_loss() {
   }
 }
 
-/// FX-2 item 4 (a): BLIND entered from a 5 m/s descent (Angle at throttle 0.3 from a hover at 60 m, then the sticks and
-/// the height lost together; from 150 m so that 10 s of BLIND fit): the probe aborts, no stop in the air, BLIND's collective never above its entry value; the
-/// descent rate 10 s after the entry printed.
+/// BLIND entered from a 5 m/s descent.
+/// and the height lost together; from 150 m so that 10 s of BLIND fit): the probe aborts, no stop in the air.
 #[test]
 fn fx2_quadratic_drag_blind_from_a_5_m_s_descent() {
     let mut p = quadratic_plant(1.0);
@@ -318,10 +308,8 @@ fn fx2_quadratic_drag_blind_from_a_5_m_s_descent() {
     assert!(c_max <= c0 + 1e-3, "{c_max} {c0}");
 }
 
-/// FX-2 item 4 (a): LAND from a hover at 20 m with the v_D estimate frozen at a faulty value from the stick loss on
-/// (FS_HOLD_EN 0): +3 m/s (down, the loop adds thrust) and -3 m/s (up, the loop commands the idle floor). Printed: the
-/// time until the commanded collective first reaches the floor, the ground contact and whether TD then holds in the air
-/// (20 s); asserted: no stop within the first 3 s.
+/// LAND from a hover at 20 m with the v_D estimate frozen at a faulty value from the stick loss on +3
+/// m/s (down, the loop adds thrust) and -3 m/s (up, the loop commands the idle floor)
 #[test]
 fn fx2_quadratic_drag_land_with_v_d_frozen() {
     for vd in [3.0f32, -3.0] {
@@ -354,9 +342,8 @@ fn fx2_quadratic_drag_land_with_v_d_frozen() {
     }
 }
 
-/// FX-2 item 4 (b), section 48: a gentle take-off in Angle at thrust gain 1.46 never sets the 0.714 latch; the stick loss
-/// with FS_HOLD_EN 1 (station heard) and with FS_HOLD_EN 0 lands without a stop, and LAND's first mode is Altitude, not
-/// Position (the (state, mode) pairs in order printed).
+/// A gentle take-off in Angle at thrust gain 1.46 never sets the 0.714 latch; the stick
+/// loss with FS_HOLD_EN 1 (station heard) and with FS_HOLD_EN 0 lands without a stop.
 #[test]
 fn fx2_hover_below_the_latch_hold_and_land_fly_altitude() {
     for fs in [true, false] {
@@ -394,12 +381,8 @@ fn fx2_hover_below_the_latch_hold_and_land_fly_altitude() {
     }
 }
 
-/// FX-2 item 4 (c), section 48: WR1's modelled clear agrees with the real one, deterministically (the wr3 walk counts it
-/// without requiring it). HOLD at 10 m on the fake estimator, the estimate then 3 m above the held height (the vertical
-/// loop at the idle floor), IMU1 at rest: at a hands-off step with TD held and the airborne latch still set the
-/// test clears the latch; that step ends disarmed in STOP. TD is put at its hold time directly, as the latch clears itself
-/// on the same idle-floor second TD needs (that is why the walk rarely sees the case). Without the clear the step stays
-/// armed in HOLD and STOP follows when the latch clears itself.
+/// The modelled clear agrees with the real one, deterministically.
+/// it without requiring it)
 #[test]
 fn fx2_wr1_modelled_clear_agrees_with_the_real_one() {
     let mut results = std::vec::Vec::new();
@@ -455,9 +438,8 @@ fn fx2_wr1_modelled_clear_agrees_with_the_real_one() {
     assert!(results[1].0 == (true, State::Hold) && results[1].1 > 1, "the latch still set: armed until it clears itself");
 }
 
-/// N18 (c): LAND from its entry to the motors stopped: (time the fall is stopped, s from the entry; the smallest height
-/// lost in a 5 s window from then to contact, m; the largest true descent rate after the stop, m/s; the smallest true
-/// v_D from 1 s after the entry, m/s; contact, s; STOP after contact, s). Asserts no stop in the air.
+/// LAND from its entry to the motors stopped.
+/// a 5 s window from then to contact, m; the largest true descent rate after the stop, m/s.
 struct LandRun {
     stopped_s: f32,
     min_drop_5s: f32,
@@ -504,7 +486,7 @@ fn land_to_stop(p: &mut Plant, max_s: f32, mut each: impl FnMut(&mut Plant, f32)
 }
 
 /// The chop case of N18 (c) on the quadratic-drag plant: 3 s at throttle 0 in Angle from a 60 m hover, the sticks lost
-/// at about 31 m falling at 15 m/s (FS_HOLD_EN 0: LAND). With `seat_off` (the control) the target is not seated.
+/// at about 31 m falling at 15 m/s (FS_HOLD_EN 0: LAND)
 fn chop_land(seat_off: bool) -> LandRun {
     let mut p = quadratic_plant(1.0);
     p.f.shaper.seat_off = seat_off;
@@ -521,8 +503,8 @@ fn chop_land(seat_off: bool) -> LandRun {
     land_to_stop(&mut p, 120.0, |_, _| {})
 }
 
-/// N18 (c): after the chop LAND stops the fall, descends at no more than 1.5 m/s, never hovers (at least 1 m lower in
-/// every 5 s window until contact), and TD stops the motors on the ground. Control: without the seat it hovers.
+/// After the chop LAND stops the fall, descends at no more than 1.5 m/s, never hovers.
+/// window until contact), and TD stops the motors on the ground.
 #[test]
 fn n18_chop_then_stick_loss_land_stops_the_fall_descends_and_td_stops() {
     let r = chop_land(false);
@@ -533,16 +515,15 @@ fn n18_chop_then_stick_loss_land_stops_the_fall_descends_and_td_stops() {
     assert!(r.min_drop_5s >= 1.0 && r.v_max <= LAND_SPEED_HIGH_MS + 0.15, "{} {}", r.min_drop_5s, r.v_max);
 }
 
-/// N18 (c) control: the seat removed, the chop case hovers (no STOP within 120 s).
+/// Control: the seat removed, the chop case hovers (no STOP within 120 s)
 #[test]
 #[should_panic(expected = "no STOP within")]
 fn n18_control_without_the_seat_the_chop_case_hovers() {
     chop_land(true);
 }
 
-/// N18 (c): LAND entered while descending at 3 m/s and at 6 m/s (Angle at throttle 0.3 from a 60 m hover, then the
-/// collective that holds that speed against the drag, then the sticks lost): v_D never negative from 1 s after the entry,
-/// touchdown, TD STOP.
+/// LAND entered while descending at 3 m/s and at 6 m/s.
+/// that holds that speed against the drag, then the sticks lost): v_D never negative from 1 s after the entry.
 #[test]
 fn n18_land_entered_descending_at_3_and_6_m_s_never_climbs() {
     for v_entry in [3.0f32, 6.0] {
@@ -565,8 +546,8 @@ fn n18_land_entered_descending_at_3_and_6_m_s_never_climbs() {
     }
 }
 
-/// N18 (c): a 2 m downward step of the height estimate during LAND at 15 m (from a 20 m hover, FS_HOLD_EN 0): no climb
-/// back (true v_D never negative after the step), the descent continues, touchdown, TD STOP.
+/// A 2 m downward step of the height estimate during LAND at 15 m (from a 20 m hover, FS_HOLD_EN 0): no climb back
+/// (true v_D never negative after the step), the descent continues, touchdown, TD STOP.
 #[test]
 fn n18_a_2_m_downward_step_of_the_estimate_in_land_does_not_climb_back() {
     let mut p = land_plant();
@@ -589,8 +570,8 @@ fn n18_a_2_m_downward_step_of_the_estimate_in_land_does_not_climb_back() {
     assert!(at.is_some() && v_after >= 0.0, "{v_after}");
 }
 
-/// FX-4 (1): RETURN at home climbing to 20 m; from the first step the guidance reports Home the v_D estimate reads
-/// -0.8 m/s (above `HOME_VD_MAX_MS`). Returns the time from that step to LAND, s (`None`: no LAND within 20 s).
+/// RETURN at home climbing to 20 m; from the first step the guidance reports Home the v_D estimate reads -0.8 m/s
+/// (above `HOME_VD_MAX_MS`)
 fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
     use crate::hands_off::{Command, Link, StationCommand};
     let mut p = land_plant();
@@ -611,7 +592,6 @@ fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
     while p.f.legs.phase() != LegPhase::Home {
         assert!(p.step(None).armed && p.t < 100_000_000);
         assert_ne!(p.f.hands_off_state(), State::Land);
-        // M2: the climb ends at rest, so v_D is held from the step before the first Home (HomeLeg's one step at home).
         if p.f.legs.phase() == LegPhase::HomeLeg {
             p.vd_frozen = Some(-0.8);
         }
@@ -627,8 +607,8 @@ fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
     None
 }
 
-/// FX-4 (1): with v_D held at -0.8 m/s after arrival, LAND comes `HOME_WAIT_US` (3.0 s) after Home, within one step;
-/// control: the bound removed, no LAND in 20 s.
+/// With v_D held at -0.8 m/s after arrival, LAND comes `HOME_WAIT_US` (3.0 s) after Home, within one step; control:
+/// the bound removed, no LAND in 20 s.
 #[test]
 fn fx4_home_wait_is_bounded_at_3_s() {
     let t = home_wait_with_v_d_held(false);
@@ -639,9 +619,7 @@ fn fx4_home_wait_is_bounded_at_3_s() {
     assert_eq!(off, None);
 }
 
-/// FX-4 (2): LAND in the 0.5 m/s stage at about 4.3 m; the height estimate reads 1.0 m lower for one step. The true
-/// descent rate never exceeds the down-speed limit (1.5 m/s) + 0.05; the extra descent is about the spike (0.7 to 1.3
-/// m); the rate is back at 0.5 +- 0.05 within 3 s; no idle floor in the air.
+/// LAND in the 0.5 m/s stage at about 4.3 m; the height estimate reads 1.0 m lower for one step.
 #[test]
 fn fx4_a_one_step_1_m_downward_spike_of_the_estimate_in_land() {
     let mut p = pilot_hover_lost(5.0);
@@ -669,8 +647,8 @@ fn fx4_a_one_step_1_m_downward_spike_of_the_estimate_in_land() {
     assert!(v_max <= limit + 0.05 && (0.7..=1.3).contains(&extra) && last_off <= 3.0 && !floor, "{v_max} {extra} {last_off} {floor}");
 }
 
-/// FX-4 (2): estimate noise uniform +-0.2 m at every step for 10 s in LAND's 0.5 m/s stage (from about 10 m): the mean and
-/// the largest true descent rate reported; the largest at or below the down-speed limit.
+/// Estimate noise uniform +-0.2 m at every step for 10 s in LAND's 0.5 m/s stage (from about 10 m): the mean and the
+/// largest true descent rate reported; the largest at or below the down-speed limit.
 #[test]
 fn fx4_estimate_noise_0_2_m_in_lands_slow_stage() {
     let mut p = pilot_hover_lost(10.0);

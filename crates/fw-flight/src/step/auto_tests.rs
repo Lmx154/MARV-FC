@@ -1,9 +1,5 @@
-//! Host tests of AUTO on the real step (decision-mavlink-mode-20261123, Amendment A, A4-A6, A9, A10; section 36; H3b):
-//! the mission facts from the pushed target set, Start, the leg law and its exits. The estimator is the fake of
-//! `althold_tests` (origin `ORIGIN`); the plant, where one is needed, is a point mass: the horizontal velocity follows
-//! the acceleration of the step's attitude setpoint (as `handsoff_tests::brake_run`), plus a steady push when a test
-//! sets one; the height follows the setpoint's vertical target, v_D = its rate + 1.0/s x (target - D), down to the
-//! ground at D 0, where it stops; IMU1 reads at rest (so TD can hold on the ground).
+//! Host tests of AUTO on the real step: the mission facts from the pushed target set, Start, the leg law and its
+//! exits.
 
 extern crate std;
 
@@ -25,8 +21,8 @@ fn handshake() -> &'static Handshake {
     h
 }
 
-/// Latitude and longitude (1e-7 degree) of the point `n`, `e` metres from the fake's origin (`ned_from_geo` is linear in
-/// the differences).
+/// Latitude and longitude (1e-7 degree) of the point `n`, `e` metres from the fake's origin.
+/// in the differences)
 pub(super) fn geo(n: f32, e: f32) -> (i32, i32) {
     let probe = ned_from_geo(&ORIGIN, &GeoPoint { lat_e7: ORIGIN.lat_e7 + 100_000, lon_e7: ORIGIN.lon_e7 + 100_000, alt_mm: ORIGIN.alt_mm });
     let (kn, ke) = (probe[0] / 100_000.0, probe[1] / 100_000.0);
@@ -53,9 +49,7 @@ pub(super) fn square() -> GdnTargets {
 const YAW_RAD: f32 = 0.523_598_8;
 
 /// A flight on the fake estimator: armed on the ground at the origin (home N 0, E 0, D 0), lifted, put 10 m up, the
-/// sticks lost on T3' with FS_HOLD_EN 1: HOLD. The station is heard on the radio link at every step while `station`.
-/// N19: at FS_HOLD_EN 1 the reports come from the receiver (a MAVLink flight), and Start's step carries one with the
-/// mission switch ON, arm ON and Position (the pilot's confirmation); at 0 from CRSF.
+/// sticks lost on T3' with FS_HOLD_EN 1.
 struct Run {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
@@ -74,7 +68,7 @@ impl Run {
         Run::with(speed_ms, set, true, true)
     }
 
-    /// As `new`; without `home` the NE position is not valid until after take-off (no home, A6); with `fs` false
+    /// As `new`; without `home` the NE position is not valid until after take-off (no home); with `fs` false
     /// FS_HOLD_EN is 0 and the stick loss gives LAND.
     fn with(speed_ms: f32, set: Option<GdnTargets>, home: bool, fs: bool) -> Run {
         let valid = if home { POSITION } else { Valid { position_ne: false, velocity_ne: false, ..POSITION } };
@@ -101,7 +95,6 @@ impl Run {
         n.position_m[2] = -10.0;
         n.valid = POSITION;
         r.cell.set(n);
-        // The height target the shaper captured on the ground moves with the vehicle (the fake does not fly the climb).
         r.f.shaper.target_d = Some(-10.0);
         for _ in 0..2_000 {
             r.quiet();
@@ -194,8 +187,8 @@ fn accel_ne(q: [f32; 4]) -> [f32; 2] {
     [-GRAVITY_MSS * col[0] / col[2], -GRAVITY_MSS * col[1] / col[2]]
 }
 
-/// Item 1: the facts come from the pushed set. `GDN_SRC` 0 (the parameters, no heights) is no mission; a height outside
-/// the limits, then a valid list, reach Start's checks in their order.
+/// Item 1: the facts come from the pushed set. `GDN_SRC` 0 (the parameters, no heights) is no mission; a height
+/// outside the limits, then a valid list, reach Start's checks in their order.
 #[test]
 fn mission_facts_from_the_pushed_set_reach_start() {
     let mut params = square();
@@ -214,8 +207,8 @@ fn mission_facts_from_the_pushed_set_reach_start() {
     assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::NoWaypoints));
 }
 
-/// Horizontal distance of the vehicle from the waypoint put at (n, e), m: from where it lands after `geo`'s rounding to
-/// 1e-7 degree (up to about 1 cm), as the guidance converts it.
+/// Horizontal distance of the vehicle from the waypoint put at (n, e), m: from where it lands after `geo`'s rounding
+/// to 1e-7 degree (up to about 1 cm), as the guidance converts it.
 fn dist_from(r: &Run, n: f32, e: f32) -> f32 {
     let (lat_e7, lon_e7) = geo(n, e);
     let [wn, we, _] = ned_from_geo(&ORIGIN, &GeoPoint { lat_e7, lon_e7, alt_mm: ORIGIN.alt_mm });
@@ -235,8 +228,7 @@ fn heading(o: &StepOut) -> Option<f32> {
 }
 
 /// (a) The 30 m square at 3 m/s, heights 10, 15, 10, 10 m: Start in HOLD gives AUTO; each waypoint is reached within
-/// GDN_RADIUS at its height; after the last, HOLD there with the place dropped; e stays below X; the heading is that of
-/// Start on every AUTO step.
+/// GDN_RADIUS at its height; after the last, HOLD there with the place dropped; e stays below X.
 #[test]
 fn a_square_at_3_m_s_flies_every_waypoint_and_holds_at_the_last() {
     let wps = [(30.0, 0.0, 10.0f32), (30.0, 30.0, 15.0), (0.0, 30.0, 10.0), (0.0, 0.0, 10.0)];
@@ -282,15 +274,12 @@ fn a_square_at_3_m_s_flies_every_waypoint_and_holds_at_the_last() {
     let (d, h) = (dist_from(&r, 0.0, 0.0), -r.cell.get().position_m[2]);
     std::println!("5 s after: {d:.2} m from the last waypoint at {h:.2} m");
     assert!(d <= 2.0 && libm::fabsf(h - 10.0) < 0.5, "{d} {h}");
-    // The place was dropped: Start begins at waypoint 0.
     assert_eq!(r.command(Command::Start), CommandResult::Accepted);
     assert_eq!(r.f.leg_active(), Some(0));
 }
 
-/// FX-2 item 1: the square with GDN_RADIUS 10 m at 3 m/s (X 7 m): the arrival radius in force is min(10, X - 3.0) = 4 m,
-/// so after each arrival the carrot at the reached corner is within 4 m and e stays below X at the 90 degree corners;
-/// every waypoint reached within 4 m, HOLD at the last, never LAND. With GDN_RADIUS itself the first corner tripped the
-/// track fault (e = 10 m).
+/// The square with GDN_RADIUS 10 m at 3 m/s (X 7 m): the arrival radius in force is min(10, X - 3.0) = 4
+/// m.
 #[test]
 fn fx2_a_square_with_gdn_radius_10_m_at_3_m_s_completes_with_e_below_x() {
     let wps = [(30.0, 0.0, 10.0f32), (30.0, 30.0, 15.0), (0.0, 30.0, 10.0), (0.0, 0.0, 10.0)];
@@ -323,11 +312,8 @@ fn fx2_a_square_with_gdn_radius_10_m_at_3_m_s_completes_with_e_below_x() {
     assert_eq!(r.state(), State::Hold);
 }
 
-/// N18 (b), the guidance's vertical carrot: on the square's leg from 15 m down to 10 m the vehicle is put 2.5 m below the
-/// descending carrot mid-descent. The carrot stops at the lead cap (|d - carrot| >= 1.5 m), and while it stands its rate,
-/// the feed-forward, is 0, so the loop asks for P (carrot - d) only and the vehicle climbs back toward it: there is no
-/// fixed point outside the cap (unlike LAND, whose feed-forward stays 1.5 m/s). The carrot moves again and the leg
-/// completes. Nothing changed; the climb-back and the time the carrot stood are printed.
+/// The guidance's vertical carrot: on the square's leg from 15 m down to 10 m the vehicle is put 2.5 m below
+/// the descending carrot mid-descent.
 #[test]
 fn n18_auto_vehicle_below_a_descending_carrot_climbs_back_and_the_leg_completes() {
     let mut r = Run::new(3.0, Some(square()));
@@ -381,7 +367,6 @@ fn b_pause_resumes_the_same_waypoint_from_the_vehicle_and_abort_starts_over() {
     assert!(libm::hypotf(at[0] - 30.0, at[1] - 30.0) > 5.0, "mid-leg: {at:?}");
     assert_eq!(r.command(Command::Start), CommandResult::Accepted);
     assert_eq!((r.state(), r.f.leg_active()), (State::Auto, Some(1)));
-    // The first leg starts at the vehicle: the carrot of the Start step is where the vehicle was.
     match r.last.unwrap().setpoint {
         Setpoint::Position { position_m, .. } => {
             assert!(libm::hypotf(position_m[0] - at[0], position_m[1] - at[1]) < 0.05, "{position_m:?} {at:?}");
@@ -423,27 +408,19 @@ fn g_start_denied_with_its_reason() {
     }
     let mut r = Run::new(3.0, Some(near));
     assert_eq!(deny(&mut r), CommandResult::Accepted, "999 m");
-    // The battery not known OK.
     let mut r = Run::new(3.0, Some(square()));
     r.f.set_battery_ok(false);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::BatteryNotOk), "no battery input");
-    // Station absent. With STATION_LOST_US equal to LINK_LOSS_US a heartbeat that has aged out of the former has also
-    // aged out of the latter (the link age is the newer of sticks and heartbeat), and HOLD leaves for RETURN
-    // (hands_off.rs:897) before the command is read on that step. So the case is a heartbeat never heard on the radio
-    // link, with the sticks' last report still inside LINK_LOSS_US.
     let mut r = Run::new(3.0, Some(square()));
     r.station = false;
     r.f.set_last_radio_heartbeat_us(None);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::StationAbsent), "station absent");
-    // Not in HOLD: LAND.
     let mut r = Run::new(3.0, Some(square()));
     assert_eq!(r.command(Command::Land), CommandResult::Accepted);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::NotInThisState), "LAND");
-    // No home: the NE position became valid only after take-off.
     let mut r = Run::with(3.0, Some(square()), false, true);
     assert_eq!(r.f.hands_off.home(), None);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::NoHome), "no home");
-    // FS_HOLD_EN 0: the stick loss lands; Start is HandsOffDisabled.
     let mut r = Run::with(3.0, Some(square()), true, false);
     assert_eq!(r.state(), State::Land);
     assert_eq!(deny(&mut r), CommandResult::Denied(DenyReason::HandsOffDisabled), "FS_HOLD_EN 0");
@@ -460,8 +437,8 @@ fn in_auto() -> Run {
     r
 }
 
-/// (c) A new plan id in AUTO gives HOLD at that step with the place dropped; Start then begins at waypoint 0 of the new
-/// list.
+/// (c) A new plan id in AUTO gives HOLD at that step with the place dropped; Start then begins at waypoint 0 of the
+/// new list.
 #[test]
 fn c_a_new_plan_in_auto_holds_with_the_place_dropped() {
     let mut r = in_auto();
@@ -481,7 +458,8 @@ fn c_a_new_plan_in_auto_holds_with_the_place_dropped() {
     assert_eq!(r.f.leg_active(), Some(0));
 }
 
-/// (d) No station heartbeat for STATION_LOST_US (10 s) in AUTO: HOLD with the place kept (Start resumes the same waypoint).
+/// (d) No station heartbeat for STATION_LOST_US (10 s) in AUTO: HOLD with the place kept.
+/// waypoint)
 #[test]
 fn d_station_lost_in_auto_holds_with_the_place_kept() {
     let mut r = in_auto();
@@ -539,7 +517,6 @@ fn auto_exits_give_their_reason_and_the_plan_seen_follows_the_set() {
     assert_eq!(r.command(Command::Abort), CommandResult::Accepted);
     assert_eq!(ho(&r), "HO 3 HOLD abort");
 
-    // Not the mission set (GDN_SRC 0): the station's plan id, no waypoints.
     let mut r = Run::new(3.0, None);
     assert_eq!(r.f.plan_seen(), (None, 0));
     r.f.set_plan_id(Some(0x1862_F4A2));
@@ -547,8 +524,7 @@ fn auto_exits_give_their_reason_and_the_plan_seen_follows_the_set() {
 }
 
 /// (e) A plant that cannot follow (a steady push of 15 m/s^2 south, more than the tilt limit gives): e grows to E_MAX
-/// and the carrot stops; the vehicle is pushed on, and at the step after e passes X the track fault lands with the
-/// braking law, armed with the motors running; never STOP.
+/// and the carrot stops; the vehicle is pushed on.
 #[test]
 fn e_a_vehicle_that_cannot_follow_stops_the_carrot_then_lands_braking() {
     let mut r = in_auto();
@@ -589,7 +565,7 @@ fn e_a_vehicle_that_cannot_follow_stops_the_carrot_then_lands_braking() {
 }
 
 /// (f) T3' lost in AUTO gives LAND after the debounce; the height lost gives BLIND; a stick report with the mission
-/// switch OFF, arm ON and Position hands back to PILOT (N19 column 2); the motors run throughout.
+/// switch OFF, arm ON and Position hands back to PILOT; the motors run throughout.
 #[test]
 fn f_t3_lost_lands_height_lost_blind_and_sticks_take_over() {
     let mut r = in_auto();
@@ -615,7 +591,7 @@ fn f_t3_lost_lands_height_lost_blind_and_sticks_take_over() {
     assert_eq!((r.state(), r.f.leg_active()), (State::Pilot, None));
 }
 
-// ---- RETURN (A7, H3b-2) ----
+// ---- RETURN ----
 
 /// Height above home (D 0), m.
 fn height(r: &Run) -> f32 {
@@ -623,8 +599,7 @@ fn height(r: &Run) -> f32 {
 }
 
 /// (a) Return in AUTO mid-leg at 10 m, return height 20 m: the climb in place to 20 m, the leg home, LAND at home
-/// within GDN_RADIUS holding position, the descent at 1.5 m/s above 10 m and 0.5 m/s below, TD stops the motors on the
-/// ground; no stop in the air.
+/// within GDN_RADIUS holding position, the descent at 1.5 m/s above 10 m and 0.5 m/s below.
 #[test]
 fn ra_return_in_auto_climbs_in_place_flies_home_lands_and_td_stops() {
     let mut r = Run::new(3.0, Some(square()));
@@ -649,7 +624,6 @@ fn ra_return_in_auto_climbs_in_place_flies_home_lands_and_td_stops() {
     let climb_s = steps as f32 * DT_US as f32 * 1e-6;
     let h_top = height(&r);
     std::println!("climb {climb_s:.2} s to {h_top:.2} m, horizontal drift {drift:.3} m");
-    // The drift is the stop from 3 m/s: the carrot stands at the entry point.
     assert!(libm::fabsf(h_top - 20.0) < 0.1 && drift < 1.5, "{h_top} {drift}");
     let mut e_max = 0.0f32;
     while r.state() == State::Return {
@@ -689,7 +663,8 @@ fn ra_return_in_auto_climbs_in_place_flies_home_lands_and_td_stops() {
     assert!(touch <= 2.0 && r.state() == State::Stop);
 }
 
-/// (b) Already above the return height (return 12 m, the vehicle at 15 m): no climb, the height is kept on the leg home.
+/// (b) Already above the return height (return 12 m, the vehicle at 15 m): no climb, the height is kept on the leg
+/// home.
 #[test]
 fn rb_above_the_return_height_no_climb_and_the_height_is_kept() {
     let mut m = square();
@@ -714,8 +689,8 @@ fn rb_above_the_return_height_no_climb_and_the_height_is_kept() {
     assert!(hi - lo < 0.05 && dist_from(&r, 0.0, 0.0) <= 2.0, "{lo} {hi}");
 }
 
-/// FX-3 item 1 on the real step: a stored return height of 60 m with GDN_ALT_MAX 40 m in the pushed set: Return at 10 m
-/// climbs in place to 40 m, not 60 m.
+/// On the real step: a stored return height of 60 m with GDN_ALT_MAX 40 m in the pushed set: Return at 10
+/// m climbs in place to 40 m, not 60 m.
 #[test]
 fn fx3_return_climbs_to_gdn_alt_max_not_the_stored_height() {
     let mut m = square();
@@ -732,7 +707,6 @@ fn fx3_return_climbs_to_gdn_alt_max_not_the_stored_height() {
         top = top.max(height(&r));
     }
     let carrot = -r.f.legs.down_m();
-    // At home already: Home, then LAND; the highest point is the top of the climb.
     for _ in 0..4_000 {
         r.fly();
         top = top.max(height(&r));
@@ -753,11 +727,7 @@ fn until_not(r: &mut Run, from: State, max_s: f32) -> f32 {
     steps as f32 * DT_US as f32 * 1e-6
 }
 
-/// (c) Link loss (A1, table): sticks and station heartbeat both gone in HOLD: RETURN just past 10 s with home, LAND
-/// without. The station heartbeat alone stopping in AUTO: HOLD past STATION_LOST_US (place kept) and RETURN past
-/// LINK_LOSS_US (the sticks were lost long before, so the link age is the heartbeat's). Both are 10 s, so the two
-/// exits fall on consecutive steps: AUTO's arm (hands_off.rs:913) pauses to HOLD, and only the next step's HOLD arm
-/// (hands_off.rs:897) sees the link age above LINK_LOSS_US.
+/// (c) Link loss: sticks and station heartbeat both gone in HOLD: RETURN just past 10 s with home, LAND without.
 #[test]
 fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_station_loss_then_returns_the_next_step() {
     let mut r = Run::new(3.0, Some(square()));
@@ -782,8 +752,8 @@ fn rc_link_loss_in_hold_returns_with_home_lands_without_and_auto_holds_at_statio
     assert!((b - dt).abs() < 0.5 * dt, "RETURN one step after HOLD: {b}");
 }
 
-/// (d) Fresh sticks in RETURN on a MAVLink flight (N19): the mission switch OFF out of Position gives TAKEOVER, then
-/// in Position PILOT.
+/// (d) Fresh sticks in RETURN on a MAVLink flight: the mission switch OFF out of Position gives TAKEOVER, then in
+/// Position PILOT.
 #[test]
 fn rd_fresh_sticks_in_return_take_over_and_the_lock_hands_over() {
     let mut r = Run::new(3.0, Some(square()));
@@ -805,7 +775,6 @@ fn rd_fresh_sticks_in_return_take_over_and_the_lock_hands_over() {
 /// fault (e past X) and land braking; T3' lost lands; the height lost gives BLIND. Never a stop.
 #[test]
 fn re_track_fault_lands_braking_t3_lost_lands_height_lost_blind() {
-    // Away from home: 15 m north on AUTO's first leg.
     let returning = |climb: bool| {
         let mut r = in_auto();
         while r.cell.get().position_m[0] < 15.0 {
@@ -826,7 +795,6 @@ fn re_track_fault_lands_braking_t3_lost_lands_height_lost_blind() {
     for climb in [true, false] {
         let mut r = returning(climb);
         let x = hands_off::track_fault_m(r.f.speed_xy_in_force());
-        // Away from home (home is south of the vehicle; north pushes it away).
         r.push = [15.0, 0.0];
         let mut e_max = 0.0f32;
         while r.state() == State::Return {
@@ -880,8 +848,8 @@ fn rf_return_denied_with_its_reason() {
     assert_eq!(r.state(), State::Return);
 }
 
-/// (h) N2: with FS_HOLD_EN 0 a stick loss in the air lands, and with neither sticks nor station for 15 s it never
-/// becomes RETURN.
+/// with FS_HOLD_EN 0 a stick loss in the air lands, and with neither sticks nor station for 15 s it never becomes
+/// RETURN.
 #[test]
 fn rh_fs_hold_en_0_stick_loss_lands_never_returns() {
     let mut r = Run::with(3.0, Some(square()), true, false);
@@ -896,7 +864,7 @@ fn rh_fs_hold_en_0_stick_loss_lands_never_returns() {
 // ---- BATT-M: the battery monitor's byte on the real step (`Flight::set_battery_cell`, as the board's Stepper) ----
 
 /// The byte core 0 hands over (`batt_fs`): the monitor's `cell` and, when it knows the battery is not critical,
-/// `CELL_KNOWN_OK`. One monitor step at `t_us` with a sample of `volts` taken `age_ms` before, armed.
+/// `CELL_KNOWN_OK`.
 fn monitor_cell(m: &mut fw_core::battery::Monitor, cfg: &fw_core::battery::Config, t_us: u64, volts: Option<f32>, age_ms: u64) -> u8 {
     let t_ms = t_us / 1000 + 10_000;
     let sample = volts.map(|v| fw_core::battery::Sample { volts: v, t_ms: t_ms - age_ms });
@@ -904,10 +872,8 @@ fn monitor_cell(m: &mut fw_core::battery::Monitor, cfg: &fw_core::battery::Confi
     u.cell | if m.known_not_critical() { fw_core::battery::CELL_KNOWN_OK } else { 0 }
 }
 
-/// Start's battery check from the monitor (decision-mavlink-mode-20261123, A10 "battery not critical", section 50;
-/// `battery_ok` = `Monitor::known_not_critical`): 12 s in HOLD with the monitor stepped at 10 Hz, then Start. ACCEPTED
-/// with the pack fine or at LOW; BatteryNotOk with the monitor off (no cells, no timer, CRITICAL at or above LOW), with
-/// no sample and with a stale one. CRITICAL lands (B1), so Start is not taken.
+/// Start's battery check from the monitor.
+/// `Monitor::known_not_critical`): 12 s in HOLD with the monitor stepped at 10 Hz, then Start.
 #[test]
 fn batt_m_start_needs_the_battery_known_not_critical() {
     use fw_core::battery::{Config, Level, Monitor};
@@ -949,9 +915,8 @@ fn batt_m_start_needs_the_battery_known_not_critical() {
     }
 }
 
-/// B1 in AUTO: CRITICAL from the monitor's byte mid-leg gives LAND at the next step, holding position (the stop from
-/// 3 m/s), E2's stages, TD stops the motors on the ground and nothing stops them in the air; with action 0 and 1 every
-/// output is bit-identical to the raw input's (the descent request adds nothing, its state Off).
+/// In AUTO: CRITICAL from the monitor's byte mid-leg gives LAND at the next step, holding position.
+/// M/s), the stages, TD stops the motors on the ground and nothing stops them in the air.
 #[test]
 fn batt_m_auto_critical_lands_holding_position_and_td_stops() {
     let run = |cell: Option<u8>| {
@@ -994,9 +959,8 @@ fn batt_m_auto_critical_lands_holding_position_and_td_stops() {
     assert_eq!(run(Some((fw_core::battery::Level::Critical as u8) | fw_core::battery::CELL_DESCEND)), raw, "action 1");
 }
 
-/// N19 section 7: the hand-back (column 2: the mission switch OFF, arm ON, Position, centred sticks) from AUTO at 3 m/s
-/// and from LAND: PILOT at that step; the vehicle brakes and holds; the height stays within the lead cap of the
-/// hand-back height (`pilot_alt_lead_s` x the smaller of the pilot's climb and descent speeds, 1.5 m).
+/// The hand-back (column 2: the mission switch OFF, arm ON, Position, centred sticks) from AUTO at 3 m/s and from
+/// LAND: PILOT at that step; the vehicle brakes and holds.
 #[test]
 fn n19_hand_back_from_auto_at_3_m_s_and_from_land_brakes_and_holds() {
     let t = Tuning::DEFAULT;
@@ -1040,12 +1004,10 @@ fn n19_hand_back_from_auto_at_3_m_s_and_from_land_brakes_and_holds() {
     }
 }
 
-/// Review of N19, item 4: in AUTO, the stick reports lost for 3 s (more than 1.0 s, less than STATION_LOST_US, 10 s), then
-/// the first fresh report: the mission switch ON with arm ON carries AUTO on at the same waypoint; the mission switch OFF
-/// with arm ON and Position hands back to PILOT.
+/// In AUTO, the stick reports lost for 3 s (more than 1.0 s, less than STATION_LOST_US, 10 s),
+/// then the first fresh report: the mission switch ON with arm ON carries AUTO on at the same waypoint.
 #[test]
 fn n19_the_first_report_after_a_stick_loss_in_auto_is_its_own_column() {
-    // `in_auto`: Start's step carried the last report, then 2 400 steps without one.
     assert!(2_400 * DT_US > Tuning::DEFAULT.rc_fs_timeout_us && 2_400 * DT_US < hands_off::STATION_LOST_US);
     for mission in [true, false] {
         let mut r = in_auto();

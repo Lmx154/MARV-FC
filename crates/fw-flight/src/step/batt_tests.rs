@@ -1,7 +1,5 @@
-//! Host tests of the low-battery descent at the step level (decision-nav-eskf-20261120, Amendment BATT, T2): with the
-//! request off (`BATT_FS_CRT_ACT` 0, or CRITICAL not reached) every output is bit for bit what it was; with it on the
-//! effective mode is at least Altitude when covered and the throttle stick reads 0.0; a change of the mode switch cancels
-//! it until disarm; it never disarms and never touches the gate. The estimator is the fake of `althold_tests`.
+//! Host tests of the low-battery descent at the step level: with the request off.
+//! reached) every output is bit for bit what it was.
 
 extern crate std;
 
@@ -43,9 +41,8 @@ fn descent_target(out: &StepOut) -> (f32, f32) {
     }
 }
 
-/// A scripted flight: arm in Angle, then the mode switch through Low, Middle, High, Low with the throttle stick moving and
-/// the estimate covering, then not covering Altitude; one line of `{:?}` per step. `call` is what is done to the flight
-/// before each step (the request, or nothing).
+/// A scripted flight: arm in Angle, then the mode switch through Low, Middle, High, Low with the throttle stick moving
+/// and the estimate covering, then not covering Altitude.
 fn script(call: impl Fn(&mut TestFlight, usize)) -> Vec<String> {
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(-2.0, POSITION));
@@ -72,15 +69,14 @@ fn script(call: impl Fn(&mut TestFlight, usize)) -> Vec<String> {
     log
 }
 
-/// B-I2: with the request never made, or made false at every step, the whole `StepOut` of a scripted flight (modes, setpoints,
-/// demands, allocations, motor command) is the same, step by step.
+/// B-I2: with the request never made, or made false at every step, the whole `StepOut` of a scripted flight.
+/// setpoints, demands, allocations, motor command) is the same, step by step.
 #[test]
 fn action_0_is_bit_identical_whether_the_request_is_never_made_or_false() {
     let never = script(|_, _| {});
     let off = script(|f, _| f.set_batt_descend(false));
     assert_eq!(never.len(), 4_000);
     assert_eq!(never, off);
-    // Negative control: the same flight with the request on is not the same (the descent changes the outputs).
     let on = script(|f, _| f.set_batt_descend(true));
     let differing = never.iter().zip(&on).filter(|(a, b)| a != b).count();
     assert!(differing > 1_000, "{differing}");
@@ -137,7 +133,6 @@ fn the_descent_lifts_angle_to_altitude_and_reads_the_throttle_stick_as_zero() {
             }
             last = target;
         }
-        // The vehicle stays at D = -2 m: the target stops at the lead cap, dn x pilot_alt_lead_s below it (one step's travel more).
         assert!(last - -2.0 <= dn * lead + dn * dt_s + 1e-5 && last - -2.0 >= dn * lead, "{last}");
     }
 }
@@ -163,7 +158,6 @@ fn altitude_and_position_selected_descend_through_their_own_vertical_loop() {
             assert_eq!(out.mode, want);
             assert_eq!(descent_target(&out).1, dn);
         }
-        // Control: without the request the full stick climbs.
         f.set_batt_descend(false);
         t += DT_US;
         let out = step_rc(&mut f, t, true, 1.0, switch);
@@ -172,7 +166,7 @@ fn altitude_and_position_selected_descend_through_their_own_vertical_loop() {
 }
 
 /// Uncovered twin: no height estimate means Angle with the pilot's throttle, exactly the outputs of a flight with no
-/// request, and the state says so (core 0 raises "no height estimate: land now").
+/// request, and the state says so (core 0 raises "no height estimate: land now")
 #[test]
 fn without_a_height_estimate_the_pilot_keeps_angle_and_the_throttle() {
     let tuning = Tuning::DEFAULT;
@@ -199,8 +193,8 @@ fn without_a_height_estimate_the_pilot_keeps_angle_and_the_throttle() {
     assert!(states.iter().all(|s| *s == BattDescent::NoHeight));
 }
 
-/// Any change of the mode switch cancels the descent until disarm; the pilot has the sticks back; a new arming starts it
-/// again while the request stands.
+/// Any change of the mode switch cancels the descent until disarm; the pilot has the sticks back; a new arming starts
+/// it again while the request stands.
 #[test]
 fn a_change_of_the_mode_switch_cancels_until_disarm() {
     let tuning = Tuning::DEFAULT;
@@ -214,16 +208,13 @@ fn a_change_of_the_mode_switch_cancels_until_disarm() {
         let out = step_rc(&mut f, t, true, 1.0, Switch3::Low);
         assert_eq!(out.mode, Mode::Altitude);
     }
-    // Control: a step with the same switch position and no report keeps it going.
     t += DT_US;
     assert_eq!(f.step(&input(t, None)).mode, Mode::Altitude);
-    // The switch moves Low -> Middle: cancelled. Altitude is selected now, with the pilot's full stick: a climb.
     t += DT_US;
     let out = step_rc(&mut f, t, true, 1.0, Switch3::Middle);
     assert_eq!(f.batt_descent(), BattDescent::Cancelled);
     assert_eq!((out.selected, out.mode), (Mode::Altitude, Mode::Altitude));
     assert!(descent_target(&out).1 < 0.0, "the pilot's throttle again");
-    // Back to Low: still cancelled, Angle with the pilot's throttle, whatever the request says.
     for sw in [Switch3::Low, Switch3::High, Switch3::Low] {
         t += DT_US;
         let out = step_rc(&mut f, t, true, 1.0, sw);
@@ -233,12 +224,9 @@ fn a_change_of_the_mode_switch_cancels_until_disarm() {
             assert_eq!(out.mode, Mode::Angle);
         }
     }
-    // Disarm (switch off), then arm again: core 0 clears the request at the disarm and raises it after the new arming (an
-    // edge while armed), and the descent starts again.
     t += DT_US;
     let out = step_rc(&mut f, t, false, 0.0, Switch3::Low);
     assert!(!out.armed);
-    // The state reads the armed state the previous step left, so the next step shows it.
     f.set_batt_descend(false);
     t += DT_US;
     step_rc(&mut f, t, false, 0.0, Switch3::Low);
@@ -254,8 +242,8 @@ fn a_change_of_the_mode_switch_cancels_until_disarm() {
     assert_eq!(f.batt_descent(), BattDescent::Descending);
 }
 
-/// A request that is already true when the arming step runs (disarm and re-arm within one supervisor tick: core 0 has not
-/// cleared the byte) starts nothing and so wipes no cancel; a later false then true is an edge and starts the descent.
+/// A request that is already true when the arming step runs.
+/// not cleared the byte) starts nothing and so wipes no cancel.
 #[test]
 fn a_request_standing_across_a_quick_rearm_starts_nothing_until_a_new_edge() {
     let tuning = Tuning::DEFAULT;
@@ -269,7 +257,6 @@ fn a_request_standing_across_a_quick_rearm_starts_nothing_until_a_new_edge() {
         step_rc(&mut f, t, true, 1.0, Switch3::Low);
     }
     assert_eq!(f.batt_descent(), BattDescent::Descending);
-    // The request stays true through a disarm and a re-arm.
     for _ in 0..3 {
         t += DT_US;
         step_rc(&mut f, t, false, 0.0, Switch3::Low);
@@ -282,11 +269,9 @@ fn a_request_standing_across_a_quick_rearm_starts_nothing_until_a_new_edge() {
         assert!(out.armed);
         assert_eq!((out.mode, f.batt_descent()), (Mode::Angle, BattDescent::Off));
     }
-    // The pilot's switch change is no cancel of a descent that never started.
     t += DT_US;
     step_rc(&mut f, t, true, 1.0, Switch3::Middle);
     assert_eq!(f.batt_descent(), BattDescent::Off);
-    // False, then true: a new edge while armed starts it.
     f.set_batt_descend(false);
     t += DT_US;
     step_rc(&mut f, t, true, 1.0, Switch3::Low);
@@ -299,7 +284,8 @@ fn a_request_standing_across_a_quick_rearm_starts_nothing_until_a_new_edge() {
     assert_eq!(f.batt_descent(), BattDescent::Descending);
 }
 
-/// The first report and a report that repeats the switch are no change; a switch change BEFORE the request is no cancel.
+/// The first report and a report that repeats the switch are no change; a switch change BEFORE the request is no
+/// cancel.
 #[test]
 fn only_a_change_while_the_descent_is_asked_for_cancels() {
     let tuning = Tuning::DEFAULT;
@@ -322,8 +308,7 @@ fn only_a_change_while_the_descent_is_asked_for_cancels() {
 }
 
 /// B-I1, B-I5: 60 s armed with the descent in force and the vehicle not following: still armed, the motors still spin
-/// (never a Stop, never a thrust cut: the collective is the controller's, at or above the idle floor), no disarm; then RC
-/// loss gives LAND (Amendment N, N2) and the arm switch disarms, exactly as without the request.
+/// (never a Stop, never a thrust cut: the collective is the controller's, at or above the idle floor)
 #[test]
 fn sixty_seconds_armed_critical_stays_armed_and_rc_loss_and_the_arm_switch_still_win() {
     let tuning = Tuning::DEFAULT;
@@ -343,8 +328,6 @@ fn sixty_seconds_armed_critical_stays_armed_and_rc_loss_and_the_arm_switch_still
         }
         assert_eq!(f.batt_descent(), BattDescent::Descending);
         if rc_loss {
-            // No report for longer than the timeout: in the air LAND (Amendment N, N2: no stop in the air), armed and
-            // spinning; the state machine is the only actor, the descent request does nothing there.
             let mut out = None;
             for _ in 0..(tuning.rc_fs_timeout_us / DT_US + 20) {
                 t += DT_US;

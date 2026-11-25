@@ -1,6 +1,5 @@
-//! Host tests of Amendment N14 (decision-mavlink-mode-20261123, section 35): TD's (a) is the allocator's idle floor, the
-//! low "ever airborne" mark, the clamps and the card check, on a vertical point mass whose thrust is the commanded
-//! collective times a real thrust gain (the card's thrust is right at gain 1). The estimator is `althold_tests`' fake.
+//! Host tests: TD's (a) is the allocator's idle floor, the low "ever airborne" mark, the clamps and
+//! the card check.
 
 extern crate std;
 
@@ -9,7 +8,7 @@ use super::*;
 use core::cell::Cell;
 use std::vec::Vec;
 
-/// Everything Position needs (T3).
+/// Everything Position needs.
 const POSITION: Valid = Valid {
     heading: true,
     velocity_ne: true,
@@ -24,8 +23,7 @@ fn handshake() -> &'static Handshake {
 }
 
 /// The vertical point mass: thrust `gain` x the commanded collective, linear drag `k` (1/s; 0 for none), the ground at
-/// d = 0 (no bounce: on it v = 0 while the net force is down). IMU1 reads the specific force of thrust, drag and the
-/// ground's reaction; the estimate is exact (height, v_D) with coverage `valid`.
+/// d = 0 (no bounce: on it v = 0 while the net force is down)
 struct Plant {
     f: TestFlight<'static>,
     cell: &'static Cell<NavState>,
@@ -99,8 +97,7 @@ fn n14_td_a_is_the_allocator_floor_flag() {
     }
 }
 
-/// One flight: armed on the ground in Altitude, climb to about 5 m, hover 20 s, sticks lost (FS_HOLD_EN 0, T3: LAND),
-/// LAND to the ground. Returns (TD's longest count in the air, us; stopped; contact to STOP, us; floor to STOP, us).
+/// One flight: armed on the ground in Altitude, climb to about 5 m, hover 20 s, sticks lost (FS_HOLD_EN 0, T3), LAND to the ground.
 fn hover_and_land(gain: f32) -> (u64, bool, Option<u64>, Option<u64>) {
     let mut p = Plant::new(gain, 0.0, POSITION);
     p.step(Some((false, 0.0, Switch3::Middle)));
@@ -142,9 +139,8 @@ fn hover_and_land(gain: f32) -> (u64, bool, Option<u64>, Option<u64>) {
     (td_air, false, None, None)
 }
 
-/// N14 (5): in the plant, TD never reaches 1.0 s in a steady hover or a LAND descent at real gains 0.6 to 1.5; at 0.62
-/// to 1.46 LAND standing on the ground reaches the floor and TD stops the motors within 3.2 s + 1.0 s of contact, except at
-/// 0.62, where this plant takes 3.6 s to the floor (N14 estimated about 3 s): there within 5 s, N14 (5)'s simulator bound.
+/// In the plant, TD never reaches 1.0 s in a steady hover or a LAND descent at real gains 0.6 to 1.5; at 0.62 to 1.46
+/// LAND standing on the ground reaches the floor and TD stops the motors within 3.2 s + 1.0 s of contact.
 #[test]
 fn n14_td_never_counts_1_s_in_the_air_and_land_stops_within_4_2_s_of_contact() {
     let land = Tuning::DEFAULT.land_detect_us;
@@ -162,7 +158,7 @@ fn n14_td_never_counts_1_s_in_the_air_and_land_stops_within_4_2_s_of_contact() {
     }
 }
 
-/// N14 (1), BLIND on the ground: probe to the floor, TD, STOP; the time from BLIND's entry reported.
+/// BLIND on the ground: probe to the floor, TD, STOP; the time from BLIND's entry reported.
 #[test]
 fn n14_blind_on_the_ground_probes_to_the_floor_and_stops() {
     let mut p = Plant::new(1.0, 0.0, super::althold_tests::ANGLE);
@@ -189,11 +185,8 @@ fn n14_blind_on_the_ground_probes_to_the_floor_and_stops() {
     panic!("BLIND never stopped on the ground");
 }
 
-/// One BLIND flight in the air from a hover at 50 m (60 s, H learned): thrust gain `gain`, vertical drag; with `climb`,
-/// then 4 s at full throttle in Altitude (a 3 m/s climb) before the loss. With `sticks_first` the sticks are lost first
-/// (LAND, FS_HOLD_EN 0, T3) and T1 comes at LAND's entry, so the tier debounce before BLIND is flown hands-off in Angle
-/// (N16 (b)); else sticks and T1 are lost together, and the second before BLIND is PILOT with the last report held (the
-/// pilot's Angle, untouched by N16 (b)). 60 s or down to 5 m above the ground.
+/// One BLIND flight in the air from a hover at 50 m (60 s, H learned): thrust gain `gain`, vertical drag; with
+/// `climb`, then 4 s at full throttle in Altitude (a 3 m/s climb) before the loss.
 struct BlindAir {
     stopped: bool,
     probes: u32,
@@ -287,12 +280,8 @@ fn blind_air(gain: f32, climb: bool, sticks_first: bool) -> BlindAir {
     BlindAir { stopped, probes, aborted, per: per(&lost), rise_5s, rise, a_corr, a_min, a_trim, ground, v_loss, v_entry, v_15s }
 }
 
-/// N14 (1), (2), N16, BLIND in the air at real gains 0.62 to 1.46 with vertical drag, entered from a hover (H learned),
-/// the sticks lost first and T1 at LAND's entry: every probe aborts ((b) fails), no stop, no fall to the ground; never
-/// above the entry + 1 m after 5 s at every gain (N16 (b): the tier debounce before BLIND flies Angle at H, not the card's
-/// m g). Reported, not asserted: the same with sticks and T1 lost together (the second before BLIND is PILOT's Angle at
-/// the held half-throttle report, the card's m g). The net acceleration after the correction, v_D at the entry and the
-/// height lost per probe reported.
+/// BLIND in the air at real gains 0.62 to 1.46 with vertical drag, entered from a hover (H learned), the
+/// sticks lost first and T1 at LAND's entry: every probe aborts ((b) fails), no stop, no fall to the ground.
 #[test]
 fn n14_blind_in_the_air_probes_abort_and_never_stop() {
     for gain in [0.62f32, 0.88, 1.0, 1.12, 1.3, 1.46] {
@@ -311,10 +300,8 @@ fn n14_blind_in_the_air_probes_abort_and_never_stop() {
     }
 }
 
-/// N16: BLIND entered from a 3 m/s climb (H learned in a 60 s hover, then 4 s at full throttle in Altitude, then the sticks
-/// lost and T1 at LAND's entry): at gains 0.62 to 1.12 the rise above BLIND's entry is at most 15 m (v^2 / (2 x 0.3)) and
-/// it is descending 15 s after the entry; at 1.3 and 1.46 the same reported, not asserted (N16 Tests). Reported: the same
-/// with sticks and T1 lost together (PILOT's Angle at the held full-throttle report for the second before BLIND).
+/// BLIND entered from a 3 m/s climb.
+/// lost and T1 at LAND's entry)
 #[test]
 fn n16_blind_from_a_3_m_s_climb_rises_at_most_15_m_and_descends_by_15_s() {
     for gain in [0.62f32, 1.0, 1.46] {
@@ -336,9 +323,8 @@ fn n16_blind_from_a_3_m_s_climb_rises_at_most_15_m_and_descends_by_15_s() {
     }
 }
 
-/// A gentle take-off in Angle at real gain `gain`: the throttle ramps at 0.2 per second up to the collective 1.03 m g /
-/// gain, to 3 m, then the hover collective m g / gain for 5 s. Returns the plant and whether the airborne latch (0.714)
-/// was ever set.
+/// A gentle take-off in Angle at real gain `gain`: the throttle ramps at 0.2 per second up to the collective 1.03 m g
+/// / gain, to 3 m, then the hover collective m g / gain for 5 s.
 fn gentle_take_off(gain: f32) -> (Plant, bool) {
     let mut p = Plant::new(gain, 0.0, POSITION);
     p.step(Some((false, 0.0, Switch3::Low)));
@@ -357,8 +343,8 @@ fn gentle_take_off(gain: f32) -> (Plant, bool) {
     (p, latch)
 }
 
-/// N14 (1): at real gain 1.46 a gentle take-off never sets the 0.714 latch but sets the low mark ("ever airborne"), and
-/// a stick loss in that hover gives LAND (FS_HOLD_EN 0, T3), not STOP; the vehicle stays armed and in the air for 2 s.
+/// At real gain 1.46 a gentle take-off never sets the 0.714 latch but sets the low mark ("ever airborne"), and a stick
+/// loss in that hover gives LAND (FS_HOLD_EN 0, T3), not STOP; the vehicle stays armed and in the air for 2 s.
 #[test]
 fn n14_low_mark_sets_at_gain_1_46_and_a_stick_loss_there_lands() {
     let (mut p, latch) = gentle_take_off(1.46);
@@ -374,7 +360,7 @@ fn n14_low_mark_sets_at_gain_1_46_and_a_stick_loss_there_lands() {
     }
 }
 
-/// An allocator that is the card's with its thrust flags forced: (`thrust_low`, `thrust_high`).
+/// An allocator that is the card's with its thrust flags forced: (`thrust_low`, `thrust_high`)
 struct SatAlloc {
     inner: CardAllocator,
     force: (bool, bool),
@@ -389,8 +375,8 @@ impl Allocator for SatAlloc {
     }
 }
 
-/// N14 (2): a step whose allocation has `thrust_low` or `thrust_high` leaves H and its qualifying time unchanged; the
-/// next step without them learns again.
+/// A step whose allocation has `thrust_low` or `thrust_high` leaves H and its qualifying time unchanged; the next step
+/// without them learns again.
 #[test]
 fn n14_saturation_gates_block_learning() {
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
@@ -419,8 +405,8 @@ fn n14_saturation_gates_block_learning() {
     }
 }
 
-/// N14 (3), the card check (no behaviour): `card_check_pct` is `None` until H is valid, `None` at 11 % off, the percent at
-/// 13 % off (either side); the text. The board writes it once per arming (src/flight.rs, `card_logged`).
+/// The card check (no behaviour): `card_check_pct` is `None` until H is valid, `None` at 11 % off, the percent at
+/// 13 % off (either side); the text.
 #[test]
 fn n14_card_check_fires_at_13_percent_not_at_11() {
     let mut p = Plant::new(1.0, 0.0, POSITION);

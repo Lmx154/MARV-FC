@@ -1,4 +1,5 @@
-//! The gate, the last stage of every flight step: arming, disarming, RC-loss kill, and the motor command.
+//! The gate, the last stage of every flight step, and the command it makes arming, disarming and the RC-loss rule of
+//! section 5, steps 1 to 7.
 
 use crate::gnc::{MotorLevels, NavState};
 use crate::quat::down_in_body;
@@ -9,37 +10,40 @@ use fw_core::handshake::Handshake;
 use fw_core::rc::{RcSample, RcSource};
 use marv_card::{IDLE_LEVEL, LEVEL_MAX};
 
-/// The gate disarms (and the ESC task clears `ARMED`) when the gap between flight steps exceeds this, us; 100 ms is the IMU loop's first recovery back-off.
+/// The gate disarms and the ESC task clears `ARMED` when the gap between flight steps exceeds this, us. 100 ms is the
+/// IMU loop's first recovery back-off (`fw_core::health`, `recovery_backoff_ms: [100, 300, 1000, 3000]`)
 pub const FLIGHT_GAP_DISARM_US: u64 = 100_000;
 
-/// In-air restart: a switch-on edge restarts only within this long of the in-air arm-switch STOP, us (PX4 re-arm grace, Commander.cpp).
+/// The in-air restart (b): a switch-on edge restarts only this long after the in-air arm-switch STOP, us.
 pub const RESTART_WINDOW_US: u64 = 5_000_000;
 
-/// In-air restart: IMU1 specific force below this, g, is free fall (ArduPilot mode_throw.cpp `free_falling`).
+/// The in-air restart (c), (d): IMU1's specific force below this, g, is free fall.
 pub const FREEFALL_G: f32 = 0.25;
 
-/// In-air restart: samples this long after the STOP neither set nor clear the free-fall latch, us (prop spin-down transient).
+/// The in-air restart (c): samples this long after the STOP neither set nor clear the free-fall latch, us: the prop
+/// spin-down transient, 107 ms measured in log 346 (IMU1 >= 0.25 g up to 621.2750 after the STOP at 621.1680)
 pub const FALL_SETTLE_US: u64 = 150_000;
 
-/// Test feature `restart-bench` (props off): every arm-switch STOP starts the restart window and the free-fall latch reads true. Never in the flight image.
+/// The board test feature `restart-bench` (props off): every arm-switch STOP starts the restart window and the free-
+/// fall latch reads true, so an arm-ON within `RESTART_WINDOW_US` restarts on the bench.
 const BENCH: bool = cfg!(feature = "restart-bench");
 
-/// Why a switch-on edge was refused: the first check that failed, in this order (`ARM no <token>`).
+/// Why a switch-on edge was refused: the first check that failed, in this order (`ARM no <token>`)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The throttle above `ARM_THR_MAX` (skipped by the restart).
+    /// The throttle above `ARM_THR_MAX` (skipped by the restart)
     Thr,
     /// Tilt not valid.
     Tilt,
     /// Rates not valid.
     Rates,
-    /// Leaning more than `ANGLE_MAX` (skipped by the restart).
+    /// Leaning more than `ANGLE_MAX` (skipped by the restart)
     Lean,
-    /// No motor levels (the controller refused).
+    /// No motor levels (the controller refused)
     Ctl,
     /// A receiver report with the mission switch ON.
     Ms,
-    /// Core 0's `try_arm` refused (a save running, or the permit clear).
+    /// Core 0's `try_arm` refused (a save running, or the permit clear)
     Busy,
 }
 
@@ -58,12 +62,12 @@ impl Refusal {
     }
 }
 
-/// What a switch-on edge did, at its step (logged only).
+/// What a switch-on edge did, at its step (logged only)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ArmNote {
     /// Refused: the first check that failed.
     Refused(Refusal),
-    /// Armed with the restart latch true (a restart arming, whatever the throttle and lean).
+    /// Armed with the restart latch true (a restart arming, whatever the throttle and lean)
     Restart {
         /// Since the STOP, ms.
         t_ms: u32,
@@ -74,7 +78,7 @@ pub enum ArmNote {
     },
 }
 
-/// Why the free-fall latch ended (`FALL off <token>`).
+/// Why the free-fall latch ended (`FALL off <token>`)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FallOff {
     /// An arm-switch STOP taken with the state machine's ground predicate true: no restart window.
@@ -99,7 +103,7 @@ impl FallOff {
     }
 }
 
-/// A change of the free-fall latch, at its step (logged only).
+/// A change of the free-fall latch, at its step (logged only)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FallNote {
     /// Set.
@@ -111,7 +115,7 @@ pub enum FallNote {
 /// The free-fall latch (c) after an in-air arm-switch STOP.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fall {
-    /// No sample below `FREEFALL_G` yet since the STOP (the props still spinning down).
+    /// No sample below `FREEFALL_G` yet since the STOP (the props still spinning down)
     Wait,
     /// Set.
     On,
@@ -139,7 +143,7 @@ impl MotorCommand {
         self.spin
     }
 
-    /// Tests only: a spinning command with these levels by DShot line (each 1..=2000).
+    /// Tests only: a spinning command with these levels by DShot line (each 1..=2000)
     #[cfg(test)]
     pub(crate) fn spinning(levels: [u16; LINES]) -> MotorCommand {
         MotorCommand {
@@ -159,23 +163,24 @@ pub struct Gate {
     seen_off: bool,
     /// The flight's source: the source of the report the gate armed on, until disarm.
     source: Option<RcSource>,
-    /// Where the armed state is stored for core 0; arming also needs its `try_arm` (no save running).
+    /// Where the armed state is stored for core 0; arming also needs its `try_arm` (no save running)
     handshake: &'static Handshake,
     rc_fs_timeout_us: u64,
     arm_thr_max: f32,
     /// cos(ANGLE_MAX): the lowest third component of the estimated down vector that may arm.
     cos_angle_max: f32,
-    /// In-air restart window start: step time of the arm-switch STOP taken with the ground predicate false, when it was the last disarm; `None` otherwise.
+    /// The in-air restart (a): the step time of the arm-switch STOP taken with the ground predicate false, when it was
+    /// the last disarm; `None` otherwise (and while armed)
     stop_us: Option<u64>,
-    /// The free-fall latch since `stop_us`.
+    /// the free-fall latch since `stop_us`.
     fall: Fall,
-    /// The step time of the latest `fall_step` and IMU1's |f| then, m/s^2 (NaN when not finite).
+    /// the step time of the latest `fall_step` and IMU1's |f| then, m/s^2 (not a number when not finite)
     f_at: Option<(u64, f32)>,
     /// The switch-on edge of the latest step that had one, and that step's time.
     arm_note: Option<(u64, ArmNote)>,
     /// The latch change of the latest step that had one, and that step's time.
     fall_note: Option<(u64, FallNote)>,
-    /// Tests only: `FALL_SETTLE_US` taken as 0 (the control of the settle time).
+    /// Tests only: `FALL_SETTLE_US` taken as 0 (the control of the settle time)
     #[cfg(test)]
     pub(crate) settle_off: bool,
 }
@@ -208,7 +213,8 @@ impl Gate {
         self.armed
     }
 
-    /// Armed, only a report of the flight's source counts; disarmed, a CRSF report, or a receiver report with `fs_hold_en` 1. `Flight::step` hands no other report to the shaper, the state machine or the gate.
+    /// Armed, only a report of the flight's source counts; disarmed, a CRSF report, or a receiver report with
+    /// FS_HOLD_EN `fs_hold_en` 1. `Flight::step` hands no other report to the shaper, the state machine or the gate.
     pub(crate) fn accepts(&self, r: &RcSample, fs_hold_en: bool) -> bool {
         match self.source {
             Some(s) if self.armed => r.source == s,
@@ -216,7 +222,7 @@ impl Gate {
         }
     }
 
-    /// The last stage of every step. `rc` is this step's new stick report; RC loss is the newest report older than `RC_FS_TIMEOUT` at `t_us`. `levels` is `None` when the controller refused. While armed, `hands_off` keeps RC loss from disarming and `arm_off_holds` keeps a switch-off report from disarming; both are ignored while disarmed, so neither can arm.
+    /// The last stage of every step. `rc` is this step's new stick report.
     pub fn apply(
         &mut self,
         t_us: u64,
@@ -244,7 +250,8 @@ impl Gate {
             self.disarm();
             return MotorCommand::STOP;
         }
-        // 4. A new report: the switch off disarms at once; on, it arms only from a switch cycle with every check met (the restart latch waives the throttle and lean checks).
+        // 4. A new report: the switch off disarms at once; on, it arms only from a switch cycle with every check met
+        // (the in-air restart's latch waives the throttle and lean checks, )
         if let Some(r) = rc {
             if !r.arm {
                 if !(self.armed && arm_off_holds) {
@@ -252,7 +259,8 @@ impl Gate {
                     self.seen_off = true;
                 }
             } else if !self.armed {
-                // With the latch true the edge skips only the throttle and lean checks; any arming with the latch true is a restart arming.
+                // The in-air restart: with the latch true the edge skips only the throttle and lean checks; any arming
+                // with the latch true is a restart arming.
                 let thr_ok = r.sticks.throttle <= self.arm_thr_max;
                 let lean_ok = down_in_body(nav.attitude)[2] >= self.cos_angle_max;
                 let restart = self.restart_ok(t_us);
@@ -319,7 +327,8 @@ impl Gate {
         }
     }
 
-    /// Disarmed, and the switch must be cycled. Clears the handshake's `ARMED` only when leaving armed, so a flag the gate did not set (feature `fake-armed`) is left alone. `Flight::step` calls it before `apply` when the hands-off state machine enters STOP from an armed step.
+    /// Disarmed, and the switch must be cycled. Clears the handshake's `ARMED` only when leaving armed, so a flag the
+    /// gate did not set (feature `fake-armed`) is left alone. `Flight::step` calls it before `apply` when the hands-
     pub(crate) fn disarm(&mut self) {
         if self.armed {
             self.handshake.disarm();
@@ -330,7 +339,8 @@ impl Gate {
         self.source = None;
     }
 
-    /// The hands-off state machine entered STOP from an armed step: `disarm`, and with `arm_stop_ground` `Some(false)` (arm-switch STOP, ground predicate false) the restart window starts at `t_us` and the free-fall latch waits for the first low sample; `Some(true)` logs `FALL off ground`. With `restart-bench` every arm-switch STOP starts the window.
+    /// The hands-off state machine entered STOP from an armed step: `disarm`, and with `arm_stop_ground` `Some(false)`
+    /// .
     pub(crate) fn stop(&mut self, t_us: u64, arm_stop_ground: Option<bool>) {
         let was = self.armed;
         self.disarm();
@@ -344,7 +354,8 @@ impl Gate {
         }
     }
 
-    /// The free-fall latch, on a disarmed step more than `FALL_SETTLE_US` after the STOP, before `apply`: set by the first sample with IMU1 specific force `f_ms2` below `FREEFALL_G`, cleared for good by a sample at or above it or not finite.
+    /// The in-air restart's free-fall latch (c), on a disarmed step more than `FALL_SETTLE_US` after the STOP, before
+    /// `apply`: set by the first sample with IMU1's specific force `f_ms2` below `FREEFALL_G`.
     pub(crate) fn fall_step(&mut self, t_us: u64, f_ms2: [f32; 3]) {
         let [x, y, z] = f_ms2;
         let f = libm::sqrtf(x * x + y * y + z * z);
@@ -378,7 +389,8 @@ impl Gate {
         }
     }
 
-    /// The restart latch at `t_us`: last disarm was an in-air arm-switch STOP, within `RESTART_WINDOW_US`, free-fall latch set, and this step's sample below `FREEFALL_G`.
+    /// The in-air restart latch at `t_us`: (a) the last disarm was an in-air arm-switch STOP, (b) at most
+    /// `RESTART_WINDOW_US` ago, (c) the free-fall latch set, (d) this step's sample below `FREEFALL_G`.
     fn restart_ok(&self, t_us: u64) -> bool {
         let low_now = self.f_at.is_some_and(|(t, f)| t == t_us && f < FREEFALL_G * GRAVITY_MSS);
         self.stop_us.is_some_and(|s| t_us.saturating_sub(s) <= RESTART_WINDOW_US)
@@ -500,8 +512,6 @@ mod tests {
         assert_eq!(levels_out, Some(want));
         assert!(gate.armed() && HANDSHAKE.armed());
 
-        // RC loss: still armed at exactly the timeout, Stop one microsecond later.
-        // Stepped every FLIGHT_GAP_DISARM_US (a gap of exactly the limit does not trip the latch), so only RC loss acts.
         let last = t;
         for k in 1..=TIMEOUT / FLIGHT_GAP_DISARM_US {
             let cmd = step(&mut gate, last + k * FLIGHT_GAP_DISARM_US, None, levels);
@@ -527,14 +537,11 @@ mod tests {
         let cmd = step(&mut gate, t, None, None);
         assert_stopped(&gate, cmd, "levels None while armed");
 
-        // A save running: try_arm is refused and the gate stays disarmed.
         assert!(HANDSHAKE.begin_save());
         let cmd = cycle_on(&mut gate, &mut t);
         assert_stopped(&gate, cmd, "try_arm refused");
         HANDSHAKE.end_save();
 
-        // I1: a gap of exactly the limit stays armed; one microsecond more gives Stop and disarm; the switch still on
-        // stays Stop; a switch cycle arms again.
         assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
         t += FLIGHT_GAP_DISARM_US;
         let cmd = step(&mut gate, t, None, levels);
@@ -547,7 +554,6 @@ mod tests {
         assert_stopped(&gate, cmd, "after the gap, switch still on");
         assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
 
-        // I2: the gate is never armed at the end of a step while ARMED is clear.
         HANDSHAKE.disarm();
         t += 1_000;
         let cmd = step(&mut gate, t, None, levels);
@@ -557,14 +563,12 @@ mod tests {
         assert_stopped(&gate, cmd, "ARMED cleared, switch still on");
         assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
 
-        // P-I1: arming is refused while core 0's permit is clear; with it set, a cycle arms.
         HANDSHAKE.set_permit(false);
         let cmd = cycle_on(&mut gate, &mut t);
         assert_stopped(&gate, cmd, "permit clear");
         HANDSHAKE.set_permit(true);
         assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
 
-        // P-I2: setting the permit while the switch is on does not arm; a switch cycle does.
         HANDSHAKE.set_permit(false);
         let cmd = cycle_on(&mut gate, &mut t);
         assert_stopped(&gate, cmd, "permit clear, switch on");
@@ -574,7 +578,6 @@ mod tests {
         assert_stopped(&gate, cmd, "permit set while the switch is on");
         assert!(cycle_on(&mut gate, &mut t).throttles().is_some());
 
-        // P-I3: clearing the permit while armed changes nothing (200 steps with throttles).
         HANDSHAKE.set_permit(false);
         for k in 0..200 {
             t += 1_000;
@@ -600,7 +603,8 @@ mod tests {
         assert!(gate.armed());
     }
 
-    /// With `hands_off` RC loss does not disarm; without it the gate disarms at the timeout plus one microsecond.
+    /// Decision-mavlink-mode A2/I2: with `hands_off` RC loss does not disarm; without it the gate disarms at exactly
+    /// the step it does today (the timeout plus one microsecond)
     #[test]
     fn gate_hands_off_keeps_rc_loss_from_disarming() {
         static HS_OFF: Handshake = Handshake::new();
@@ -624,7 +628,6 @@ mod tests {
         assert!(cmd == MotorCommand::STOP && !off.armed() && !HS_OFF.armed(), "false: disarmed at timeout + 1");
         let cmd = step_flags(&mut on, t, None, LEVELS, true, false);
         assert!(cmd.throttles().is_some() && on.armed() && HS_ON.armed(), "true: still armed");
-        // A minute without reports, then reports resume with the switch on: armed throughout.
         let mut t = t;
         for _ in 0..600 {
             t += FLIGHT_GAP_DISARM_US;
@@ -632,7 +635,6 @@ mod tests {
         }
         t += 1_000;
         assert!(step_flags(&mut on, t, Some(report(t, true, 0.5)), LEVELS, true, false).throttles().is_some());
-        // Unchanged while hands-off: the flight gap, levels None, and RC loss once `hands_off` is false.
         t += FLIGHT_GAP_DISARM_US + 1;
         assert_eq!(step_flags(&mut on, t, None, LEVELS, true, false), MotorCommand::STOP);
         assert!(!on.armed() && !HS_ON.armed(), "flight gap");
@@ -648,7 +650,6 @@ mod tests {
         assert!(on.armed());
         let cmd = step_flags(&mut on, last + TIMEOUT + FLIGHT_GAP_DISARM_US, None, LEVELS, false, false);
         assert!(cmd == MotorCommand::STOP && !on.armed(), "hands_off false while lost: disarm");
-        // Ignored while disarmed: RC loss clears seen_off, and nothing arms.
         let mut t = last + 2 * TIMEOUT;
         step_flags(&mut on, t, Some(report(t, false, 0.0)), LEVELS, true, false);
         assert!(on.seen_off && !on.armed());
@@ -660,7 +661,7 @@ mod tests {
         assert!(!on.armed() && !HS_ON.armed());
     }
 
-    /// C1: with `arm_off_holds` a report with the switch off leaves `armed` and `seen_off` alone; disarmed, the flag is
+    /// With `arm_off_holds` a report with the switch off leaves `armed` and `seen_off` alone; disarmed, the flag is
     /// ignored and cannot arm.
     #[test]
     fn gate_arm_off_holds_keeps_an_arm_off_report_from_disarming_and_never_arms() {
@@ -676,19 +677,16 @@ mod tests {
             assert!(cmd.throttles().is_some() && gate.armed() && HS_HOLD.armed());
             assert_eq!(gate.seen_off, seen_off);
         }
-        // The flag dropped (K set): the next arm-OFF report disarms at once.
         t += 1_000;
         let cmd = step_flags(&mut gate, t, Some(report(t, false, 0.0)), LEVELS, true, false);
         assert_stopped_on(&gate, &HS_HOLD, cmd, "flag false");
         assert!(gate.seen_off, "as today: the switch-off report counts toward the cycle");
-        // Disarmed, both flags true: switch-on reports without a cycle never arm.
         let mut gate = Gate::new(&Tuning::DEFAULT, &HS_HOLD);
         for _ in 0..50 {
             t += 1_000;
             let cmd = step_flags(&mut gate, t, Some(report(t, true, 0.0)), LEVELS, true, true);
             assert_stopped_on(&gate, &HS_HOLD, cmd, "no cycle");
         }
-        // Disarmed, the flag is ignored: switch off sets seen_off, and only the existing cycle arms.
         t += 1_000;
         let cmd = step_flags(&mut gate, t, Some(report(t, false, 0.0)), LEVELS, true, true);
         assert_stopped_on(&gate, &HS_HOLD, cmd, "switch off");
@@ -752,7 +750,8 @@ mod tests {
         }
     }
 
-    /// The in-air restart's facts as the property walks model them, written from the rule, not from the gate.
+    /// The in-air restart's facts as the property walks model them, written from the rule, not from the gate: (a) the
+    /// last disarm was an in-air arm-switch STOP, (b) at most `RESTART_WINDOW_US` ago.
     struct LatchModel {
         stop: Option<u64>,
         /// 0: no low sample yet, 1: set, 2: cleared for good.
@@ -788,8 +787,8 @@ mod tests {
         }
     }
 
-    /// The in-air facts of one walk step: IMU1's specific force (mostly free fall for a while after an in-air STOP, with
-    /// impacts and non-finite samples; about 1 g otherwise) and an attitude (level, or leaning 40 deg, past ANGLE_MAX).
+    /// The in-air facts of one walk step: IMU1's specific force.
+    /// with impacts and non-finite samples; about 1 g otherwise) and an attitude (level, or leaning 40 deg.
     struct AirFacts {
         f_ms2: [f32; 3],
         attitude: [f32; 4],
@@ -810,7 +809,8 @@ mod tests {
         }
     }
 
-    /// Over random inputs, disarmed becomes armed only on a switch-on report with levels present, right after a switch-off report that left the gate disarmed, and with the throttle low and level OR the restart latch true (`LatchModel`); every such edge with the latch true arms. A refused edge leaves the cycle to be made again. More than 100 restart and 100 normal armings.
+    /// I1 / C1 a5 / I-arm': over random reports, gaps, levels, both flags, arm-switch STOPs in the air and on the
+    /// ground, specific forces and attitudes.
     #[test]
     fn gate_walk_flags_never_arm_outside_the_switch_cycle() {
         static HS_WALK: Handshake = Handshake::new();
@@ -826,14 +826,12 @@ mod tests {
                 HS_WALK.disarm();
             }
             let mut f = random_facts(&mut rng, &mut t, &mut quiet);
-            // Sometimes the switch stays off for 4 to 6 s after a STOP (the window's edge).
             if f.t < hold_off_until {
                 f.rc = f.rc.map(|r| RcSample { arm: false, ..r });
             }
             let air = random_air(&mut rng, falling);
             let was = gate.armed();
             let lost = gate.last_rc_us.is_some_and(|l| f.t.saturating_sub(l) > TIMEOUT) && f.rc.is_none();
-            // The machine's arm-switch STOP: an arm-off report the gate does not hold, in the air or on the ground.
             let stop = was && f.rc.is_some_and(|r| !r.arm) && !f.arm_off_holds;
             if stop {
                 let ground = rng.chance(300);
@@ -855,7 +853,6 @@ mod tests {
                 r.sticks.throttle <= Tuning::DEFAULT.arm_thr_max
                     && down_in_body(air.attitude)[2] >= libm::cosf(Tuning::DEFAULT.angle_max_rad)
             });
-            // A switch-on edge: disarmed with the cycle made and no flight gap at this step.
             let gap = gate.last_step_us.is_some_and(|l| f.t - l > FLIGHT_GAP_DISARM_US);
             let edge = !gate.armed() && gate.seen_off && !gap && f.rc.is_some_and(|r| r.arm);
             let nav = NavState { attitude: air.attitude, ..level_nav(f.t) };
@@ -897,7 +894,7 @@ mod tests {
         assert!(restarts > 100 && normal > 100 && held_loss > 100 && held_off > 100, "{restarts} {normal} {held_loss} {held_off}");
     }
 
-    /// The gate as it was before the two hands-off inputs, verbatim but for the handshake argument: the reference for (false, false).
+    /// The gate as it was at 047aff0, verbatim but for the handshake argument: the reference for (false, false)
     struct OldGate {
         armed: bool,
         last_step_us: Option<u64>,
@@ -978,7 +975,8 @@ mod tests {
         }
     }
 
-    /// With (false, false) the gate is bit-identical to the reference gate, step by step, over a seeded walk of reports, gaps, levels, permit, saves and `ARMED` cleared from outside.
+    /// With (false, false) the gate is bit-identical to the gate before the two inputs, step by step, over a seeded
+    /// walk of reports, gaps, levels, permit, saves and `ARMED` cleared from outside.
     #[test]
     fn gate_false_false_matches_the_old_gate_step_by_step() {
         static HS_NEW: Handshake = Handshake::new();
@@ -1027,7 +1025,8 @@ mod tests {
         assert!(armed_steps > 10_000 && spins > 10_000, "{armed_steps} {spins}");
     }
 
-    /// A receiver report with the mission switch ON never arms; with it OFF it does; a receiver report counts while disarmed only at FS_HOLD_EN 1; the armed source is latched until disarm (`accepts`).
+    /// A receiver report with the mission switch ON never arms (switch cycle, low throttle and every check met), with
+    /// it OFF it does; a receiver report counts while disarmed only at FS_HOLD_EN 1.
     #[test]
     fn n19_mission_switch_on_never_arms_and_the_source_is_latched() {
         static HS_N19: Handshake = Handshake::new();
@@ -1065,7 +1064,7 @@ mod tests {
         assert!(gate.accepts(&report(t, true, 0.0), false));
     }
 
-    /// The real gate driven by the real hands-off machine. Each step the machine runs first; its `disarm` goes through the gate's STOP path, then a random specific force reaches the free-fall latch and `apply` takes the report and the Output's flags. The airborne latch (step.rs) is a modelled input here.
+    /// The real gate driven by the real hands-off machine.
     #[test]
     fn gate_and_hands_off_joint_walk_wr3() {
         use crate::hands_off::{Command, HandsOff, Inputs, Link, MissionFacts, State, StationCommand, Tier};
@@ -1167,8 +1166,6 @@ mod tests {
             i.home_reached = rng.chance(5);
             i.last_waypoint_reached = rng.chance(5);
             i.now_us = t;
-            // CRSF and receiver reports at random (MAVLink flights reach every state); the step hands on only what the
-            // gate accepts (the flight's source; disarmed at FS_HOLD_EN 0 no receiver report).
             let rc = rc.filter(|r| gate.accepts(r, i.fs_hold_en));
             if rc.is_some() {
                 i.crsf = rc;
@@ -1178,8 +1175,6 @@ mod tests {
             i.restart = restarted;
 
             let out = h.step(&i);
-            // Flight::step's order: the machine's STOP (an arm-switch STOP in the air starts the restart window), the
-            // free-fall sample, the gate.
             if out.disarm {
                 gate.stop(t, out.arm_stop_ground);
                 model.disarmed(t, out.arm_stop_ground == Some(false));
@@ -1200,9 +1195,7 @@ mod tests {
                 falling = false;
             }
 
-            // (a) armed at the end of two consecutive steps: the second is not STOP.
             assert!(!(prev_armed && armed && out.state == State::Stop), "a, step {k}: {out:?}");
-            // (b) only the switch cycle arms, with the throttle low or the in-air restart's latch true (I-arm').
             if !prev_armed && armed {
                 let r = rc.expect("b: arming needs a report");
                 let normal = r.sticks.throttle <= tuning.arm_thr_max;
@@ -1215,7 +1208,6 @@ mod tests {
                 model = LatchModel::NEW;
                 falling = false;
             }
-            // (c) outside hands-off states silence disarms at the first step the newest report is older than the timeout, and not before.
             if prev_armed && !out.hands_off && rc.is_none() {
                 let age = i.crsf.map_or(u64::MAX, |r| t.saturating_sub(r.t_us));
                 if age > TIMEOUT {
@@ -1225,7 +1217,6 @@ mod tests {
                     assert!(armed, "c, step {k}: disarmed before the timeout");
                 }
             }
-            // (d) a hands-off state that reads the latch false: disarmed at the end of that step.
             if !matches!(prev_state, State::Pilot | State::Stop) && !i.airborne {
                 assert!(!armed, "d, step {k}: {prev_state:?} grounded, still armed");
                 wr1_stops += u32::from(prev_armed);
@@ -1258,7 +1249,7 @@ mod tests {
         );
     }
 
-    /// One gate step of the restart tests: the free-fall sample `f_z` (m/s^2, body z), then `apply` with level nav (or
+    /// One gate step of the restart tests: the free-fall sample `f_z` (m/s^2, body z), then `apply` with level nav.
     /// `nav`), levels present.
     fn fall_apply(gate: &mut Gate, t: u64, rc: Option<RcSample>, f_z: f32, nav: Option<NavState>) -> MotorCommand {
         gate.fall_step(t, [0.0, 0.0, f_z]);
@@ -1293,15 +1284,13 @@ mod tests {
         (gate.armed(), gate.arm_note())
     }
 
-    /// The in-air restart at the gate: an in-air arm-switch STOP then free fall arms at throttle 0.74 (the positive twin);
-    /// a disarm by RC loss, by a flight gap or by the controller's refusal (levels None), or by the arm switch without the
-    /// machine's STOP, followed by the same free fall, is refused "ARM no thr", and the cycle is cleared.
+    /// The in-air restart at the gate: an in-air arm-switch STOP then free fall arms at throttle 0.74.
+    /// twin); a disarm by RC loss, by a flight gap or by the controller's refusal (levels None)
     #[test]
     fn restart_only_after_an_in_air_arm_switch_stop() {
         static HS_R: Handshake = Handshake::new();
         HS_R.set_permit(true);
         let thr = Some(ArmNote::Refused(Refusal::Thr));
-        // Positive twin: the machine's in-air STOP.
         let mut gate = Gate::new(&Tuning::DEFAULT, &HS_R);
         let mut t = 1_000;
         armed_at_hover(&mut gate, &mut t);
@@ -1315,7 +1304,6 @@ mod tests {
         let (armed, note) = fall_then_on(&mut gate, &mut t);
         assert!(armed && HS_R.armed(), "in-air STOP: restart");
         assert!(matches!(note, Some(ArmNote::Restart { t_ms: 602, f_x100: 98, thr_x100: 74 })), "{note:?}");
-        // RC loss: silence past the timeout while armed (no hands-off).
         let mut gate = Gate::new(&Tuning::DEFAULT, &HS_R);
         armed_at_hover(&mut gate, &mut t);
         for _ in 0..=TIMEOUT / 50_000 {
@@ -1325,14 +1313,12 @@ mod tests {
         assert!(!gate.armed());
         assert_eq!(fall_then_on(&mut gate, &mut t), (false, thr), "RC loss");
         assert!(!gate.seen_off);
-        // A flight gap.
         let mut gate = Gate::new(&Tuning::DEFAULT, &HS_R);
         armed_at_hover(&mut gate, &mut t);
         t += FLIGHT_GAP_DISARM_US + 1;
         fall_apply(&mut gate, t, Some(report(t, true, 0.6)), -0.1 * GRAVITY_MSS, None);
         assert!(!gate.armed());
         assert_eq!(fall_then_on(&mut gate, &mut t), (false, thr), "flight gap");
-        // The controller's refusal (levels None while armed).
         let mut gate = Gate::new(&Tuning::DEFAULT, &HS_R);
         armed_at_hover(&mut gate, &mut t);
         t += 1_000;
@@ -1340,7 +1326,6 @@ mod tests {
         gate.apply(t, Some(&report(t, true, 0.6)), &level_nav(t), None, false, false);
         assert!(!gate.armed());
         assert_eq!(fall_then_on(&mut gate, &mut t), (false, thr), "levels None");
-        // The arm switch with no STOP from the machine (`stop` not called), and a STOP that is not the arm switch's.
         for by_machine in [false, true] {
             let mut gate = Gate::new(&Tuning::DEFAULT, &HS_R);
             armed_at_hover(&mut gate, &mut t);
@@ -1354,8 +1339,8 @@ mod tests {
         }
     }
 
-    /// One "ARM no" per refused edge, the first failing check named; repeated switch-on reports after it are not edges.
-    /// The order: thr, tilt, rates, lean, ctl, ms, busy.
+    /// One "ARM no" per refused edge, the first failing check named; repeated switch-on reports after it are not
+    /// edges.
     #[test]
     fn arm_no_once_per_refused_edge_naming_the_first_failed_check() {
         static HS_N: Handshake = Handshake::new();

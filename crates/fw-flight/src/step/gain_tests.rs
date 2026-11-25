@@ -1,6 +1,5 @@
-//! Host tests of the gain parameters at the step level (decision-gain-params-20261123, packet P1): the defaults change
-//! nothing, a set takes effect at the next arming only, an out-of-range set is refused, and `set_gains` leaves the
-//! controller where `CascadedPid::new` would have. The estimator is the fake of `althold_tests`.
+//! Host tests of the gain parameters at the step level: the defaults change nothing, a set takes effect at the next
+//! arming only, an out-of-range set is refused.
 
 extern crate std;
 
@@ -30,7 +29,6 @@ type Record = (String, Vec<u8>, Gains);
 /// A scripted flight: `STEPS` steps with two armed spans, moving rates and a moving roll stick; `hook(k, flight)` runs
 /// before step `k`.
 fn script(mut hook: impl FnMut(usize, &mut TestFlight)) -> Vec<Record> {
-    // A handshake of its own: the gate's `try_arm` fails while the flag a previous run set is still up.
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
@@ -120,7 +118,6 @@ fn a_set_while_disarmed_applies_from_the_next_arming() {
     });
     assert_eq!(run[0].2, defaults());
     assert_eq!(run[1].2, tuned);
-    // Disarmed demands may differ (the controller is called); what flies is what differs after arming.
     let armed_diff = (0..STEPS).find(|&k| base[k].0.contains("armed: true") && base[k].0 != run[k].0);
     assert!(armed_diff.is_some_and(|k| k >= 3), "{armed_diff:?}");
     assert!(run[3..DISARM_AT].iter().all(|r| r.2 == tuned));
@@ -135,13 +132,10 @@ fn a_set_while_armed_has_no_effect_until_after_a_disarm_and_then_applies_from_th
             assert!(f.set_gains(tuned));
         }
     });
-    // Identical through the whole first armed span, up to and including the step that disarms; gains in force unchanged.
     assert!(same_outputs(&base, &run, 0..DISARM_AT + 1));
     assert!(run[..DISARM_AT + 1].iter().all(|r| r.2 == defaults()));
-    // The step that disarms is still armed at its start; the next one is disarmed and latches the set.
     assert!(!run[DISARM_AT].0.contains("armed: true"));
     assert_eq!(run[DISARM_AT + 1].2, tuned);
-    // The second armed span flies with it.
     let armed_diff = (REARM_AT..STEPS).find(|&k| base[k].0.contains("armed: true") && base[k].0 != run[k].0);
     assert!(armed_diff.is_some(), "outputs differ after the next arming");
     assert!(run[REARM_AT..1_400].iter().all(|r| r.2 == tuned));
@@ -165,7 +159,6 @@ fn a_refused_set_returns_false_keeps_the_previous_set_and_changes_nothing() {
         }),
         ("zero", rll_p(0.0)),
     ];
-    // Below the minimum and above the maximum of every gain.
     for i in 0..GAIN_COUNT {
         let mut lo = defaults();
         lo.0[i] = f32::from_bits(Gains::MIN.0[i].to_bits() - 1);
@@ -175,12 +168,10 @@ fn a_refused_set_returns_false_keeps_the_previous_set_and_changes_nothing() {
         bad.push((GAIN_NAMES[i], hi));
     }
     for (what, g) in bad {
-        // Every step, disarmed or armed, and the same flight as the baseline.
         let run = script(|_, f| assert!(!f.set_gains(g), "{what}"));
         assert!(same_outputs(&base, &run, 0..STEPS), "{what}");
         assert!(run.iter().all(|r| r.2 == defaults()), "{what}");
     }
-    // A refused set after an accepted one leaves the accepted one pending.
     let tuned = rll_p(1.5);
     let run = script(|k, f| {
         if k == 1 {
@@ -218,7 +209,6 @@ fn drive(pid: &mut CascadedPid, steps: usize, mut hook: impl FnMut(usize, &mut C
             let x = k as f32 * 0.02;
             let mut nav = nav_at(0.0, ANGLE);
             nav.t_us = 1_000_000 + k as u64 * DT_US;
-            // Large rates, so that the integrators reach their limits and the D term is live.
             nav.rates_rads = [3.0 * libm::sinf(x) + noise, 2.0 * libm::cosf(1.3 * x), 1.5 * libm::sinf(0.5 * x) + noise];
             let sp = if k % 400 < 200 {
                 Setpoint::Attitude {
@@ -275,12 +265,12 @@ fn set_gains_leaves_the_integrators_and_the_filter_memories_alone() {
     assert_eq!(base, every);
 }
 
-/// The digest of `script` (every step's `Debug` text and its step block) on the flight step before the hands-off wiring
-/// (commit c270814).
+/// The digest of `script` (every step's `Debug` text and its step block) on the flight step before the hands-off
+/// wiring (commit c270814)
 const SCRIPT_GOLDEN: u64 = 0x2ed6_7fa3_9e94_9fb8;
 
-/// Decision-mavlink-mode-20261123, I2: with FS_HOLD_EN 0 (the default) the scripted flight is bit-identical to the step
-/// before the hands-off wiring.
+/// With FS_HOLD_EN 0 (the default) the scripted flight is bit-identical to the
+/// step before the hands-off wiring.
 #[test]
 fn the_script_is_bit_identical_to_the_step_before_the_hands_off_wiring() {
     let mut h = 0xcbf2_9ce4_8422_2325u64;

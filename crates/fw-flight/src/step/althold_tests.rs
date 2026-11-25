@@ -1,6 +1,5 @@
-//! Host tests of the mode switch, the effective mode and (from the second stage) altitude hold
-//! (decision-nav-eskf-20261120, Amendment F). The estimator is a fake that returns the state the test sets, so each
-//! test chooses what the estimate covers. Every expected number comes from `marv_card` or `Tuning`.
+//! Host tests of the mode switch, the effective mode and (from the second stage) altitude hold . The estimator is a
+//! fake that returns the state the test sets, so each test chooses what the estimate covers.
 
 extern crate std;
 
@@ -16,7 +15,7 @@ pub(super) const DT_US: u64 = 1_250;
 /// An estimator that returns the state in its cell, stamped with the step time.
 pub(super) struct Fake<'a>(pub &'a Cell<NavState>);
 
-/// The fake's NED origin (read only by AUTO's mission facts and entry).
+/// The fake's NED origin (read only by AUTO's mission facts and entry)
 pub(super) const ORIGIN: crate::gnc::GeoPoint = crate::gnc::GeoPoint { lat_e7: 473_977_420, lon_e7: 85_455_940, alt_mm: 488_000 };
 
 impl Estimator for Fake<'_> {
@@ -109,7 +108,7 @@ pub(super) fn input(t_us: u64, rc: Option<RcSample>) -> FlightInputs {
     }
 }
 
-/// One step at `t_us` with a fresh report (so RC loss never fires and the switch and sticks update).
+/// One step at `t_us` with a fresh report (so RC loss never fires and the switch and sticks update)
 pub(super) fn step_rc(
     f: &mut TestFlight,
     t_us: u64,
@@ -128,7 +127,6 @@ pub(super) fn mot_mode_byte(out: &StepOut) -> u8 {
         + usize::from(dflog::SETP.length)
         + usize::from(dflog::DMD.length);
     assert!(len >= at + usize::from(dflog::MOT.length));
-    // MOT: header 3, TimeUS 8, Arm 1, then Mode.
     buf[at + 12]
 }
 
@@ -156,11 +154,9 @@ fn the_effective_mode_rule() {
         ANGLE,
         Valid::NONE,
     ];
-    // (switch, selected, effective when Altitude is covered, effective when it is not)
     let table = [
         (Switch3::Low, Mode::Angle, Mode::Angle, Mode::Angle),
         (Switch3::Middle, Mode::Altitude, Mode::Altitude, Mode::Angle),
-        // Position counts as Altitude until it is built.
         (Switch3::High, Mode::Position, Mode::Altitude, Mode::Angle),
     ];
     for (n, &(switch, selected, covered, uncovered)) in table.iter().enumerate() {
@@ -190,7 +186,6 @@ fn before_the_first_report_the_mode_is_angle_and_the_last_switch_holds() {
     assert_eq!((out.selected, out.mode), (Mode::Angle, Mode::Angle));
     let out = step_rc(&mut f, 2_000, false, 0.0, Switch3::Middle);
     assert_eq!((out.selected, out.mode), (Mode::Altitude, Mode::Altitude));
-    // No new report: the switch holds.
     let out = f.step(&input(3_000, None));
     assert_eq!((out.selected, out.mode), (Mode::Altitude, Mode::Altitude));
     let out = step_rc(&mut f, 4_000, false, 0.0, Switch3::Low);
@@ -228,7 +223,6 @@ fn mode_is_written_at_the_first_step_and_at_every_change_of_either() {
             log.done(&out);
         }
     };
-    // Steps: Low x3, Middle x3 (Eff 1 -> 2), the estimate drops (Eff 2 -> 1, Sel stays 2), returns, High, Low.
     for _ in 0..3 {
         run(&mut f, Switch3::Low, &mut t, &mut written);
     }
@@ -246,22 +240,18 @@ fn mode_is_written_at_the_first_step_and_at_every_change_of_either() {
     run(&mut f, Switch3::High, &mut t, &mut written);
     run(&mut f, Switch3::Low, &mut t, &mut written);
     let codes: std::vec::Vec<(u8, u8)> = written.iter().map(|b| (b[11], b[12])).collect();
-    // (Sel, Eff): first step, Middle, Altitude lost, Altitude back, High (Eff stays 2: Position acts as Altitude), Low.
     assert_eq!(codes, [(1, 1), (2, 2), (2, 1), (2, 2), (3, 2), (1, 1)]);
     for b in &written {
         assert_eq!(b[..3], [0xA3, 0x95, dflog::ID_MODE]);
     }
-    // The first record is at the first step's time.
     assert_eq!(u64::from_le_bytes(written[0][3..11].try_into().unwrap()), 1_000 + DT_US);
-    // A record the ring dropped is offered again: `pending` stays true until `done`.
     let out = step_rc(&mut f, t + DT_US, false, 0.0, Switch3::Middle);
     assert!(log.pending(&out));
     assert!(log.pending(&out));
-    // Too small a buffer writes nothing.
     assert_eq!(encode_mode(&out, &mut [0u8; 12]), 0);
 }
 
-// ---- Altitude hold (stage 2): the shaper, the loop around it, the log record ----
+// ---- Altitude hold: the shaper, the loop around it, the log record ----
 
 use marv_card::MASS as CARD_MASS;
 
@@ -299,19 +289,15 @@ fn the_stick_law_at_the_edges_and_across_the_travel() {
     );
     let (low, high) = (0.5 - dz, 0.5 + dz);
     let rate = |f: &TestFlight, thr: f32| f.shaper.stick_rate_d(thr);
-    // The dead zone, both edges inclusive, holds.
     assert_eq!(rate(&f, low), 0.0);
     assert_eq!(rate(&f, 0.5), 0.0);
     assert_eq!(rate(&f, high), 0.0);
-    // Just outside the edges the rate is small and of the right sign (down positive: below the zone descends).
     assert!(rate(&f, low - 1e-3) > 0.0 && rate(&f, low - 1e-3) < 1e-2 * dn);
     assert!(rate(&f, high + 1e-3) < 0.0 && rate(&f, high + 1e-3) > -1e-2 * up);
-    // Linear scaling to full travel: the full speeds at the ends.
     near(rate(&f, 0.0), dn, 1e-6);
     near(rate(&f, 1.0), -up, 1e-6);
     near(rate(&f, 0.2), dn * (low - 0.2) / low, 1e-6);
     near(rate(&f, 0.8), -up * (0.8 - high) / low, 1e-6);
-    // Through the shaper: the setpoint carries the feed-forward.
     let mut t = 1_000;
     for thr in [0.0, 0.2, 0.5, 0.8, 1.0] {
         t += DT_US;
@@ -334,7 +320,6 @@ fn entry_captures_the_height_and_zeroes_the_integrator_at_every_entry() {
         H.set_permit(true);
         let mut t = 1_000;
         arm(&mut f, &mut t, Switch3::Low, 0.0);
-        // In Angle there is no target.
         t += DT_US;
         step_rc(&mut f, t, true, 0.5, Switch3::Low);
         assert_eq!(f.shaper.target_d, None);
@@ -342,8 +327,6 @@ fn entry_captures_the_height_and_zeroes_the_integrator_at_every_entry() {
             let mut n = nav_at(d, ALTITUDE);
             n.velocity_ms = [0.0, 0.0, 0.5];
             cell.set(n);
-            // First Altitude step: target = D exactly, no jump, the integrator 0, the thrust the weight less the
-            // velocity term only (e_v = -0.5 here: the vehicle descends, the setpoint is 0).
             t += DT_US;
             let out = step_rc(&mut f, t, true, 0.5, entry_switch);
             assert_eq!(out.mode, Mode::Altitude);
@@ -361,7 +344,6 @@ fn entry_captures_the_height_and_zeroes_the_integrator_at_every_entry() {
             assert_eq!(f.controller.vertical_integrator(), 0.0, "round {round}");
             let want = CARD_MASS * (fw_core::calib::GRAVITY_MSS - tuning.psc_velz_p * -0.5);
             near(out.demand.unwrap().thrust_n, want, 1e-3 * hover);
-            // Wind it for 2 s: it goes negative, the target stays (the stick is centred).
             for _ in 0..1_600 {
                 t += DT_US;
                 step_rc(&mut f, t, true, 0.5, entry_switch);
@@ -369,7 +351,6 @@ fn entry_captures_the_height_and_zeroes_the_integrator_at_every_entry() {
             let wound = f.controller.vertical_integrator();
             assert!(wound < 0.0, "round {round}: {wound}");
             assert_eq!(f.shaper.target_d, Some(d));
-            // Leave: no target in Angle.
             for _ in 0..3 {
                 t += DT_US;
                 step_rc(&mut f, t, true, 0.5, Switch3::Low);
@@ -385,7 +366,6 @@ fn the_lead_cap_limits_how_far_the_target_runs_and_the_control_shows_it_runs_awa
     let tuning = Tuning::DEFAULT;
     let (up, dn) = (tuning.pilot_speed_up_ms, tuning.pilot_speed_dn_ms);
     let dt_s = DT_US as f32 * 1e-6;
-    // The vehicle cannot follow (it stays at D = 0): the stick asks for a descent, then for a climb, for 10 s.
     let gap = |throttle: f32, cap_off: bool| {
         let cell = Cell::new(nav_at(0.0, ALTITUDE));
         let mut f = flight(&cell, &H, &tuning);
@@ -401,13 +381,11 @@ fn the_lead_cap_limits_how_far_the_target_runs_and_the_control_shows_it_runs_awa
             other => panic!("not Altitude: {other:?}"),
         }
     };
-    // Down: stops at dn x pilot_alt_lead_s (plus at most one step's travel). Up: at up x pilot_alt_lead_s.
     let lead = tuning.pilot_alt_lead_s;
     let down = gap(0.0, false);
     assert!(down >= dn * lead && down <= dn * lead + dn * dt_s + 1e-5, "{down}");
     let climb = gap(1.0, false);
     assert!(-climb >= up * lead && -climb <= up * lead + up * dt_s + 1e-5, "{climb}");
-    // Control: with the cap off the target runs at the stick's rate for the whole 10 s.
     let down_off = gap(0.0, true);
     let climb_off = gap(1.0, true);
     assert!(down_off > 9.0 * dn && -climb_off > 9.0 * up, "{down_off} {climb_off}");
@@ -420,18 +398,15 @@ fn armed_in_altitude_with_the_stick_low_the_first_thrust_is_bounded_then_falls_t
     let tuning = Tuning::DEFAULT;
     let hover = CARD_MASS * fw_core::calib::GRAVITY_MSS;
     let (dz, dn) = (tuning.pilot_thr_dz, tuning.pilot_speed_dn_ms);
-    // The slowest descent the stick (at most arm_thr_max) can ask for: the smallest velocity error the first step has.
     let e_min = dn * ((0.5 - dz) - tuning.arm_thr_max) / (0.5 - dz);
     let bound = CARD_MASS * (fw_core::calib::GRAVITY_MSS - tuning.psc_velz_p * e_min);
     assert!(bound <= tuning.ground_thrust_g * hover, "below the ground threshold");
     for (n, disarmed_steps) in [1_usize, 1_600].into_iter().enumerate() {
-        // Each scenario has its own handshake: one static per run.
         let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
         h.set_permit(true);
         let cell = Cell::new(nav_at(0.0, ALTITUDE));
         let mut f = flight(&cell, h, &tuning);
         let mut t = 1_000;
-        // Disarmed in Altitude with the stick low: the target is captured and runs down (up to the lead limit).
         for _ in 0..disarmed_steps {
             t += DT_US;
             step_rc(&mut f, t, false, tuning.arm_thr_max, Switch3::Middle);
@@ -447,8 +422,6 @@ fn armed_in_altitude_with_the_stick_low_the_first_thrust_is_bounded_then_falls_t
             tuning.ground_thrust_g
         );
         assert!(thrust <= bound, "{thrust} > {bound}");
-        // Then the thrust falls to the allocator's floor (every rotor at idle: the demand is below what four rotors at
-        // IDLE_LEVEL give, `limited.thrust_low`) and the integrator stops there, F5, long before it could wind up.
         let mut floor_at = None;
         for k in 1..=4_000_u32 {
             t += DT_US;
@@ -474,15 +447,13 @@ fn armed_in_altitude_with_the_stick_low_the_first_thrust_is_bounded_then_falls_t
             assert!(out.allocation.unwrap().saturation.thrust_low);
             assert!(out.demand.unwrap().thrust_n <= bound);
         }
-        // Frozen from the first floored step on: it has not moved (the floor is reached with e_v > 0).
         assert_eq!(f.controller.vertical_integrator(), at_floor, "the integrator stopped");
         let at_zero = at_floor;
         assert!(at_zero > 0.0 && at_zero <= tuning.psc_velz_imax);
     }
 }
 
-/// I6 on the fake estimator: the failures found (empty when every part holds). With `ignore` the Flight's test switch
-/// makes the effective mode ignore coverage (the negative control).
+/// On the fake estimator: the failures found (empty when every part holds)
 fn i6_failures(ignore: bool) -> std::vec::Vec<&'static str> {
     static H0: Handshake = Handshake::new();
     static H1: Handshake = Handshake::new();
@@ -508,7 +479,6 @@ fn i6_failures(ignore: bool) -> std::vec::Vec<&'static str> {
         Valid { velocity_d: false, ..ALTITUDE },
         Valid { position_d: false, ..ALTITUDE },
     ] {
-        // Altitude, covered, for a while.
         cell.set(nav_at(2.0, ALTITUDE));
         let mut out = StepOut { ..step_rc(&mut f, t + DT_US, true, throttle, Switch3::Middle) };
         t += DT_US;
@@ -520,7 +490,6 @@ fn i6_failures(ignore: bool) -> std::vec::Vec<&'static str> {
         if log.pending(&out) {
             log.done(&out);
         }
-        // The flag drops: Angle from that very step, MODE logged, the Angle stick thrust, no target.
         cell.set(nav_at(1.0, lost));
         t += DT_US;
         out = step_rc(&mut f, t, true, throttle, Switch3::Middle);
@@ -542,7 +511,6 @@ fn i6_failures(ignore: bool) -> std::vec::Vec<&'static str> {
             out = step_rc(&mut f, t, true, throttle, Switch3::Middle);
             check(out.mode == Mode::Angle, "Angle for as long as the flag is down");
         }
-        // Coverage returns at another height: Altitude again with a fresh capture and the integrator at 0.
         cell.set(nav_at(0.4, ALTITUDE));
         t += DT_US;
         out = step_rc(&mut f, t, true, throttle, Switch3::Middle);
@@ -564,7 +532,7 @@ fn i6_the_effective_mode_never_exceeds_coverage() {
     assert!(bad.is_empty(), "{bad:?}");
 }
 
-/// Negative control: a Flight that ignores coverage fails I6.
+/// Negative control: a Flight that ignores coverage fails.
 #[test]
 fn i6_control_ignoring_coverage_fails() {
     let bad = i6_failures(true);
@@ -572,8 +540,8 @@ fn i6_control_ignoring_coverage_fails() {
     assert!(bad.contains(&"effective Angle from the step the flag drops"));
 }
 
-/// Amendment N, N2: in the air (the latch set) RC loss leaves PILOT for LAND at the first step past the timeout, in
-/// Altitude exactly as in Angle, the gate armed and the motors running (before N2 both stopped there).
+/// In the air (the latch set) RC loss leaves PILOT for LAND at the first step past the timeout, in
+/// Altitude exactly as in Angle, the gate armed and the motors running (before N2 both stopped there)
 #[test]
 fn rc_loss_in_altitude_lands_after_the_timeout_exactly_as_in_angle() {
     let tuning = Tuning::DEFAULT;
@@ -603,15 +571,12 @@ fn rc_loss_in_altitude_lands_after_the_timeout_exactly_as_in_angle() {
     };
     let angle = stop_after(Switch3::Low);
     let altitude = stop_after(Switch3::Middle);
-    // Fresh while the age is at most the timeout: the first step past it stops.
     let expected = tuning.rc_fs_timeout_us / DT_US + 1;
     assert_eq!((angle, altitude), (expected, expected));
 }
 
-/// A 1-D point mass on the vertical axis, the plant of the closed-loop tests: thrust scale `scale` (the vehicle gives
-/// `scale` x the commanded thrust), level, perfect estimate. Returns (time s, D, target D, vD) per step after the
-/// entry. The pilot's throttle is `script(t)`; the run starts at hover (D0 = -2 m, climb rate `v0`) with the switch in
-/// Altitude from the first step.
+/// A 1-D point mass on the vertical axis, the plant of the closed-loop tests: thrust scale `scale`.
+/// `scale` x the commanded thrust), level, perfect estimate.
 fn fly(
     scale: f32,
     tuning: &Tuning,
@@ -624,7 +589,6 @@ fn fly(
     let cell = Cell::new(nav_at(-2.0, ALTITUDE));
     let mut f = flight(&cell, h, tuning);
     let mut t_us = 1_000;
-    // Arm in Angle at the stick floor, one more Angle step with the stick centred; the plant waits.
     arm(&mut f, &mut t_us, Switch3::Low, 0.0);
     t_us += DT_US;
     step_rc(&mut f, t_us, true, 0.5, Switch3::Low);
@@ -643,7 +607,6 @@ fn fly(
             Setpoint::Altitude { down_m, .. } => down_m,
             other => panic!("not Altitude: {other:?}"),
         };
-        // Down positive: a = g - T/m.
         let thrust = out.demand.unwrap().thrust_n * scale;
         let a = fw_core::calib::GRAVITY_MSS - thrust / CARD_MASS;
         v += a * dt;
@@ -659,13 +622,10 @@ fn closed_loop_hold_climb_and_a_wrong_thrust_scale() {
     let dz = tuning.pilot_thr_dz;
     let g = fw_core::calib::GRAVITY_MSS;
     let dt = DT_US as f32 * 1e-6;
-    // 1. From hover, centred stick: the entry holds the height.
     let run = fly(1.0, &tuning, 0.0, 10.0, |_| 0.5);
     let worst = run.iter().map(|r| (r.1 - r.2).abs()).fold(0.0, f32::max);
     std::println!("hold from hover: max |D - target| {worst:.6} m over 10 s");
     assert!(worst <= 1e-3);
-    // 1b. Entered while climbing at 2 m/s (Angle's stick holds the weight, so the climb goes on): the overshoot, then
-    // back to the captured height.
     let run = fly(1.0, &tuning, -2.0, 20.0, |_| 0.5);
     let entry = run[0].2;
     let overshoot = run.iter().map(|r| entry - r.1).fold(0.0, f32::max);
@@ -673,7 +633,6 @@ fn closed_loop_hold_climb_and_a_wrong_thrust_scale() {
     std::println!("entry at a 2 m/s climb: overshoot {overshoot:.3} m, error after 20 s {:.4} m", last.1 - last.2);
     assert!(overshoot > 0.0 && overshoot < 1.0);
     assert!((last.1 - last.2).abs() <= 0.01);
-    // 2. A stick-up of 1 s at half the scaled travel climbs by about the speed x scale x 1 s and holds there.
     let half_up = 0.5 + dz + 0.5 * (0.5 - dz);
     let run = fly(1.0, &tuning, 0.0, 15.0, |t| if (1.0..2.0).contains(&t) { half_up } else { 0.5 });
     let entry = run[0].2;
@@ -683,7 +642,6 @@ fn closed_loop_hold_climb_and_a_wrong_thrust_scale() {
     std::println!("climb 1 s at half travel: moved {:.3} m (want {want:.3}), peak lag {lag:.3} m, final error {:.4} m", last.1 - entry, last.1 - last.2);
     near(last.1 - entry, want, 0.02);
     assert!(run.iter().rev().take((1.0 / dt) as usize).all(|r| (r.1 - last.1).abs() <= 0.01), "holds");
-    // 3. A thrust scale of 0.7 and 1.3: the integrator trims it.
     for scale in [0.7_f32, 1.3] {
         let run = fly(scale, &tuning, 0.0, 40.0, |_| 0.5);
         let last = run.last().unwrap();
@@ -691,7 +649,6 @@ fn closed_loop_hold_climb_and_a_wrong_thrust_scale() {
         let peak = run.iter().map(|r| r.1 - r.2).fold(0.0, |a: f32, e| if e.abs() > a.abs() { e } else { a });
         std::println!("scale {scale}: steady error {:.5} m, settled (within 5 cm) at {settle:.1} s, peak error {peak:.3} m", last.1 - last.2);
         assert!((last.1 - last.2).abs() <= 0.01, "scale {scale}");
-        // Control: with psc_velz_i = 0 an offset stays: the thrust shortfall over the loop's stiffness.
         let mut no_i = tuning;
         no_i.psc_velz_i = 0.0;
         let run = fly(scale, &no_i, 0.0, 40.0, |_| 0.5);
@@ -720,7 +677,6 @@ fn spn_is_written_only_in_altitude_with_the_target_and_the_feed_forward() {
     assert_eq!(encode_spn(&out, &mut b), 39);
     assert_eq!(b[..3], [0xA3, 0x95, 150 + 1]);
     assert_eq!(u64::from_le_bytes(b[3..11].try_into().unwrap()), 6_000);
-    // PN, PE, PD, VN, VE, VD, Hdg.
     let fields: std::vec::Vec<f32> = (0..7).map(|i| f32_at(&b, 11 + 4 * i)).collect();
     assert_eq!(fields, [0.0, 0.0, -1.25, 0.0, 0.0, v_ff, 0.0]);
     assert_eq!(encode_spn(&out, &mut [0u8; 38]), 0);
