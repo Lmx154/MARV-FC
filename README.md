@@ -10,8 +10,7 @@ waypoint mission store. Core 1, the flight core, runs IMU1, IMU2, the estimator,
 telemetry). The hardware-free logic is in `crates/fw-core`, `crates/fw-flight` and `crates/fw-settings` (see Workspace).
 
 **Start with `docs/overview.md`**: what the firmware does today (flight modes, the mission switch, failsafes, waypoint missions, key
-parameters, what has and has not flown). This README is the detailed reference for each subsystem; where a section is dated, it describes
-that date's bench work.
+parameters, what has and has not flown). This README is the detailed reference for each subsystem.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
@@ -34,7 +33,7 @@ that date's bench work.
   lists the five channels (0-3 and 5). No log, no critical-section primitive of its own, and no
   timer in the sample loop there. Everything it runs, every constant and its vector table are in internal SRAM
   (see Flight core in SRAM).
-- RULE of the flight core (lead's ruling, 2026-11-15): the flight core verifies INCREMENTALLY (as ArduPilot's
+- RULE of the flight core: the flight core verifies INCREMENTALLY (as ArduPilot's
   `check_next_register`). The sample loop never runs a whole-configuration `verify`: after every K-th sample,
   and never while a sample is waiting (the latched data-ready level, `ImuAdapter::data_waiting`), it takes ONE
   `verify_step`, which checks one register (one or two SPI transactions; the ICM-45686's indirect registers
@@ -42,9 +41,7 @@ that date's bench work.
   registers per pass, so one pass takes about 1 s: IMU1 33 registers, K 24 (792 samples, 0.99 s); IMU2 32
   registers, K 25 (800 samples, 1.0 s). A mismatch is the same health event as a failed `verify`
   (reconfigure); a bus error at a step is an error event. The steps come from the drivers' additive
-  `verify_steps` / `verify_step` (branch `verify-step` of both driver repositories). The earlier rule (a
-  yield after every transaction and busy wait) was withdrawn: it helped the other task but stretched a
-  whole `verify` past one period, during which the task cannot read its own samples. Each IMU task's
+  `verify_steps` / `verify_step` (branch `verify-step` of both driver repositories). Each IMU task's
   longest poll (the longest stretch it ran without yielding, since boot and over the last 10 s window) and
   its poll count are taken around every poll (`flight_latency::measured`), published through its status
   cell (`ImuAdapter::latency`) and logged in its `[STAT]` line: the flight core's latency figure.
@@ -83,15 +80,15 @@ is published: `ImuTask` hands each new sample to its `SampleSink` (IMU1's is `fl
 `Flight`; IMU2's is `()`, which does nothing). The stages run in the order of the decision's rule R1 (estimator,
 controller reset while disarmed, stick shaper, validity check, controller, allocator, gate); the seams are in
 `fw_flight::gnc`, the gate and `MotorCommand` (only the gate can make a spinning one) in `fw_flight::gate`, the
-slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. Since step 5 (P4b, 2026-11-19) the step runs
+slow-sensor and stick sample types in `fw_core::sample` and `fw_core::rc`. The step runs
 the real flight code (`decision-first-pair-20261119.md`): `fw_flight::mahony::Mahony`, the Angle-mode stick shaper
 (private, in `step.rs`; collective 0 -> 0, 0.5 -> m g, 1 -> 2 m g, one straight line: `pilot_thrust_max_g`, Amendment C), `fw_flight::pid::CascadedPid`, `fw_flight::alloc::CardAllocator` and the gate's arming and
 RC-loss rules (section 5: an off-to-on switch cycle on fresh reports with throttle low, attitude valid, lean within
 `ANGLE_MAX`, levels present and `HANDSHAKE.try_arm()` granted; Stop and disarm when the newest report is older than
 `RC_FS_TIMEOUT`, on switch off, or on a refusal while armed). The board image names them in `src/flight.rs`
-(`BoardFlight`). Since P6 the image spins the motors when armed (see Flying, props off, below). IMU1's sample, the
+(`BoardFlight`). The image spins the motors when armed (see Flying, props off, below). IMU1's sample, the
 newest CRSF stick report and the newest barometer, compass and GNSS samples go in (IMU2 comes with a later step).
-The slow sensors (`decision-nav-eskf-20261120.md` section 4, packet F1): core 0's device loop, when it publishes a good
+The slow sensors (`decision-nav-eskf-20261120.md` section 4): core 0's device loop, when it publishes a good
 sample to the row's `Watch` (`device::read`), hands it to the adapter's `DeviceAdapter::to_flight` hook; BARO, MAG and
 GNSS turn the reading into its `fw_core::sample` sample (`BaroSample`, `MagSample` with the calibrated field m, `GnssSample`
 with everything `Reading::Gnss` has, deviations included; its `vel_ned_mm_s` (north, east, down, mm/s) is the NAV-PVT velocity when there is a 3D fix, see GNSS below), each with the core-0 board time and `seq` of the publish, and
@@ -100,26 +97,23 @@ on both sides). `Stepper::sample` reads the three once per step and gives `Senso
 sample that is new since the previous step (newest only; a gap shows in `seq`). The read copies the three slots every
 step (24 + 32 + 104 bytes), no lock and no wait; Mahony ignores the three samples, so the step's outputs are the same
 bit for bit with and without them (test `slow_sensor_samples_do_not_change_a_mahony_step`).
-Mode switch and altitude hold (decision-nav-eskf-20261120, 5e, 7, Amendment F, packet P-F1; host-tested only, not yet flown): channel 6 is a three-position switch, decoded by `fw_settings::rc::mode_switch` from the normalised channel in thirds (below 1/3 `Low`, above 2/3 `High`, else `Middle`; exactly 1/3 and 2/3 are `Middle`; an absent channel (0 us) or RC6_MIN >= RC6_MAX gives `Low`; no hysteresis) into `RcSample.switch6` (`fw_core::rc::Switch3`, filled in `src/rc.rs`). `Flight` maps Low/Middle/High to the selected mode Angle/Altitude/Position (Angle until the first stick report; the last switch holds between reports and through RC loss). The effective mode, re-evaluated every step, is Altitude if Altitude or Position is selected and the estimate covers `Setpoint::Altitude.requires()` (tilt, rates, velocity_d, position_d), otherwise Angle; Position behaves as Altitude until it is built; Acro cannot be selected; arming is unchanged in every mode. `StepOut.selected` is the switch, `StepOut.mode` the effective mode (MOT's `Mode`). In Altitude: roll, pitch and yaw sticks as Angle; the throttle stick centre is 0.5, `pilot_thr_dz` on each side holds the height, outside it the climb rate scales linearly to `pilot_speed_up_ms` (stick 1) or `pilot_speed_dn_ms` (stick 0); the target height is captured at the first step whose effective mode is Altitude (the current down position: no jump, the controller's vertical integrator 0) and integrates the stick's climb rate only while the vehicle is within `pilot_alt_lead_s` (1 s, Betaflight) times the limit speed of that direction from it. `CascadedPid`: vD_sp = `psc_posz_p` (D_target - D) + stick rate, limited to the up and down speeds; PI on the velocity error (`psc_velz_p`, `psc_velz_i`, integrator within `psc_velz_imax`) gives the acceleration a_d; thrust = m (g - a_d) x clamp(10 cos, 0, 1) / clamp(cos, 0.1, 1) from the estimated tilt, clamped to [0, the same maximum Angle's stick reaches]; the integrator does not advance into a saturated thrust (our clamp or the allocator's `thrust_low`/`thrust_high`); the ground rule uses this step's thrust. Signs: NED, down positive for D, vD, a_d and the integrator. Fallback: when velocity_d or position_d drops the effective mode is Angle from that step (thrust straight from the stick map, 0.8 to 1.2 m g in the dead zone), MODE is logged, and on return Altitude resumes by itself with a fresh capture. RC loss in Altitude is the gate's rule as in Angle. Armed in Altitude with the stick low the first thrust is at most m (g - `psc_velz_p` x the stick's descent rate at `arm_thr_max`) (0.46 m g with the approved numbers), then the thrust falls to the allocator's idle floor within about 1 s and the integrator stops there. Tuning fields (owner-approved 2026-11-21): `psc_posz_p` 1.0, `psc_velz_p` 4.0, `psc_velz_i` 2.0, `psc_velz_imax` `GRAVITY_MSS`, `pilot_speed_up_ms` 3.0, `pilot_speed_dn_ms` 1.5, `pilot_thr_dz` 0.10. `pilot_alt_lead_s` (1 s), `thr_tilt_cos_min` (0.1) and `thr_inverted_gain` (10) are Tuning fields (owner-approved 2026-11-21). First Altitude flights: arm and take off in Angle, hover, centre the throttle, switch to the middle, land in Angle. Tests: `step/althold_tests.rs` and `pid.rs` (decode bands in `fw-settings`; capture and integrator at every entry; stick law; lead cap with its negative control; anti-windup for each flag and direction with controls; A4 arming bound; tilt factor; I6 with its control; RC loss; a 1-D closed loop at thrust scales 0.7 and 1.3 with `psc_velz_i` = 0 as control).
-Ground rule (`decision-flight-ground-20261119.md`, section 1; approved by the owner on 2026-11-19): while the collective is below `ground_thrust_g` x m g (0.5/0.7, the vehicle on the ground) `fw_flight::pid::CascadedPid` sets the three rate integrators to 0 every step; above it nothing changes.
+Mode switch and altitude hold (decision-nav-eskf-20261120, 5e, 7, Amendment F): channel 6 is a three-position switch, decoded by `fw_settings::rc::mode_switch` from the normalised channel in thirds (below 1/3 `Low`, above 2/3 `High`, else `Middle`; exactly 1/3 and 2/3 are `Middle`; an absent channel (0 us) or RC6_MIN >= RC6_MAX gives `Low`; no hysteresis) into `RcSample.switch6` (`fw_core::rc::Switch3`, filled in `src/rc.rs`). `Flight` maps Low/Middle/High to the selected mode Angle/Altitude/Position (Angle until the first stick report; the last switch holds between reports and through RC loss). The effective mode, re-evaluated every step, is Altitude if Altitude or Position is selected and the estimate covers `Setpoint::Altitude.requires()` (tilt, rates, velocity_d, position_d), otherwise Angle; Position behaves as Altitude until it is built; Acro cannot be selected; arming is unchanged in every mode. `StepOut.selected` is the switch, `StepOut.mode` the effective mode (MOT's `Mode`). In Altitude: roll, pitch and yaw sticks as Angle; the throttle stick centre is 0.5, `pilot_thr_dz` on each side holds the height, outside it the climb rate scales linearly to `pilot_speed_up_ms` (stick 1) or `pilot_speed_dn_ms` (stick 0); the target height is captured at the first step whose effective mode is Altitude (the current down position: no jump, the controller's vertical integrator 0) and integrates the stick's climb rate only while the vehicle is within `pilot_alt_lead_s` (1 s, Betaflight) times the limit speed of that direction from it. `CascadedPid`: vD_sp = `psc_posz_p` (D_target - D) + stick rate, limited to the up and down speeds; PI on the velocity error (`psc_velz_p`, `psc_velz_i`, integrator within `psc_velz_imax`) gives the acceleration a_d; thrust = m (g - a_d) x clamp(10 cos, 0, 1) / clamp(cos, 0.1, 1) from the estimated tilt, clamped to [0, the same maximum Angle's stick reaches]; the integrator does not advance into a saturated thrust (our clamp or the allocator's `thrust_low`/`thrust_high`); the ground rule uses this step's thrust. Signs: NED, down positive for D, vD, a_d and the integrator. Fallback: when velocity_d or position_d drops the effective mode is Angle from that step (thrust straight from the stick map, 0.8 to 1.2 m g in the dead zone), MODE is logged, and on return Altitude resumes by itself with a fresh capture. RC loss in Altitude is the gate's rule as in Angle. Armed in Altitude with the stick low the first thrust is at most m (g - `psc_velz_p` x the stick's descent rate at `arm_thr_max`) (0.46 m g with the approved numbers), then the thrust falls to the allocator's idle floor within about 1 s and the integrator stops there. Tuning fields: `psc_posz_p` 1.0, `psc_velz_p` 4.0, `psc_velz_i` 2.0, `psc_velz_imax` `GRAVITY_MSS`, `pilot_speed_up_ms` 3.0, `pilot_speed_dn_ms` 1.5, `pilot_thr_dz` 0.10. `pilot_alt_lead_s` (1 s), `thr_tilt_cos_min` (0.1) and `thr_inverted_gain` (10) are Tuning fields. First Altitude flights: arm and take off in Angle, hover, centre the throttle, switch to the middle, land in Angle. Tests: `step/althold_tests.rs` and `pid.rs` (decode bands in `fw-settings`; capture and integrator at every entry; stick law; lead cap with its negative control; anti-windup for each flag and direction with controls; A4 arming bound; tilt factor; I6 with its control; RC loss; a 1-D closed loop at thrust scales 0.7 and 1.3 with `psc_velz_i` = 0 as control).
+Ground rule (`decision-flight-ground-20261119.md`, section 1): while the collective is below `ground_thrust_g` x m g (0.5/0.7, the vehicle on the ground) `fw_flight::pid::CascadedPid` sets the three rate integrators to 0 every step; above it nothing changes.
 `Flight::new` also takes the gains and limits (`fw_flight::tuning::Tuning::DEFAULT`, the numbers of
 `decision-first-pair-20261119.md` section 13) and `settings::HANDSHAKE`, where the gate stores the armed state for
 core 0; before each step the estimator is given the previous step's armed state (`Estimator::set_armed`).
-Attitude estimator (`fw_flight::mahony::Mahony`, `decision-estimator-accel-20261120.md`, approved 2026-11-20): Mahony's filter on IMU1, tilt only, Kp 0.25 armed and 2.5 disarmed. The accelerometer goes through a PT1 low-pass (`Tuning::ins_accel_lpf_hz`, default 10 Hz, seeded with the first sample) before anything is decided on it: the 0.9 g to 1.1 g window and the direction used for the correction both come from the filtered vector, never from a raw sample (selecting and normalising raw samples slid the tilt by up to 18 deg on the ground with the motors running). The gyro is integrated raw. Test `tilt_holds_on_the_ground_with_the_motors_running` replays `crates/fw-flight/testdata/ground-run-20261120.bin`, a recording of the first flights' ground run (log 182, IMU1, 23.0 s to 40.0 s, motors spinning up, vehicle not moving; 12 075 records of 33 bytes, little-endian: u64 t_us, f32 gyro x y z rad/s, f32 accel x y z m/s^2, u8 armed; IMU and armed flag only, one particular vehicle): from the first armed sample the tilt stays within 0.5 deg of the tilt of the mean of all accelerometer samples (about 0.08 deg roll and 0.11 deg pitch). The unit test holds 2 g and 0.5 g along the mirrored tilt, and 0 g, for 0.25 s from a converged estimator: the attitude stays within 0.1 deg only while the window rejects the filtered vector. After a zero first sample the tilt becomes valid only when the filtered |f| reaches 0.9 g (about 37 ms at 10 Hz); `step.rs`'s test pins that delay.
-Steering estimator on the board (decision-nav-eskf-20261120 D7 and its storage addendum, Amendments G and G-1, packet P-G6): `flight::BoardFlight = Flight<&'static mut SteerMix<'static>, CascadedPid, CardAllocator>`. `fw_flight::eskf_out::SteerMix` composes two estimators that both run on every step with the same sensors: the ESKF3 core (`Eskf`, `Aiding::Full`) behind its output predictor `EskfSteer` gives attitude, rates and the horizontal state at the current time, and the zero-delay ESKF2 (an `Eskf` with `Aiding::ImuBaro`: IMU and barometer, no compass or GNSS; a full-ring `Eskf` rather than the one-entry `EskfZ`, which is bit for bit the same filter at zero delay but would add a second 17.7 KB monomorphisation of the filter to `.ram_text`; `SteerMix<'a, const RV: usize>` takes either, the board uses `RV = RING`, and its `Estimator` impls are written for `RING` and, in tests, 1, so that the filter is compiled once) gives the vertical state (D, v_D, their sigmas, the vertical flags). They live in three statics built on core 0 before core 1 starts: `flight::STEER_CORE` (the `Eskf`, 16 656 B of `.bss`, from the map), `flight::VERT` (the second `Eskf`, 16 656 B) and `flight::STEER` (the `SteerMix` with the output predictor's ring, 2 824 B), by `flight::steer_core()`, `flight::vert()` and `flight::steer(core, vert)`, each `#[inline(never)]` and called one after the other from `main` so that their stack frames do not add up. The two big ones are built through `StaticCell::try_init_with` into a `StaticCell<Result<_, EskfError>>`, which halves the boot frame (33 308 to 16 668 B for the `Eskf`) but does not construct the value in place: the compiler still builds one instance on core 0's stack and copies it (boot chain about 21.6 KB, core 0's stack 31 440 B on the measured image). A blanket `impl Estimator for &mut E` in `fw_flight::gnc` lets `Flight` own the reference; the guard `const _: () = assert!(size_of::<BoardFlight>() < size_of::<Eskf>())` in `src/flight.rs` fails the build if `Flight` ever holds an estimator by value. Two more `const` assertions make a refusal of `Eskf::new` or `EskfSteer::new` for `Tuning::DEFAULT` a build error. `Stepper::new` returns `None` if any constructor refused, so IMU1's task never starts and the board does not fly. No shadow estimator runs on the board. Amendments E (E1) and H (H1, H2): this variant's barometer scalar updates only position D, velocity D and accelerometer-bias z (every other Kalman-gain entry zeroed, P in Joseph form with that gain; the attitude, gyro bias, horizontal velocity and position and b_a,x, b_a,y are not touched by it; b_a,z still learned through its covariance with D), so b_a,x and b_a,y stay exactly 0.0; its `rates_rads` are the PT1 of the gyro minus the x and y gyro-bias estimates, the z bias is not subtracted (`rates_rads[2]` is `Mahony`'s bit for bit, so the yaw rate hold with the stick centred follows the raw gyro's z offset; the attitude still integrates the gyro minus the full bias; the same for `Aiding::Imu`, `Full` unchanged); without GPS the horizontal accelerometer bias is not estimated; the real one (about +0.1 to +0.2 m/s^2 in x per ESKF3) remains as a tilt offset of up to about 1 deg, as with Mahony. `MahonyBaro` is no longer run on the board; its code and tests stay, and the doc comment on `BoardFlight` says what to edit to go back. The next paragraph describes `MahonyBaro`, the board's steering estimator from packet E2 until P4a (`flight::BoardFlight = Flight<MahonyBaro, CascadedPid, CardAllocator>`; `fw_flight::mahony_baro::MahonyBaro`, decision-nav-eskf-20261120 Amendment B, B1, approved 2026-11-21; packet E1a): `Mahony` unchanged, plus `VertKf`, a 3-state vertical Kalman filter in f32 (D down from the barometer datum, vD, bD the earth-down accelerometer bias). Attitude, rates and the tilt and rates flags are Mahony's, bit for bit (invariant I9). Every IMU1 sample: a_D = row 3 of R(q) times the raw specific force + `GRAVITY_MSS` - bD integrates D and vD (dt capped at `DT_MAX_US`); every `Tuning::nav_predict_us` of capped time P = F P F^T + Q (Q from `nav_vrw`, `nav_ba_rw`). Each fresh barometer sample: the ISA height (ISO 2533 constants, as the simulator's model) minus the datum (the first sample after tilt is valid) is fused with H = [-1, tau, 0], tau = sample age + `nav_baro_delay_us`, noise `nav_baro_sigma_m`, gated at `nav_gate_sigma` on the scalar innovation. Initialised at that first sample (D 0, vD 0, bD 0; sigmas `nav_baro_sigma_m`, `nav_p0_vel_ms`, `nav_p0_ba_ms2`). After `nav_aid_timeout_us` of rejected samples the height is reset to the barometer (vD zeroed disarmed, kept armed; counted by `VertKf::resets`, NKI Src 6 once logged). A pressure that is not finite or <= 0 is ignored; a non-finite state or P re-initialises VertKf at the next sample (the datum is kept) without touching Mahony. velocity_d and position_d are set while tilt is valid and a fusion, reset or initialisation happened within `nav_aid_timeout_us`; heading and the NE flags never. `sigma` is always given: vD and D from P (infinite before the initialisation), tilt, heading and NE infinite. Pure arithmetic, no lock, timer or log; `memory.x` puts it in `.ram_text` (the flight image runs it since packet E2; `tools/check-ram-code.py` passes). Tests: `mahony_baro.rs` (B4 a1 on `ground-run-20261120.bin` with a constant barometer added, a5 to a8 and the re-initialisation); a2 to a4 on simulator truth are in MARV-sim (`tests/nav_vertical.rs`, `marv-run --shadow mahony-baro`).
+Attitude estimator (`fw_flight::mahony::Mahony`, `decision-estimator-accel-20261120.md`): Mahony's filter on IMU1, tilt only, Kp 0.25 armed and 2.5 disarmed. The accelerometer goes through a PT1 low-pass (`Tuning::ins_accel_lpf_hz`, default 10 Hz, seeded with the first sample) before anything is decided on it: the 0.9 g to 1.1 g window and the direction used for the correction both come from the filtered vector, never from a raw sample (selecting and normalising raw samples slid the tilt by up to 18 deg on the ground with the motors running). The gyro is integrated raw. Test `tilt_holds_on_the_ground_with_the_motors_running` replays `crates/fw-flight/testdata/ground-run-20261120.bin`, a recording of the first flights' ground run (log 182, IMU1, 23.0 s to 40.0 s, motors spinning up, vehicle not moving; 12 075 records of 33 bytes, little-endian: u64 t_us, f32 gyro x y z rad/s, f32 accel x y z m/s^2, u8 armed; IMU and armed flag only, one particular vehicle): from the first armed sample the tilt stays within 0.5 deg of the tilt of the mean of all accelerometer samples (about 0.08 deg roll and 0.11 deg pitch). The unit test holds 2 g and 0.5 g along the mirrored tilt, and 0 g, for 0.25 s from a converged estimator: the attitude stays within 0.1 deg only while the window rejects the filtered vector. After a zero first sample the tilt becomes valid only when the filtered |f| reaches 0.9 g (about 37 ms at 10 Hz); `step.rs`'s test pins that delay.
+Steering estimator on the board (decision-nav-eskf-20261120 D7 and its storage addendum, Amendments G and G-1): `flight::BoardFlight = Flight<&'static mut SteerMix<'static>, CascadedPid, CardAllocator>`. `fw_flight::eskf_out::SteerMix` composes two estimators that both run on every step with the same sensors: the ESKF3 core (`Eskf`, `Aiding::Full`) behind its output predictor `EskfSteer` gives attitude, rates and the horizontal state at the current time, and the zero-delay ESKF2 (an `Eskf` with `Aiding::ImuBaro`: IMU and barometer, no compass or GNSS; a full-ring `Eskf` rather than the one-entry `EskfZ`, which is bit for bit the same filter at zero delay but would add a second 17.7 KB monomorphisation of the filter to `.ram_text`; `SteerMix<'a, const RV: usize>` takes either, the board uses `RV = RING`, and its `Estimator` impls are written for `RING` and, in tests, 1, so that the filter is compiled once) gives the vertical state (D, v_D, their sigmas, the vertical flags). They live in three statics built on core 0 before core 1 starts: `flight::STEER_CORE` (the `Eskf`, 16 656 B of `.bss`, from the map), `flight::VERT` (the second `Eskf`, 16 656 B) and `flight::STEER` (the `SteerMix` with the output predictor's ring, 2 824 B), by `flight::steer_core()`, `flight::vert()` and `flight::steer(core, vert)`, each `#[inline(never)]` and called one after the other from `main` so that their stack frames do not add up. The two big ones are built through `StaticCell::try_init_with` into a `StaticCell<Result<_, EskfError>>`, which halves the boot frame (33 308 to 16 668 B for the `Eskf`) but does not construct the value in place: the compiler still builds one instance on core 0's stack and copies it (boot chain about 21.6 KB, core 0's stack 31 440 B on the measured image). A blanket `impl Estimator for &mut E` in `fw_flight::gnc` lets `Flight` own the reference; the guard `const _: () = assert!(size_of::<BoardFlight>() < size_of::<Eskf>())` in `src/flight.rs` fails the build if `Flight` ever holds an estimator by value. Two more `const` assertions make a refusal of `Eskf::new` or `EskfSteer::new` for `Tuning::DEFAULT` a build error. `Stepper::new` returns `None` if any constructor refused, so IMU1's task never starts and the board does not fly. No shadow estimator runs on the board. Amendments E (E1) and H (H1, H2): this variant's barometer scalar updates only position D, velocity D and accelerometer-bias z (every other Kalman-gain entry zeroed, P in Joseph form with that gain; the attitude, gyro bias, horizontal velocity and position and b_a,x, b_a,y are not touched by it; b_a,z still learned through its covariance with D), so b_a,x and b_a,y stay exactly 0.0; its `rates_rads` are the PT1 of the gyro minus the x and y gyro-bias estimates, the z bias is not subtracted (`rates_rads[2]` is `Mahony`'s bit for bit, so the yaw rate hold with the stick centred follows the raw gyro's z offset; the attitude still integrates the gyro minus the full bias; the same for `Aiding::Imu`, `Full` unchanged); without GPS the horizontal accelerometer bias is not estimated; the real one (about +0.1 to +0.2 m/s^2 in x per ESKF3) remains as a tilt offset of up to about 1 deg, as with Mahony. `MahonyBaro` is no longer run on the board; its code and tests stay, and the doc comment on `BoardFlight` says what to edit to go back. The next paragraph describes `MahonyBaro`, the former steering estimator (`flight::BoardFlight = Flight<MahonyBaro, CascadedPid, CardAllocator>`; `fw_flight::mahony_baro::MahonyBaro`, decision-nav-eskf-20261120 Amendment B, B1): `Mahony` unchanged, plus `VertKf`, a 3-state vertical Kalman filter in f32 (D down from the barometer datum, vD, bD the earth-down accelerometer bias). Attitude, rates and the tilt and rates flags are Mahony's, bit for bit (invariant I9). Every IMU1 sample: a_D = row 3 of R(q) times the raw specific force + `GRAVITY_MSS` - bD integrates D and vD (dt capped at `DT_MAX_US`); every `Tuning::nav_predict_us` of capped time P = F P F^T + Q (Q from `nav_vrw`, `nav_ba_rw`). Each fresh barometer sample: the ISA height (ISO 2533 constants, as the simulator's model) minus the datum (the first sample after tilt is valid) is fused with H = [-1, tau, 0], tau = sample age + `nav_baro_delay_us`, noise `nav_baro_sigma_m`, gated at `nav_gate_sigma` on the scalar innovation. Initialised at that first sample (D 0, vD 0, bD 0; sigmas `nav_baro_sigma_m`, `nav_p0_vel_ms`, `nav_p0_ba_ms2`). After `nav_aid_timeout_us` of rejected samples the height is reset to the barometer (vD zeroed disarmed, kept armed; counted by `VertKf::resets`, NKI Src 6 once logged). A pressure that is not finite or <= 0 is ignored; a non-finite state or P re-initialises VertKf at the next sample (the datum is kept) without touching Mahony. velocity_d and position_d are set while tilt is valid and a fusion, reset or initialisation happened within `nav_aid_timeout_us`; heading and the NE flags never. `sigma` is always given: vD and D from P (infinite before the initialisation), tilt, heading and NE infinite. Pure arithmetic, no lock, timer or log; `memory.x` puts it in `.ram_text` (`tools/check-ram-code.py` passes). Tests: `mahony_baro.rs` (B4 a1 on `ground-run-20261120.bin` with a constant barometer added, a5 to a8 and the re-initialisation); a2 to a4 on simulator truth are in MARV-sim (`tests/nav_vertical.rs`, `marv-run --shadow mahony-baro`).
 
-Navigation filter with `Aiding::Full` (on the board it is the ESKF3 core inside `SteerMix` since packet P-G6, in shadow from packet E2 until then; `fw_flight::eskf::Eskf`, decision-nav-eskf-20261120 sections 1a-1c, 3, 6, Amendment B B2 where it stands, Amendments C and C-1; packet E1b): a 15-state error-state Kalman filter in f32 (attitude error in NED, velocity, position, gyro and accelerometer biases) whose own state never steers (the board steers on its output predictor `EskfSteer`, `fw_flight::eskf_out`, Amendment G). It runs at a delayed horizon, t_now - `nav_gps_delay_us`: a static ring of 402 raw IMU1 samples (`eskf::RING`, 32 B each) feeds the nominal integration (N0's `eskf_n0::nominal_step`) at the horizon, and `NavState.t_us` is the horizon time. Barometer samples wait until the horizon reaches their time minus `nav_baro_delay_us`, compass samples until it reaches their time, a GNSS epoch is due on arrival. Work rule I2: each step integrates and does at most one heavy job (`eskf_n0::covariance_predict` every `nav_predict_us`, one scalar fusion, the alignment or a reset) from a queue of one GNSS epoch (4 scalars), one barometer set (barometer, then no-aid N and E) and one compass sample. Tilt aligns from the first propagation interval whose mean specific force is within `ACCEL_MIN_G`..`ACCEL_MAX_G`, yaw 0. Barometer: H = -1 on the down error, gated, the height reset of B1. No-aid hold while horizontal aiding is not running (disarmed, or no GNSS position fused for `nav_aid_timeout_us`): position N and E toward the held position, `nav_noaid_sigma_m` armed / `nav_noaid_sigma_dis_m` disarmed, ungated, with the accelerometer-bias inhibit (no accelerometer-bias state updated). Heading: only from a compass sample whose `expected` field passes the health test (strength and inclination with the horizon tilt); the first healthy sample aligns the yaw (and resets b_g,z, b_a,x, b_a,y), then one yaw fusion per `nav_mag_fuse_us` with the H row of the innovation in use (the review's ruling 1: [-m_N m_D / c, -m_E m_D / c, 1] for the rotated field m, c = m_N^2 + m_E^2; not the 321-yaw row), noise `nav_mag_heading_sigma_rad`, declination `nav_mag_declination_rad` (3.195 deg E, compiled); a yaw reset after `nav_aid_timeout_us` of gated samples while disarmed; while armed (Amendment G, G6-B) no reset: the latch `global_off` is set (NKI Src 8 with Ok 0, Inn the innovation), GNSS epochs are no longer fused (counted in `EskfStats::gps_disarmed`), `started` goes false and the heading and NE flags stay false until the disarm edge clears the latch. GNSS: accepted with fix type >= 3, GST lat/lon and an interval <= 1/`nav_gps_min_rate_hz` (1000/245 Hz: ArduPilot's per-frame bound of 245 ms, `AP_GPS.cpp:849`; the 215 ms is its bound on the average interval; the first fix only starts the interval); the origin latches at the first accepted epoch (`Estimator::origin`, `eskf::ned_from_geo`); fused only while armed and with the yaw aligned; the first accepted epoch after each arming sets position and velocity to the fix (Src 9); exact repeats while armed are screened (E1s), the velocity is screened when the GNSS speed is under `nav_gps_spd_ratio` of the position-difference speed (at `nav_gps_spd_min_ms` or more), that speed taken between the epoch and the newest earlier epoch since arming at least `eskf::SPD_SPAN_US` (1 s, the span of the 1 Hz data the screen was validated on; a derived rule for the owner's approval) older, no screen decision before such an epoch exists; position N/E and velocity N/E (the receiver's NED velocity when given, else speed and course, below `nav_gps_course_min_ms` zero with sigma hypot(speed, sigma_v)) as gated scalars; the C3 reset when either position axis is gated for `nav_aid_timeout_us`. Flags: tilt from alignment, rates always, velocity_d/position_d by the B1 rule, heading (aligned, sigma <= `nav_heading_valid_sigma_rad`, a compass sample accepted within the timeout) and velocity_ne/position_ne (origin, a GNSS position fused within the timeout, the latest epoch without a gated scalar) only while armed. The reported `sigma.position_ne_m` (Amendment G, G5) is sqrt(P_N + P_E + s_N^2 + s_E^2), s the floored GST sigmas of the latest GNSS epoch that became a job (before any, sqrt(P_N + P_E)); the filter's state and P do not use it. A non-finite state or P re-initialises it (origin and datum kept). `Eskf::events` returns the step's NKI codes (C8), `Eskf::stats` the counters. Pure arithmetic; `memory.x` puts it in `.ram_text` (the flight image runs it since packet E2; `tools/check-ram-code.py` passes). RAM: about 16 KB per instance, computed from the layout (the IMU ring 12 864 B; the waiting barometer samples `BARO_WAIT` 25 x 16 B = 400 B and compass samples `MAG_WAIT` 50 x 24 B = 1 200 B, each nav_buffer_us times the sensor's rate of section 4a, 50 and 100 Hz; the fix history 12 x 16 B; P 900 B). Tests: `eskf.rs` (c3, c5-c15, b5-b8, n1, O1, I4) and the N0 tests in `eskf_n0.rs` (now always built; the `eskf-n0` feature stays for the bench binary); c1, c2, c4, b2, b3 on simulator truth in MARV-sim (`tests/nav_eskf.rs`, `marv-run --shadow eskf`). c6 and b6 follow the lead's rulings R1 and R2 (2026-11-21). MARV-sim's c4 still fails its pass rule (the GNSS slow error is not a filter state) and reports a second figure with that error removed; the owner decides how it is judged. Readings of the specification in `Eskf` (also in the module's header, checked against the code): the Src 9 reset at the first accepted, aligned, non-repeated epoch after every arming, a queued GNSS job dropped on every change of the armed state; aiding = armed and started and a GNSS position fused or reset within the timeout, else the no-aid hold at the position captured when aiding stops; the first fix only starts the interval rule (any fix with a position becomes the previous fix, GST or not); the GST check needs latitude and longitude only; the origin latches at the first accepted epoch, normally the second fix, armed or not; a waiting compass sample is used only if it carried `expected`, with the newest value; no velocity at or above the course minimum without a course (and then no speed screen); job order propagation, GNSS, barometer, compass; the height reset counts from the last barometer aid, and after a re-initialisation the next barometer sample initialises the height at once (as `MahonyBaro`), counted as a height reset; no position process noise; the declination is a `Tuning` field the simulator sets from its field model; WGS 84 radii; a reset counts as a position fusion for the flags; the horizontal flags need the yaw aligned, not the heading flag; the first epoch after arming (and a C3 reset) takes the receiver's velocity unscreened; armed at rest, exact repeats are screened, so GNSS is neither reset nor fused until the fix changes; compass refusals all counted, one NKI record per nav_mag_fuse_us; a barometer, compass or GNSS sample older than now - nav_buffer_us (GNSS: arrival time minus the delay) dropped and counted (`EskfStats::stale`).
+Navigation filter with `Aiding::Full` (on the board it is the ESKF3 core inside `SteerMix`; `fw_flight::eskf::Eskf`, decision-nav-eskf-20261120 sections 1a-1c, 3, 6, Amendment B B2 where it stands, Amendments C and C-1): a 15-state error-state Kalman filter in f32 (attitude error in NED, velocity, position, gyro and accelerometer biases) whose own state never steers (the board steers on its output predictor `EskfSteer`, `fw_flight::eskf_out`, Amendment G). It runs at a delayed horizon, t_now - `nav_gps_delay_us`: a static ring of 402 raw IMU1 samples (`eskf::RING`, 32 B each) feeds the nominal integration (N0's `eskf_n0::nominal_step`) at the horizon, and `NavState.t_us` is the horizon time. Barometer samples wait until the horizon reaches their time minus `nav_baro_delay_us`, compass samples until it reaches their time, a GNSS epoch is due on arrival. Work rule I2: each step integrates and does at most one heavy job (`eskf_n0::covariance_predict` every `nav_predict_us`, one scalar fusion, the alignment or a reset) from a queue of one GNSS epoch (4 scalars), one barometer set (barometer, then no-aid N and E) and one compass sample. Tilt aligns from the first propagation interval whose mean specific force is within `ACCEL_MIN_G`..`ACCEL_MAX_G`, yaw 0. Barometer: H = -1 on the down error, gated, the height reset of B1. No-aid hold while horizontal aiding is not running (disarmed, or no GNSS position fused for `nav_aid_timeout_us`): position N and E toward the held position, `nav_noaid_sigma_m` armed / `nav_noaid_sigma_dis_m` disarmed, ungated, with the accelerometer-bias inhibit (no accelerometer-bias state updated). Heading: only from a compass sample whose `expected` field passes the health test (strength and inclination with the horizon tilt); the first healthy sample aligns the yaw (and resets b_g,z, b_a,x, b_a,y), then one yaw fusion per `nav_mag_fuse_us` with the H row of the innovation in use ([-m_N m_D / c, -m_E m_D / c, 1] for the rotated field m, c = m_N^2 + m_E^2; not the 321-yaw row), noise `nav_mag_heading_sigma_rad`, declination `nav_mag_declination_rad` (3.195 deg E, compiled); a yaw reset after `nav_aid_timeout_us` of gated samples while disarmed; while armed (Amendment G, G6-B) no reset: the latch `global_off` is set (NKI Src 8 with Ok 0, Inn the innovation), GNSS epochs are no longer fused (counted in `EskfStats::gps_disarmed`), `started` goes false and the heading and NE flags stay false until the disarm edge clears the latch. GNSS: accepted with fix type >= 3, GST lat/lon and an interval <= 1/`nav_gps_min_rate_hz` (1000/245 Hz: ArduPilot's per-frame bound of 245 ms, `AP_GPS.cpp:849`; the 215 ms is its bound on the average interval; the first fix only starts the interval); the origin latches at the first accepted epoch (`Estimator::origin`, `eskf::ned_from_geo`); fused only while armed and with the yaw aligned; the first accepted epoch after each arming sets position and velocity to the fix (Src 9); exact repeats while armed are screened (E1s), the velocity is screened when the GNSS speed is under `nav_gps_spd_ratio` of the position-difference speed (at `nav_gps_spd_min_ms` or more), that speed taken between the epoch and the newest earlier epoch since arming at least `eskf::SPD_SPAN_US` (1 s, the span of the 1 Hz data the screen was validated on) older, no screen decision before such an epoch exists; position N/E and velocity N/E (the receiver's NED velocity when given, else speed and course, below `nav_gps_course_min_ms` zero with sigma hypot(speed, sigma_v)) as gated scalars; the C3 reset when either position axis is gated for `nav_aid_timeout_us`. Flags: tilt from alignment, rates always, velocity_d/position_d by the B1 rule, heading (aligned, sigma <= `nav_heading_valid_sigma_rad`, a compass sample accepted within the timeout) and velocity_ne/position_ne (origin, a GNSS position fused within the timeout, the latest epoch without a gated scalar) only while armed. The reported `sigma.position_ne_m` (Amendment G, G5) is sqrt(P_N + P_E + s_N^2 + s_E^2), s the floored GST sigmas of the latest GNSS epoch that became a job (before any, sqrt(P_N + P_E)); the filter's state and P do not use it. A non-finite state or P re-initialises it (origin and datum kept). `Eskf::events` returns the step's NKI codes (C8), `Eskf::stats` the counters. Pure arithmetic; `memory.x` puts it in `.ram_text` (`tools/check-ram-code.py` passes). RAM: about 16 KB per instance, computed from the layout (the IMU ring 12 864 B; the waiting barometer samples `BARO_WAIT` 25 x 16 B = 400 B and compass samples `MAG_WAIT` 50 x 24 B = 1 200 B, each nav_buffer_us times the sensor's rate of section 4a, 50 and 100 Hz; the fix history 12 x 16 B; P 900 B). Tests: `eskf.rs` (c3, c5-c15, b5-b8, n1, O1, I4) and the N0 tests in `eskf_n0.rs` (now always built; the `eskf-n0` feature stays for the bench binary); c1, c2, c4, b2, b3 on simulator truth in MARV-sim (`tests/nav_eskf.rs`, `marv-run --shadow eskf`). Readings of the specification in `Eskf` (also in the module's header, checked against the code): the Src 9 reset at the first accepted, aligned, non-repeated epoch after every arming, a queued GNSS job dropped on every change of the armed state; aiding = armed and started and a GNSS position fused or reset within the timeout, else the no-aid hold at the position captured when aiding stops; the first fix only starts the interval rule (any fix with a position becomes the previous fix, GST or not); the GST check needs latitude and longitude only; the origin latches at the first accepted epoch, normally the second fix, armed or not; a waiting compass sample is used only if it carried `expected`, with the newest value; no velocity at or above the course minimum without a course (and then no speed screen); job order propagation, GNSS, barometer, compass; the height reset counts from the last barometer aid, and after a re-initialisation the next barometer sample initialises the height at once (as `MahonyBaro`), counted as a height reset; no position process noise; the declination is a `Tuning` field the simulator sets from its field model; WGS 84 radii; a reset counts as a position fusion for the flags; the horizontal flags need the yaw aligned, not the heading flag; the first epoch after arming (and a C3 reset) takes the receiver's velocity unscreened; armed at rest, exact repeats are screened, so GNSS is neither reset nor fused until the fix changes; compass refusals all counted, one NKI record per nav_mag_fuse_us; a barometer, compass or GNSS sample older than now - nav_buffer_us (GNSS: arrival time minus the delay) dropped and counted (`EskfStats::stale`).
 
-Navigation state on the board (packet E2, decision-nav-eskf-20261120 8a, rewritten for packet P-G6): each step `Flight::step` runs the composite, the command goes to `flight::OUT`, then `Stepper` writes the log (NKF1, NKF2, NKI, see Logging) from the composite's parts and, every 64th step, `flight::NavStat` to the seqlock `flight::NAV_STAT`, which core 0 prints every 10 s as `[STAT] NAV:` (no horizontal position, no coordinate). The fields keep their layout and names (they date from `MahonyBaro` and the shadow) and now hold: `mb` the composed state that steers (valid bits, D, v_D and their sigmas, which are ESKF2's); `mb_baro` ESKF2's barometer counts (fused, gated, height resets); `shadow` true (the ESKF3 core is present whenever the board flies); `tilt_aligned`, `yaw_aligned` the core's alignment; `ek` the ESKF3 core at its horizon (valid bits 1 tilt aligned and 2 yaw aligned, the nominal D and v_D and the sigmas of those two error states); `ek_stats` the core's counters (compass refusals, GPS epochs and scalars fused, screened, gated, resets, the most heavy jobs in one step). The printed line names them: `steering (ESKF3 output + ESKF2 vertical)`, `ESKF2 baro`, `ESKF3 core ... align bits ... horizon D`. Tests of the composite are in `eskf_out.rs` (M1 to M3 and the output predictor's T1 to T12) and `step.rs`; the board-side wiring has no host test.
+Navigation state on the board (decision-nav-eskf-20261120 8a): each step `Flight::step` runs the composite, the command goes to `flight::OUT`, then `Stepper` writes the log (NKF1, NKF2, NKI, see Logging) from the composite's parts and, every 64th step, `flight::NavStat` to the seqlock `flight::NAV_STAT`, which core 0 prints every 10 s as `[STAT] NAV:` (no horizontal position, no coordinate). The fields keep their layout and names and hold: `mb` the composed state that steers (valid bits, D, v_D and their sigmas, which are ESKF2's); `mb_baro` ESKF2's barometer counts (fused, gated, height resets); `shadow` true (the ESKF3 core is present whenever the board flies); `tilt_aligned`, `yaw_aligned` the core's alignment; `ek` the ESKF3 core at its horizon (valid bits 1 tilt aligned and 2 yaw aligned, the nominal D and v_D and the sigmas of those two error states); `ek_stats` the core's counters (compass refusals, GPS epochs and scalars fused, screened, gated, resets, the most heavy jobs in one step). The printed line names them: `steering (ESKF3 output + ESKF2 vertical)`, `ESKF2 baro`, `ESKF3 core ... align bits ... horizon D`. Tests of the composite are in `eskf_out.rs` (M1 to M3 and the output predictor's T1 to T12) and `step.rs`; the board-side wiring has no host test.
 `fw_flight::step::encode_step` writes one step as the records NAV, SETP, DMD and MOT (`fw_core::dflog::FLIGHT_TYPES`,
 ids 139 to 142; the board logs them, see Logging).
 After each step the task writes the step time and the command to the seqlock `flight::OUT`. The ESC task reads it at
 every exchange (`try_read(1)`; a failed read sends Stop and counts `flight_read_failures`) and passes it to `Esc::frames`,
 which applies `fw_flight::esc::hold` (Stop when the command is older than 10 ms) and, while the held command spins, sends
-its throttles on all four lines, no EDT burst, and ends a running motor test as `Replaced`. There is no status line for it. A core-0
-`[STAT] FLT:` line was tried on 2026-11-19 (it showed 8035 steps per 10 s, the IMU1 rate, `command Stop`) and removed:
-with the probe attached, that one extra log line raised the ESC task's longest spacing from 1.09 to 1.26 ms (six runs
-without it) to 1.58 ms inside the 10 s `[STAT]` burst and 1.36 ms on a tick of its own; without the line it is 1.20 ms.
+its throttles on all four lines, no EDT burst, and ends a running motor test as `Replaced`. There is no status line for it.
 
 IMU1's configuration comes from `IMU1_ACC_FS`, `IMU1_GYR_FS` and `IMU1_ODR_HZ` at boot, fixed until the next reboot; the
 defaults are 16 g, 2000 dps, 800 Hz on both sensors (`fw_settings::imu::imu1_setup`: read once in `main` after `settings::boot`, logged as
@@ -150,22 +144,13 @@ Its values go to the station (with the `IMU2_GYR_OFF*` and `IMU2_ACC_OFF*` offse
 as 1, since 0 means "no temperature"), the magnetometer fields 0 (the chip has none); not sent when IMU2's
 latest sample is older than 1 s. SYS_STATUS: 3D_GYRO2 + 3D_ACCEL2 from IMU2's row.
 
-Measured with both IMUs at the defaults (16 g, 2000 dps, 800 Hz) and the incremental verify (2026-11-17, 600 s clean run, log
-`marv-v2-firmware-20261117-141123.log`, the 10 s to 610 s lines; taken with an earlier build whose chip settings for these values are the same): every device row Ok with no transition after the start, 0 errors, timeouts, missed edges, overflows and recoveries, delay count after the start 0,
-watchdog stalls begun 0. IMU1 803.56 samples/s (its own rate: nothing lost), largest gap 1697 us, 0 gaps over 1.5 P, verify steps 18 to 276 us, 618 passes; IMU2
-800.71 samples/s (bench 800.664 Hz), largest gap 1781 us, 0 gaps over 1.5 P, steps 13 to 138 us, 610 passes. Other configurations (4 g / 250 dps; 4 g / 500 dps; 400 Hz) are in
-`docs/handoff.md`, "IMU configurations on the board". History, not today's figures: the 10-minute run of 2026-11-15 (log `marv-v2-firmware-20261115-114930.log`), taken on
-an older firmware at 4 g / 250 dps, read IMU1 803.52 samples/s, largest gap 2442 us, 110 gaps over 1.5 P (10 across a step), steps 134 to 946 us, 608 passes, and IMU2 800.48 samples/s,
-largest gap 3410 us, 1066 gaps over 1.5 P (79 across a step), steps 84 to 489 us, 600 passes; what changed the gap count is not isolated. Gaps and long polls are REPORTED, not a pass criterion: the
+Other configurations (4 g / 250 dps; 4 g / 500 dps; 400 Hz) are in
+`docs/handoff.md`, "IMU configurations on the board". Gaps and long polls are REPORTED, not a pass criterion: the
 data-ready, one-read-per-sample scheme is Betaflight's, which loses a sample when the reader is late and does
 not count it; ArduPilot and PX4 avoid the loss with the chip's FIFO (kept in reserve here). An IMU row is
 accepted when it is Ok with 0 errors, timeouts and recoveries and its rate is within 1 % of the chip's own.
-In those runs of 2026-11-15 the longest poll was 1.06 to 2.56 ms (IMU1) and 0.63 to 1.36 ms (IMU2) in every 10 s window, with
-single-register steps, so it is not `verify`; while IMU2 was parked IMU1 had no new gap but still polls of
-about 1 ms. Three 620 s runs of that time (logging as usual, `DEFMT_LOG=off`, `quiet-stat`) gave IMU1 63 / 37 / 42 gaps and
-IMU2 379 / 279 / 199: logging on core 0 is NOT the main cause. The cause is not found; it belongs to the
-measurement of what disturbs the flight core, to be done before any control loop runs there (the features
-`latency-text` and `quiet-stat` and the per-poll latency figure exist for it). Facts and suspects:
+The features
+`latency-text` and `quiet-stat` and the per-poll latency figure measure what disturbs the flight core. Facts and suspects:
 `~/Documents/MARV-V2-drivers/_plan/facts-foundation.md`, "Two IMUs on the flight core".
 
 Features: `FEATURES=inject-imu1-persistent tools/run.sh 120`: 5 s after the first good sample every
@@ -225,7 +210,6 @@ compensated field in microtesla and the die temperature, rotated by `MAG_ORIENT`
 temperature (what the flight core gets, as `MagSample` through `flight::FLIGHT_MAG`, with `expected: Option<MagExpected>`: the adapter reads the five health-test parameters in the same store access as the calibration and fills it on every sample, `None` unless `MAG_CAL_TYPE` is 2 and `MAG_FLD_UT` > 0), and r (core 0 only: the compass calibration reads it). The BMM350 has no power-on-reset flag: a reset shows as a `verify` mismatch.
 `verify` and `recover` are the driver's, `apply` is `configure`, `restart` does the bus clear (`src/busclear.rs`, shared with BARO) and
 rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
-The field at rest on the driver's bench was about 66 to 67 uT.
 
 **GNSS.** A row for the u-blox SAM-M10Q receiver, `src/gnss.rs`, through the `sam-m10q` driver (UBX protocol only;
 decision `_plan/decision-gnss-m10-20261122.md`). UART1 is read in thread mode on core 0 (`BufferedUart`, no DMA, RX buffer 4096 B).
@@ -280,9 +264,9 @@ stored settings itself, so it also carries out a waiting APPLY.
 
 The barometer's `restart` first does a bus clear (up to 9 SCL pulses while SDA is low, then START and
 STOP, as the driver's `bmp581_cancel` bench program; neither the driver nor embassy-rp 0.10 has one), then
-rebuilds I2C1 and runs `init`. Both I2C buses (I2C1 BARO, I2C0 MAG) are also cleared the same way at every boot, before the first transaction, and each logs one line with the SDA and SCL levels before and after and the pulses given: a reset of the MCU in the middle of a transfer can leave the sensor holding SDA low (seen on I2C1 on 2026-11-15, where the barometer's first start then never ended), and the MCU's reset does not release it.
+rebuilds I2C1 and runs `init`. Both I2C buses (I2C1 BARO, I2C0 MAG) are also cleared the same way at every boot, before the first transaction, and each logs one line with the SDA and SCL levels before and after and the pulses given: a reset of the MCU in the middle of a transfer can leave the sensor holding SDA low, and the MCU's reset does not release it.
 
-A hung I2C transfer (owner's decision of 2026-11-15, "Yes just do what PX4 and ardupilot do"; it amends the
+A hung I2C transfer (it amends the
 design's rule I1.1): every transaction of the BARO and MAG drivers runs under a deadline (`src/i2cbus.rs`,
 `Timed`, a wrapper around the embassy-rp bus the driver is given), ArduPilot's formula from
 `I2CDevice::_transfer`, 1 + 2 * (((8 * 10^6 / bus clock) * bytes) / 1000) ms with its 4 ms floor
@@ -351,30 +335,12 @@ the real adapter and then replaces its result; each acts once, 5 s after the fir
   (`src/i2cbus.rs` `hang`, BELOW the deadline wrapper, so the deadline is what is exercised; not part of the
   adapter wrapper above): the inner I2C1 transaction never completes, once at the first transaction from 15 s
   of uptime, once at the first transaction at boot, or every transaction from 15 s on (also on rebuilt buses).
-  Logs `[INFO] inject: I2C1 transaction never completes from ... ms` for each hang. Seen on the board
-  (2026-11-15): `once` (`logs/marv-v2-firmware-20261115-191628.log`): hang at 15007 ms, time-out at 15011 ms
-  (4 ms, a 2-byte transaction), Degraded at once, Recovering at 15047 ms (two refused reads), attempt 1 at
-  15147 ms: `recover` refused, `restart` = bus clear, rebuild, start, Ok at 15174 ms: 167 ms from the hang to
-  Ok, BARO errors 3, recoveries 1, never STUCK; MAG and the other rows Ok, MAG errors 0, watchdog stalls begun
-  0, 7 `[PASS]`. `boot` (`...-191738.log`): the first start timed out at 10 ms, the start retry at 111 ms did
-  the clear and rebuild first, Ok at 131 ms (no STUCK, not Absent). `forever` (`...-191829.log`): Recovering,
-  4 attempts (each a clear, rebuild and a timed-out start) at 100, 300, 1000, 3000 ms, Failed at 19487 ms;
-  `device restart BARO` answered `failed` about 1.4 s after the request was taken (the restart and its 3 start
-  retries, each a clear and rebuild, then Absent); 9 time-outs in all, never STUCK, the other rows Ok, stalls
-  begun 0. Not seen: a real bus stuck in the middle of a run (only this injected hang, which never touches the
-  bus, so the state an abandoned embassy-rp transfer leaves in the controller was not exercised on the board).
-  The normal build with the deadline (`...-192012.log`, 310 s): BARO Ok 49.90/s and MAG Ok 100.10/s over the
-  last 10 s, errors 0, timeouts 0, no `timed out` line (no spurious time-out from the 4 ms deadline), both
-  `I2Cx bus at boot` lines, the other rows Ok, 7 `[PASS]`, watchdog stalls begun 0.
-  A settings save during a run (`...-194641.log`, the reviewer's run): the save stalled core 0 for 43.5 ms,
-  ten times the 4 ms deadline; no `timed out` line, BARO and MAG errors 0 and recoveries 0 before and after
-  (the deadline a save overlaps is discarded and the wait goes on with the same transfer). Not seen: a real
-  hang right after a save.
+  Logs `[INFO] inject: I2C1 transaction never completes from ... ms` for each hang.
 
 - `FEATURES=inject-gnss-silent tools/run.sh 100`: 10 s after GNSS's first good sample the adapter stops seeing sentences (the wrapper swallows the
   fixes; the receiver keeps talking) until a RESTART request (`device restart GNSS`). Shows the long path of a device that stays silent:
   one TIMEOUT error event per 2.5 s (Degraded after the first, Recovering after the third), 4 recovery attempts (each a `recover` then a `restart`, each
-  waiting one deadline for a fix), Failed, ONE ERROR text; then `device restart GNSS` -> Ok. Times in the "GNSS on the board" paragraph.
+  waiting one deadline for a fix), Failed, ONE ERROR text; then `device restart GNSS` -> Ok.
 
 Run `tools/run.sh` again afterwards to put the normal build back on the board.
 
@@ -442,7 +408,7 @@ through the driver's `Config::validate` before the value is stored); the three o
 
 | Name | Default | Range | Means |
 |---|---|---|---|
-| `BATT_V_SCALE` | 1.0 | 0.1 to 10 | gain on the battery voltage (100k / 10k divider, 3.3 V reference): the crate's `gain_ppm` is `(scale - 1) * 1e6`; 2.0 doubles the voltage; the bench's one-point trim for this board would be 1.007603 (not applied) |
+| `BATT_V_SCALE` | 1.0 | 0.1 to 10 | gain on the battery voltage (100k / 10k divider, 3.3 V reference): the crate's `gain_ppm` is `(scale - 1) * 1e6`; 2.0 doubles the voltage |
 | `BATT_A_SCALE` | 0.02 | 0 to 10 | volts at the pin per ampere of the ESC's current output; the default is the crate's PLACEHOLDER, not calibrated; 0 reads 0 A |
 | `BATT_A_OFFSET` | 0.0 | -3.3 to 3.3 | volts at the pin with no current (the crate's `zero_uv`) |
 | `BATT_CELLS` | 4 (`I32`) | 0 to 12 | cells in series; 0 turns the low-battery monitor off (Amendment BATT, indices 123 to 127, core 0 reads them at 10 Hz) |
@@ -538,13 +504,13 @@ configure, scale and time themselves with it (init, `apply`, RESTART, self-test,
 
 ## SD card (device row 9)
 
-`src/sd.rs` (decision-sd-logging Q1, Q2, Q4 first bullet, Q6; milestone SD2), task `sd` on core 0's
+`src/sd.rs` (decision-sd-logging Q1, Q2, Q4 first bullet, Q6), task `sd` on core 0's
 thread-mode executor, tagged `SD` for the watchdog. It owns PIO0 (SM0, the `pio-sdmmc` program), DMA channel 4
 (programmed by the driver through the PAC, completing on `DMA_IRQ_1`, enabled only in core 0's NVIC; the waker
 static `SD_WAKER` and the binding `DMA_IRQ_1 => DmaIrqHandler<SdWaker>` are in `src/sd.rs`), the card and the
 mounted FAT32 volume (`embedded-fatfs` over `BufStream` + `StreamSlice`), and drives row 9 through the shared
 `fw_core::health::Health` with its own loop (the row is in `DEVICES`, so the supervisor's stuck check with
-P = 1 s, its texts and `[STAT] SD:` line apply). It is also the log writer (milestone SD3, see Logging): the
+P = 1 s, its texts and `[STAT] SD:` line apply). It is also the log writer (see Logging): the
 one consumer of the log ring.
 
 - Start, recovery and restart are the same: a NEW bus (PIO0 and its pins re-borrowed, so a bus the driver marked
@@ -552,7 +518,7 @@ one consumer of the log ring.
   type 0x0B or 0x0C inside the card), the mount, `LOGS/` opened (created if missing), one bounded listing of
   `LOGS/` for the notice; a recovery or restart un-mounts first. Free space is never asked of the file system
   (the scan can take 68 s): used space is the sum of the files' sizes in `LOGS/`.
-- While mounted, the log's writes are the liveness (SD2's once-per-second reads are gone): `samples` = 512-byte
+- While mounted, the log's writes are the liveness: `samples` = 512-byte
   blocks written since boot, `errors` = writes that failed after their retry, `timeouts` = driver time-outs,
   `overflows` = records the log ring dropped (saturating), `last_sample_age_ms` = time since the last good write.
   A write or flush that fails after its retry is an error event (BUS, or TIMEOUT for the driver's time-outs; a
@@ -583,36 +549,16 @@ The machine itself parks a row whose start retries all failed as Absent with no 
 the cause of the last failed start instead (Failed and ID_MISMATCH for the wrong format, TIMEOUT for no card),
 as the stuck flag is shown as Failed/STUCK. SYS_STATUS: row 9 is `MAV_SYS_STATUS_LOGGING` (as ArduPilot).
 
-On the board (2026-11-15, MARV V2 Rev 1 on USB, the scratch SanDisk 64 GB card, FAT32, 32 KiB clusters; logs
-`marv-v2-firmware-20261115-*`): normal build (231006): the five SD checks PASS with the seven earlier ones,
-0 `[FAIL]`; card init 47 ms, mount 4.8 ms, Ok at 572 ms after boot, the notice "SD: 59.5 GiB FAT32, 17 MiB in 2
-logs" on USB; `status` shows LOGGING healthy; `devices` 8 rows, the six and SD OK, RC Starting (no radio
-link on the desk); liveness 1.0 samples/s; after 41 s the driver counted 85 blocks read, 0 written (2 per
-liveness plus the mount). `device restart SD`: accepted, un-mount 0.3 ms, a new bus, Ok again 66 ms later with a
-new notice; `device selftest SD`: DENIED "not supported yet". `inject-sd-no-card` (231243): four start tries,
-Absent at 2.03 s, last error timeout, "SD: no card". `inject-sd-wrong-format` (231330): Failed at 2.05 s, last
-error id mismatch, "SD: no FAT32 volume, reformat as FAT32". `sd-irq-negative` (231415): INTE0 0x1f, the INTE0
-check FAILs, the other four PASS. `LOG_BACKEND_TYPE` 0, saved, `reboot --yes` (231521, 231607): SD Absent NONE,
-"SD: logging off", no card init line in the boot's log; 1, saved, reboot: Ok with the notice. NOT seen then (a real card
-removal is below, in Logging): a real exFAT card, a second card type, errors in service (the ladder on a real
-card fault); the 10-minute run against `main` (milestone check G) was started but not read when this was
-written.
-
 ## Logging
 
-`src/logger.rs` and `src/sd.rs` (decision-sd-logging Q3 to Q6, milestone SD3; the pure pieces are
+`src/logger.rs` and `src/sd.rs` (decision-sd-logging Q3 to Q6; the pure pieces are
 `fw_core::dflog`, `fw_core::logfile` and `fw_core::xcore::LogRing`).
 
 - Format: ArduPilot DataFlash `.BIN` (FMT records first, then `A3 95 <type> <payload>` records, little-endian,
   `TimeUS` board microseconds first). Readers, free and without conversion: `mavlogdump.py` and MAVExplorer
-  (`pip install pymavlink MAVProxy`), UAV Log Viewer (plot.ardupilot.org), Mission Planner. Checked on a PC
-  (2026-11-16): ArduPilot's reader, pymavlink 2.4.50 `mavlogdump.py`, read three logs copied off the card with a
-  USB card reader: the 30-minute log 3 (397 226 records, no bad bytes, the same counts as the on-board walker,
-  45 282 IMU records per instance = 25.0 per second each, wall-clock time from the GPS records correct), the
-  8.5-hour log 5 (161 MB, no bad bytes, DSF 30 804, GPS 30 885) and log 13 (the one cut by the card pull below:
-  reads clean). UAV Log Viewer and Mission Planner were not tried.
+  (`pip install pymavlink MAVProxy`), UAV Log Viewer (plot.ardupilot.org), Mission Planner.
 - What and how often (Q5 and decision-flight-logging-20261119 section 1; about 166 kB/s armed, 62 kB/s
-  disarmed (decision-flight-logging-20261119 as amended 2026-11-21: IMU1 at every step), of which core 0's own records are about 4.6 kB/s with fresh stick reports): from the flight core
+  disarmed (decision-flight-logging-20261119 as amended: IMU1 at every step), of which core 0's own records are about 4.6 kB/s with fresh stick reports): from the flight core
   (IMU1's `flight::Stepper`, after the motor command is published) IMU instance 0 (IMU1, this step's sample) with
   NAV, SETP, DMD and MOT at every flight step while armed (803.6 Hz, 182 B per step) and every 8th step while
   disarmed (100.4 Hz; the IMU record alone, 40 B, at every step disarmed, so a log replays through the estimators), ESC (eRPM, volts, degC by DShot line, the fresh bits; `TimeUS` the exchange's) every 4th
@@ -636,16 +582,16 @@ written.
   3D fix): `TimeUS` the GNSS sample's `t_us`, as its GPS record; `I` 0; `VelN`, `VelE`, `VelD` mm/s (`i32`, NAV-PVT's `velN`, `velE`, `velD`);
   `GMS` the NAV-PVT's iTOW (GPS time of week, ms; `gnss::pvt_tow_ms`); `Spd` ground speed, mm/s; `Hdg` heading, 0.01 degree. Format character
   `i` (`i32`) is new in `dflog`.
-- MODE (id 150, format `QBB`, 13 B, columns `TimeUS,Sel,Eff`; decision-nav-eskf-20261120 8c, F6): the selected and the effective flight mode, written by `Stepper` at the first step and at every change of either, armed or not (codes as MOT's `Mode`: 0 Acro, 1 Angle, 2 Altitude, 3 Position; a record the ring dropped is offered again at the next step).
-- SPN (id 151, format `Qfffffff`, 39 B, columns `TimeUS,PN,PE,PD,VN,VE,VD,Hdg`; 8c, F1): the altitude setpoint, only while the setpoint is Altitude, with the step block's cadence (armed every step, disarmed every 8th): `PD` the target height (m, down positive), `VD` the climb-rate feed-forward (m/s, down positive); `PN`, `PE`, `VN`, `VE`, `Hdg` are 0 (Position will fill them). About 31 kB/s more at 800 Hz armed in Altitude, none in Angle; the flight ring's free space in Altitude is not measured yet.
+- MODE (id 150, format `QBB`, 13 B, columns `TimeUS,Sel,Eff`; decision-nav-eskf-20261120 8c): the selected and the effective flight mode, written by `Stepper` at the first step and at every change of either, armed or not (codes as MOT's `Mode`: 0 Acro, 1 Angle, 2 Altitude, 3 Position; a record the ring dropped is offered again at the next step).
+- SPN (id 151, format `Qfffffff`, 39 B, columns `TimeUS,PN,PE,PD,VN,VE,VD,Hdg`; 8c): the altitude setpoint, only while the setpoint is Altitude, with the step block's cadence (armed every step, disarmed every 8th): `PD` the target height (m, down positive), `VD` the climb-rate feed-forward (m/s, down positive); `PN`, `PE`, `VN`, `VE`, `Hdg` are 0 (Position will fill them). About 31 kB/s more at 800 Hz armed in Altitude, none in Angle.
 - BFS (id 157, format `QBBfB`, 18 B, columns `TimeUS,Level,Act,Volt,Cells`; Amendment BATT): one record each time the low-battery monitor reaches a level, on its own (not in the per-step block): `Level` 1 LOW or 2 CRITICAL, `Act` `BATT_FS_CRT_ACT`, `Volt` the pack voltage in V, `Cells` `BATT_CELLS`.
 - NKF1 (id 147, format `QBffffffffffB`, 53 B, columns `TimeUS,I,Q1,Q2,Q3,Q4,VN,VE,VD,PN,PE,PD,Vld`), NKF2 (id 148, format
   `QBffffffffffff`, 60 B, columns `TimeUS,I,GBX,GBY,GBZ,ABX,ABY,ABZ,STlt,SHdg,SVne,SVd,SPne,SPd`) and NKI (id 149, format `QBBffB`,
-  22 B, columns `TimeUS,I,Src,Inn,Var,Ok`), decision-nav-eskf-20261120 8c, B5, C8 (packet E2), written by IMU1's `Stepper` on core 1
-  into `flight::LOG` after the step's other records. `I` 0 is the steering estimator (since packet P-G6, the composite `SteerMix`): NKF1 and NKF2 of the composed state that steered, `TimeUS` the step's time, the flags and sigmas of the composed state (the vertical ones are ESKF2's), the biases of the ESKF3 core. `I` 1 is ESKF2's own state (what `EskfZ` returned before the composition took its vertical part, `SteerMix::vert_nav`), its flags, biases and sigmas, `TimeUS` the step's time (it has no delay). `I` 2 is NKF1 only: the ESKF3 core's nominal attitude, velocity and position at its horizon (`Eskf::nominal`, not sign-normalised), `TimeUS` the horizon time (`Eskf::horizon_us`), `Vld` bit 0 tilt aligned and bit 1 yaw aligned (the core has no `NavState` of its own on the board); it is written with the core's propagations, so the rates below apply with 53 B per I = 2 record. NKF1 and NKF2
+  22 B, columns `TimeUS,I,Src,Inn,Var,Ok`), decision-nav-eskf-20261120 8c, B5, C8, written by IMU1's `Stepper` on core 1
+  into `flight::LOG` after the step's other records. `I` 0 is the steering estimator (the composite `SteerMix`): NKF1 and NKF2 of the composed state that steered, `TimeUS` the step's time, the flags and sigmas of the composed state (the vertical ones are ESKF2's), the biases of the ESKF3 core. `I` 1 is ESKF2's own state (what `EskfZ` returned before the composition took its vertical part, `SteerMix::vert_nav`), its flags, biases and sigmas, `TimeUS` the step's time (it has no delay). `I` 2 is NKF1 only: the ESKF3 core's nominal attitude, velocity and position at its horizon (`Eskf::nominal`, not sign-normalised), `TimeUS` the horizon time (`Eskf::horizon_us`), `Vld` bit 0 tilt aligned and bit 1 yaw aligned (the core has no `NavState` of its own on the board); it is written with the core's propagations, so the rates below apply with 53 B per I = 2 record. NKF1 and NKF2
   (one pair, 113 B; I = 2: NKF1 alone, 53 B) at each covariance propagation of the estimator (the core's for I = 0 and I = 2, ESKF2's for I = 1) while armed (about 100 Hz each), at every 8th disarmed (about
   12.5 Hz each). NKI at each scalar fusion and reset: `I` 0 the events of the ESKF3 core (`TimeUS` the horizon time) and `I` 1 those of ESKF2, the codes `Eskf::events` returns
-  (Src 0-9, Ok 0-3 of C8; Src 4 and 5 N, E at the barometer rate). NKI Src 10 and 11 of `I` 0, with `TimeUS` the step's time and Ok 1, at every 20th correction of the output predictor (`EskfSteer::corrected`): Src 10 `Inn` the attitude tracking error (rad), `Var` the velocity error (m/s); Src 11 `Inn` the position error (m), `Var` T_d (s). The latch of G6-B is the core's NKI Src 8 Ok 0 of `I` 0. About +5.3 kB/s armed for I = 2 and about +0.2 kB/s for Src 10 and 11 on paper (100 propagations/s x 53 B; 5 corrections/s x 2 x 22 B), against the step block's 182 B x about 800 Hz; the flight ring's least free space on the last flown log was 13 640 B (log 263) and is not measured on this image. `MahonyBaro` as steering wrote for `I` 0 one per barometer sample (Src 4 Ok 1 fused, the initialisation with Inn 0;
+  (Src 0-9, Ok 0-3 of C8; Src 4 and 5 N, E at the barometer rate). NKI Src 10 and 11 of `I` 0, with `TimeUS` the step's time and Ok 1, at every 20th correction of the output predictor (`EskfSteer::corrected`): Src 10 `Inn` the attitude tracking error (rad), `Var` the velocity error (m/s); Src 11 `Inn` the position error (m), `Var` T_d (s). The latch of G6-B is the core's NKI Src 8 Ok 0 of `I` 0. About +5.3 kB/s armed for I = 2 and about +0.2 kB/s for Src 10 and 11 on paper (100 propagations/s x 53 B; 5 corrections/s x 2 x 22 B), against the step block's 182 B x about 800 Hz. `MahonyBaro` as steering wrote for `I` 0 one per barometer sample (Src 4 Ok 1 fused, the initialisation with Inn 0;
   Src 4 Ok 0 gated; Src 6 Ok 1 a height reset, Inn the applied change, Var the new variance).  Positions here are offsets from the estimator's own origin, not coordinates.
 - Path: `log_collect` (core 0, watchdog id LOG) is the one producer of a 64 KiB `LogRing`; it pushes only while
   a log is open (`logger::OPEN`) and never awaits the card. A record that does not fit is dropped and counted.
@@ -704,69 +650,15 @@ written.
   handle with nothing left to read is closed after 2 s. `[STAT]` of the USB link: transfers, bytes sent, the
   SD task's longest download step, and the longest time a piece or flush waited for one (an upper bound: the
   step's whole duration).
-  On the board (2026-11-16, normal build, logging; `logs/marv-v2-firmware-20261116-113221.log`, `-114213.log`):
-  the list equals the SD task's listing (19 logs, numbers 7 to 25 with sizes; the open log listed with its
-  flushed size, growing); logs 8 and 13 downloaded twice with a throw-away pymavlink client (the station's
-  client did not exist yet) and once with `marv-cli logs get`: all byte-identical (sha256) to the card-reader
-  copies; 57 kB/s with the pymavlink script, about 70 kB/s with `marv-cli` (2 527 232 B in 36 s). Seen: a log
-  that does not exist gets no LOG_DATA; `ofs` at and past the end one LOG_DATA with count 0; a new request in
-  the middle of a transfer takes over (4 frames of the old log already on their way, none after the first frame
-  of the new one); LOG_REQUEST_END stops the stream at once; with the station's HEARTBEAT stopped the last
-  LOG_DATA came 3.01 s after the last HEARTBEAT. During a 109 s download of log 24 (6 258 688 B): SD Ok, 0
-  errors, overflows 0, 9.6 to 10.4 blocks/s, every other row Ok with 0 errors, IMU 803.49 to 803.63 / 800.66
-  to 800.76, watchdog stalls begun 0; one IMU2 gap over 1.5 P (largest gap 1 886 us against 1 874 us) in the
-  window 260 to 270 s, IMU1 0. The SD task's longest download step 8.1 ms, the longest wait of a piece or
-  flush for one 3.5 ms (upper bound). The open log, read through the second handle while being written, came
-  down to its flushed size (1 449 984 B) and is the exact prefix of the same log downloaded after it was
-  closed; `log-verify` read that log (2 527 232 B) with 0 bad bytes. NOT seen: a request while the row is not
-  Ok (no card, recovery, clean-up), a link drop in the middle of a transfer, a listing of hundreds of logs.
 - Test hooks (Cargo.toml): `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume` (the first open's
   clean-up after boot is told a volume of the reserve plus the listed bytes minus one: the oldest log is deleted
   before the log opens), `inject-log-delete-big` (the first open's clean-up after boot is told a volume of the
   reserve plus the bytes of the logs after the largest one in ring order: every log up to and including the
   largest is deleted, one by one, so a long deletion is seen on the board).
 
-On the board (2026-11-16, MARV V2 Rev 1 on USB, probe-rs attached, the scratch SanDisk 64 GB card, receiver
-searching, so no RCIN):
-- 30 minutes from boot, normal build, three `param save` at 307, 914 and 1367 s
-  (`marv-v2-firmware-20261116-011541.log`): 13 `[PASS]`, 0 `[FAIL]`; every row Ok throughout with 0 errors, SD
-  Ok with 0 errors, 0 recoveries, 0 records dropped, 10.2 blocks/s (18 440 at 1810 s), largest gap between
-  writes 880 ms; IMU rates 803.5 to 803.6 / 800.6 to 800.7, and 800.0 / 797.2 in the three windows of a save;
-  gaps over 1.5 P: one per IMU at each save (3 in 30 minutes, the saves' flash stalls of 40.9, 40.7 and 44.6 ms,
-  the largest gap 45.0 / 45.3 ms), 0 in every other window (largest gap before the first save 1.66 / 1.54 ms);
-  watchdog stalls begun 0.
-- That log read back on the board (`log-verify`, `-014612.log`): 9 453 568 B, 397 226 records, 0 bad bytes, a
-  17-byte cut last record, FMT matched 11, mismatched 0; IMU 50.0/s (both together), BARO 49.8, MAG 99.5, GPS
-  1.0, BAT 10.0, DEV 8.0, DSF 0.997/s; PARM 26, MSG 2 (the boot text and the SD notice); 5.2 kB/s; the last
-  record within about 1 s of the moment the board was stopped.
-- An unplanned soak: log 5 ran 8 h 35 min (`-014815.log` to `-102320.log`): every row Ok with 0 errors at the
-  end; read back: 161 218 560 B, 6 775 764 records, 0 bad bytes, tail 37 B, FMT matched 11, mismatched 0, the
-  same rates; the SD row was not flagged stuck during the 68 s walk.
-- `device restart SD` (`-102721.log`): log 7 written out and closed (212 503 B), log 8 opened 80 ms later with a
-  new notice. In log 8 `param set BARO_ODR_HZ 25` and `50` and `calibrate gyro`: 34 PARM records read back
-  (26 + 2 + the 6 gyro offsets).
-- `inject-sd-write-fail` (`-103425.log`): at 60.7 s the next six write calls fail: Ok -> Degraded at 61.3 s,
-  Recovering at 62.8 s, log 10 closed (315 392 B), Ok again at 63.0 s with log 11; the other rows unaffected.
-- `inject-log-small-volume` (`-103223.log`, before the clean-up moved to before the log opens): 1 s after log 9 opened, `LOGS/00000001.BIN` (319 488 B) deleted in
-  58 ms, once; the row stayed Ok.
-- A real card removal (`logs/marv-v2-firmware-20261116-104041.log`, pulled at 225 s): the next flush failed, Ok
-  -> Degraded, two pieces discarded after their retry, Recovering 0.9 s after the pull, the log closed and the
-  volume un-mounted on the missing card in under 2 ms (ok false, no hang), four recovery attempts "no card",
-  Failed 5.5 s after the pull with the text "SD: failed (bus)"; with the card back, `device restart SD` gave Ok
-  in 329 ms and log 14.
-- Clean-up before the log opens (2026-11-16, `-105045.log`, `-105233.log`): `inject-log-small-volume`: "SD: clean-up,
-  deleting log 2" at 0.56 s, `LOGS/00000002.BIN` (1 294 336 B) deleted in 210 ms, then the log opened at 0.80 s,
-  SD Ok. `inject-log-delete-big`: logs 3 (9 453 568 B, 1.35 s), 4 (512 000 B, 77 ms) and 5 (161 218 560 B,
-  22.9 s) deleted one after the other, the log opened 24.9 s after boot; during the 22.9 s (the stuck limit is 20 s)
-  the SD row was Starting, never flagged stuck, then Ok; the other rows Ok with 0 errors, IMU 803.5 / 800.7,
-  watchdog stalls begun 0; the log then written at 10.4 blocks/s, overflows 0, in the 210 s run.
-- NOT seen: a power cut, a real write error on a present card, card full, a second card type, RCIN records (no
-  transmitter), the logger without the debugger attached.
-
 ## Settings in flash
 
-`src/settings.rs` (design: decision-foundation item 3, the two-core amendment "Item 3, changes", and the
-owner's answers of 2026-11-15). The parameters persist in the `SETTINGS` region, two 4096-byte sectors
+`src/settings.rs` (design: decision-foundation item 3, the two-core amendment "Item 3, changes"). The parameters persist in the `SETTINGS` region, two 4096-byte sectors
 A (0x101FE000) and B (0x101FF000), one `fw_core::record` record each: only the values that differ from
 their default.
 
@@ -806,15 +698,13 @@ their default.
   APPLY request; ACCEPTED (also with no valid record: defaults, with the boot's text).
 - The range guard: every erase and program passes ONE function (`settings::guarded`) that refuses any
   range outside offsets 0x1FE000 to 0x200000 with a `[FAIL]` log line and an error, never a write.
-- The stall: an erase or program runs with interrupts off on core 0 and core 1 paused. Measured on the
-  board over 100 saves (feature `save-loop`): 30.6 ms min, 44.8 ms max, 40.2 ms mean (erase 30 to 44 ms,
+- The stall: an erase or program runs with interrupts off on core 0 and core 1 paused. A stall is about 30 to 45 ms (erase 30 to 44 ms,
   program of one page about 0.6 ms); the design's bound is 533 ms. Each stall is published (`SAVE_EPOCH`,
   the last window); a core-0 device's deadline miss or stuck window that a save overlapped is discarded
   (logged, `discarded, a flash save overlapped it`), never a health event. IMU1 (flight core): the samples
-  due during the stall are not read; after it, one long gap (largest 47 ms) and no error, timeout or
-  recovery. Over the 100 saves: 0 device transitions, 0 errors, 0 timeouts on IMU1 and BARO.
-- `tools/run.sh` re-flashes only the program (`FLASH`, below 0x101FE000): the settings survive it
-  (checked 3 of 3); the power-cycle half of I3.5 is not checked yet.
+  due during the stall are not read; after it, one long gap and no error, timeout or
+  recovery.
+- `tools/run.sh` re-flashes only the program (`FLASH`, below 0x101FE000): the settings survive it.
 
 Features for the checks (off by default):
 
@@ -822,11 +712,9 @@ Features for the checks (off by default):
   alternating 1 and 3, each stall logged, then `[INFO] save-loop summary: ...` (count, verified,
   min/max/mean stall, device transitions, IMU1 missed edges, long gaps and largest gap, BARO timeouts,
   discarded windows, guard refusals, the last value saved). Flash wear: 100 erases per run. Runs once per
-  power-up or flash: not after a reset the watchdog caused (so a fault can never make it loop). Not yet run
-  under the watchdog (see Watchdog).
+  power-up or flash: not after a reset the watchdog caused (so a fault can never make it loop).
 - `FEATURES=fake-armed tools/run.sh 60`: the handshake's armed flag is set at boot; `param save` is
-  TEMPORARILY_REJECTED (the admission reads the same flag as armed) and writes nothing. Before the flight
-  wiring (step 5) it reached the save and ended FAILED "save failed: armed".
+  TEMPORARILY_REJECTED (the admission reads the same flag as armed) and writes nothing.
 - `FEATURES=corrupt-newest tools/run.sh 60`: at boot, before the settings are read, one byte of the newest
   valid record (the first entry's value byte, else the CRC's, else the magic's) is programmed to 0x00
   through the guard; the boot then chooses the other sector (invariant I3.2) and the next save goes to the
@@ -844,9 +732,7 @@ Features for the checks (off by default):
 
 ## Frames
 
-Every IMU and compass value that leaves the board is in the body frame, FRD (x forward, y right, z down), as in MAVLink and ArduPilot: level and at rest the accelerometer reads z about -9.81 m/s^2 (specific force, up). The IMU adapters (core 1) apply the chip's fixed rotation (`ROLL_180`), then subtract the offsets (the board frame), then apply `AHRS_ORIENTATION`; the compass adapter (core 0) applies `MAG_ORIENT`, then the calibration m = S (r - o) with `MAG_OFF*` and the `MAG_DIAG*`/`MAG_ODIAG*` matrix (the body frame). The log's IMU and MAG records and the `[STAT]` lines carry the same values. Measurements made before this build (this README's, `docs/handoff.md`'s) and offsets and logs stored before it are in the chips' own axes, and the stored offsets must be redone. Design: `_plan/decision-orientation-20261117.md`.
-
-On 2026-11-18 the owner checked the IMU and compass signs on both IMUs (moved by hand), calibrated the gyroscopes, accelerometers and compass in the body frame, and saved the offsets to flash; they were kept after a reboot.
+Every IMU and compass value that leaves the board is in the body frame, FRD (x forward, y right, z down), as in MAVLink and ArduPilot: level and at rest the accelerometer reads z about -9.81 m/s^2 (specific force, up). The IMU adapters (core 1) apply the chip's fixed rotation (`ROLL_180`), then subtract the offsets (the board frame), then apply `AHRS_ORIENTATION`; the compass adapter (core 0) applies `MAG_ORIENT`, then the calibration m = S (r - o) with `MAG_OFF*` and the `MAG_DIAG*`/`MAG_ODIAG*` matrix (the body frame). The log's IMU and MAG records and the `[STAT]` lines carry the same values. Design: `_plan/decision-orientation-20261117.md`.
 
 ## Calibrations
 
@@ -917,7 +803,7 @@ is m. With S the identity (the defaults) m equals the old `r - o` (bit for bit, 
 -0.0 may come out as +0.0). The parameters (indices 81 to 91, see Parameters): S's six terms, `MAG_CAL_TYPE`
 (0 none or unknown, 1 quick, 2 guided), the expected field `MAG_FLD_UT` and `MAG_FLD_INC` (from the World
 Magnetic Model at the calibration site, 0 = not set), and the flight health test's tolerances `MAG_HLT_STR`
-and `MAG_HLT_INC`: with the type, the adapter reads these four for every compass sample and publishes them to the flight core as `MagSample.expected` (microtesla, radians, fraction, radians), `None` unless the type is 2 and `MAG_FLD_UT` > 0; the flight core does not use it yet. `param reset-calibration` returns
+and `MAG_HLT_INC`: with the type, the adapter reads these four for every compass sample and publishes them to the flight core as `MagSample.expected` (microtesla, radians, fraction, radians), `None` unless the type is 2 and `MAG_FLD_UT` > 0. `param reset-calibration` returns
 `MAG_OFF*` and indices 81 to 89 to their defaults: S the identity, offsets 0, type 0, no expected field. A
 record saved before these parameters existed (offsets only) loads with S the identity and type 0. Changing
 `MAG_ORIENT` invalidates the calibration (S and o are in the body frame after it); nothing on the board warns.
@@ -962,20 +848,6 @@ calibration runs, its input (not the published samples) is replaced by a synthet
 (+-50, 0, 0), (0, +-50, 0), (0, 0, +-50) uT about the centre (10, -20, 30) uT, each held for 100 samples, so
 the success path can be shown on a board that cannot be turned: offsets (10, -20, 30), radii 50.
 
-### On the board (2026-11-15, MARV V2 Rev 1 at rest on the bench, nothing saved)
-
-(Later: on 2026-11-18 the owner calibrated this board by hand (gyro, accelerometer, compass) and saved the offsets to flash; they were kept after a reboot. The figures below are the 2026-11-15 ones.)
-
-Normal build: `calibrate accel` ACCEPTED, "accel cal: |IMU1| 285 |IMU2| 294 mm/s^2" printed before the exit
-(exit 0); `calibrate gyro` ACCEPTED, "gyro cal: |IMU1| 5417 |IMU2| 5412 urad/s"; `calibrate compass`: 0 to
-98 % over 30 s, then FAILED "compass cal: not rotated, radius 1 1 1 uT" (exit 1), `MAG_OFF*` still 0; a run
-interrupted at about 9 s and ended by `calibrate cancel`: "compass calibration stopped (cancelled): nothing
-written", final ACK of command 241 CANCELLED, `MAG_OFF*` 0. Then `param reset-calibration --yes`. With
-`inject-mag-rotation`: ACCEPTED, "compass cal: off 10 -20 30 r 50 50 50 uT", `MAG_OFFX/Y/Z` = 10, -20, 30;
-the `[STAT] MAG:` field of the next line moved from (-32.93, 13.03, 37.86) to (-42.66, 32.93, 7.88) uT, the
-offsets less the noise of a single sample (about 0.3 uT); after a restart `MAG_OFF*` read 0 (not saved).
-Six rows Ok, 0 errors, watchdog stalls begun 0, no reset throughout.
-
 ## Commands
 
 `Telemetry::command` and `Telemetry::acks` on the USB link, over ONE `fw_core::admission::ActionBook`
@@ -995,7 +867,7 @@ commands put the book's text out as a STATUSTEXT. Every decision logs
 | `param reload` | the boot rule again from flash; the devices whose values changed get their APPLY request; ACCEPTED |
 | `reboot --yes` | MAV_CMD_PREFLIGHT_REBOOT_SHUTDOWN param1 = 1: the action writes the REQUESTED scratch record and ends ACCEPTED; when the final ACK is handed to the link the watchdog monitor resets the board (`trigger_reset`) 100 to 200 ms later (1 s after the action when no ACK could be handed). Nothing is saved: an unsaved parameter change is gone after the reboot. The boot report then says INFO "reboot: requested" |
 | `calibrate gyro`, `accel`, `compass`, `calibrate cancel` | see Calibrations |
-| `device selftest MAG`, `IMU1`, `IMU2` (others DENIED "not supported yet") | THE DEVICE MUST LIE STILL (no motion check: a moved device just reports FAIL). The device's task runs the driver's self-test with the driver's defaults (bmm350 X and Y both polarities; icm45686 the vendor's eDMP test, both sensors, 320 ms, 50 %; lsm6dsk320x low-g, gyroscope and high-g, positive stimulus), then the operator restart path under the same request number (the adapter's `restart`, then a fresh sample) whatever the test gave. MAG on core 0 (`REQ_SELF_TEST` in `run_device`), IMU1/IMU2 on the flight core (Kick bit `REQ_SELF_TEST` = 8, the test and the restart in the same loop step so no CHECK is taken between them). The outcome crosses as `fw_core::selftest::Outcome` (number, verdict Pass / Fail(failed-axis mask: IMU1 accel XYZ gyro XYZ, IMU2 low-g/gyro/high-g XYZ, MAG X+ X- Y+ Y-) / Error(kind), duration; IMU outcome in `ImuStatus`), the device's return through the restart outcome of the same number. ACCEPTED only on a pass with the device back Ok, otherwise FAILED; ONE STATUSTEXT before the final ACK: "MAG self-test: PASS", "IMU2 self-test FAIL: lowg X gyro YZ", "IMU1 self-test: error bus". The row's flag bit 1 (self-test) is set from the request until the action ends, and the supervisor's stuck check does not apply to the row meanwhile. The IMU tests wait through the flight core's `SpinDelay`: every wait of 50 us or longer polls the clock and yields (no timer queue), shorter ones busy-wait (so a verify step, whose waits are 10 us, never yields). On the board (2026-11-15, logs `marv-v2-firmware-20261115-152811.log`, `-153906.log`, `-155325.log`): MAG 8 runs PASS in 133-164 ms, IMU1 7 runs PASS in 749-751 ms, IMU2 7 runs PASS in 875-884 ms, each device back Ok with samples at its rate, the calibration offsets still applied afterwards; 1 to 2 status rows went out with the flag per IMU run, 0 or 1 per MAG run (the flag is not visible in `marv-cli devices`, which prints no flags). With the 50 us rule (`-155325.log`), during the three IMU1 tests: no "flight core not answering", watchdog stalls begun 0, IMU2 0 errors, 0 timeouts, 0 recoveries, IMU2's largest gap 3.4 ms (up to 10 s, covering the first IMU1 test and most of the second; a busy-waiting 100 us poll had starved IMU2 for 0.96 s and the watchdog had reported a 0.5-0.7 s stall per test). Not seen on the board: a FAIL or an error verdict (host tests only, `fw_core::selftest`, `fw_flight::imu`) |
+| `device selftest MAG`, `IMU1`, `IMU2` (others DENIED "not supported yet") | THE DEVICE MUST LIE STILL (no motion check: a moved device just reports FAIL). The device's task runs the driver's self-test with the driver's defaults (bmm350 X and Y both polarities; icm45686 the vendor's eDMP test, both sensors, 320 ms, 50 %; lsm6dsk320x low-g, gyroscope and high-g, positive stimulus), then the operator restart path under the same request number (the adapter's `restart`, then a fresh sample) whatever the test gave. MAG on core 0 (`REQ_SELF_TEST` in `run_device`), IMU1/IMU2 on the flight core (Kick bit `REQ_SELF_TEST` = 8, the test and the restart in the same loop step so no CHECK is taken between them). The outcome crosses as `fw_core::selftest::Outcome` (number, verdict Pass / Fail(failed-axis mask: IMU1 accel XYZ gyro XYZ, IMU2 low-g/gyro/high-g XYZ, MAG X+ X- Y+ Y-) / Error(kind), duration; IMU outcome in `ImuStatus`), the device's return through the restart outcome of the same number. ACCEPTED only on a pass with the device back Ok, otherwise FAILED; ONE STATUSTEXT before the final ACK: "MAG self-test: PASS", "IMU2 self-test FAIL: lowg X gyro YZ", "IMU1 self-test: error bus". The row's flag bit 1 (self-test) is set from the request until the action ends, and the supervisor's stuck check does not apply to the row meanwhile. The IMU tests wait through the flight core's `SpinDelay`: every wait of 50 us or longer polls the clock and yields (no timer queue), shorter ones busy-wait (so a verify step, whose waits are 10 us, never yields). |
 | `device restart RC` (a device this build does not serve), and any command or parameter the admission does not accept | DENIED by the admission, its text as a STATUSTEXT |
 
 ## Radio (ELRS receiver, `rc-port`)
@@ -1011,8 +883,6 @@ shares with thread mode (the parameter store, the action book, the text ring, th
 storage) is a critical-section mutex or an atomic, none held across an await. Its watchdog id is stored
 at the start of each of its polls and the preempted task's id put back at the end (`rc::preempting`), so
 a stall inside its poll is recorded as RC and the interrupted thread-mode task keeps its own id.
-UART overruns (in `[STAT] RC:`): 5 in 300 s in thread mode, 7 in 300 s on `SWI_IRQ_0` (2026-11-15, radio
-on, MAVLink): the executor did not remove them (cause not found yet).
 
 The RC row (`MARV_DEVICE_STATUS` device 7, SYS_STATUS RC_RECEIVER) is REPORT ONLY: no health machine,
 no recovery (`rc-port` recovers by itself), `device restart RC` is DENIED. The row means "the radio link
@@ -1042,9 +912,7 @@ What each link carries:
 The radio's budget from the frame sizes (MAVLink 2 as our dialect crate encodes them, 12 bytes of framing; trailing zero bytes of a payload are not sent; sizes got by encoding one message of each type with `marv-dialect` at the pinned commit `af6baa1` in a scratch program, outside this repository): HEARTBEAT 21 B/s, SYS_STATUS up
 to 43 B/s, one MARV_DEVICE_STATUS up to 42 B/s, GPS_RAW_INT up to 64 B per 2 s = 32 B/s, HIGHRES_IMU 74 B/s (the
 `id` byte, 0, is not sent), SCALED_IMU2 36 B/s, SCALED_PRESSURE 26 B/s (28 with a non-zero `temperature_press_diff`, which
-is always 0): at most about 274 B/s plus texts (up to 66 B each). Counted at the UART (`sent MAVLink` in `[STAT] RC:`, MAVLink 460800
-mode, GPS fix present, 2026-11-16, transmitter on in its MAVLink model): 2 700 B in every 10 s from 10 s to 90 s, 270 B/s,
-against about 134 B/s before the three streams (2026-11-15). The owner's ELRS settings are 250 Hz packet rate, telemetry
+is always 0): at most about 274 B/s plus texts (up to 66 B each). The owner's ELRS settings are 250 Hz packet rate, telemetry
 ratio 1:2, switch mode hybrid; ExpressLRS's documentation gives about 590 B/s of telemetry at 250 Hz (UNVERIFIED: read from a
 summarised web page, not checked against the source or on the air), of which 270 to 274 B/s is 46 to 47 %. The air link's own
 framing of MAVLink and its share left for the receiver's link statistics are not known here, so this is the rule's margin, not
@@ -1078,25 +946,8 @@ A MAVLink RC_CHANNELS_OVERRIDE report is never written, so the radio's MAVLink m
 loss are decided on core 1 (see Flying, props off). Not built: a rule about which link has authority or what a mode
 change means.
 
-Seen on 2026-11-15, transmitter on in its MAVLink model, ground station on the transmitter backpack's
-WiFi (UDP 14550): the port locked on MAVLink at start and held 300 s (100 stick reports and 90
-RADIO_STATUS per second, `rssi` 254, `txbuf` 100, slowdown 0, row OK, link up, health bit set);
-`marv-link-test` over the air, 30 s: HEARTBEAT 30, SYS_STATUS 30, MARV_DEVICE_STATUS 30, GPS_RAW_INT 15,
-nothing else, 0 lost, 133.9 B/s; `devices --for 10` showed all 7 rows; `param set` over UDP refused by
-the station ("this link is operate-only", status 4, no write on the board); `param list` over UDP got all
-25 within 60 s; a text reached both links once; a USB gyro calibration with the radio up kept its text
-before its ACK. CRSF mode has run since (2026-11-16: RC_CHANNELS and MANUAL_CONTROL on USB, RCIN in the
-SD log). Not yet run: the transmitter switched off in either mode, a command over the radio.
-
 ## Status LED
 
-Run on the board on 2026-11-18 (commit 51651e2, flash log `logs/marv-v2-firmware-20261118-213111.log`: 15 PASS, 0 FAIL;
-the ESC cadence unchanged: 1000 exchanges/s, longest spacing 1.24 ms). Seen by the owner, in his words: "bring up worked,
-all 3 clicks the led functioned as expected". The bring-up was a reboot from the station (white, the nine-blink roll call,
-then the pulse); the three clicks were a motor-test spin (expected: solid purple), `LED_BRIGHT` set to 3 and back to 1
-(full brightness, then dim) and the battery unplugged and plugged back (a yellow pulse, then back). This is what the owner
-observed, not a measurement. Not seen on the board: the red double blink (no vital sensor failed), the calibration pattern,
-the save and calibration flashes, `LED_BRIGHT` 0 and 2, the green pulse. The display logic, `fw_core::led`, has host tests.
 Design: `_plan/decision-status-led-20261118.md`.
 
 The board's one status LED (D20, a WS2812C on GPIO43) shows the vehicle's state, decided by the firmware (nothing in the
@@ -1200,8 +1051,7 @@ starts but its liveness task is not spawned. Expected: `[FAIL] PONG follows PING
 WARNING text "flight core not answering", and `param save` ends FAILED "save failed: flight core not
 answering" with nothing written. The hardware watchdog is NOT started in this build (`[INFO] watchdog NOT
 started ...`): the flight core never answers, so it would reset the board in a loop. The monitor still runs
-without effect (it logs the flight-core stall once) and carries out a reboot. Measured 2026-11-15: 60 s, no
-reset, all three of the above. Run `tools/run.sh` again afterwards to put the normal build back on the
+without effect (it logs the flight-core stall once) and carries out a reboot. Run `tools/run.sh` again afterwards to put the normal build back on the
 board.
 
 ## Watchdog
@@ -1238,40 +1088,30 @@ board.
   firmware boots again from flash on its own and keeps running; its evidence is then read with `marv-cli`.
   A flash by `tools/run.sh` leaves the scratch registers at 0 and the reset reason empty.
 - Every 10 s: `[STAT] watchdog: feeds N, stalls begun B, ended E, checks after a save S`.
-- A save under the watchdog (2026-11-15, normal build, `param set BARO_IIR_T 3`, `param save`,
-  `param reset-all --yes`, `param save`): both ACCEPTED, stalls 42.1 ms and 40.7 ms, `checks after a save
-  2`, `stalls begun 0`, feeds 100 per 10 s (no check went unfed), no reset.
-- 100 saves in a row under the watchdog (2026-11-15, `save-loop`, run by the owner): 100 saves, 100 verified,
-  stall 38.7 to 45.5 ms (mean 41.8 ms), 0 device transitions, `feeds 1900` at 190 s (100 per 10 s throughout),
-  `stalls begun 0`, `checks after a save 100`, no reset; IMU1 and BARO 0 errors (invariant I6.3 on the board).
-- A power cycle (2026-11-15, the owner unplugged and replugged the board): the saved record was loaded
-  (`BARO_ODR_HZ` 25 from the start), the boot text ends "reset: power-on" and there is no watchdog or reset text.
-- A stuck device (2026-11-15, `inject-baro-stuck`, 75 s): "BARO: stuck" (ERROR), the row FAILED/STUCK, no
-  stall, no reset; IMU1 Ok with 0 errors at 803.5 samples/s throughout.
 
 What each cargo feature does under the watchdog:
 
 | Feature | Under the watchdog |
 |---|---|
 | `no-fbeat` | the watchdog is not started (a pre-watchdog negative control); no reset |
-| `inject-baro-*` (transient, persistent, missed-edge, silent, verify, por, fail-until-restart, stuck) | device faults inside awaits: the executor runs on, the watchdog stays fed, no reset (stuck: measured) |
+| `inject-baro-*` (transient, persistent, missed-edge, silent, verify, por, fail-until-restart, stuck) | device faults inside awaits: the executor runs on, the watchdog stays fed, no reset |
 | `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify` | IMU faults on the flight core; `fbeat` still answers, no reset |
 | `stall-core0` | 1.2 s spin: a "core 0 stalled" text, no reset; once per power-up or flash |
 | `f4-negative` | a DMA channel built on core 0 before the check: `[FAIL]` line only, no stall |
-| `sd-fat-probe`, `sd-fat-format`, `sd-fat-paced` | probe P3 of the SD logging design (`src/sd_probe.rs`): from 20.5 s a core-0 task builds the SD bus (PIO0 SM0, DMA channel 4 on `DMA_IRQ_1`), mounts the FAT32 volume of MBR partition 1, writes, reads back and compares `LOGS/P3TEST.BIN` (16 MiB) and un-mounts, yielding at every card access; `sd-fat-format` first writes a new MBR and formats the card FAT32 (erases it). Measured 2026-11-15 (logs 222457 format, 223053 probe): every probe check PASS, stalls begun 0, no reset; but while the card was written the flight core's IMU rates fell by 1 to 6 % and its gaps over 1.5 P per 10 s rose 10 to 50 times (back to normal once the probe ended), so the SD path is not yet fit for a burst. `sd-fat-paced` (also: instead of the burst, 150 s at the logger's duty, one 4 KiB write every 700 ms and a flush each second): measured 2026-11-15 (logs 224159 with `xip-stat`, 224604 without), every check PASS, IMU rates within 0.2 % of the normal build, XIP misses within 3 % of idle; with `xip-stat` (223918) the burst doubled the XIP misses per second. With the flight core in SRAM (2026-11-16, log 20261116-000838) the burst leaves the IMUs unchanged: see Flight core in SRAM |
+| `sd-fat-probe`, `sd-fat-format`, `sd-fat-paced` | probe P3 of the SD logging design (`src/sd_probe.rs`): from 20.5 s a core-0 task builds the SD bus (PIO0 SM0, DMA channel 4 on `DMA_IRQ_1`), mounts the FAT32 volume of MBR partition 1, writes, reads back and compares `LOGS/P3TEST.BIN` (16 MiB) and un-mounts, yielding at every card access; `sd-fat-format` first writes a new MBR and formats the card FAT32 (erases it). `sd-fat-paced` (also: instead of the burst, 150 s at the logger's duty, one 4 KiB write every 700 ms and a flush each second). |
 | `inject-sd-no-card`, `inject-sd-wrong-format`, `sd-irq-negative` | the SD task's test hooks (every card `init` answers `NoCard`; block 0's partition type handed to the MBR check as 0x07) and the negative control of Q1-I1 (INTE0 bit 4 set before the SD register check, cleared after it): rows and `[FAIL]` lines only, no stall |
-| `save-loop` | 100 saves; no stall, no reset (measured); once per power-up or flash |
+| `save-loop` | 100 saves; no stall, no reset; once per power-up or flash |
 | `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | boot-time settings checks (corrupt-newest programs one byte at every boot); no stall |
 | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff` | the watchdog checks below, each once per power-up or flash |
 | `wdg-scratch-probe` | no monitor; at most two resets by design |
 | `inject`, `inject-imu1`, `inject-imu2`, `inject-imu` | internal, switched on by the features above |
 | `inject-late` | with an IMU injection feature, the injection starts 60 s (not 5 s) after the first good sample; no other effect |
 | `xip-stat` | measurement only: at start the QMI flash read mode (registers in hex and decoded) and the cost of one XIP cache miss (three passes over 32 kB of unused flash, one control pass), then an extra `[STAT]` line with the XIP cache accesses, hits and misses since the previous line; reads QMI and XIP_CTRL, writes only the two XIP counters; the passes block core 0 for a few ms at start |
-| `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; with `NO_CATCH_HARDFAULT=1` the core locks up and the watchdog resets it: "TimedOut, record false", measured), without it `[FAIL] ... no fault` and the statics below are overwritten |
+| `stack-negative` | NEGATIVE CONTROL of core 0's stack guard (MSPLIM = `_stack_end`): 10 s after a start the watchdog did not cause, a core-0 task recurses to 2 KiB below `_stack_end`; with the guard it takes a HardFault (nothing is logged after its `[INFO] stack-negative:` line; under `probe-rs run`: "Firmware exited unexpectedly: Exception", HardFault escalated; with `NO_CATCH_HARDFAULT=1` the core locks up and the watchdog resets it: "TimedOut, record false"), without it `[FAIL] ... no fault` and the statics below are overwritten |
 | `psram-skip-remap` | the hook after a settings flash erase or program does not re-map the PSRAM: its canary must FAIL after the first save (`[FAIL] psram: canary read back wrong ...`, the `[STAT]` line reads `FAULT canary after flash op`; if it passes, the re-map is not needed, record that) |
 | `psram-absent` | the PSRAM's init is treated as failed without touching the chip: `[FAIL] psram: init treated as failed`, the `[STAT]` line reads `FAULT init`, the board boots normally and nothing panics |
 | `psram-negative` | NEGATIVE CONTROL: core 1's `now_us` reads the PSRAM canary, so `tools/check-ram-code.py` must FAIL naming `psram::negative_touch` and the 0x15000000 object (a static check; never flashed: `tools/run.sh` refuses it because the checker does not pass) |
-| `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. On the board the build runs normally (core 1 then reads flash on every sample) |
+| `ram-negative` | NEGATIVE CONTROL of `tools/check-ram-code.py`: `now_us` is linked into flash (`.text.ram_negative`, never inlined), so the checker must FAIL naming it; `tools/run.sh` requires that failure before it flashes. The build runs normally on the board (core 1 then reads flash on every sample) |
 | `esc-off` | the ESC task is not built or spawned: nothing touches PIO2, DMA channel 5 or GPIO36-39 (the IMU baseline of the ESC board checks); the ESC row reads FAILED, stuck; not for a release |
 | `esc-no-edt` | no EDT burst starts (`edt_bursts` stays 0); Stop, the motor test and flight throttles go out as without it (the negative control of extended telemetry); not for a release |
 | `xip-park` | the board check of the flight core in SRAM (`src/xip_park.rs`), once, 30 s after a start the watchdog did not cause: a 1 s window of XIP accesses with both cores running (over 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with its interrupts off and the XIP accesses counted meanwhile, core 1's, must be exactly 0 while each IMU gains at least 790 samples and no error; with `xip-park,ram-negative` at least 1000. One "core 0 stalled 1.0 s" text, no reset. Not together with `xip-stat` |
@@ -1281,7 +1121,7 @@ it provokes; `tools/run.sh` puts the normal build back):
 
 - `FEATURES=wdg-scratch-probe`: at most two resets: writes a record, lets the watchdog time out, reads it
   back (text "probe: kept after TimedOut reset"), writes another, forces a reset 30 s later, reads it back
-  ("probe: kept after Forced reset"). Result 2026-11-15: the scratch registers 0 to 3 survive both.
+  ("probe: kept after Forced reset").
 - `FEATURES=hang-core0`: the barometer's task spins forever: reset, "WDG reset: BARO stalled (core 0)".
 - `FEATURES=hang-flight`: IMU1's task on the flight core spins forever: reset, "WDG reset: IMU1 stalled
   (flight core)".
@@ -1377,49 +1217,16 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-esc-telemetry-20261118.md`. 
 - Core 0 prints `[STAT] ESC:` every 10 s: the row, exchanges, starts, longest spacing, longest exchange and shortest exchange (0 before the first), and per
   motor good replies, non-replies, dropouts, EDT bursts and the latest raw voltage, temperature and current, and at
   the end of the line `throttle frames N` (the throttle frames the flight core has sent since boot).
-- Since P6 the frames carry the flight command's throttles on all four lines while it spins (see Flying, props off,
+- The frames carry the flight command's throttles on all four lines while it spins (see Flying, props off,
   below); `EscStatus` counts them (`flight_spin`, `flight_frames`, `flight_read_failures`; not in the `[STAT]` line).
 - Not built: the ESCs' serial telemetry on GPIO34, the passthrough, the ESC row in the SD log, ESC messages on the radio.
-- Measured on the board (2026-11-18, battery connected, motors fitted, no propellers, probe-rs attached). F3a at
-  4cfb1f0: logs `20261118-191955` (default), `20261118-192214` (`esc-off`), `20261118-192403` (default). F3b at
-  0d25909: `20261118-193433` (default, one settings save), `20261118-193820` (`esc-no-edt`), `20261118-194106`
-  (`xip-park`), `20261118-194357` (`xip-park,ram-negative`), `20261118-194637` (default).
-  - Start-up checks: 15 `[PASS]`, no `[FAIL]`; `PIO2_IRQ_0` enabled on core 1 and not on core 0; INTE0 0x2f.
-  - Online (row OK, ESC_INFO `info` 15) about 4.1 s after boot; the row dips to STARTING for about 0.7 s during the
-    ESCs' arming tune (one dropout per line) and is stable from about 5.4 s.
-  - 1000 exchanges/s (10 000 ±1 per 10 s); longest spacing 1.1-1.3 ms.
-  - Error rate 0 after 5.4 s on all four; about 940 non-replies per line before.
-  - ESC voltage M1 16.0 V, M2 15.25-15.75 V, M3 15.5 V, M4 15.5 V beside the board's 15.0 V (SYS_STATUS 14.99-15.02 V);
-    temperature M1 46-47, M2 32-33, M3 30-32, M4 42-43 degC. The ESCs' raw current reads 153-162 A at rest, hence NaN
-    on the link. rpm 0 in every ESC_STATUS.
-  - IMU rates unchanged against `esc-off` (192214): IMU1 803.450/s, largest gap 1416 us, longest run 616 us; IMU2
-    800.600/s, 1450 us, 266 us. With the ESC task (191955, 192403): IMU1 803.433-803.450/s, 1411-1487 us, 711-737 us;
-    IMU2 800.600/s, 1406-1847 us, 204-276 us.
-  - One settings save (193433): 45 ms stall, 44 frames lost, longest spacing 44.3 ms, all four stayed online,
-    `starts` 1.
-  - `esc-no-edt` control (193820): `info` 15, voltage NaN and temperature no-data (32767) on all four for the whole run.
-  - `xip-park` with the ESC task running (194106): 0 accesses with core 0 parked; 184 035 in the `ram-negative`
-    control (194357).
-  - Battery pulled and plugged back by the owner with the station (figures from the lead's reading of the station
-    recordings, not from these logs): row FAILED/TIMEOUT and `info` 0 within the same second; back online within a
-    second of power, voltage after about 2.3 s; a boot without battery reads ABSENT, then OK after plugging in. The
-    ESCs' bootloader v1 starts the application with frames already running, so the decision's fallback restart was
-    not built.
-  - Exchange duration: shortest 156-157 us. With 144.6 us for the frame and capture, that leaves 11.4 us for decode,
-    frame choice, wake and two clock reads (1 us resolution). The driver decision's 1500-cycle decode tripwire is
-    10 us: decode alone was not isolated, it is bounded above by 11.4 us. Longest 255-1358 us, which includes other
-    core-1 tasks' polls and, once, the save stall.
-  - Not measured: serial telemetry. Throttle: see Motor test below.
 - Known behaviour: when the battery is plugged in more than 5 s after boot, the ESC row can read FAILED/TIMEOUT for
   under a second during the arming tune.
-- Noticed (2026-11-18, not analysed): an RC UART framing/break burst after `xip-park`'s core-0 park (33 warnings,
-  logs `20261118-194106` / `20261118-194357`; 1 overrun on 2026-11-16); one RC UART overrun at a settings save
-  (`20261118-193433`).
 
 ### Flying, props off
 
 **This firmware spins all four motors when the pilot arms it on the radio. Keep the propellers off unless the owner
-says otherwise.** Not yet checked on the board (`docs/handoff.md`).
+says otherwise.**
 
 - Arms: channel 5 goes from off to above 1800 us on a fresh CRSF report, with throttle low, the attitude valid, lean
   within 30 deg, no settings save running and core 0's permit set (`HANDSHAKE.try_arm()`); the motors then run at idle
@@ -1447,7 +1254,9 @@ says otherwise.** Not yet checked on the board (`docs/handoff.md`).
 Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (amendment A, "lean"). Code:
 `fw_core::admission` (`classify_motor_test`, `MotorTest`), `src/actions.rs` (`motor_test`), `src/esc.rs` (`TEST`,
 `report`), `fw_flight::esc` (`Esc::frames`, `capped`). The station's field table: `docs/link-contract.md` section 15
-(MARV-GCS). **Propellers off only.** Run on the board on 2026-11-18 (the last item below).
+(MARV-GCS). **Propellers off only.**
+Motor positions and spin directions: M1 rear left counter-clockwise, M2 front left clockwise, M3 rear right clockwise, M4 front
+right counter-clockwise.
 
 - The command: `MAV_CMD_DO_MOTOR_TEST` (209), `COMMAND_LONG`, on every link the same way (the firmware does not check the
   link; link contract section 9). param1 motor 1-4 (M1-M4, the ESC_STATUS order); param2 0 (percent); param3 throttle
@@ -1478,30 +1287,10 @@ Design: `~/Documents/MARV-V2-drivers/_plan/decision-motor-test-20261118.md` (ame
   runs to its end (at most 3 s); nothing repeats or holds it. The ESC task must be running: if the driver was not
   built the row reads FAILED but a spin is still ACCEPTED and nothing turns.
 - Tests: `cargo host-test -p fw-core` (admission: `motor_test_*`), `-p fw-flight` (the frames and endings, M2-F1).
-- Measured on the board (2026-11-18, commit 7b3cdb6, flash log `20261118-204512`: 15 PASS, 0 FAIL; battery on, no
-  propellers; the owner clicking Spin and Stop in the station's Motors tab; figures read from the station's own
-  recordings `2026-11-19_02-48-25Z.tlog` and `2026-11-19_03-03-53Z.tlog`, ESC_STATUS at 10 Hz, so times resolve to 0.1 s):
-  - Identity: each of M1-M4 at 5 % for 2 s turned one motor, and rpm appeared only on that motor's ESC_STATUS element.
-    The owner named them: M1 rear left counter-clockwise, M2 front left clockwise, M3 rear right clockwise, M4 front
-    right counter-clockwise (the same as `docs/pinout.md`, 2026-11-13).
-  - rpm at 5 % (level 100), median over the last second: M1 1809, M2 1899, M3 1822, M4 1840 (the bench's
-    2026-11-13 median for M1 was 12 755 eRPM, 1822 rpm). At 1.65 % (level 33) M1 started and ran at 898 rpm.
-  - Duration: 17 spins, all ACCEPTED; a 2 s spin showed rpm for 2.0-2.1 s and a 3 s spin for 3.0 s, each ended by
-    itself.
-  - Stop: a stop 0.67 s into a 3 s spin; rpm was 0 in the next ESC_STATUS (0.70 s after the spin began).
-  - Replace: M2 commanded 0.35 s into M1's spin; M1 went to 0 and M2 ran its own 3 s.
-  - Link loss: the USB cable pulled 1.2 s into a 3 s spin and 0.4 s into a 2 s spin; the owner saw the motor stop by
-    itself both times; after reconnecting, rpm 0, all four ESCs online, no reset.
-  - All four ESCs stayed online (`info` 15 in every ESC_INFO) with 0 new reply errors over the 914 s recording.
-  - Not run on the board: a refused command (the station cannot send one outside the table; host-tested), a save
-    or calibration during a spin (host-tested), a spin with the battery unplugged, `xip-park` and the IMU rates
-    during a spin (the RAM-code checker passed at the flash), the `[INFO] motor test` lines (the probe was detached).
 
 ## Flight core in SRAM
 
-Design: `~/Documents/MARV-V2-drivers/_plan/decision-ram-code-20261115.md` (the owner: "run from PSRAM or RAM
-not flash"; the PSRAM sits behind the same 16 kB XIP cache as the flash, so this is internal SRAM). Since
-2026-11-16 the flight core executes only from internal SRAM once `core1_main` has started, so it no
+Design: `~/Documents/MARV-V2-drivers/_plan/decision-ram-code-20261115.md` (the PSRAM sits behind the same 16 kB XIP cache as the flash, so this is internal SRAM). The flight core executes only from internal SRAM once `core1_main` has started, so it no
 longer shares the XIP cache with core 0, whose misses under card work slowed it (facts-sd-logging C2).
 
 - In SRAM: everything core 1 can run after `core1_main` begins (the IMU tasks and the ESC task, `fw_flight`'s imu,
@@ -1540,33 +1329,13 @@ longer shares the XIP cache with core 0, whose misses under card work slowed it 
   machinery; a tool error exits 2. Blind spot: a function pointer formed only by core 0 and called on core 1
   (none today), which `xip-park` covers on the board. The patterns are the mechanism and the checker is the
   proof: a pattern change counts only with a passing checker (`docs/resources.md`, rule 10).
-- Measured (2026-11-16, probe-rs attached in every run):
-  - `xip-park` (log `20261116-001800`): unparked 1 s window 1 667 188 XIP accesses; core 0 parked 1 s in SRAM
-    with interrupts off: 0 accesses (HIT 0) while IMU1 gained 803 and IMU2 801 samples, 0 errors. Negative
-    control `xip-park,ram-negative` (`20261116-000720`): 159 605 accesses.
-  - The checker passes on this build and fails on `main`'s ELF of 96b94b7 (127 functions in flash) and with
-    `ram-negative` (naming `now_us`).
-  - The 16 MiB SD burst (`sd-fat-probe,xip-stat`, log `20261116-000838` against `20261115-223918`): during
-    the burst IMU1 803.49 to 803.61 and IMU2 800.61 to 800.70 samples/s (idle 803.5 and 800.7; before 790 to
-    802 and 770 to 799), 0 samples later than 1.5 P per 10 s (before 63 to 541), 0 errors.
-    Core 0 got faster too: the 16 MiB write took 16.7 s (1004 kB/s) against 35.5 s (472 kB/s), though its
-    longest single write call was longer (130 ms against 72 ms).
-  - The normal build, 200 s (log `20261116-001110` against `20261115-233145`): 0 samples later than 1.5 P per
-    10 s window for both IMUs (before 6 to 20 and 23 to 53), largest gap 1.63 and 1.67 ms (before 3.0 and
-    3.3 ms).
-  - The XIP counters now count core 0 alone: about 1.5 million accesses and 0.15 million misses per second
-    idle (both cores before: 94 million and 0.74 million).
-- Not done or not seen: no run without the debugger attached; the boot-copy time is not measured (the first
-  log line's timestamp starts after the copy); no breakpoint was tried in SRAM code; stage 2 (core 0's own
-  hot paths, such as the SD write path or the UART and USB handlers, in SRAM) is not built; core 0 still
-  competes with itself for the cache (its card work evicts its own code).
 
 ## Flash layout and memory map
 
 `memory.x` gives the program `FLASH` 2040K (0x10000000 to 0x101FE000) and reserves the last 8 KB of the
 2 MiB flash, 0x101FE000 to 0x10200000, as the `SETTINGS` region for the settings record (`src/settings.rs`;
-the only range the firmware erases or programs). The map of the normal build (2026-11-16,
-from `arm-none-eabi-size -A` and the linker symbols):
+the only range the firmware erases or programs). The map of the normal build (from
+`arm-none-eabi-size -A` and the linker symbols):
 
 | Where | What | Bytes |
 |---|---|---|
@@ -1593,15 +1362,12 @@ ends with `psram <state>, canary checks, failed, remaps, context violations`; th
 that tick (core 0, thread mode) and after every settings flash erase or program, where `psram::after_flash_op`
 (called from `settings::guarded`) first re-maps the window (the boot ROM's flash routines reset it). Core 1 never
 touches the PSRAM: `tools/check-ram-code.py` fails on any core-1-reachable code or data in 0x10000000-0x1FFFFFFF,
-and with the feature `psram-negative` it must fail. After the canary passes, `init` binds `logger::RING` and `logdl::HANDOVER` to their storage in the PSRAM and zeroes it (an `ExtLogRing`, `fw_core::extring`; the boot line ends with the time that took). Without a working PSRAM the rings stay unbound: the collector goes on draining the flight ring into nothing (its drops stay 0), the SD task goes off (`SD: logging off, no PSRAM`, row Absent), a log download is not answered, arming is not blocked, and there is no SRAM fallback ring. A FAULT at run time (the canary fails after a flash operation) stops the collector, the SD task and the download at their next PSRAM batch. Row 10 of the device table is not served yet.
+and with the feature `psram-negative` it must fail. After the canary passes, `init` binds `logger::RING` and `logdl::HANDOVER` to their storage in the PSRAM and zeroes it (an `ExtLogRing`, `fw_core::extring`; the boot line ends with the time that took). Without a working PSRAM the rings stay unbound: the collector goes on draining the flight ring into nothing (its drops stay 0), the SD task goes off (`SD: logging off, no PSRAM`, row Absent), a log download is not answered, arming is not blocked, and there is no SRAM fallback ring. A FAULT at run time (the canary fails after a flash operation) stops the collector, the SD task and the download at their next PSRAM batch.
 
 ## Board documentation
 
 - `docs/handoff.md`: the overview for whoever picks the work up: what is done and proven, what is in progress
-  (SD card logging), what is left, and the rules that are easy to break (2026-11-15).
-- `docs/handoff-esc-link.md`: the ESC link (DShot, AM32 passthrough, ESC telemetry input) and battery sensing: what the drivers
-  already do, the owner's decisions and what is still open for the firmware (DShot telemetry and the props-off motor test are built,
-  see ESC telemetry; passthrough, serial telemetry and arming are not).
+  (SD card logging), what is left, and the rules that are easy to break.
 - `docs/pinout.md`: the board pin assignment.
 - `docs/devices.md`: the devices on the board and what was measured on them.
 - `docs/resources.md`: who owns which pin, PIO state machine, DMA channel and interrupt, and the rules that follow.

@@ -266,7 +266,7 @@ Land, Return (`hands_off.rs:1050-1092`). Uploading a new list while holding drop
 
 ## 7. Key parameters
 
-Defaults and ranges from `crates/fw-settings/src`. Values saved on the vehicle at the handoff: none of the first three (see section 9).
+Defaults and ranges from `crates/fw-settings/src`.
 
 | Parameter | Default (range) | What it does |
 |---|---|---|
@@ -316,22 +316,18 @@ against thresholds and writes DataFlash logs. The N19 work was run on firmware b
 
 ## 9. Status: verified and not flown
 
-Verified (handoff sections 6-7):
+What is verified, at d430a96:
 
 | Layer | Evidence |
 |---|---|
 | Host tests at d430a96 | fw-flight 523 + 2, fw-core 458 + 5, fw-settings 85; hand-flying reference outputs (`SCRIPT_GOLDEN`, `WALK_GOLDEN`) unchanged; six deliberate faults caught |
-| Review | Three review passes on the N19 change and one on d430a96: PASS for a push and a props-off bench flash |
 | Build guards | `check-ram-code` PASS; start-up report 16 PASS, 0 FAIL; 128 parameters (120 flown ones identical to the snapshot) |
 | Simulator | N19 flight end to end in 126 of 126 runs over thrust gain 0.62-1.46; arm-OFF landings 126 of 126 with 0 motor stops above 0.3 m; hand-back brakes to under 0.3 m/s in about 1 s; transmitter-off 3 / 9.9 / 10.1 s as ruled; CRSF regression 540 cells identical |
-| Bench (props off, with the owner) | Every cell of the switch table, HOLD 30 s, Start accepted and AUTO 30 s (twice), RETURN 15 s, LAND and touchdown stop, TAKEOVER lock and release, both arm-OFF rules, arming refusals, upload over the backpack verified, refusal 20 and ACCEPTED line seen |
+| Bench (props off) | Every cell of the switch table, HOLD 30 s, Start accepted and AUTO 30 s (twice), RETURN 15 s, LAND and touchdown stop, TAKEOVER lock and release, both arm-OFF rules, arming refusals, upload over the backpack verified, refusal 20 and ACCEPTED line seen |
 
-Never flown (the handoff's own words, section 7): "HOLD, AUTO, RETURN, LAND's touchdown stop, TAKEOVER and the mission switch have never been in the air. Hand flying on the MAVLink model
-(100 stick reports/s instead of about 245; stop delay after arm OFF 8 ms instead of 2 ms in the simulator) has never been flown. The real link's delay is not measured." Also never run on
-the board: BLIND, a waypoint arrival or leg change, the battery-critical exits. The vehicle is on d430a96, not the flown firmware (`mission-upload` 72de0d4 in `~/Documents/MARV-V2-firmware`; restore with `tools/run.sh 120` there).
-
-Open owner decisions (handoff section 8): save `FS_HOLD_EN` 1, `GDN_SRC` 1, `PILOT_SPEED_XY` 3.0 for the flights (not yet; never `MAG_HLT_STR` 40); raise the flight-core stack; remove outdated
-firmware folders. Flight plan (handoff section 9): pre-flight on the MAVLink model, compass check `valid 0x7f`, upload, wait 15 s after arming; flight 1 hand flight with MS OFF; flight 2 the mission.
+Never flown: HOLD, AUTO, RETURN, LAND's touchdown stop, TAKEOVER and the mission switch have never been in the air. Hand flying on the
+MAVLink model (100 stick reports/s instead of about 245) has never been flown, and the real link's delay is not measured. Never run on the
+board: BLIND, a waypoint arrival or leg change, the battery-critical exits. The last flight-tested firmware is branch `mission-upload` (72de0d4).
 
 ## 10. Where to look next
 
@@ -339,7 +335,6 @@ firmware folders. Flight plan (handoff section 9): pre-flight on the MAVLink mod
 |---|---|
 | Per-subsystem detail and bench evidence | `README.md` headings: Flight-core device loop (54), Device layer (183), Parameters (457), SD card (616), Logging (678), Settings in flash (844), Calibrations (929), Commands (1057), Radio (1079), Status LED (1169), Watchdog (1285), ESC telemetry (1430), Flight core in SRAM (1578), Flash layout (1642) |
 | Pins, DMA, PIO, IRQ ownership | `docs/resources.md`, `docs/pinout.md`, `docs/devices.md` |
-| ESC link history | `docs/handoff-esc-link.md`; project state at 2026-11-19: `docs/handoff.md` (dated) |
 | Why the mission-switch behaviour is what it is | `~/Documents/MARV-V2-drivers/_plan/decision-mavlink-mode-20261123.md` sections 65-75 (67 = N19 table); latest handoff `_plan/handoff-20261124-evening.md` |
 | Wire contract (commands, codes, missions) | `~/Documents/MARV-GCS/docs/link-contract.md` sections 10, 17; `docs/architecture.md`, `README.md` there |
 | Driver contracts | `~/Documents/MARV-V2-drivers/CONTRACT.md`, each driver's README |
