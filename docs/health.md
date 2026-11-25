@@ -39,7 +39,7 @@ flowchart TB
 | power-on or debugger | nothing |
 
 A station can also tell from `time_boot_ms` going back to near zero and from the USB device re-enumerating. Nothing is kept in flash.
-Check features (`hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `wdg-scratch-probe`) each act once, 20 s after a start the watchdog did not cause.
+Check features (`hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`) each act once, 20 s after a start the watchdog did not cause.
 
 ## Status LED
 

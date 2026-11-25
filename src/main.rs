@@ -27,8 +27,8 @@
 //! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
 //! start-up check, then its line is disabled again before core 1 starts.
 //! Features `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign`: the
-//! settings checks (`settings`). Features `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`,
-//! `wdg-scratch-probe`: the watchdog checks (`watchdog`). Feature `stack-negative` (negative control of
+//! settings checks (`settings`). Features `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`: the
+//! watchdog checks (`watchdog`). Feature `stack-negative` (negative control of
 //! core 0's stack guard): 10 s after start the stack is run 2 KiB below `_stack_end`.
 #![no_std]
 #![no_main]
@@ -1245,28 +1245,23 @@ async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
     watchdog::RUNNING0.store(task::MAIN, Ordering::Relaxed);
     let mut wd = embassy_rp::watchdog::Watchdog::new(p.WATCHDOG);
-    #[cfg(feature = "wdg-scratch-probe")]
-    let probe = watchdog::probe::boot(&mut wd);
-    #[cfg(not(feature = "wdg-scratch-probe"))]
+    watchdog::boot(&mut wd);
+    #[cfg(not(feature = "no-fbeat"))]
     {
-        watchdog::boot(&mut wd);
-        #[cfg(not(feature = "no-fbeat"))]
-        {
-            wd.pause_on_debug(true);
-            wd.start(Duration::from_millis(u64::from(
-                fw_core::watchdog::PERIOD_MS,
-            )));
-            defmt::info!(
-                "[INFO] watchdog started: {=u32} ms, paused while a core is halted by the debugger; the monitor on SWI_IRQ_1 feeds it while BEAT0 and PONG are younger than {=u32} ms",
-                fw_core::watchdog::PERIOD_MS,
-                fw_core::watchdog::STALL_MS
-            );
-        }
-        #[cfg(feature = "no-fbeat")]
+        wd.pause_on_debug(true);
+        wd.start(Duration::from_millis(u64::from(
+            fw_core::watchdog::PERIOD_MS,
+        )));
         defmt::info!(
-            "[INFO] watchdog NOT started (no-fbeat: the flight core never answers, so it would reset the board in a loop); the monitor runs without effect and still carries out a reboot"
+            "[INFO] watchdog started: {=u32} ms, paused while a core is halted by the debugger; the monitor on SWI_IRQ_1 feeds it while BEAT0 and PONG are younger than {=u32} ms",
+            fw_core::watchdog::PERIOD_MS,
+            fw_core::watchdog::STALL_MS
         );
     }
+    #[cfg(feature = "no-fbeat")]
+    defmt::info!(
+        "[INFO] watchdog NOT started (no-fbeat: the flight core never answers, so it would reset the board in a loop); the monitor runs without effect and still carries out a reboot"
+    );
     defmt::info!(
         "[INFO] MARV V2 fw {=str}: two cores",
         env!("CARGO_PKG_VERSION")
@@ -1440,7 +1435,6 @@ async fn main(spawner: Spawner) {
         p.ADC, p.PIN_41, p.PIN_42
     ))));
     rc::start(p.UART0, p.PIN_14, p.PIN_17);
-    #[cfg(not(feature = "wdg-scratch-probe"))]
     watchdog::start_monitor(wd);
     #[cfg(feature = "hang-flight")]
     spawner.spawn(defmt::unwrap!(watchdog::hang_flight_arm()));
@@ -1452,8 +1446,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(settings::save_loop()));
     #[cfg(feature = "xip-park")]
     spawner.spawn(defmt::unwrap!(xip_park::task()));
-    #[cfg(feature = "wdg-scratch-probe")]
-    spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
     // The SD card's device task and the log collector.
@@ -1523,7 +1515,7 @@ async fn startup_checks() {
         "PIO2_IRQ_0 not enabled on core 0, enabled",
         u32::from(pio2_0),
     );
-    #[cfg(not(any(feature = "wdg-scratch-probe", feature = "no-fbeat")))]
+    #[cfg(not(feature = "no-fbeat"))]
     {
         Timer::after(Duration::from_millis(500)).await;
         let feeds = watchdog::FEEDS.load(Ordering::Relaxed);

@@ -66,7 +66,7 @@ Cargo features are off by default; they add board checks and fault injections. B
 | Fault injection, other devices | `inject-mag-fail-until-restart`, `inject-gnss-silent`, `inject-mag-rotation`, `inject-imu1-persistent`, `-imu1-missed-edge`, `inject-imu2-persistent`, `-imu2-verify`, `inject-late` | MAG, GNSS and IMU adapters; `inject-late` delays the IMU injections to 60 s so the vehicle can be armed first |
 | SD and log | `inject-sd-no-card`, `inject-sd-wrong-format`, `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume`, `inject-log-delete-big`, `sd-irq-negative` | Test hooks of the SD task ([logging](logging.md)) |
 | Settings | `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | Flash save checks ([parameters](parameters.md)) |
-| Watchdog | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `wdg-scratch-probe`, `stall-core0` | Each acts once, 20 s after a start the watchdog did not cause ([health](health.md)) |
+| Watchdog | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `stall-core0` | Each acts once, 20 s after a start the watchdog did not cause ([health](health.md)) |
 | ESC | `esc-off`, `esc-no-edt` | ESC task not built; or no extended-telemetry burst ([esc](esc.md)) |
 | PSRAM | `psram-skip-remap`, `psram-absent`, `psram-negative` | PSRAM checks |
 | Measurement | `xip-park`, `latency-text`, `quiet-stat`, `eskf-bench` | Parked-core check, latency texts, silent `[STAT]`, ESKF bench |

@@ -175,10 +175,6 @@ hang-core0 = []
 hang-flight = []
 spin-1s = []
 hang-irqoff = []
-# Also: whether the scratch registers 0 to 3 survive a watchdog
-# time-out reset (5 s after start), then a forced reset (30 s after the next start); at most two
-# resets; no monitor.
-wdg-scratch-probe = []
 
 # Latency experiment (src/device.rs `latency_text`): at 60 s a baseline of both IMUs' flight-core
 # figures, at 300 s and 590 s two STATUSTEXTs per IMU (and one log line) for the interval since it;
