@@ -1,6 +1,4 @@
-//! Log file rules of the SD logger, pure: the numbers, the names, `LASTLOG.TXT` and the clean-up
-//! plan (design: decision-sd-logging, Q4 "Files" and "Free space", with the lead's amendment of
-//! facts-sd-logging C1).
+//! Log file rules of the SD logger, pure: the numbers, the names, `LASTLOG.TXT` and the clean-up plan.
 //!
 //! Logs are `LOGS/NNNNNNNN.BIN`, numbered 1 to [`MAX_LOG_NUMBER`] (500) and then 1 again (the
 //! file that held the number is deleted first). `LOGS/LASTLOG.TXT` holds the last number used, in
@@ -9,7 +7,7 @@
 //! 1. [`parse_lastlog`] the file (if it exists), take the largest [`parse_file_name`] number of the
 //!    `LOGS/` listing, and [`last_number`] gives the last number used (0 if nothing).
 //! 2. [`next_number`] gives the number of the new log.
-//! 3. `LASTLOG.TXT` is written with [`format_lastlog`] BEFORE the log is opened (Q4-I3).
+//! 3. `LASTLOG.TXT` is written with [`format_lastlog`] BEFORE the log is opened.
 //! 4. [`plan_cleanup`] is called with the listing, one deletion per call, until it says
 //!    [`CleanUp::Nothing`] (go on) or [`CleanUp::Full`] (no log: "SD: card full"). The firmware
 //!    never asks the file system for free space (a full FAT scan takes 67 s after a power cut): the
@@ -331,7 +329,7 @@ mod tests {
         }
     }
 
-    /// Q4-I3: missing, garbage, 500 (and the wrap after it).
+    /// missing, garbage, 500 (and the wrap after it).
     #[test]
     fn q4_i3_lastlog_parse_and_the_number_rule() {
         assert_eq!(parse_lastlog(b"7"), Some(7));

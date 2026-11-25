@@ -1,7 +1,7 @@
 //! The RC stick mapping: the 44 parameters (ArduPilot's `RCn_MIN`, `RCn_TRIM`, `RCn_MAX`,
 //! `RCn_REVERSED`, `RCn_DZ` for channels 1 to 8, and `RCMAP_ROLL`, `RCMAP_PITCH`, `RCMAP_THROTTLE`,
 //! `RCMAP_YAW`) and the pure rule that turns the microseconds of a stick report into the four
-//! normalised functions and the MANUAL_CONTROL axes (decision-rc-mapping, 1.1, 1.2, 1.4).
+//! normalised functions and the MANUAL_CONTROL axes.
 //!
 //! All are `Live`: nothing is configured, the next computation reads them. The functions are total:
 //! no cross-parameter check exists (MIN below TRIM below MAX, a unique map), so every value in the
@@ -375,7 +375,7 @@ pub const MODE_BAND_LOW: f32 = 1.0 / 3.0;
 pub const MODE_BAND_HIGH: f32 = 2.0 / 3.0;
 
 /// Channel 6 (raw us, with its calibration `ch`) as the three-position mode switch
-/// (decision-nav-eskf-20261120, F8): n = [`range`] of the channel; n below one third is `Low`, above two thirds
+/// (`mode_switch`): n = [`range`] of the channel; n below one third is `Low`, above two thirds
 /// `High`, otherwise `Middle`. An absent channel (0 us, reversed or not) and RC6_MIN at or above RC6_MAX give n = 0, `Low`. No
 /// hysteresis, no debounce.
 pub fn mode_switch(ch6_us: u16, ch: &Channel) -> Switch3 {

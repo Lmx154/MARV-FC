@@ -1,4 +1,4 @@
-//! The STATUSTEXT ring shared by the ground-station links (design: decision-foundation, item 4).
+//! The STATUSTEXT ring shared by the ground-station links.
 //!
 //! [`DEPTH`] (8) entries in order of arrival (another depth through the const parameter `N`) and
 //! one read cursor per link: every text reaches each link once, in order. When a link falls more

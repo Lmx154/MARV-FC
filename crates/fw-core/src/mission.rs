@@ -1,5 +1,5 @@
-//! The vehicle's side of the mission (waypoint list) service: MARV-GCS `docs/link-contract.md`,
-//! section 17 "Missions" (MAVLink's mission protocol cut down to six messages, plan type 0).
+//! The vehicle's side of the mission (waypoint list) service: MARV-GCS `docs/link-contract.md` section 17
+//! (MAVLink's mission protocol cut down to six messages, plan type 0).
 //!
 //! [`MissionService`] is pure: no I/O, no clock of its own (time is passed in as microseconds), no
 //! allocation and no dependency on the MAVLink crates. Its inputs are the plain [`Frame`] and [`Rx`]
@@ -15,7 +15,7 @@
 //! board's; the contract's reply-pacing rule (one slot per link) is not modelled here: a message
 //! is "handed to the slot" when it is returned, and the timers start at that call's time.
 //!
-//! Readings of the contract where its text is not explicit (none changes a number or a code):
+//! Where the contract is not explicit (none changes a number or a code):
 //! - A re-request caused by a wrong item restarts the 1500 ms timer and leaves the retry count
 //!   as it was (it is not counted, and it does not reset the count either).
 //! - The download's 9000 ms run from the last mission message of the owner that passed the
@@ -431,10 +431,10 @@ pub fn decode(message_id: u32, payload: &[u8]) -> Option<(u8, u8, Rx)> {
     }
 }
 
-/// How many targets the shadow guidance takes from the mission: all of its waypoints (not the return item).
+/// How many targets the guidance takes from the mission: all of its waypoints (not the return item).
 pub const GDN_TARGETS: usize = CAPACITY;
 
-/// The shadow guidance's target set as core 0 pushes it to the flight core: how many targets are in use (0 is off), the
+/// The guidance's target set as core 0 pushes it to the flight core: how many targets are in use (0 is off), the
 /// arrival radius (m) and the targets as (latitude, longitude) in 1e-7 degree, the unused ones 0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GdnTargets {
@@ -1026,7 +1026,7 @@ mod tests {
         for (p, w) in pts.iter().zip(want.iter()) {
             assert_eq!(&p.bytes(), w);
         }
-        // Example 1 (the three points alone, the old rule's arithmetic) is not an upload any more.
+        // Example 1 (the three points alone) is not an upload any more.
         assert_eq!(plan_id_of(&pts), PLAN3);
         assert_eq!(0x99C3_BD49u32, 2_579_742_025);
         // Example 3: the same points and the return item (8 bytes of 0, then z = 20.0).
@@ -2419,7 +2419,7 @@ mod tests {
         assert_eq!(s.poll(u64::MAX), None);
     }
 
-    // ---- the shadow guidance's target source ----
+    // ---- the guidance's target source ----
 
     const PARAM_TARGETS: [(i32, i32); 4] = [(10, 20), (30, 40), (50, 60), (70, 80)];
     /// `GDN_ALT_MIN`, `GDN_ALT_MAX` at their defaults.
@@ -2449,7 +2449,7 @@ mod tests {
         let want = GdnTargets { mission_stored: true, ..want };
         assert_eq!(select_targets(2, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
         assert_eq!(select_targets(-1, 3, 2.5, &PARAM_TARGETS, &many(5), 7, LIMITS), want);
-        // FX-3 item 1: GDN_ALT_MAX in force is carried with either source.
+        // GDN_ALT_MAX in force is carried with either source.
         assert_eq!(select_targets(0, 3, 2.5, &PARAM_TARGETS, &many(5), 7, (5.0, 35.0)).alt_max_m, 35.0);
         assert_eq!(select_targets(1, 3, 2.5, &PARAM_TARGETS, &many(5), 7, (5.0, 35.0)).alt_max_m, 35.0);
     }
@@ -2635,7 +2635,7 @@ mod tests {
         let _ = upload(&mut s, r, &full3(), 0);
         assert_eq!(s.plan_id(), PLAN3R);
         assert_eq!(one_shot(&full3()), PLAN3R);
-        // Example 1's three points alone, under the old rule's arithmetic.
+        // Example 1's three points alone.
         assert_eq!(one_shot(&points3()), PLAN3);
 
         // Dropped, repeated and out-of-order items in the middle, and a restart halfway.

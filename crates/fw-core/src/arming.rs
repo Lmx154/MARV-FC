@@ -1,4 +1,4 @@
-//! The pre-arm rule (decision-prearm-20261119, section 1): the reasons core 0 does not permit
+//! The pre-arm rule: the reasons core 0 does not permit
 //! arming. Core 0's supervisor tick stores `Handshake::set_permit(reasons(..).is_empty())`; the
 //! gate arms only with the permit set. The RC hook names the first reason in the refusal text.
 
@@ -93,7 +93,7 @@ mod tests {
         State::Absent,
     ];
 
-    /// I5: empty only when P1 to P4 hold; each reason gives its text.
+    /// Empty only when P1 to P4 hold; each reason gives its text.
     #[test]
     fn reasons_empty_only_when_all_four_hold() {
         let ready = |uptime_ms| reasons(uptime_ms, State::Ok, State::Ok, false, false, false);

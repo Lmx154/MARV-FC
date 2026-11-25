@@ -2,9 +2,8 @@
 //!
 //! Pure functions over plain values, from the per-device health rows to what the ground station
 //! is sent: the three SYS_STATUS sensor masks ([`sensor_masks`]), the HEARTBEAT `system_status`
-//! ([`system_status`]) and the dialect's `MARV_DEVICE_STATUS` row ([`device_status`]). Rules: the
-//! foundation decision, section 4 (invariant I4.1: the health bit of a device is set if and only
-//! if it is Ok and not stuck; for the receiver, if and only if the port is locked).
+//! ([`system_status`]) and the dialect's `MARV_DEVICE_STATUS` row ([`device_status`]). Invariant: the health
+//! bit of a device is set if and only if it is Ok and not stuck; for the receiver, if and only if the port is locked.
 //!
 //! # Bit table
 //!
@@ -102,7 +101,7 @@ fn is_enabled(row: &DeviceRow) -> bool {
     )
 }
 
-/// I4.1: Ok and not stuck; for the receiver, locked.
+/// Ok and not stuck; for the receiver, locked.
 fn is_healthy(row: &DeviceRow) -> bool {
     match row.device {
         MarvDevice::MARV_DEVICE_RC => row.locked,

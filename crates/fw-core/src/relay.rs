@@ -1,20 +1,11 @@
-//! The relay of the flight log ring into the main log ring (design: decision-flight-logging, section 3).
+//! The relay of the flight log ring into the main log ring.
 //!
-//! [`relay`] is the pure body of what core 0's collector does every tick: it walks the readable
-//! bytes of the flight ring (the consumer side of a [`LogRing`](crate::xcore::LogRing) that core 1
-//! fills with whole records), takes the length of each record from [`dflog::TYPES`] by its type
-//! id, reserves that length in the destination ring and copies the record. When the destination
-//! has no room the record is dropped (the destination counts it, see
-//! [`LogProducer::reserve`]) and it is STILL consumed from the source, so a stalled card never
-//! backs up into the flight core. With no destination ("no log open") everything readable is
-//! consumed and nothing is pushed.
-//!
-//! A byte sequence that is not a record header (`A3 95 <type of the table>`) is skipped one byte
-//! at a time and counted in [`Relayed::skipped`], as the walker of [`dflog::walk`] does (PROVISIONAL:
-//! the design does not say). Every step consumes at least one byte, so the flight ring cannot
-//! stall on bad bytes. A record whose length runs past the readable bytes (the producer commits
-//! whole records only, so this means damage) is skipped with all the bytes that remain.
-//! Only the bytes readable when the call starts are walked.
+//! [`relay`] is the pure body of core 0's collector tick: it walks the readable records of the flight ring,
+//! takes each length from [`dflog::TYPES`] by type id and copies the record into the destination ring.
+//! A record the destination has no room for is dropped (counted there) but still consumed from the source,
+//! so a stalled card never backs up into the flight core; with no destination everything is consumed.
+//! Bytes that are not a record header (`A3 95 <type>`) are skipped one at a time ([`Relayed::skipped`]);
+//! a record cut short by the readable end is skipped with the rest. Only bytes readable at the call start are walked.
 
 use crate::dflog::{self, HEAD1, HEAD2, HEADER_LEN};
 use crate::xcore::{LogConsumer, LogProducer};

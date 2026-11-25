@@ -1,5 +1,5 @@
-//! A reader for our own `.BIN` files: counts, times and damage (design: decision-sd-logging, Q3
-//! and SD3). For a host test of the writer and, later, an on-board check of a file read back.
+//! A reader for our own `.BIN` files: counts, times and damage.
+//! For a host test of the writer and an on-board check of a file read back.
 //!
 //! [`Walker`] is fed byte slices of any size, in order (a record may span two slices) and keeps a
 //! [`Summary`]: per record type the count and the first and last `TimeUS`; the bytes skipped as

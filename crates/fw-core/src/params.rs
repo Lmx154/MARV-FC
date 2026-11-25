@@ -3,7 +3,7 @@
 //! One static [`ParamDef`] per parameter; [`Params`] holds the values and decides whether a write
 //! is accepted. Everything is polled: after writes the firmware takes [`Params::dirty`], the two
 //! per-device masks and the last [`Notice`]; nothing is called back. The table itself (the real
-//! parameters) belongs to the device milestones; this module only checks and stores it.
+//! parameters) is the device modules'; this module only checks and stores it.
 
 use mavlink_device::{ParamError, ParamName, ParamStore, ParamValue};
 

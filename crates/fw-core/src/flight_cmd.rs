@@ -1,15 +1,13 @@
-//! The station's five flight commands (link-contract section 10, Amendments A and C): the COMMAND_LONG decode table, and
+//! The station's five flight commands: the COMMAND_LONG decode table, and
+//! the single-slot hand-off of one command from core 0 to the flight step and of its answer back.
 //! the single-slot hand-off of one command from core 0 to the flight step and of its answer back.
 //!
 //! The hand-off ([`Mailbox`]) is two 32-bit words, each a 24-bit sequence number and an 8-bit payload; sequence 0 means
-//! empty. Core 0 claims the mailbox (one command at a time, across both links and both of core 0's executors), posts the
-//! request with `compare_exchange(0, word)`; the flight step takes it with `swap(0)`, so a request is consumed at most
-//! once and cannot be read again after a restart of either side (the word is empty once taken; a board reset clears
-//! every static). The flight step answers with one store of the answer word tagged with the request's sequence number;
-//! core 0 reads only the answer with its own number, so a late answer to an older command is never taken for a newer
-//! one. Core 0 withdraws a request that was not taken within its bound with `compare_exchange(word, 0)`: success
-//! proves the flight step never saw it. Core 0 keeps the command as a [`Pending`] and checks it from its normal task. Nothing here allocates, takes a critical section or loops on the flight
-//! step's side ([`Mailbox::take`], [`Mailbox::answer`]); `thumbv8m.main` has the 32-bit compare-and-swap.
+//! empty. Core 0 posts a request with `compare_exchange(0, word)`; the flight step takes it with `swap(0)`, so a request
+//! is consumed at most once. The answer carries the request's sequence number, so a late answer to an older command is
+//! never taken for a newer one. Core 0 withdraws an untaken request with `compare_exchange(word, 0)`.
+//! Nothing here allocates, takes a critical section or loops on the flight step's side; `thumbv8m.main` has the 32-bit
+//! compare-and-swap.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
@@ -33,17 +31,15 @@ pub enum FlightCommand {
 /// What [`decode`] made of a COMMAND_LONG.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decoded {
-    /// Not one of the five: the command goes where it went before.
+    /// Not one of the five.
     Other,
-    /// One of the five with parameters the table does not give: DENIED (section 10, DENIED item 3), reason code 0.
+    /// One of the five with parameters the table does not give: DENIED, reason code 0.
     BadParams,
     /// A flight command for the state machine.
     Command(FlightCommand),
 }
 
-/// The decode table of section 10. Only the parameters the contract's DENIED item 3 names are checked: Pause's param1,
-/// DO_SET_MODE's param1 and param2; Start's are ignored ("the vehicle ignores them"), and Return's are not checked
-/// (item 3 does not list them).
+/// The decode table. Only Pause's param1 and DO_SET_MODE's param1 and param2 are checked; Start's and Return's are not.
 pub fn decode(command: MavCmd, params: &[f32; 7]) -> Decoded {
     match command {
         MavCmd::MAV_CMD_MISSION_START => Decoded::Command(FlightCommand::Start),
@@ -56,7 +52,7 @@ pub fn decode(command: MavCmd, params: &[f32; 7]) -> Decoded {
     }
 }
 
-/// The ground station's (system, component): link-contract section 2, "Ground station: system 255, component 190".
+/// The ground station's (system, component): system 255, component 190.
 pub const STATION: (u8, u8) = (255, 190);
 
 /// The station's own latest HEARTBEAT time, from `kept` (the value so far) and the RC port's latest ground-station

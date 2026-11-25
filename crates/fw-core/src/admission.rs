@@ -4,7 +4,7 @@
 //!
 //! - [`classify`]: a command and its seven parameters become a recognised [`Classified`] action or a
 //!   [`Refusal`] (UNSUPPORTED, or DENIED with a short text for a STATUSTEXT).
-//! - [`ActionBook`]: the admission order (decision foundation, item 5) and the books of the one long
+//! - [`ActionBook`]: the admission order and the books of the one long
 //!   action that may run at a time, firmware-wide. The firmware passes `armed`, `hil`, the link id and
 //!   `now_ms` as plain values, executes the action itself, and reports progress and the result back.
 //!
@@ -487,7 +487,7 @@ impl ActionBook {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Motor test (`decision-motor-test-20261118`, amendment A, Q1).
+// Motor test.
 // ---------------------------------------------------------------------------------------------
 
 /// The highest throttle of a motor test, in percent (param3).
@@ -495,7 +495,7 @@ pub const MOTOR_TEST_PERCENT_MAX: f32 = 5.0;
 /// The longest spin of a motor test, in seconds (param4).
 pub const MOTOR_TEST_SECONDS_MAX: f32 = 3.0;
 /// Throttle levels per percent: 2000 levels are 100 % (`dshot_spin` `step_level`,
-/// `dshot/hil/src/bin/dshot_spin.rs` 202-206, "each at least 1"; the owner's mapping: 5 % is level 100).
+/// `dshot/hil/src/bin/dshot_spin.rs` 202-206, "each at least 1"; 5 % is level 100).
 const LEVELS_PER_PERCENT: f32 = 20.0;
 
 const _: () = assert!(
@@ -532,7 +532,7 @@ pub enum MotorTestRequest {
     },
 }
 
-/// The motor-test table of the decision (Q1): param1 a whole number 1-4, param2 0, param3 0 (stop) or
+/// The motor-test table: param1 a whole number 1-4, param2 0, param3 0 (stop) or
 /// above 0 up to 5.0, param4 above 0 up to 3.0 when param3 > 0 (ignored for a stop), param5 0 or 1,
 /// param6 0 or 2, param7 0. Anything else, NaN included, is refused with a "motor test: ..." text.
 /// Returns the motor (1..=4) with the request.
@@ -1411,7 +1411,7 @@ mod tests {
         );
     }
 
-    // ---- motor test (decision-motor-test-20261118, amendment A, T6) ----
+    // ---- motor test ----
 
     /// A spin of motor `m` at `pct` percent for `secs` seconds, the rest of the table at its zeros.
     fn spin(m: f32, pct: f32, secs: f32) -> [f32; 7] {

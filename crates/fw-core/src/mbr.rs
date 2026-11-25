@@ -1,4 +1,4 @@
-//! The SD card's volume (decision-sd-logging Q2): block 0 must be an MBR whose partition 1 is a
+//! The SD card's volume: block 0 must be an MBR whose partition 1 is a
 //! FAT32 partition, type 0x0B (CHS) or 0x0C (LBA). Anything else (no 0x55AA, type 0x07 exFAT/NTFS,
 //! 0xEE GPT, an empty entry, a FAT boot sector with no partition table) is the wrong format.
 
@@ -67,7 +67,7 @@ pub fn partition1(block0: &[u8; 512], capacity_blocks: u64) -> Result<Partition,
 mod tests {
     use super::*;
 
-    /// The card of the bench: SanDisk 64 GB, 124 735 488 blocks.
+    /// A real card: SanDisk 64 GB, 124 735 488 blocks.
     const CARD: u64 = 124_735_488;
 
     /// Block 0 with partition 1 = (`kind`, `first`, `blocks`) and the signature.

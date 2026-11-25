@@ -867,7 +867,7 @@ mod tests {
         assert_eq!(run.outcome(), Outcome::Failed(Failure::Moving, Some(1)));
     }
 
-    /// H3: with the board rotation B = YAW_90 (not its own inverse) and nonzero offsets on every
+    /// With the board rotation B = YAW_90 (not its own inverse) and nonzero offsets on every
     /// axis, the path chip sample -> published (`publish`, as the adapters apply it) -> core 0
     /// (`unpublish`) gives the chip sample rotated by the mount M, and both calibrations recover the
     /// injected offsets. The accel reference is `B^T * (0, 0, -g)`.

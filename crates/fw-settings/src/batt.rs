@@ -14,7 +14,7 @@ const DEVICE: u8 = MarvDevice::MARV_DEVICE_BATT as u8;
 /// reference; the crate's `gain_ppm` is `(scale - 1) * 1e6`. 2.0 doubles the reported voltage.
 pub const V_SCALE: &str = "BATT_V_SCALE";
 /// Volts at the ADC pin per ampere of the ESC's current output (the crate's `microvolts_per_amp`
-/// / 1e6). NOT calibrated: the default is the crate's bench PLACEHOLDER, 0.020 V/A. 0 reads 0 A.
+/// / 1e6). NOT calibrated: the default is a PLACEHOLDER, 0.020 V/A. 0 reads 0 A.
 pub const A_SCALE: &str = "BATT_A_SCALE";
 /// Volts at the ADC pin with no current (the crate's `zero_uv` / 1e6), subtracted before the scale.
 pub const A_OFFSET: &str = "BATT_A_OFFSET";
@@ -33,25 +33,24 @@ pub const LOW_TIMER: &str = "BATT_LOW_TIMER";
 /// What CRITICAL does: 0 warns, 1 descends (the flight core's descent, off by default).
 pub const FS_CRT_ACT: &str = "BATT_FS_CRT_ACT";
 
-/// The number of low-battery monitor parameters (Amendment BATT).
+/// The number of low-battery monitor parameters.
 pub const FS_COUNT: usize = 5;
 
 /// Where [`FS_TABLE`] starts in `fw_settings::TABLE`: appended last, after `FS_HOLD_EN` (122). Pinned by a test.
 pub const FS_AT: usize = 123;
-
-/// The battery monitor's parameter table; the defaults are the configuration the `adc-battery`
-/// bench program ran on this board (no gain correction, 20 000 uV/A placeholder, zero at 0 V).
+/// The battery monitor's parameter table; the defaults are the `adc-battery` crate's
+/// configuration (no gain correction, 20 000 uV/A placeholder, zero at 0 V).
+/// program ran on this board (no gain correction, 20 000 uV/A placeholder, zero at 0 V).
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(V_SCALE, DEVICE, 1.0, 0.1, 10.0, Apply::Live),
     ParamDef::f32(A_SCALE, DEVICE, 0.02, 0.0, 10.0, Apply::Live),
     ParamDef::f32(A_OFFSET, DEVICE, 0.0, -3.3, 3.3, Apply::Live),
 ];
 
-/// The low-battery monitor's parameters (decision-nav-eskf-20261120, Amendment BATT, appended at indices 123 to 127 after
-/// the last existing one, so no index changed), all device BATT and `Live` (core 0 reads them at 10 Hz). Defaults and
-/// ranges are the amendment's: `BATT_CELLS` 0 to 12 default 4 (0 is off; PX4 `BAT_N_CELLS`), `BATT_LOW_CELL` 3.0 to 4.2 V
+/// The low-battery monitor's parameters, appended at indices 123 to 127 after
+/// the last existing one, all device BATT and `Live` (core 0 reads them at 10 Hz). `BATT_CELLS` 0 to 12 default 4 (0 is off; PX4 `BAT_N_CELLS`), `BATT_LOW_CELL` 3.0 to 4.2 V
 /// default 3.6, `BATT_CRT_CELL` 3.0 to 4.2 V default 3.5, `BATT_LOW_TIMER` 0 to 120 s default 10 (ArduPilot `BATT_LOW_TIMER`)
-/// and `BATT_FS_CRT_ACT` 0 to 1 default 0 (warn only). The amendment gives no type: the counts and the action are `I32`, the
+/// and `BATT_FS_CRT_ACT` 0 to 1 default 0 (warn only). The counts and the action are `I32`, the
 /// thresholds `F32`, the timer whole seconds as `I32` (ArduPilot's is an integer too).
 pub static FS_TABLE: [ParamDef; FS_COUNT] = [
     ParamDef::i32(CELLS, DEVICE, 4, 0, 12, Apply::Live),
@@ -149,14 +148,14 @@ mod tests {
 
     #[test]
     fn doubling_the_voltage_scale_doubles_the_voltage() {
-        // 1 701.6 counts mean on the battery input (the bench's 15.08 V reading).
+        // 1 701.6 counts mean on the battery input (15.08 V).
         let adc = AdcConfig::new();
         let pin_uv = adc.pin_microvolts(Reading::from_sum(27_226, 16).unwrap());
         let one = with(V_SCALE, 1.0).voltage.millivolts(pin_uv);
         let two = with(V_SCALE, 2.0).voltage.millivolts(pin_uv);
         assert!((15_000..15_200).contains(&one), "{one}");
         assert!(two.abs_diff(2 * one) <= 1, "{one} {two}");
-        // The board's one-point trim of the bench (+7603 ppm) is a scale of 1.007603.
+        // A one-point trim of +7603 ppm is a scale of 1.007603.
         assert_eq!(with(V_SCALE, 1.007_603).voltage.gain_ppm, 7_603);
         assert_eq!(with(V_SCALE, 0.5).voltage.gain_ppm, -500_000);
     }
@@ -174,7 +173,7 @@ mod tests {
         assert_eq!(with(A_OFFSET, -0.5).current.zero_uv, -500_000);
     }
 
-    /// The monitor's five parameters are at 123 to 127 with the amendment's defaults and ranges; the range is the whole
+    /// The monitor's five parameters are at 123 to 127 with their defaults and ranges; the range is the whole
     /// validator; the table's defaults are the monitor's `Config::DEFAULT`.
     #[test]
     fn the_monitor_parameters_are_appended_at_123_to_127_with_the_amendments_numbers() {

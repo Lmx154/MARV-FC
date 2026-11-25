@@ -1,4 +1,4 @@
-//! The low-battery monitor (decision-nav-eskf-20261120, Amendment BATT): pure state machine on the raw pack voltage under
+//! The low-battery monitor: pure state machine on the raw pack voltage under
 //! load. It runs on core 0 at 10 Hz and hands one byte ([`Update::cell`]) to the flight core.
 //!
 //! Rules (ArduPilot `AP_BattMonitor_Backend::update_failsafes`, `AP_BattMonitor::check_failsafes`; PX4 `batteryCheck`):
@@ -576,7 +576,7 @@ mod tests {
         assert!(m.voltage_valid());
     }
 
-    /// B-I1 and B-I7 by text: the monitor's source reaches no gate, no disarm and no throttle, and holds no voltage
+    /// By text: the monitor's source reaches no gate, no disarm and no throttle, and holds no voltage
     /// literal outside the defaults and the plausibility constants.
     #[test]
     fn the_source_reaches_no_gate_disarm_or_throttle() {
@@ -592,9 +592,9 @@ mod tests {
         }
     }
 
-    /// T2: the recorded pack voltage of log 286 (BAT, instance 0, armed windows 2 and 3 of PB0, 10 Hz) replayed through the
-    /// monitor. Expected times are PB0's table (pb0-report.md, seconds after the window's first armed sample); the monitor
-    /// fires at the first sample MORE than the timer after the first one below the level, PB0's script at `>=`, so they may
+    /// The recorded pack voltage of a flight log (BAT, instance 0, two armed windows, 10 Hz) replayed through the
+    /// monitor. Expected times come from an offline script that fires at `>=`; the monitor
+    /// fires at the first sample MORE than the timer after the first one below the level, so they may
     /// differ by one sample (0.1 s). Timer 0 is off here and fires never.
     #[test]
     fn log_286_replay_fires_where_the_pre_study_did() {
@@ -625,9 +625,9 @@ mod tests {
             (Some(g), Some(w)) => (g as f32 - w * 1000.0).abs() <= 100.0,
             _ => false,
         };
-        // (level V, timer s, PB0's window 3 time s, this monitor's time s). The recorded volts are f32 at 0.01 V steps; PB0
+        // (level V, timer s, offline script's window 3 time s, this monitor's time s). The recorded volts are f32 at 0.01 V steps; the script
         // compared them with an f64 threshold, so a reading equal to 14.4 or 13.2 as f32 (just under it as f64) counted as
-        // below there and is not below here (the threshold is f32 too). Those two levels therefore differ from PB0 by
+        // below there and is not below here (the threshold is f32 too). Those two levels therefore differ by
         // more than a sample for 14.4 V and for 13.2 V / 10 s; 14.0 V (exact in both) and 13.2 V / 3 s agree.
         let w3 = [
             (14.4, 3, 50.2, 53.5),
@@ -644,7 +644,7 @@ mod tests {
                 assert!(near(got, Some(pb0)), "{level} V / {timer} s: {got:?} PB0 {pb0}");
             }
         }
-        // Window 2 (the 14.4 V / 0 s false fire of PB0): nothing fires with a timer, and none with timer 0 (off).
+        // Window 2 (a 14.4 V / 0 s false fire in the script): nothing fires with a timer, and none with timer 0 (off).
         for level in [14.4, 14.0, 13.2] {
             for timer in [0, 3, 10] {
                 assert_eq!(fire(0, level, timer), None, "w2 {level} V / {timer} s");
@@ -653,7 +653,7 @@ mod tests {
         for level in [14.4, 14.0, 13.2] {
             assert_eq!(fire(1, level, 0), None, "w3 {level} V / 0 s");
         }
-        // The defaults (LOW 14.4 V, CRITICAL 14.0 V, 10 s): LOW at 60.5 s (PB0: 57.3 s, see above) and CRITICAL at 95.6 s of window 3.
+        // The defaults (LOW 14.4 V, CRITICAL 14.0 V, 10 s): LOW at 60.5 s and CRITICAL at 95.6 s of window 3.
         let mut m = Monitor::new();
         let t0 = wins[1][0].0;
         let mut rises = std::vec::Vec::new();

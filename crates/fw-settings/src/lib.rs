@@ -360,8 +360,8 @@ mod tests {
         assert_eq!(70 + appended.len(), COUNT);
     }
 
-    /// I1: the compass's soft-iron matrix and calibration record are indices 81 to 91 with the
-    /// decision's types, defaults, ranges and classes (decision-compass-cal-20261120, section 1);
+    /// The compass's soft-iron matrix and calibration record are indices 81 to 91 with the
+    /// types, defaults, ranges and classes;
     /// each range is the whole check.
     #[test]
     fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
@@ -406,7 +406,7 @@ mod tests {
         }
     }
 
-    /// I6: "calibration to defaults" gives a coherent "not calibrated": 81 to 89 and `MAG_OFF*` at
+    /// "calibration to defaults" gives a coherent "not calibrated": 81 to 89 and `MAG_OFF*` at
     /// their defaults (S the identity, offsets 0, type 0, no expected field); the two health
     /// tolerances and `MAG_ORIENT` are not calibration results and keep their values.
     #[test]
@@ -448,7 +448,7 @@ mod tests {
         assert_eq!(p.get_named("MAG_ORIENT"), Some(I32(3)));
     }
 
-    /// H4: the two orientation parameters are appended after the first 76 (names unchanged in
+    /// The two orientation parameters are appended after the first 76 (names unchanged in
     /// order), with their ranges, defaults and classes; the 0 to 15 range is the whole validator.
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
@@ -591,7 +591,7 @@ mod tests {
         assert_eq!(p.get_named("MAG_ORIENT"), Some(ParamValue::I32(3)));
     }
 
-    /// decision-sd-logging Q4: the start burst of a log (the header, a PARM for every parameter,
+    /// The start burst of a log (the header, a PARM for every parameter,
     /// the boot texts that wait for the log's text cursor: the ring's depth and its sticky slots)
     /// is at most 16 KiB, also with the writer's alignment filler (under one 4 KiB piece) in the
     /// ring before it. Encoded from the table, not counted from literals.
@@ -715,9 +715,9 @@ mod tests {
         assert_eq!(gnss::rate_ms(stored), Ok(200));
     }
 
-    /// An old record (offsets only: `MAG_OFF*` its only non-default values) loads by the boot rule
-    /// with S the identity, `MAG_CAL_TYPE` 0 and no expected field; with them the output is the
-    /// offset subtraction of before.
+    /// A record with only `MAG_OFF*` non-default loads by the boot rule
+    /// with S the identity, `MAG_CAL_TYPE` 0 and no expected field; the output is then
+    /// the plain offset subtraction.
     #[test]
     fn an_offsets_only_record_loads_with_the_identity_matrix_and_type_0() {
         use fw_core::record::{self, Boot, Entry, SECTOR_LEN};

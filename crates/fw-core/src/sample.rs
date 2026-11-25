@@ -1,5 +1,5 @@
-//! The slow sensors' samples as the flight code takes them: barometer, compass, GNSS
-//! (decision-sim-seams-20261119, section 2). Units are the firmware's (conventions 3c).
+//! The slow sensors' samples as the flight code takes them: barometer, compass, GNSS.
+//! Units are the firmware's.
 
 /// Barometer: pressure, Pa; die temperature, deg C.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -20,9 +20,8 @@ pub struct MagReading {
     pub temperature_c: f32,
 }
 
-/// What the compass should read where this vehicle was calibrated, for the flight core's health test (decision-nav-eskf-20261120,
-/// Amendment C4). Units are converted once, where it is filled: the strength in microtesla, the angles in radians, the
-/// tolerance of the strength as a fraction.
+/// What the compass should read where this vehicle was calibrated, for the flight core's health test.
+/// Units are converted once, where it is filled: strength in microtesla, angles in radians, tolerance as a fraction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MagExpected {
     /// Expected field strength, microtesla (`MAG_FLD_UT`, > 0).
@@ -35,7 +34,7 @@ pub struct MagExpected {
     pub tol_inclination_rad: f32,
 }
 
-/// One receiver epoch in its integer units (today's `Reading::Gnss`, field for field). Position, speed and course
+/// One receiver epoch in its integer units. Position, speed and course
 /// are `None` without a fix.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GnssReading {

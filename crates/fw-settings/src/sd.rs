@@ -1,4 +1,4 @@
-//! The SD card's one parameter (decision-sd-logging Q6): the log backend, read once at boot.
+//! The SD card's one parameter: the log backend, read once at boot.
 
 use fw_core::params::{Apply, ParamDef};
 use mavlink_device::marv::MarvDevice;

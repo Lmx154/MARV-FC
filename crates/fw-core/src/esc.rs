@@ -1,7 +1,6 @@
 //! ESC telemetry on core 0's side: the plain data the flight core publishes about the four DShot
 //! lines ([`EscStatus`]), the two MAVLink messages built from it ([`esc_status`] ESC_STATUS 291,
 //! [`esc_info`] ESC_INFO 290) and the ESC device row ([`verdict`], [`device_status`]).
-//! Design: `decision-esc-telemetry-20261118` Q2, Q3.8 and Q4.
 //!
 //! The data types live here, not in `fw_flight::esc` (which re-exports them), because `fw-flight`
 //! depends on `fw-core` and the builders need the type. Nothing here knows the DShot codec: the
@@ -34,11 +33,11 @@ pub const STARTING_US: u64 = 5_000_000;
 /// An eRPM value above this is AM32's "not started yet" report, not a speed: it is not stored.
 pub const ERPM_MAX: u32 = 1_000_000;
 
-// Motor test (`decision-motor-test-20261118`, amendment A): the limits of `dshot_spin` (DS =
-// `dshot/hil/src/bin/dshot_spin.rs` at dshot 3557eb1) with the same values. The flight core checks
+// Motor test limits, the same as the `dshot_spin` example (DS =
+// `dshot/hil/src/bin/dshot_spin.rs`). The flight core checks
 // them on every frame (`fw_flight::esc`).
 
-/// The highest throttle level a motor test may send, of 2000: 5 % (DS:87-100, `CAP`, G3).
+/// The highest throttle level a motor test may send, of 2000: 5 % (DS:87-100, `CAP`).
 pub const TEST_CAP: u16 = 100;
 const _: () = assert!(
     TEST_CAP <= 200,
@@ -46,7 +45,7 @@ const _: () = assert!(
 );
 const _: () = assert!(TEST_CAP >= 1, "TEST_CAP is 0: a throttle level is 1..=2000");
 
-/// No spin longer than this from its first throttle frame, in us (DS:146, `BURST_MAX_US`, G4).
+/// No spin longer than this from its first throttle frame, in us (DS:146, `BURST_MAX_US`).
 pub const TEST_BURST_MAX_US: u64 = 3_000_000;
 
 /// Time allowed between a limit check and the push it guards, in us (DS:152-153, `PUSH_MARGIN_US`).
@@ -500,7 +499,7 @@ mod tests {
         assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 0);
     }
 
-    /// T9: the line answers (an extended reply now), its latest eRPM is 100 ms old or more.
+    /// The line answers (an extended reply now), its latest eRPM is 100 ms old or more.
     #[test]
     fn rpm_is_zero_when_the_latest_erpm_is_100_ms_old_while_the_line_answers() {
         let mut s = live();
@@ -514,7 +513,7 @@ mod tests {
         assert_eq!(esc_status(&s, NOW, 14).unwrap().rpm[1], 0);
     }
 
-    /// T8: a reset never resumes a test.
+    /// A reset never resumes a test.
     #[test]
     fn the_initial_test_command_is_a_stop() {
         assert_eq!(TestCmd::INITIAL.level, 0);

@@ -2,8 +2,7 @@
 //!
 //! One [`Health`] per device, stepped by the device's own task. It performs no I/O and reads no
 //! clock: the task passes each [`Event`] with the current time in milliseconds and carries out the
-//! [`Action`] that comes back, then feeds the result in as the next event. Rules: the foundation
-//! decision, section 2 (the supervisor).
+//! [`Action`] that comes back, then feeds the result in as the next event.
 //!
 //! # Driving protocol
 //!
@@ -69,7 +68,7 @@ pub enum ErrorKind {
     Stuck,
 }
 
-/// The numbers of the machine ("numbers to set from the bench").
+/// The numbers of the machine.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Score added per error event.

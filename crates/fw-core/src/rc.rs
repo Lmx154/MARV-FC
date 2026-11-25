@@ -177,8 +177,8 @@ pub fn gps_frame_due(sample_t_us: Option<u64>, last_sent_us: Option<u64>) -> boo
     }
 }
 
-/// Moved unchanged from fw-settings::rc. Roll, pitch, yaw in -1..1 (right, forward, clockwise positive); throttle in
-/// 0..1 (0 at the bottom). Normalised on core 0 (decision-rc-mapping-20261116, 1.2).
+/// Roll, pitch, yaw in -1..1 (right, forward, clockwise positive); throttle in
+/// 0..1 (0 at the bottom). Normalised on core 0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sticks {
     /// Roll.
@@ -192,7 +192,7 @@ pub struct Sticks {
 }
 
 /// The three-position mode switch on channel 6, decoded in thirds of the normalised channel
-/// (`fw_settings::rc::mode_switch`; decision-nav-eskf-20261120, F8). The flight code reads Low as Angle, Middle as
+/// (`fw_settings::rc::mode_switch`). The flight code reads Low as Angle, Middle as
 /// Altitude and High as Position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Switch3 {
@@ -204,7 +204,7 @@ pub enum Switch3 {
     High,
 }
 
-/// Where a stick report came from (decision-mavlink-mode-20261123, Amendment N19, 1(1) and 1(3)).
+/// Where a stick report came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcSource {
     /// A CRSF stick frame.
@@ -213,12 +213,12 @@ pub enum RcSource {
     Receiver,
 }
 
-/// The receiver's own MAVLink sender ids (ExpressLRS defaults): system 255, component 68 (N19 1(1)).
+/// The receiver's own MAVLink sender ids (ExpressLRS defaults): system 255, component 68.
 pub const RECEIVER_SYSTEM_ID: u8 = 255;
 /// See [`RECEIVER_SYSTEM_ID`].
 pub const RECEIVER_COMPONENT_ID: u8 = 68;
 
-/// N19 1(1): an RC_CHANNELS_OVERRIDE (already addressed to this vehicle or to all, the port's target rule) is a receiver
+/// An RC_CHANNELS_OVERRIDE (already addressed to this vehicle or to all, the port's target rule) is a receiver
 /// report only from (`RECEIVER_SYSTEM_ID`, `RECEIVER_COMPONENT_ID`) and with none of channels 1 to 8 at 0 or 65535
 /// (MAVLink's "release" and "ignore"). Any other sender (the station's 255/190 included) is never a stick report.
 pub fn receiver_report(system_id: u8, component_id: u8, channels_us: &[u16; 16]) -> bool {
@@ -236,9 +236,9 @@ pub struct RcSample {
     pub arm: bool,
     /// Channel 6, the mode switch, same report.
     pub switch6: Switch3,
-    /// Where the report came from (N19).
+    /// Where the report came from.
     pub source: RcSource,
-    /// Channel 8, the mission switch, ON (N19 1(2): the arm switch's rule), same report.
+    /// Channel 8, the mission switch, ON (the arm switch's rule), same report.
     pub mission: bool,
     /// Board time the report was read, us.
     pub t_us: u64,
@@ -502,7 +502,7 @@ mod tests {
         assert!(!gps_frame_due(None, Some(1)), "no sample");
     }
 
-    /// N19 1(1), hazard 1: only the receiver's own ids with live channels 1 to 8 make a receiver report. The station's
+    /// Only the receiver's own ids with live channels 1 to 8 make a receiver report. The station's
     /// (255, 190) override, an arm channel at 65535 and a channel at 0 make none; channels 9 to 16 are not read.
     #[test]
     fn n19_receiver_report_filter() {

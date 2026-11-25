@@ -1,4 +1,4 @@
-//! The status LED's parameter: its brightness level (`decision-status-led-20261118`).
+//! The status LED's parameter: its brightness level.
 
 use fw_core::params::{Apply, ParamDef};
 

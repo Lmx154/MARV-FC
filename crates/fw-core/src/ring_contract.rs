@@ -1,7 +1,7 @@
 //! Test-only: ONE set of behavioural tests for the byte-ring protocol, instantiated for the SRAM
 //! ring ([`crate::xcore::LogRing`]) and the external-memory ring ([`crate::extring::ExtLogRing`]
 //! bound to a [`crate::extring::PsramBuf`]), so the protocol written twice cannot drift apart
-//! unnoticed (decision-psram-offload-20261121, D2 and risk "ring protocol written twice").
+//! unnoticed.
 //!
 //! `ring_contract_tests!(name, setup)` expands to a module `name` of tests; `setup!(ring, N)` is a
 //! macro that declares `ring`, a ready ring of `N` bytes whose `take_producer` and
@@ -321,7 +321,7 @@ macro_rules! ring_contract_tests {
             );
         }
 
-        /// Q4-I2: `ops` random operations against the model; every byte read equals the model's, in
+        /// `ops` random operations against the model; every byte read equals the model's, in
         /// order, `dropped` equals the model's count at every step, and the statistics windows
         /// equal the model's.
         fn model_run<const N: usize>(ops: u32, seed: u64) -> (u64, u64) {

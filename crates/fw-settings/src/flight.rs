@@ -1,7 +1,6 @@
-//! The flight code's parameters: the pilot's horizontal speed in position hold (decision-nav-eskf-20261120, Amendment P,
-//! P9; the owner's answer 2026-11-22: a parameter, saved to flash), the RPM notch switch (decision-rpm-notch-20261123) and
-//! the shadow guidance's targets (decision-guidance-shadow-20261123, section 1 item 4) and the 14 gains of the cascaded
-//! controller (decision-gain-params-20261123).
+//! The flight code's parameters: the pilot's horizontal speed in position hold, the RPM notch switch,
+//! the guidance's targets and the 14 gains of the cascaded
+//! controller.
 
 use fw_core::params::{Apply, ParamDef};
 use fw_flight::tuning::{GAIN_COUNT, GAIN_NAMES, Gains, Tuning};
@@ -12,7 +11,7 @@ pub const SPEED_XY: &str = "PILOT_SPEED_XY";
 /// The RPM notch switch: 1 filters the measured body rates with the rotor-frequency notches, 0 leaves them as they are.
 pub const RPM_NOTCH_EN: &str = "RPM_NOTCH_EN";
 
-/// How many targets the shadow guidance has slots for.
+/// How many targets the guidance has slots for.
 pub const GDN_SLOTS: usize = 4;
 
 /// The number of targets in use, 0 to 4; 0 is off.
@@ -27,8 +26,7 @@ pub const GDN_LAT: [&str; GDN_SLOTS] = ["GDN_LAT1", "GDN_LAT2", "GDN_LAT3", "GDN
 /// Longitude of target 1 to 4, 1e-7 degree (west negative), `GDN_LON1` to `GDN_LON4`.
 pub const GDN_LON: [&str; GDN_SLOTS] = ["GDN_LON1", "GDN_LON2", "GDN_LON3", "GDN_LON4"];
 
-/// Where the shadow guidance takes its targets from: 0 = the `GDN_*` parameters (default), 1 = the committed mission
-/// (decision-mavlink-mode-20261123, section 1 item C).
+/// Where the guidance takes its targets from: 0 = the `GDN_*` parameters (default), 1 = the committed mission.
 pub const GDN_SRC: &str = "GDN_SRC";
 
 /// The lowest `z` above home, m, of a waypoint or the return item of an uploaded mission (checked at upload only).
@@ -37,8 +35,8 @@ pub const GDN_ALT_MIN: &str = "GDN_ALT_MIN";
 /// The highest `z` above home, m, of a waypoint or the return item of an uploaded mission (checked at upload only).
 pub const GDN_ALT_MAX: &str = "GDN_ALT_MAX";
 
-/// The hands-off switch: 1 lets stick loss in the air hand the vehicle to the hands-off state machine
-/// (decision-mavlink-mode-20261123, Amendments A to D), 0 keeps today's rule (only PILOT and STOP).
+/// The hands-off switch: 1 lets stick loss in the air hand the vehicle to the hands-off state machine,
+/// 0 keeps only PILOT and STOP.
 pub const FS_HOLD_EN: &str = "FS_HOLD_EN";
 
 /// The number of flight parameters.
@@ -56,7 +54,7 @@ pub const SPEED_XY_AT: usize = 93;
 /// `RPM_NOTCH_EN` follows at index 94: `I32`, 0 or 1, default 0 (off: one change per flight), `Live`: core 0 pushes the
 /// stored value to the flight core, which takes it at the arming step like `PILOT_SPEED_XY`. Device 0, the system.
 ///
-/// The shadow guidance's parameters follow, indices 95 to 104, all device 0 and `Live` (core 0 pushes them to the flight
+/// The guidance's parameters follow, indices 95 to 104, all device 0 and `Live` (core 0 pushes them to the flight
 /// core, which takes new targets on a disarmed step): `GDN_COUNT` (`I32`, 0 to 4, default 0 = off), `GDN_RADIUS` (`F32`, m,
 /// default 2.0, range 0.05 to 10: ArduPilot WP_RADIUS_M 2.0, PX4 NAV_ACC_RAD 10), then `GDN_LAT1`, `GDN_LON1`, ...,
 /// `GDN_LAT4`, `GDN_LON4` (`I32`, 1e-7 degree, default 0; latitude -900000000 to 900000000, longitude -1800000000 to
@@ -112,12 +110,12 @@ pub const GDN_ALT_MIN_AT: usize = 120;
 
 /// The index of [`FS_HOLD_EN`] in the firmware's table: the one after `GDN_ALT_MAX` (121). `I32`, 0 or 1, default 0,
 /// `Live`, device 0: core 0 pushes the stored value to the flight core every change; the state machine takes it into force
-/// on disarmed steps only (decision-mavlink-mode-20261123, section 11, B9).
+/// on disarmed steps only.
 pub const FS_HOLD_EN_AT: usize = 122;
 
 /// The definition of gain `i` of `GAIN_NAMES`: `F32`, device 0, `Live`; the default is the field of `Tuning::DEFAULT`
-/// and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own (decision-gain-params-20261123,
-/// sections 1 and 2). Core 0 pushes the 14 stored values to the flight core as one set, which takes them at the next
+/// and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own.
+/// Core 0 pushes the 14 stored values to the flight core as one set, which takes them at the next
 /// arming (`fw_flight::step::Flight::set_gains`).
 #[allow(clippy::indexing_slicing)] // `i` is a literal below `GAIN_COUNT`; the table's length is checked by its type
 const fn gain(i: usize) -> ParamDef {

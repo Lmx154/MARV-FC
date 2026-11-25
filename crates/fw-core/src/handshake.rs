@@ -1,36 +1,18 @@
-//! The arm/save handshake.
+//! The arm/save handshake: arming and saving can never both win.
 //!
-//! Design: decision-foundation, two-core amendment, "Item 3, changes: the save, and arming".
-//! Arming and saving can never both win. Two flags: `ARMED`, stored only by the flight core (set and cleared by the
-//! gate, and cleared by the ESC task on a stale spinning command; both run on the flight core), and `SAVE_INTENT`,
-//! stored only by core 0. Each side stores its own flag, then loads the other's, and backs out (clears its own flag) if the other is set. Every access is `SeqCst`: this is the
-//! store-then-load (Dekker) pattern, where release/acquire would let both loads read the old
-//! `false` (each store still in its core's write buffer); `SeqCst` puts the four accesses in one
-//! total order, so whichever load comes second in it sees the other side's store.
+//! Flags: `ARMED` (stored only by the flight core), `SAVE_INTENT` and `PERMIT` (stored only by core 0).
+//! Each side stores its own flag, then loads the other's and backs out if it is set. Every access is `SeqCst`:
+//! this is the store-then-load (Dekker) pattern, where release/acquire would let both loads read the old value.
+//! Each `begin_save`/`try_arm` is two callable steps (announce, confirm) so tests can interleave them.
+//! Both sides may lose the same race; neither retries here. [`Handshake::armed`] can read `true`
+//! between `announce_arm` and a `confirm_arm` that backs out.
 //!
-//! Each `begin_save`/`try_arm` is built from two separately callable steps (announce: store own
-//! flag; confirm: load the other's and decide) so tests can interleave them. Both sides may lose
-//! in the same race (each sees the other's flag before it is withdrawn); neither retries here.
-//! [`Handshake::armed`] can read `true` for the short time between `announce_arm` and a
-//! `confirm_arm` that backs out.
+//! `PERMIT` (initially false) is the pre-arm permit; arming also needs it set. Arming and a core-0 action never overlap:
+//! - Admission against the gate (different cores): the same Dekker pair (admission stores `PERMIT` false, then loads `ARMED`).
+//! - Admission against the supervisor tick (both on core 0): admission is synchronous and the tick reads the action's
+//!   state and stores `PERMIT` inside one critical section, so each is atomic relative to the other.
 //!
-//! The pre-arm permit (decision-prearm-20261119, section 3, with the lead's amendment on the tick):
-//! a third flag, `PERMIT`, initially false, stored only by core 0; arming also needs it set. Arming
-//! and a core-0 action (a calibration, an action in the book, a motor-test spin) never overlap:
-//! - Admission against the gate (different cores): the same Dekker pair. Admission stores
-//!   `PERMIT` false, then loads `ARMED`; the gate stores `ARMED`, then loads `PERMIT`. `SeqCst`
-//!   orders the four accesses, so either the gate backs out or core 0 sees armed and refuses.
-//! - Admission against the supervisor tick that sets `PERMIT` (both on core 0): admission is
-//!   synchronous (no await from its store of `PERMIT` false to the action's state being set) and
-//!   runs either cooperatively in thread mode (USB) or on the radio's `SWI_IRQ_0` executor, which
-//!   the thread-mode tick cannot preempt; so admission is atomic relative to the tick. The tick
-//!   reads the action's state and stores `PERMIT` inside one critical section, so a radio admission
-//!   cannot run between the read and the store; so the tick is atomic relative to admission. A tick
-//!   before an admission is overwritten by its false; a tick after it sees the action and stores
-//!   false.
-//!
-//! The flight core loads `PERMIT` only in [`Handshake::confirm_arm`], so clearing it while armed
-//! changes nothing.
+//! The flight core loads `PERMIT` only in [`Handshake::confirm_arm`], so clearing it while armed changes nothing.
 
 use core::sync::atomic::{AtomicBool, Ordering::SeqCst};
 

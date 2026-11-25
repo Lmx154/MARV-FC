@@ -35,7 +35,7 @@ pub const ORIENT: &str = "MAG_ORIENT";
 pub const COUNT: usize = 5;
 
 /// The magnetometer's parameter table; the two configuration defaults are `Config::new()` as the
-/// driver's bench programs ran it on this board (100 Hz, averaging 2). The offsets default to 0.
+/// driver (100 Hz, averaging 2). The offsets default to 0.
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(ODR_HZ, DEVICE, 100.0, 1.5625, 400.0, Apply::Configure),
     ParamDef::i32(AVG, DEVICE, 2, 1, 8, Apply::Configure),
@@ -92,7 +92,7 @@ pub const CAL_COUNT: usize = 11;
 /// The index of [`CAL_TABLE`]'s first entry (`MAG_DIAGX`) in the firmware's table: the block before `GPS_GNSS`.
 pub const CAL_OFFSET: usize = crate::COUNT - CAL_COUNT - crate::gnss::SET_COUNT - crate::flight::COUNT - crate::batt::FS_COUNT;
 
-/// Appended to the firmware's table at indices 81 to 91 (decision-compass-cal-20261120, section 1).
+/// Appended to the firmware's table at indices 81 to 91.
 /// All `Live`; 81 to 89 are calibration results (`param reset-calibration` resets them with
 /// `MAG_OFF*`: S the identity, type 0, no expected field), the two health tolerances are not.
 pub static CAL_TABLE: [ParamDef; CAL_COUNT] = [
@@ -428,14 +428,14 @@ mod tests {
         );
     }
 
-    /// The function this build replaced, kept here as it was: `sample - offset` per axis.
+    /// Reference: `sample - offset` per axis.
     fn old_apply_offsets(field_ut: [f32; 3], offsets_ut: [f32; 3]) -> [f32; 3] {
         let [x, y, z] = field_ut;
         let [ox, oy, oz] = offsets_ut;
         [x - ox, y - oy, z - oz]
     }
 
-    /// I2: with the default S the output equals the old `r - o`: bit for bit, except that a
+    /// With the default S the output equals `r - o`: bit for bit, except that a
     /// difference of -0.0 may come out as +0.0 (the S-row sum adds 0 * d of the other axes); those
     /// are equal in value and compared by value.
     #[test]
@@ -472,13 +472,13 @@ mod tests {
             }
         }
         assert!(neg_zero > 0, "the -0.0 case was exercised");
-        // -0.0 - 0.0 on X with a positive Y difference: +0.0 now, -0.0 before.
+        // -0.0 - 0.0 on X with a positive Y difference: +0.0.
         let new = apply([-0.0, 1.0, 0.0], &offsets([0.0; 3]));
         assert_eq!(new[0].to_bits(), 0.0f32.to_bits());
         assert_eq!(old_apply_offsets([-0.0, 1.0, 0.0], [0.0; 3])[0].to_bits(), (-0.0f32).to_bits());
     }
 
-    /// I3: the worked vector of decision-compass-cal-20261120 (shared with the station), bit for bit.
+    /// The worked vector (shared with the station), bit for bit.
     #[test]
     fn the_worked_vector_bit_for_bit() {
         let cal = Calibration {
@@ -495,7 +495,7 @@ mod tests {
         );
     }
 
-    /// I7: the quick calibration's result writer leaves the coherent set in one call: the
+    /// The quick calibration's result writer leaves the coherent set in one call: the
     /// offsets, S the identity, type 1, no expected field; `MAG_FLD_INC` and the health
     /// tolerances as they were.
     #[test]
@@ -544,7 +544,7 @@ mod tests {
         assert!(!write_quick_result(&mut p, [250.0, 0.0, 0.0]));
     }
 
-    /// F1b: the expected field exists only for the guided calibration (type 2) with a field above 0, in the
+    /// The expected field exists only for the guided calibration (type 2) with a field above 0, in the
     /// converted units; a tolerance written to the store shows in the next read.
     #[test]
     fn the_expected_field_is_none_unless_guided_with_a_field() {
@@ -589,9 +589,9 @@ mod tests {
         assert_eq!(expected(Some(2), Some(50.0), Some(1.0), None, Some(10.0)), None);
     }
 
-    /// I4: the quick calibration measures the raw field r (what the adapter hands it beside m),
+    /// The quick calibration measures the raw field r (what the adapter hands it beside m),
     /// so its offsets are the same whatever S and o are in force; undoing only the offsets of a
-    /// published m (the old path) would not be, once S is not the identity.
+    /// published m would not be, once S is not the identity.
     #[test]
     fn the_quick_calibration_gives_the_same_offsets_whatever_calibration_is_in_force() {
         use fw_core::calib::{MagCal, MagOutcome};

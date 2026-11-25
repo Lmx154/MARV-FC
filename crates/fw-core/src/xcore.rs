@@ -1,7 +1,5 @@
 //! Lock-free cells between the two cores: `Seqlock` (flight core to core 0, the writer never waits), `TripleBuffer` (core 0 to flight core, wait-free on both sides), `Kick` (cross-core wake and requests) and `LogRing` (byte ring for whole log records, wait-free on both sides).
 //!
-//! Design: decision-foundation, two-core amendment, "Rules" (SHARING) and invariant F3.
-//!
 //! Every cell is `const`-constructible so it can live in a `static`, holds `T: Copy` payloads,
 //! allocates nothing and uses only 8- and 32-bit atomics: `thumbv8m.main-none-eabihf` has no
 //! 64-bit atomics. No cell takes a critical section, and no operation on the flight core's side
@@ -1526,7 +1524,7 @@ mod log_ring_tests {
         }
     }
 
-    /// Q4-I2: `ops` random operations against the model; every byte read equals the model's, in
+    /// `ops` random operations against the model; every byte read equals the model's, in
     /// order, `dropped` equals the model's count at every step, and the statistics windows
     /// equal the model's.
     fn model_run<const N: usize>(ops: u32, seed: u64) -> (u64, u64) {

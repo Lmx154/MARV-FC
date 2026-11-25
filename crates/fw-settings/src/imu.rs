@@ -138,7 +138,7 @@ pub fn board_rotation(value: Option<i32>) -> Rotation {
 /// board's orientation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ImuSetup<C, A, G> {
-    /// The driver's configuration: today's `config()` of the adapter with the three values in place.
+    /// The driver's configuration: the three values in place.
     pub config: C,
     /// The accelerometer full scale of `config`.
     pub accel_fs: A,

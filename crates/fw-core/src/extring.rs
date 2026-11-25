@@ -2,11 +2,11 @@
 //! the ring's own memory: the control block (indices, statistics, a bound pointer) lives in the
 //! struct, in SRAM, and the `N` bytes of storage are a [`PsramBuf`] bound at run time.
 //!
-//! Design: decision-psram-offload-20261121, D2. The log buffers (`logger::RING`, `logdl::HANDOVER`)
+//! The log buffers (`logger::RING`, `logdl::HANDOVER`)
 //! are the only users; the board places its [`PsramBuf`] statics in the `.psram` section and binds
 //! them once the PSRAM is initialised and verified.
 //!
-//! # The four rules of the external memory (P1 to P4 of the decision)
+//! # The four rules of the external memory
 //!
 //! - P1: core 1 never touches it. Core 1 makes no XIP/QMI access; this module's code is not in the
 //!   flight core's RAM-code selector (the module is `extring`, not `xcore`) and only core-0 tasks
@@ -701,8 +701,6 @@ mod tests {
     /// the consumer is given, over many laps and wraps, is only bytes the producer wrote (a
     /// sentinel byte never appears in the output, the output equals the input), and the producer
     /// writes nothing outside its grants (the untouched tail of a fresh buffer stays sentinel).
-    /// Before the zeroing in `bind` the sentinel was the buffer's whole initial content; it now
-    /// stays a regression for the read side.
     #[test]
     fn consumer_reads_only_what_the_producer_wrote_never_the_sentinel() {
         const SENTINEL: u8 = 0xA5;

@@ -1,4 +1,4 @@
-//! The status LED's display (`decision-status-led-20261118`): what the one LED shows, as a pure
+//! The status LED's display: what the one LED shows, as a pure
 //! function of the device rows, a few flags, the brightness level and the time since boot.
 //!
 //! Boot: steady white until [`ROLL_CALL_START_MS`], then the roll call (nine blinks, one per device
@@ -89,7 +89,7 @@ pub const ROWS: usize = 9;
 pub struct Inputs {
     /// The nine rows' health states in roll-call order (the index constants of this module).
     pub rows: [State; ROWS],
-    /// The motor test's spin is active (later: armed).
+    /// The motor test's spin is active.
     pub motor_spin: bool,
     /// A calibration is running.
     pub calibrating: bool,
@@ -99,7 +99,7 @@ pub struct Inputs {
     pub gnss_fix: bool,
     /// `LED_BRIGHT`: 0 off, 1 dim, 2 medium, 3 bright (see [`level_brightness`]).
     pub level: i32,
-    /// The low-battery monitor's level (Amendment BATT): 0 none, 1 LOW, 2 CRITICAL (`fw_core::battery::Level`).
+    /// The low-battery monitor's level: 0 none, 1 LOW, 2 CRITICAL (`fw_core::battery::Level`).
     pub battery: u8,
 }
 
@@ -143,7 +143,7 @@ pub const fn level_brightness(level: i32) -> u8 {
 pub enum Mode {
     /// Red, double blink: IMU1, IMU2, BARO, MAG or BATT is FAILED.
     VitalFailed,
-    /// Red at 5 Hz: the battery monitor reached CRITICAL (Amendment BATT).
+    /// Red at 5 Hz: the battery monitor reached CRITICAL.
     BatteryCritical,
     /// Yellow at 5 Hz: the battery monitor reached LOW.
     BatteryLow,
@@ -713,7 +713,7 @@ mod tests {
         assert_eq!(display(&healthy(), 0).colour, Colour::WHITE);
     }
 
-    /// Amendment BATT: CRITICAL is red and LOW yellow at 5 Hz (100 ms on, 100 ms off), above the motor spin, the calibration
+    /// CRITICAL is red and LOW yellow at 5 Hz (100 ms on, 100 ms off), above the motor spin, the calibration
     /// and the yellow pulse, below a failed vital device; level 0 changes nothing.
     #[test]
     fn the_battery_levels_blink_at_5_hz_above_row_2_and_below_row_1() {

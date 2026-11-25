@@ -1,4 +1,4 @@
-//! The on-board log format: ArduPilot DataFlash `.BIN` records (design: decision-sd-logging, Q3).
+//! The on-board log format: ArduPilot DataFlash `.BIN` records.
 //!
 //! This module only turns plain values into bytes in a caller's buffer. It has no state, no file,
 //! no ring and no clock: every function writes exactly one record (or the whole header) at the

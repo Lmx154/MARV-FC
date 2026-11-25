@@ -1,5 +1,4 @@
-//! The GNSS receiver's parameter, its configuration and the mapping of its NAV-PVT to a `GnssReading`
-//! (decision-gnss-m10-20261122, M1 architect ruling D2 and D3).
+//! The GNSS receiver's parameter, its configuration and the mapping of its NAV-PVT to a `GnssReading`.
 //!
 //! The receiver is the u-blox SAM-M10Q, UBX only. The `sam-m10q` driver sends it one RAM-only configuration
 //! (nothing is saved): this module only picks the measurement period from `GPS_RATE_MS`. Nothing here
@@ -124,7 +123,7 @@ fn utc_time(pvt: &Pvt) -> UtcTime {
     }
 }
 
-/// The `GnssReading` of one NAV-PVT, every field and its unit (decision-gnss-m10-20261122, D3):
+/// The `GnssReading` of one NAV-PVT, every field and its unit:
 ///
 /// | field | value |
 /// |---|---|
@@ -170,9 +169,8 @@ pub fn reading(pvt: &Pvt) -> GnssReading {
     }
 }
 
-/// The wait from a failed configuration to the next try, ms. Kept from the LC76G design (its bench figure: a receiver
-/// just powered on did not complete a change for several seconds; 5000 is the figure of the start wait for the first
-/// sentence). Not measured on the SAM-M10Q: the driver's configuration is itself up to 5.6 s (three 1 s baud probes,
+/// The wait from a failed configuration to the next try, ms. 5000 is the start wait for the first
+/// sentence. Not measured on the SAM-M10Q: the driver's configuration is itself up to 5.6 s (three 1 s baud probes,
 /// 100 ms, the acknowledgement's 1 s, 500 ms), so the retry follows a failed one by 5 s more.
 pub const CONFIGURE_RETRY_MS: u64 = 5000;
 

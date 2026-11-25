@@ -1,4 +1,4 @@
-//! The watchdog's pure decisions (design: decision-foundation, two-core amendment, item 6): the
+//! The watchdog's pure decisions: the
 //! monitor's feed rule ([`Monitor`]), the task-id table ([`task`], [`task_name`]) and the boot
 //! report ([`boot_report`]).
 //!
