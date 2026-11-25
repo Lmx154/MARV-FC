@@ -74,7 +74,8 @@ fn walk(seed: u64, steps: usize, setup: impl FnOnce(&mut TestFlight)) -> (u64, O
     walk_with(seed, steps, fw_core::rc::RcSource::Crsf, setup)
 }
 
-/// `walk` with the reports from `source` (N19).
+/// `walk` with the reports from `source` (N19). IMU1 reads 1 g (level, at rest): an all-zero sample would read as free fall
+/// to the in-air restart (decision-inair-restart-20261125); the digests are the same either way without it.
 fn walk_with(seed: u64, steps: usize, source: fw_core::rc::RcSource, setup: impl FnOnce(&mut TestFlight)) -> (u64, Option<u64>, [u32; 5]) {
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(0.0, ANGLE));
@@ -134,7 +135,9 @@ fn walk_with(seed: u64, steps: usize, source: fw_core::rc::RcSource, setup: impl
         if prefix.is_none() && was_armed && air && lost {
             prefix = Some(h);
         }
-        let o = f.step(&input(t, rc));
+        let mut i = input(t, rc);
+        i.sensors.imu1.reading.accel_ms2 = [0.0, 0.0, -GRAVITY_MSS];
+        let o = f.step(&i);
         digest_step(&mut h, &o);
         counts[0] += u32::from(o.armed);
         counts[1] += u32::from(was_armed && !o.armed && air);
