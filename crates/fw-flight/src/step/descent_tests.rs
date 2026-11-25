@@ -611,6 +611,10 @@ fn home_wait_with_v_d_held(wait_off: bool) -> Option<f32> {
     while p.f.legs.phase() != LegPhase::Home {
         assert!(p.step(None).armed && p.t < 100_000_000);
         assert_ne!(p.f.hands_off_state(), State::Land);
+        // M2: the climb ends at rest, so v_D is held from the step before the first Home (HomeLeg's one step at home).
+        if p.f.legs.phase() == LegPhase::HomeLeg {
+            p.vd_frozen = Some(-0.8);
+        }
     }
     p.vd_frozen = Some(-0.8);
     for k in 1..=16_000u32 {

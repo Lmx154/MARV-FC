@@ -194,29 +194,30 @@ fn lag_rule_keeps_a_lagging_vehicle_within_e_max() {
     }
 }
 
-/// A6 vertical: climb at 3.0 m/s, descent at 1.5 m/s, horizontal and vertical together; arrival only when both are done.
+/// A6 vertical: climb at up to 3.0 m/s, descent at up to 1.5 m/s (M2: ramped at `LEG_ACC_Z_MSS`), horizontal and
+/// vertical together; arrival only when both are done.
 #[test]
 fn vertical_carrot_rates_and_arrival_needs_both_axes() {
-    // Climb 5 -> 35 m (10 s) on a 10 m leg (about 4.3 s): horizontal first. Then descent 35 -> 32 m (2 s) on a 60 m
-    // leg: vertical first.
+    // Climb 5 -> 35 m (3 s ramp, 7 s at 3.0 m/s, 3 s braking: 13 s) on a 10 m leg (about 4.3 s): horizontal first.
+    // Then descent 35 -> 32 m (1.5 s ramp, 0.5 s at 1.5 m/s, 1.5 s braking: 3.5 s) on a 60 m leg: vertical first.
     let m = mission(&[(10.0, 0.0, 35.0), (70.0, 0.0, 32.0)], R);
     let mut g = LegGuidance::new();
     assert!(g.enter([0.0, 0.0, -5.0], HOME, &ORIGIN, &m, 0, 3.0));
     let run = fly(&mut g, [0.0, 0.0, -5.0], Vehicle::Follow, 20_000);
     let o = &run.outs;
     let k_arr = o.iter().position(|x| x.event == LegEvent::Arrived(0)).unwrap();
-    // Leg 0: climbing at 3.0 m/s until 35 m; the horizontal carrot was at the waypoint long before.
-    assert!((o[10].velocity_d_ms + LEG_CLIMB_MS).abs() < 1e-3, "{:?}", o[10]);
+    // Leg 0: climbing at 3.0 m/s mid-climb until 35 m; the horizontal carrot was at the waypoint long before.
+    assert!((o[600].velocity_d_ms + LEG_CLIMB_MS).abs() < 1e-3, "{:?}", o[600]);
     let k_h = o.iter().position(|x| hypotf(x.position_ne[0] - 10.0, x.position_ne[1]) < 0.05).unwrap();
-    assert!(k_h < 500 && k_arr > 990 && k_arr < 1010, "{k_h} {k_arr}");
+    assert!(k_h < 500 && k_arr > 1290 && k_arr < 1310, "{k_h} {k_arr}");
     assert_eq!(o[k_arr - 1].down_m, -35.0);
     for x in &o[..k_arr] {
         assert!(x.down_m >= -35.0 && x.velocity_d_ms <= 0.0);
     }
-    // Leg 1: descent at 1.5 m/s for 2 s, then the horizontal finishes alone; Done only then.
-    assert!((o[k_arr + 10].velocity_d_ms - LEG_DESCENT_MS).abs() < 1e-3, "{:?}", o[k_arr + 10]);
+    // Leg 1: descent at 1.5 m/s at its middle, 3.5 s in all, then the horizontal finishes alone; Done only then.
+    assert!((o[k_arr + 170].velocity_d_ms - LEG_DESCENT_MS).abs() < 1e-3, "{:?}", o[k_arr + 170]);
     let k_v = k_arr + o[k_arr..].iter().position(|x| x.down_m == -32.0).unwrap();
-    assert!((k_v - k_arr) as f32 * DT > 1.9 && ((k_v - k_arr) as f32) * DT < 2.1, "{}", k_v - k_arr);
+    assert!((k_v - k_arr) as f32 * DT > 3.4 && ((k_v - k_arr) as f32) * DT < 3.6, "{}", k_v - k_arr);
     let last = o.last().unwrap();
     assert_eq!(last.event, LegEvent::Done);
     assert!((o.len() - k_v) as f32 * DT > 15.0);
@@ -229,12 +230,16 @@ fn vertical_carrot_stops_without_lead() {
     let m = mission(&[(50.0, 0.0, 30.0)], R);
     let mut g = LegGuidance::new();
     assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &m, 0, 3.0));
-    for _ in 0..100 {
+    // M2: with the ramp, the carrot is 3 m above the still vehicle after sqrt(2 x 3 / LEG_ACC_Z_MSS) = 2.45 s.
+    let mut n = 0;
+    while g.lead_ok(-10.0, 1.0) {
         let o = g.step(DT, [0.0, 0.0, -10.0], true, true);
         assert!(o.velocity_d_ms < 0.0);
+        n += 1;
     }
+    assert!((n as f32 * DT - 2.45).abs() < 0.02, "{n}");
     let d = g.down_m();
-    assert!((d + 13.0).abs() < 1e-3, "{d}");
+    assert!((d + 13.0).abs() < 0.05, "{d}");
     // The vehicle stayed at 10 m: 3 m behind is at the cap (3.0 m/s x 1.0 s).
     assert!(!g.lead_ok(-9.9, 1.0) && g.lead_ok(-10.1, 1.0));
     let mut p = [0.0, 0.0, -10.0];
@@ -244,14 +249,93 @@ fn vertical_carrot_stops_without_lead() {
         p = [o.position_ne[0], o.position_ne[1], -10.0];
     }
     assert!(g.carrot_ne()[0] > 1.0);
-    // Descending, the cap is 1.5 m/s x lead.
+    // M2: the stop reset the rate; it ramps again from rest.
+    let o = g.step(DT, p, true, true);
+    assert!((o.velocity_d_ms + LEG_ACC_Z_MSS * DT).abs() < 1e-6, "{o:?}");
+    // Descending, the cap is 1.5 m/s x lead (1.125 m below after the 1.5 s ramp).
     let m = mission(&[(50.0, 0.0, 5.0)], R);
     assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &m, 0, 3.0));
-    for _ in 0..50 {
+    for _ in 0..150 {
         g.step(DT, [0.0, 0.0, -10.0], true, true);
     }
     assert!(g.lead_ok(-10.0, 1.0) && !g.lead_ok(-10.0, 0.4));
     assert!(!g.lead_ok(f32::NAN, 1.0));
+}
+
+/// The vertical carrot's rate per step of `run` against the goal heights `goals` (m down, in order): |d rate| <= a dt
+/// (the snap step, from within `LEG_SNAP_M`, at most sqrt(2 a LEG_SNAP_M) + a dt), the climb and descent caps,
+/// rate <= sqrt(2 a r) + a dt with r the distance left, every goal reached exactly with rate 0. Returns the largest
+/// |d rate| of a snap step.
+fn check_vertical(outs: &[LegOut], goals: &[f32]) -> f32 {
+    let (a, eps) = (LEG_ACC_Z_MSS, 1e-4);
+    let (mut prev, mut k, mut snap_dv) = (0.0f32, 0usize, 0.0f32);
+    for (i, o) in outs.iter().enumerate() {
+        let r = o.down_m - goals[k.min(goals.len() - 1)];
+        let rate = o.velocity_d_ms;
+        let dv = libm::fabsf(rate - prev);
+        let at_goal = k < goals.len() && r == 0.0;
+        if at_goal && prev != 0.0 {
+            snap_dv = snap_dv.max(dv);
+            assert!(dv <= sqrtf(2.0 * a * LEG_SNAP_M) + a * DT + eps, "step {i}: snap dv {dv}");
+        } else {
+            assert!(dv <= a * DT + eps, "step {i}: {prev} -> {rate}");
+        }
+        assert!(rate <= LEG_DESCENT_MS + eps && rate >= -LEG_CLIMB_MS - eps, "step {i}: {rate}");
+        assert!(libm::fabsf(rate) <= sqrtf(2.0 * a * libm::fabsf(r)) + a * DT + eps, "step {i}: rate {rate} r {r}");
+        if at_goal {
+            assert_eq!(rate, 0.0, "step {i}");
+            k += 1;
+        }
+        prev = rate;
+    }
+    assert_eq!(k, goals.len(), "goals reached");
+    snap_dv
+}
+
+/// M2: the vertical carrot is acceleration limited at `LEG_ACC_Z_MSS`, capped at 3.0 up and 1.5 down, brakes into D_k
+/// and reaches it exactly at rest: a 30 m climb, a 3 m descent, a 1 m climb (never at the cap) and RETURN's climb.
+#[test]
+fn vertical_carrot_is_acceleration_limited() {
+    let m = mission(&[(10.0, 0.0, 35.0), (70.0, 0.0, 32.0), (70.0, 10.0, 33.0)], R);
+    let mut g = LegGuidance::new();
+    assert!(g.enter([0.0, 0.0, -5.0], HOME, &ORIGIN, &m, 0, 3.0));
+    let run = fly(&mut g, [0.0, 0.0, -5.0], Vehicle::Follow, 50_000);
+    assert_eq!(run.outs.last().unwrap().event, LegEvent::Done);
+    let snap_auto = check_vertical(&run.outs, &[-35.0, -32.0, -33.0]);
+    let top = run.outs.iter().map(|o| o.velocity_d_ms).fold(0.0f32, f32::min);
+    let bottom = run.outs.iter().map(|o| o.velocity_d_ms).fold(0.0f32, f32::max);
+    assert!((top + LEG_CLIMB_MS).abs() < 1e-4 && (bottom - LEG_DESCENT_MS).abs() < 1e-4, "{top} {bottom}");
+    let home = Home { ne: [-10.0, 5.0], d: -2.0 };
+    assert!(g.enter_return([40.0, 30.0, -7.0], home, 20.0, R, 3.0));
+    let run = fly(&mut g, [40.0, 30.0, -7.0], Vehicle::Follow, 20_000);
+    assert_eq!(run.outs.last().unwrap().event, LegEvent::Home);
+    let snap_ret = check_vertical(&run.outs, &[-22.0]);
+    std::eprintln!("vertical carrot: largest snap-step d rate {snap_auto:.4} (AUTO), {snap_ret:.4} (RETURN) m/s");
+}
+
+/// M2: the vertical rate is 0 again at `enter` and `enter_return`: the first step after either, entered mid-climb at
+/// 3.0 m/s, moves the rate by a dt from rest.
+#[test]
+fn vertical_rate_restarts_from_rest_at_entry() {
+    let m = mission(&[(10.0, 0.0, 35.0)], R);
+    for ret in [false, true] {
+        let mut g = LegGuidance::new();
+        assert!(g.enter([0.0, 0.0, -5.0], HOME, &ORIGIN, &m, 0, 3.0));
+        let mut p = [0.0, 0.0, -5.0];
+        for _ in 0..500 {
+            let o = g.step(DT, p, true, true);
+            p = [o.position_ne[0], o.position_ne[1], o.down_m];
+        }
+        assert!((g.vd + LEG_CLIMB_MS).abs() < 1e-4, "{}", g.vd);
+        if ret {
+            assert!(g.enter_return(p, HOME, 40.0, R, 3.0));
+        } else {
+            assert!(g.enter(p, HOME, &ORIGIN, &m, 0, 3.0));
+        }
+        assert_eq!(g.vd, 0.0);
+        let o = g.step(DT, p, true, true);
+        assert!((o.velocity_d_ms + LEG_ACC_Z_MSS * DT).abs() < 1e-6, "{ret}: {o:?}");
+    }
 }
 
 /// 16 waypoints run to Done, each Arrived once and in order; the carrot frozen at the last one and its height.
@@ -324,20 +408,22 @@ fn return_from_above_the_return_height_does_not_climb() {
     assert_eq!(g.step(DT, [0.0, 0.0, -30.0], true, true).event, LegEvent::Home);
 }
 
-/// A7: below H_r it climbs in place at 3.0 m/s first; the horizontal carrot does not move until the vertical is at H_r.
+/// A7: below H_r it climbs in place at up to 3.0 m/s first (M2: ramped at `LEG_ACC_Z_MSS`); the horizontal carrot
+/// does not move until the vertical is at H_r.
 #[test]
 fn return_from_below_climbs_in_place_first() {
     let home = Home { ne: [-10.0, 5.0], d: -2.0 };
     let mut g = LegGuidance::new();
-    // 5 m above home; return height 20 m: H_r 20 m, D -22.
+    // 5 m above home; return height 20 m: H_r 20 m, D -22 (3 s ramp, 2 s at 3.0 m/s, 3 s braking: 8 s).
     assert!(g.enter_return([40.0, 30.0, -7.0], home, 20.0, R, 3.0));
     let run = fly(&mut g, [40.0, 30.0, -7.0], Vehicle::Follow, 20_000);
     let o = &run.outs;
     let k_top = o.iter().position(|x| x.down_m == -22.0).unwrap();
-    assert!((k_top as f32 * DT - 5.0).abs() < 0.02, "{k_top}");
+    assert!(((k_top + 1) as f32 * DT - 8.0).abs() < 0.05, "{k_top}");
+    assert!((o[400].velocity_d_ms + LEG_CLIMB_MS).abs() < 1e-3, "{:?}", o[400]);
     for x in &o[..=k_top] {
         assert_eq!((x.position_ne, x.velocity_ne, x.phase), ([40.0, 30.0], [0.0; 2], LegPhase::Climb));
-        assert!((x.velocity_d_ms + LEG_CLIMB_MS).abs() < 1e-3 || x.down_m == -22.0, "{x:?}");
+        assert!(x.velocity_d_ms <= 0.0 && x.velocity_d_ms >= -LEG_CLIMB_MS - 1e-4, "{x:?}");
     }
     assert_eq!(o[k_top + 1].phase, LegPhase::HomeLeg);
     assert!(o[k_top + 2].position_ne != [40.0, 30.0]);

@@ -266,6 +266,9 @@ impl<const N: usize> Guidance<N> {
 pub const LEG_CLIMB_MS: f32 = 3.0;
 /// A6: the vertical carrot's descent rate toward D_k, m/s.
 pub const LEG_DESCENT_MS: f32 = 1.5;
+/// M2 (decision-climb-corners-20261125): the vertical carrot's rate changes by at most this, m/s^2 (ArduPilot AC_WPNav
+/// WP_ACC_Z_DEFAULT 1.0; the same value as `LAND_RATE_ACC_MSS`).
+pub const LEG_ACC_Z_MSS: f32 = 1.0;
 /// L4: the horizontal distance vehicle to carrot at which the carrot stops advancing, m (PX4 MPC_XY_ERR_MAX).
 pub const LAG_E_MAX_M: f32 = 2.0;
 /// FX-2 item 1 (decision-mavlink-mode-20261123, section 54 item 1): the arrival radius is at most the track-fault bound X
@@ -379,9 +382,10 @@ pub struct LegGuidance {
     /// The horizontal carrot's distance along `line`, m, and its speed (before the lag scale), m/s.
     s: f32,
     v: f32,
-    /// The vertical carrot and its goal, m down.
+    /// The vertical carrot and its goal, m down, and its rate, m/s down.
     d: f32,
     d_goal: f32,
+    vd: f32,
     e_m: f32,
 }
 
@@ -407,6 +411,7 @@ impl LegGuidance {
             v: 0.0,
             d: 0.0,
             d_goal: 0.0,
+            vd: 0.0,
             e_m: 0.0,
         }
     }
@@ -560,17 +565,24 @@ impl LegGuidance {
             self.v = 0.0;
         }
         let vel = [self.line.dir[0] * self.v * k, self.line.dir[1] * self.v * k];
-        // A6: toward D_k at the rate of its direction, stopped outside the lead cap.
-        let d_old = self.d;
+        // A6 and M2: toward D_k at most at the rate of its direction, the rate changing by at most `LEG_ACC_Z_MSS` dt and
+        // braking into D_k (the horizontal's braking law); stopped and at rest outside the lead cap.
         if lead_ok {
             let gap = self.d_goal - self.d;
-            let rate = if gap > 0.0 { LEG_DESCENT_MS } else { LEG_CLIMB_MS };
-            let step = rate * dt;
-            self.d = if libm::fabsf(gap) <= step { self.d_goal } else { self.d + libm::copysignf(step, gap) };
+            let sign = libm::copysignf(1.0, gap);
+            let (a, r, v) = (LEG_ACC_Z_MSS, libm::fabsf(gap), self.vd * sign);
+            let cap = if gap > 0.0 { LEG_DESCENT_MS } else { LEG_CLIMB_MS };
+            let brake = 0.5 * (sqrtf((a * a * dt * dt + 8.0 * a * r - 4.0 * a * dt * v).max(0.0)) - a * dt);
+            let target_v = cap.min(brake.max(0.0));
+            let max_dv = a * dt;
+            let v_new = v + (target_v - v).max(-max_dv).min(max_dv);
+            let r_new = r - 0.5 * (v + v_new) * dt;
+            (self.d, self.vd) = if r_new <= LEG_SNAP_M { (self.d_goal, 0.0) } else { (self.d_goal - sign * r_new, sign * v_new) };
+        } else {
+            self.vd = 0.0;
         }
-        let vd = if dt > 0.0 { (self.d - d_old) / dt } else { 0.0 };
         self.e_m = Self::dist(veh, self.carrot_ne());
-        self.out(vel, vd, false, event)
+        self.out(vel, self.vd, false, event)
     }
 
     /// Both carrots at the vehicle (`s` 0 on `line`, which starts there) and at rest; the vertical goal `d_goal`.
@@ -579,6 +591,7 @@ impl LegGuidance {
         self.v = 0.0;
         self.d = d;
         self.d_goal = d_goal;
+        self.vd = 0.0;
         self.e_m = 0.0;
     }
 

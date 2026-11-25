@@ -44,7 +44,7 @@ Upload: station Map tab, "Waypoints" panel, "Upload to vehicle"; or `marv-cli mi
 | Distance | vehicle and every waypoint within 1 km of home (`HOME_RANGE_M`) at Start |
 | Return height | the return item's z, capped at `GDN_ALT_MAX`, never lower than the present height above home |
 | Arrival radius | `GDN_RADIUS` (default 2.0 m, range 0.05..10) |
-| Cruise speed | min(`PILOT_SPEED_XY`, 6.8 m/s); climb 3.0, descent 1.5 m/s; carrot acceleration 3 m/s^2 |
+| Cruise speed | min(`PILOT_SPEED_XY`, 6.8 m/s); climb at most 3.0, descent at most 1.5 m/s, vertical acceleration 1.0 m/s^2 (`LEG_ACC_Z_MSS`); carrot acceleration 3 m/s^2 |
 | Guidance source | `GDN_SRC` 1 uses the uploaded list; 0 uses `GDN_COUNT` / `GDN_LAT1..4` / `GDN_LON1..4` |
 
 ## Start preconditions and refusal codes
