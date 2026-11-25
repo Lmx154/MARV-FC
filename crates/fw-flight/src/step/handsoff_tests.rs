@@ -1647,12 +1647,12 @@ fn n10_ho_msg_at_every_change() {
     assert_eq!(texts, want);
 }
 
-// ---- And return_built on the real step ----
+// ---- On the real step ----
 
 /// A-d on the real `Flight` over random reports, switches, sticks, coverage, silences and the heading
 /// monitor's verdict; the airborne latch is the real one (it clears in LAND on the idle floor)
 #[test]
-fn wr3_and_return_built_on_the_real_step() {
+fn wr3_on_the_real_step() {
     let tuning = Tuning::DEFAULT;
     let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(nav_at(-10.0, POSITION))));
     let mut f = flight(cell, handshake(), &tuning);
@@ -2200,7 +2200,7 @@ fn n4_blind_probe_in_the_air_aborts_and_blind_never_stops() {
     }
 }
 
-/// Flight (`return_built` false, as on the board): armed in Angle on the ground at d = 0.
+/// Flight: armed in Angle on the ground at d = 0.
 /// the height is not valid until airborne, so no home latches), then 30 m up in Altitude.
 fn e2_run(home: bool) -> std::vec::Vec<(f32, f32, f32, f32)> {
     let valid = if home { POSITION } else { ANGLE };

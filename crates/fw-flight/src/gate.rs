@@ -1100,7 +1100,6 @@ mod tests {
             heading_ok: true,
             battery_ok: true,
             battery_critical: false,
-            return_built: true,
             track_error_m: None,
             speed_xy_ms: tuning.pilot_speed_xy_ms,
             td_held: true,

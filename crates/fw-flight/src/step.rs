@@ -1111,7 +1111,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             heading_ok: nav.valid.heading && self.heading_ok,
             battery_ok,
             battery_critical,
-            return_built: true,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             td_held: td_in,
