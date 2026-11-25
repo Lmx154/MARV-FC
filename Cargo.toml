@@ -68,7 +68,7 @@ embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-futures = "0.1.2"
 static_cell = "2.1.1"
-# The FAT32 file system on the SD card (src/sd.rs, src/sd_probe.rs) and its stream adapters (`BufStream`, `StreamSlice`):
+# The FAT32 file system on the SD card (src/sd.rs) and its stream adapters (`BufStream`, `StreamSlice`):
 # git only (no release), both at one commit of master (2026-10-23), with the `[patch.crates-io]` below so that
 # the one `BlockDevice<512>` trait in the tree is the one pio-sdmmc implements. 8.3 names, no chrono (FAT
 # times 1980-01-01), no log, no alloc.
@@ -186,16 +186,6 @@ wdg-scratch-probe = []
 latency-text = []
 # The supervisor's periodic `[STAT]` lines (uptime, devices, watchdog) are not printed.
 quiet-stat = []
-# Probe P3 of the SD logging design (src/sd_probe.rs): from 20.5 s a core-0 task builds the SD bus (PIO0
-# SM0, DMA channel 4 on DMA_IRQ_1), prints the INTEn and NVIC checks, mounts the FAT32 volume of MBR
-# partition 1, times the free-space query, writes LOGS/P3TEST.BIN (16 MiB in 4 KiB writes, a flush each
-# second), reads it back and compares, lists LOGS/ and un-mounts. sd-fat-format first writes a new MBR and
-# formats partition 1 FAT32 (32 KiB clusters, label MARV): it ERASES the card.
-sd-fat-probe = []
-sd-fat-format = ["sd-fat-probe"]
-# Also: after the mount, instead of the 16 MiB burst, 150 s at the logger's duty: one 4 KiB write to
-# LOGS/P3PACED.BIN every 700 ms and a flush every second, then close and un-mount.
-sd-fat-paced = ["sd-fat-probe"]
 # Measurement only (src/xip_probe.rs): at start the QMI flash read mode and the cost of one XIP cache
 # miss (three passes and a control), then an extra `[STAT]` line with the XIP accesses, hits and misses.
 xip-stat = []

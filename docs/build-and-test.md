@@ -65,7 +65,6 @@ Cargo features are off by default; they add board checks and fault injections. B
 | Fault injection, BARO | `inject-baro-transient`, `-persistent`, `-missed-edge`, `-silent`, `-verify`, `-por`, `-stuck`, `-fail-until-restart`, `-hang-once`, `-hang-boot`, `-hang-forever` | Wrap the barometer adapter or its I2C bus ([device-layer](device-layer.md)) |
 | Fault injection, other devices | `inject-mag-fail-until-restart`, `inject-gnss-silent`, `inject-mag-rotation`, `inject-imu1-persistent`, `-imu1-missed-edge`, `inject-imu2-persistent`, `-imu2-verify`, `inject-late` | MAG, GNSS and IMU adapters; `inject-late` delays the IMU injections to 60 s so the vehicle can be armed first |
 | SD and log | `inject-sd-no-card`, `inject-sd-wrong-format`, `inject-sd-write-fail`, `log-verify`, `inject-log-small-volume`, `inject-log-delete-big`, `sd-irq-negative` | Test hooks of the SD task ([logging](logging.md)) |
-| SD probe | `sd-fat-probe`, `sd-fat-paced`, `sd-fat-format` | Probe a FAT32 volume; `sd-fat-format` ERASES the card |
 | Settings | `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign` | Flash save checks ([parameters](parameters.md)) |
 | Watchdog | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `wdg-scratch-probe`, `stall-core0` | Each acts once, 20 s after a start the watchdog did not cause ([health](health.md)) |
 | ESC | `esc-off`, `esc-no-edt` | ESC task not built; or no extended-telemetry burst ([esc](esc.md)) |

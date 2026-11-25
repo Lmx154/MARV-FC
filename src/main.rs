@@ -32,8 +32,7 @@
 //! core 0's stack guard): 10 s after start the stack is run 2 KiB below `_stack_end`.
 #![no_std]
 #![no_main]
-// The SD task's and the SD probe's file-system futures nest deeper than the default limit allows
-// for their layout.
+// The SD task's file-system futures nest deeper than the default limit allows for their layout.
 #![recursion_limit = "256"]
 
 mod actions;
@@ -57,20 +56,14 @@ mod imu_inject;
 #[cfg(any(feature = "inject", feature = "inject-mag"))]
 mod inject;
 mod led;
-// In a probe build the SD task does not exist, so the SD side of `logdl` is unused there.
-#[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
 mod logdl;
-#[cfg(not(feature = "sd-fat-probe"))]
 mod logger;
 mod mag;
 mod mission;
 mod psram;
 mod ram;
 mod rc;
-#[cfg(not(feature = "sd-fat-probe"))]
 mod sd;
-#[cfg(feature = "sd-fat-probe")]
-mod sd_probe;
 mod settings;
 mod station;
 mod store;
@@ -1469,23 +1462,9 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(watchdog::probe::act(wd, probe)));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
-    // The SD card's device task and the log collector; in a build of the SD probe the probe owns
-    // the card instead.
-    #[cfg(not(feature = "sd-fat-probe"))]
+    // The SD card's device task and the log collector.
     spawner.spawn(defmt::unwrap!(logger::task()));
-    #[cfg(not(feature = "sd-fat-probe"))]
     spawner.spawn(defmt::unwrap!(sd::task(sd::Parts {
-        pio: p.PIO0,
-        dma: p.DMA_CH4,
-        clk: p.PIN_32,
-        cmd: p.PIN_33,
-        dat0: p.PIN_28,
-        dat1: p.PIN_29,
-        dat2: p.PIN_30,
-        dat3: p.PIN_31,
-    })));
-    #[cfg(feature = "sd-fat-probe")]
-    spawner.spawn(defmt::unwrap!(sd_probe::task(sd_probe::Parts {
         pio: p.PIO0,
         dma: p.DMA_CH4,
         clk: p.PIN_32,

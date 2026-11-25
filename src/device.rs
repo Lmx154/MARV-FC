@@ -473,7 +473,6 @@ impl Device {
     }
 
     /// Publishes the outcome of restart request `number` (a task with its own loop, `sd`).
-    #[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
     pub(crate) fn finish_restart(&self, number: u32, ok: bool) {
         self.restart_outcome
             .store(number << 1 | u32::from(ok), Ordering::Release);
@@ -534,8 +533,8 @@ impl Device {
     }
 }
 
-/// The number of registry rows (the SD row is not in a build of the SD probe, which owns the card).
-pub const DEVICE_COUNT: usize = if cfg!(feature = "sd-fat-probe") { 6 } else { 7 };
+/// The number of registry rows.
+pub const DEVICE_COUNT: usize = 7;
 /// The IMU rows' period before `main` sets it from the boot setup: 800 Hz, the default of `IMUn_ODR_HZ`.
 const IMU_BOOT_PERIOD_US: u32 = 1250;
 /// IMU1's row, backed by the flight core; its P is set at boot from `IMU1_ODR_HZ`.
@@ -562,7 +561,6 @@ pub static GNSS: Device = Device::new(MarvDevice::MARV_DEVICE_GNSS, "GNSS", crat
 /// The battery monitor's row.
 pub static BATT: Device = Device::new(MarvDevice::MARV_DEVICE_BATT, "BATT", crate::batt::PERIOD_US);
 /// The SD card's row (`sd`): P = 1 s, so stuck after 20 s.
-#[cfg(not(feature = "sd-fat-probe"))]
 pub static SD: Device = Device::new(MarvDevice::MARV_DEVICE_SD, "SD", crate::sd::PERIOD_US);
 /// The registry.
 pub static DEVICES: [&Device; DEVICE_COUNT] = [
@@ -572,7 +570,6 @@ pub static DEVICES: [&Device; DEVICE_COUNT] = [
     &MAG,
     &GNSS,
     &BATT,
-    #[cfg(not(feature = "sd-fat-probe"))]
     &SD,
 ];
 
@@ -610,7 +607,6 @@ fn now_ms() -> u64 {
 }
 
 /// Hands a health transition to the supervisor for its text (a task with its own loop, `sd`).
-#[cfg_attr(feature = "sd-fat-probe", allow(dead_code))]
 pub(crate) fn notify(dev: &'static Device, report: Report) {
     if NOTICES.try_send((dev, Notice::Report(report))).is_err() {
         defmt::warn!("[INFO] {=str}: notice queue full", dev.name);

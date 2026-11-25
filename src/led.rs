@@ -62,12 +62,9 @@ fn level() -> i32 {
     .unwrap_or(DEFAULT_LEVEL)
 }
 
-/// Whether a log is open on the SD card (a build of the SD probe has no log: not a reason for yellow).
+/// Whether a log is open on the SD card.
 fn log_open() -> bool {
-    #[cfg(not(feature = "sd-fat-probe"))]
-    return crate::logger::OPEN.load(Ordering::Relaxed) != 0;
-    #[cfg(feature = "sd-fat-probe")]
-    return true;
+    crate::logger::OPEN.load(Ordering::Relaxed) != 0
 }
 
 /// Everything the display reads, now, with the level last read from the store.

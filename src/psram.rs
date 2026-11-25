@@ -83,7 +83,6 @@ macro_rules! psram_static {
 
 psram_static!(CANARY, CANARY_LEN);
 // `logger::RING`'s storage (the collector writes it, the SD task reads it).
-#[cfg(not(feature = "sd-fat-probe"))]
 psram_static!(LOG_BUF, crate::logger::RING_BYTES);
 // `logdl::HANDOVER`'s storage (the SD task writes it, the USB task reads it).
 psram_static!(HANDOVER_BUF, crate::logdl::HANDOVER_BYTES);
@@ -287,10 +286,7 @@ fn bind_rings() -> bool {
     let ready = unsafe { PsramReady::new() };
     // SAFETY: each `&'static mut` below is made exactly once, here: `init` runs once (it consumes `QMI_CS1`, a
     // singleton), nothing else names these statics, and no ring is bound yet, so no other reference exists.
-    #[cfg(not(feature = "sd-fat-probe"))]
     let log = crate::logger::RING.bind(unsafe { &mut *(&raw mut LOG_BUF) }, &ready);
-    #[cfg(feature = "sd-fat-probe")]
-    let log: Result<(), fw_core::extring::BindError> = Ok(());
     // SAFETY: as above.
     let handover = crate::logdl::HANDOVER.bind(unsafe { &mut *(&raw mut HANDOVER_BUF) }, &ready);
     log.is_ok() && handover.is_ok()
