@@ -186,9 +186,6 @@ wdg-scratch-probe = []
 latency-text = []
 # The supervisor's periodic `[STAT]` lines (uptime, devices, watchdog) are not printed.
 quiet-stat = []
-# Measurement only (src/xip_probe.rs): at start the QMI flash read mode and the cost of one XIP cache
-# miss (three passes and a control), then an extra `[STAT]` line with the XIP accesses, hits and misses.
-xip-stat = []
 # Test hooks of the SD card's device task (src/sd.rs; the card cannot be pulled on the desk):
 # inject-sd-no-card replaces the result of every card `init` with `NoCard`; inject-sd-wrong-format hands
 # the MBR check a block 0 whose partition 1 type is 0x07 (exFAT/NTFS).
@@ -216,7 +213,7 @@ ram-negative = []
 # The board check of the RAM-code design (src/xip_park.rs, decision-ram-code-20261115 Q5): 30 s after
 # start a 1 s window of both cores' XIP accesses (more than 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with
 # interrupts off and the XIP accesses counted meanwhile (core 1's) must be 0 with both IMUs sampling;
-# with ram-negative at least 1000. Not together with xip-stat.
+# with ram-negative at least 1000.
 xip-park = []
 # The N0 bench (src/bin/eskf_bench.rs, decision-nav-eskf-20261120 section 11): fw-flight's eskf_n0 module, for that
 # binary only (`BIN=eskf_bench FEATURES=eskf-bench tools/run.sh 60`); the flight binary is built without it.

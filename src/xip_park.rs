@@ -7,7 +7,7 @@
 //! none, while IMU1 and IMU2 each deliver at least 790 samples and no error. With `ram-negative`
 //! (`now_us` in flash) the parked window must count at least 1000. The watchdog survives (1.0 s plus
 //! its feed period is under 1.6 s); the "core 0 stalled" and flight-core texts after it are expected.
-//! Once, and not after a watchdog reset. Not together with `xip-stat` (it clears the same counters).
+//! Once, and not after a watchdog reset.
 
 use core::arch::asm;
 use core::sync::atomic::Ordering;

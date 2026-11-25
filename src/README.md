@@ -28,7 +28,7 @@ Hardware-free logic is in the crates (see the [README](../README.md)), not here.
 | `led.rs` | Status LED task | [health](../docs/health.md) |
 | `watchdog.rs` | Hardware watchdog and its monitor | [health](../docs/health.md) |
 | `inject.rs`, `imu_inject.rs` | Fault injection wrappers (features) | [build-and-test](../docs/build-and-test.md) |
-| `xip_probe.rs`, `xip_park.rs` | Board probes and checks (features) | [build-and-test](../docs/build-and-test.md) |
+| `xip_park.rs` | Board check (feature) | [build-and-test](../docs/build-and-test.md) |
 | `bin/eskf_bench.rs` | ESKF timing bench binary | [build-and-test](../docs/build-and-test.md) |
 
 Back to the [README](../README.md).

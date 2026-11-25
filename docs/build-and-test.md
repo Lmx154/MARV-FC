@@ -69,7 +69,7 @@ Cargo features are off by default; they add board checks and fault injections. B
 | Watchdog | `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`, `wdg-scratch-probe`, `stall-core0` | Each acts once, 20 s after a start the watchdog did not cause ([health](health.md)) |
 | ESC | `esc-off`, `esc-no-edt` | ESC task not built; or no extended-telemetry burst ([esc](esc.md)) |
 | PSRAM | `psram-skip-remap`, `psram-absent`, `psram-negative` | PSRAM checks |
-| Measurement | `xip-stat`, `xip-park`, `latency-text`, `quiet-stat`, `eskf-bench` | XIP counters, parked-core check, latency texts, silent `[STAT]`, ESKF bench |
+| Measurement | `xip-park`, `latency-text`, `quiet-stat`, `eskf-bench` | Parked-core check, latency texts, silent `[STAT]`, ESKF bench |
 | Bench, PROPS OFF | `restart-bench` | The in-air restart on the bench (below); never for flight |
 
 **`restart-bench` (props off only).** Measures how fast the motors spin up when the in-air restart re-arms

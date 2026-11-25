@@ -70,8 +70,6 @@ mod store;
 mod watchdog;
 #[cfg(feature = "xip-park")]
 mod xip_park;
-#[cfg(feature = "xip-stat")]
-mod xip_probe;
 
 use core::any::type_name;
 use core::cell::{RefCell, UnsafeCell};
@@ -1086,8 +1084,6 @@ async fn supervise() -> ! {
             flight::stat();
             calibration::stat();
             watchdog::stat();
-            #[cfg(feature = "xip-stat")]
-            xip_probe::stat(now);
         }
         // The mission's change counter moved (a commit or a clear): the shadow guidance's targets are chosen again (`GDN_SRC`).
         // The list first, then the plan id: a commit between them leaves `changed` true, so both go again next tick.
@@ -1275,8 +1271,6 @@ async fn main(spawner: Spawner) {
         "[INFO] MARV V2 fw {=str}: two cores",
         env!("CARGO_PKG_VERSION")
     );
-    #[cfg(feature = "xip-stat")]
-    xip_probe::run();
     defmt::info!("[INFO] icm45686: {}", type_name::<icm45686::Info>());
     defmt::info!("[INFO] lsm6dsk320x: {}", type_name::<lsm6dsk320x::Info>());
     defmt::info!("[INFO] bmp581: {}", type_name::<bmp581::Info>());
