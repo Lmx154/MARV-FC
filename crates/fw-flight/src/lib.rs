@@ -1,10 +1,5 @@
-//! Flight-core (core 1) tasks of the MARV V2 firmware.
-//! Today: the liveness answer [`liveness`], the IMU device loop [`imu`] (IMU1 runs it), the ESC
-//! telemetry logic [`esc`] (pure), and [`tagged`], which names the task that ran last for the watchdog (`RUNNING1`).
-//! The flight step: [`step`] (`Flight`, called by IMU1's task per sample), [`gnc`] (the estimator, controller and
-//! allocator seams), [`gate`] (the gate and `MotorCommand`), [`tuning`] (the gains and limits).
-//! What the step runs: [`mahony`] (`Mahony`), [`pid`] (`CascadedPid`), [`alloc`] (`CardAllocator`).
-//! Rule: no dependency on `embassy-time`, `embassy-sync` or `defmt`.
+//! Flight-core (core 1) tasks of the MARV V2 firmware: liveness, the IMU device loop, ESC telemetry, the flight step and its parts.
+//! No dependency on `embassy-time`, `embassy-sync` or `defmt`.
 #![no_std]
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]

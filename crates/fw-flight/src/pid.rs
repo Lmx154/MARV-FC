@@ -1,7 +1,6 @@
-//! The controller: an attitude P loop feeding a PID rate loop per axis (decision-first-pair-20261119, section 3),
-//! and, for `Setpoint::Altitude` and `Setpoint::Position`, a vertical loop that makes the collective
-//! (decision-nav-eskf-20261120, 7b, F4, F5); for `Setpoint::Position` also a horizontal position P, velocity PI loop whose
-//! acceleration is turned into a tilt (Amendment P, P2).
+//! The controller: an attitude P loop feeding a PID rate loop per axis, and, for `Setpoint::Altitude` and
+//! `Setpoint::Position`, a vertical loop that makes the collective; for `Setpoint::Position` also a horizontal
+//! position P, velocity PI loop whose acceleration is turned into a tilt.
 //! Torques in N.m about FRD, rates in rad/s, collective thrust in N. No feed-forward in the attitude and rate loops.
 
 use crate::gnc::{Controller, NavState, RateLog, Refused, Saturation, Setpoint, ThrustTorque};
@@ -73,7 +72,7 @@ impl Axis {
         ground: bool,
         fltd_hz: f32,
     ) -> [f32; 3] {
-        // D on the filtered measurement, not the error (decision 3c).
+        // D on the filtered measurement, not the error.
         let m = if first {
             rate
         } else {
@@ -85,7 +84,7 @@ impl Axis {
             0.0
         };
         self.m = m;
-        // I: keep i' unless the axis is limited and i' grows in magnitude, then clamp (ArduPilot's rule, 3c).
+        // I: keep i' unless the axis is limited and i' grows in magnitude, then clamp (ArduPilot's rule).
         if ground {
             self.i = 0.0;
         } else {
@@ -169,7 +168,7 @@ pub struct CascadedPid {
     pos_active: bool,
     /// The attitude setpoint of the latest `Position` update, [0; 4] after any other update.
     q_sp_pos: [f32; 4],
-    /// The RPM notch on the measured rates (decision-rpm-notch-20261123).
+    /// The RPM notch on the measured rates.
     notch: Notch,
     /// The notch switch of the latest `set_rotor_hz`.
     notch_on: bool,
@@ -242,10 +241,10 @@ impl CascadedPid {
         }
     }
 
-    /// The collective of altitude hold, N (F1, F4, F5). Signs: NED, down positive for height D, climb rate vD,
+    /// The collective of altitude hold, N. Signs: NED, down positive for height D, climb rate vD,
     /// acceleration a_d and the integrator; the thrust is positive up. `down_m` and `v_ff` are the shaper's target
     /// height and its climb-rate feed-forward (down positive); `a_ff` the acceleration feed-forward, m/s^2 down positive
-    /// (M2b; 0 for `Altitude`). `dt_s` is 0 on the first step after `reset`.
+    /// (the vertical carrot's; 0 for `Altitude`). `dt_s` is 0 on the first step after `reset`.
     fn vertical_thrust(
         &mut self,
         nav: &NavState,
@@ -271,11 +270,11 @@ impl CascadedPid {
         // e_v > 0: the vehicle moves up or hovers where it should move down more; a_d > 0 asks to accelerate down.
         let e_v = v_sp - v_d;
         let a_d = self.velz_p * e_v + self.alt_i + a_ff;
-        // Thrust, N, positive up: m (g - a_d) holds at a_d = 0 and falls when a_d > 0; then the tilt factor (F4).
+        // Thrust, N, positive up: m (g - a_d) holds at a_d = 0 and falls when a_d > 0; then the tilt factor.
         let cos = down_in_body(nav.attitude)[2];
         let wanted = MASS * (GRAVITY_MSS - a_d) * tilt_factor(cos, self.tilt_cos_min, self.tilt_inverted_gain);
         let thrust_n = wanted.max(0.0).min(self.thrust_full_n);
-        // F5: no integration into a saturated thrust, from either source: our own clamp or the allocator's flags.
+        // No integration into a saturated thrust, from either source: our own clamp or the allocator's flags.
         let at_min = wanted <= 0.0 || limited.thrust_low;
         let at_max = wanted >= self.thrust_full_n || limited.thrust_high;
         let frozen = (at_min && e_v >= 0.0) || (at_max && e_v <= 0.0);
@@ -306,7 +305,7 @@ impl CascadedPid {
         self.xy_i
     }
 
-    /// The attitude setpoint of position hold (Amendment P, P2): `target` and `v_ff` the setpoint's NED position and
+    /// The attitude setpoint of position hold: `target` and `v_ff` the setpoint's NED position and
     /// velocity feed-forward, `heading_rad` its heading. v_sp = posxy_p (target - p) + v_ff limited to the speed;
     /// e_v = v_sp - v; a = velxy_p e_v + I limited to `a_max`; the integrator adds velxy_i e_v dt unless the acceleration
     /// was clipped and it would grow, and stays within `a_max`. `entry`: the first `Position` setpoint, the integrator is
@@ -372,7 +371,7 @@ impl CascadedPid {
         mul([libm::cosf(h), 0.0, 0.0, libm::sinf(h)], tilt)
     }
 
-    /// Body rate setpoint, rad/s, from an attitude setpoint (decision 3b): q_e = conj(q) (x) q_sp with w >= 0,
+    /// Body rate setpoint, rad/s, from an attitude setpoint: q_e = conj(q) (x) q_sp with w >= 0,
     /// e = 2 [x, y, z], rate = [K_rp e_x, K_rp e_y, K_y e_z] + heading_rate * (NED down in the body).
     fn attitude_to_rates(&self, q: [f32; 4], q_sp: [f32; 4], heading_rate_rads: f32) -> [f32; 3] {
         let mut q_e = mul(conj(q), q_sp);
@@ -400,7 +399,7 @@ impl Controller for CascadedPid {
         let entry_xy = is_position && !self.pos_active;
         self.pos_active = is_position;
         self.q_sp_pos = [0.0; 4];
-        // dt in s from successive nav.t_us, capped; 0 on the first step after reset (decision 3d).
+        // dt in s from successive nav.t_us, capped; 0 on the first step after reset.
         let first = self.t_prev_us.is_none();
         let dt = match self.t_prev_us {
             Some(prev) => nav.t_us.saturating_sub(prev).min(DT_MAX_US) as f32 * 1e-6,
@@ -439,7 +438,7 @@ impl Controller for CascadedPid {
                 heading_rate_rads,
                 accel_d_mss,
             } => {
-                // The vertical integrator stays live across Altitude and Position (P2).
+                // The vertical integrator stays live across Altitude and Position.
                 #[cfg(test)]
                 if self.position_clears_alt_active {
                     self.alt_active = false;
@@ -476,7 +475,7 @@ impl Controller for CascadedPid {
         let [mx, my, mz] = rates;
         let hz = self.fltd_hz;
         // On the ground (the collective below the threshold; in Altitude this step's computed, clamped collective):
-        // the integrators are 0 (decision-flight-ground-20261119, section 1).
+        // the integrators are 0.
         let ground = thrust_n < self.ground_thrust_n;
         let [roll, pitch, yaw] = &mut self.axes;
         let [rp, ri, rd] = roll.step(sx - mx, mx, dt, first, limited.roll, ground, hz);
@@ -701,7 +700,7 @@ mod tests {
         }
     }
 
-    // ---- Altitude hold: the vertical loop (decision-nav-eskf-20261120, F1, F4, F5) ----
+    // ---- Altitude hold: the vertical loop ----
 
     /// Level, at height `d` and climb rate `v_d` (both down positive), Altitude covered.
     fn alt_nav(t_us: u64, d: f32, v_d: f32) -> NavState {
@@ -898,9 +897,9 @@ mod tests {
         }
         assert!(pid.axes[0].i > 0.0);
     }
-    // ---- Position hold: the horizontal loop (Amendment P, P2; N2 to N5) ----
+    // ---- Position hold: the horizontal loop ----
 
-    /// The linear rotor drag of the real vehicle, N/(m/s) (Amendment P-1: "drag 0.197"; the simulator card's air axis).
+    /// The linear rotor drag of the real vehicle, N/(m/s) (the simulator card's air axis).
     const DRAG_N_PER_MS: f32 = 0.197;
 
     /// All fields valid, level at heading `yaw`, at `p` (NED, m) with velocity `v` (NED, m/s).
@@ -979,7 +978,7 @@ mod tests {
         3.0 * core::f32::consts::FRAC_PI_2,
     ];
 
-    /// N5: the frames. The acceleration from the tilt is the commanded one for every heading and every direction of the
+    /// The frames. The acceleration from the tilt is the commanded one for every heading and every direction of the
     /// command, and the sign of each tilt component is the Angle stick's (forward lowers the nose, right lowers the right
     /// side).
     #[test]
@@ -1012,7 +1011,7 @@ mod tests {
         }
     }
 
-    /// N5: a point mass 2 m from the target at each of the four headings converges; with the rotation's sign flipped it
+    /// A point mass 2 m from the target at each of the four headings converges; with the rotation's sign flipped it
     /// diverges at 90 and 270 degrees.
     #[test]
     fn n5_a_point_mass_converges_from_2_m_at_every_heading_and_the_flipped_rotation_diverges() {
@@ -1036,7 +1035,7 @@ mod tests {
         }
     }
 
-    /// N5 (Addendum P-1): a point mass with the vehicle's linear drag in a steady wind. Without the integrator the offset
+    /// A point mass with the vehicle's linear drag in a steady wind. Without the integrator the offset
     /// settles at a_w / (posxy_p velxy_p), a_w the drag acceleration at rest in the wind; with it the offset goes to 0.
     #[test]
     fn n5_p1_drag_and_steady_wind_the_offset_without_the_integrator_and_zero_with_it() {
@@ -1068,7 +1067,7 @@ mod tests {
         assert!((a - b).abs() <= tol, "{a} vs {b} (tol {tol})");
     }
 
-    /// N4: the tilt never exceeds `angle_max_rad`, the horizontal integrator never exceeds `a_max`, and it does not grow
+    /// The tilt never exceeds `angle_max_rad`, the horizontal integrator never exceeds `a_max`, and it does not grow
     /// while the acceleration is clipped (control: the rule off lets it grow to the limit).
     #[test]
     fn n4_tilt_integrator_limit_and_anti_windup() {
@@ -1139,7 +1138,7 @@ mod tests {
         }
     }
 
-    /// N2 (controller part): the first Position setpoint after any other one, or a reset, starts the horizontal integrator
+    /// The first Position setpoint after any other one, or a reset, starts the horizontal integrator
     /// at 0 and does not advance it in that step (control: the integrator kept at the entry).
     #[test]
     fn n2_the_entry_zeroes_the_horizontal_integrator_and_does_not_advance_it() {
@@ -1181,7 +1180,7 @@ mod tests {
         }
     }
 
-    /// N3 (controller part): changing between Altitude and Position, either way, leaves the vertical integrator and the
+    /// Changing between Altitude and Position, either way, leaves the vertical integrator and the
     /// thrust bit-identical to staying in Altitude (control: the vertical integrator's live flag cleared in Position).
     #[test]
     fn n3_altitude_and_position_share_the_vertical_loop_bit_for_bit() {

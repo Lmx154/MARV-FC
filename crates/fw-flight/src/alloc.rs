@@ -1,7 +1,6 @@
-//! The allocator from the vehicle card: thrust and torques to four DShot levels (decision-first-pair-20261119,
-//! section 1). Rotor thrusts T = MIX * [thrust, t_x, t_y, t_z] (card constants, rows = DShot lines), each kept in
-//! [T_lo, T_hi]; yaw is given up first, then roll and pitch; the collective is only ever lowered, at the top
-//! (no airmode). Units: N, N.m, rad/s.
+//! The allocator from the vehicle card: thrust and torques to four DShot levels. Rotor thrusts T = MIX * [thrust, t_x,
+//! t_y, t_z] (card constants, rows = DShot lines), each kept in [T_lo, T_hi]; yaw is given up first, then roll and
+//! pitch; the collective is only ever lowered, at the top (no airmode). Units: N, N.m, rad/s.
 
 use crate::gnc::{Allocation, Allocator, MotorLevels, Saturation, ThrustTorque};
 use marv_card::{IDLE_LEVEL, K_F, LEVEL_MAX, LEVEL_MIN, MAX_ROTOR_SPEED, MIX, SPEED_AT_LEVEL_MIN};
@@ -16,7 +15,7 @@ pub struct CardAllocator {
 }
 
 impl CardAllocator {
-    /// The per-rotor thrust bounds from the card (decision 1b): T_lo = K_F w(IDLE_LEVEL)^2, T_hi = K_F w_max^2, N.
+    /// The per-rotor thrust bounds from the card: T_lo = K_F w(IDLE_LEVEL)^2, T_hi = K_F w_max^2, N.
     pub fn new() -> Self {
         let idle = speed(IDLE_LEVEL);
         CardAllocator {
@@ -26,12 +25,12 @@ impl CardAllocator {
     }
 
     /// The collective's physical range, N: the idle floor 4 T_lo (below it `thrust_low`) and full thrust 4 T_hi (above it
-    /// `thrust_high`), step 1 of [`CardAllocator::allocate`] (decision-mavlink-mode-20261123, N14 (1) and (2)).
+    /// `thrust_high`).
     pub fn collective_range(&self) -> (f32, f32) {
         (4.0 * self.t_lo, 4.0 * self.t_hi)
     }
 
-    /// Rotor thrusts by DShot line, N, each in [T_lo, T_hi], and what could not be met (decision 1c, steps 1 to 4).
+    /// Rotor thrusts by DShot line, N, each in [T_lo, T_hi], and what could not be met.
     fn thrusts(&self, demand: &ThrustTorque) -> ([f32; 4], Saturation) {
         let (lo, hi) = (self.t_lo, self.t_hi);
         let [tx, ty, tz] = demand.torque_nm;
@@ -40,7 +39,7 @@ impl CardAllocator {
         let c = demand.thrust_n.max(4.0 * lo).min(4.0 * hi);
         let thrust_low = c > demand.thrust_n;
         let mut thrust_high = c < demand.thrust_n;
-        // At the floor the shares a and e are 0 by rule (no authority at idle, no airmode; decision 1d): all four
+        // At the floor the shares a and e are 0 (no authority at idle, no airmode): all four
         // rotors at T_lo, so exactly IDLE_LEVEL, whatever the torques and the card's symmetry.
         if thrust_low {
             let all = Saturation {
@@ -120,7 +119,7 @@ fn speed(level: u16) -> f32 {
     SPEED_AT_LEVEL_MIN + span * (MAX_ROTOR_SPEED - SPEED_AT_LEVEL_MIN)
 }
 
-/// Rotor thrust, N, to DShot level: w = sqrt(T / K_F), then the inverse of [`speed`], rounded and clamped to
+/// [IDLE_LEVEL, LEVEL_MAX]. A NaN thrust gives IDLE_LEVEL.
 /// [IDLE_LEVEL, LEVEL_MAX] (decision 1b). A NaN thrust gives IDLE_LEVEL.
 fn level(thrust_n: f32) -> u16 {
     let w = libm::sqrtf(thrust_n / K_F);
@@ -132,7 +131,7 @@ fn level(thrust_n: f32) -> u16 {
 }
 
 /// The largest s in [0, cap] with lo <= base_i + s * delta_i <= hi on every line; 0 when no s fits (then nothing of
-/// delta is applied, as decision 1d expects at the thrust floor).
+/// delta is applied).
 fn largest_fit(base: &[f32; 4], delta: &[f32; 4], lo: f32, hi: f32, cap: f32) -> f32 {
     let (mut s_min, mut s_max) = (0.0f32, cap);
     for (&b, &dl) in base.iter().zip(delta) {
@@ -190,7 +189,7 @@ mod tests {
             thrust_high: false,
         };
         assert_eq!(out.saturation, want);
-        // A large torque demand at zero throttle: still idle on all four (decision 1d).
+        // A large torque demand at zero throttle: still idle on all four.
         let out = CardAllocator::new().allocate(&demand(0.0, [5.0, -5.0, 5.0]));
         assert_eq!(out.levels.level, [IDLE_LEVEL; 4]);
         assert_eq!(out.saturation, want);
@@ -216,9 +215,9 @@ mod tests {
             "{lv:?}"
         );
 
-        // A small torque that fits at hover on every axis (decision 3e: yaw has far less authority than roll and pitch).
+        // A small torque that fits at hover on every axis (yaw has far less authority than roll and pitch).
         let small = 0.01;
-        // (axis, lines that rise for + torque): +x left (2, 3); +y front (0, 2); +z CCW (0, 3) (conventions 7e, 7f).
+        // (axis, lines that rise for + torque): +x left (2, 3); +y front (0, 2); +z CCW (0, 3).
         for (axis, up) in [(0, [2, 3]), (1, [0, 2]), (2, [0, 3])] {
             for sign in [1.0f32, -1.0] {
                 let mut t = [0.0; 3];
@@ -241,12 +240,12 @@ mod tests {
     fn allocator_gives_up_yaw_first() {
         let mut alloc = CardAllocator::new();
         let hover = MASS * GRAVITY_MSS;
-        // Roll 0.1 N.m fits the roll authority; yaw 10 N.m is far beyond the yaw authority (decision 3e).
+        // Roll 0.1 N.m fits the roll authority; yaw 10 N.m is far beyond the yaw authority.
         let (tx, tz) = (0.1, 10.0);
         let d = demand(hover, [tx, 0.0, tz]);
         let (u, sat) = alloc.thrusts(&d);
         assert!(sat.yaw && !sat.roll && !sat.pitch, "{sat:?}");
-        // The roll and pitch torques the four thrusts make (conventions 7e): roll fully applied, no pitch.
+        // The roll and pitch torques the four thrusts make: roll fully applied, no pitch.
         let roll: f32 = ROTORS
             .iter()
             .zip(u)

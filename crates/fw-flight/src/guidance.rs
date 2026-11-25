@@ -1,5 +1,4 @@
-//! Shadow guidance (decision-guidance-shadow-20261123, sections 1 and 2): geodetic targets to the existing
-//! `Setpoint::Position`. A pure module: it owns nothing of the flight code and is called by nobody in it. Per leg (from the
+//! Guidance: geodetic targets to `Setpoint::Position`. A pure module. Per leg (from the
 //! previous target, or from the vehicle's position at the first valid call, to the active target) a carrot of state `s`
 //! (along the leg) and `v` (its speed) moves toward the target at the cruise speed, braking so that it stops there. The
 //! controller tracks the carrot's position and velocity; the vertical axis is the vehicle's own (horizontal only).
@@ -260,30 +259,29 @@ impl<const N: usize> Guidance<N> {
     }
 }
 
-// Autonomous legs and the return leg (decision-mavlink-mode-20261123, A6 and A7; decision-guided-legs-20261123, L2-L4,
-// L7): the law the AUTO and RETURN states will fly. Not called by the flight step yet. No indexing, no `clamp`, no
+// Autonomous legs and the return leg: the law the AUTO and RETURN states fly. No indexing, no `clamp`, no
 // division by a value that can be 0; every output finite for any input.
 
-/// A6: the vertical carrot's climb rate toward D_k, m/s (also A7's climb in place).
+/// The vertical carrot's climb rate toward D_k, m/s (also the climb in place of RETURN).
 pub const LEG_CLIMB_MS: f32 = 3.0;
-/// A6: the vertical carrot's descent rate toward D_k, m/s.
+/// The vertical carrot's descent rate toward D_k, m/s.
 pub const LEG_DESCENT_MS: f32 = 1.5;
-/// M2 (decision-climb-corners-20261125): the vertical carrot's rate changes by at most this, m/s^2 (ArduPilot AC_WPNav
+/// The vertical carrot's rate changes by at most this, m/s^2 (ArduPilot AC_WPNav
 /// WP_ACC_Z_DEFAULT 1.0; the same value as `LAND_RATE_ACC_MSS`).
 pub const LEG_ACC_Z_MSS: f32 = 1.0;
-/// L4: the horizontal distance vehicle to carrot at which the carrot stops advancing, m (PX4 MPC_XY_ERR_MAX).
+/// The horizontal distance vehicle to carrot at which the carrot stops advancing, m (PX4 MPC_XY_ERR_MAX).
 pub const LAG_E_MAX_M: f32 = 2.0;
-/// FX-2 item 1 (decision-mavlink-mode-20261123, section 54 item 1): the arrival radius is at most the track-fault bound X
+/// The arrival radius is at most the track-fault bound X
 /// less this, m: the lag limit `LAG_E_MAX_M` plus 1.0 m, since after an arrival the carrot sits at the reached waypoint.
 pub const ARRIVAL_MARGIN_M: f32 = LAG_E_MAX_M + 1.0;
-/// A6: the AUTO and RETURN cruise speed is min(speed in force, this), m/s (baro sink measured at 6.8 m/s).
+/// The AUTO and RETURN cruise speed is min(speed in force, this), m/s.
 pub const LEG_SPEED_MAX_MS: f32 = 6.8;
 /// The carrot closer than this to the leg's end, m, is at the end and at rest (f32 rounding, not a tuning value: 2 km out,
 /// a 1 ms braking step this close to the end is below half an ulp of `s`). The stop from there is at most
 /// sqrt(2 a 1 mm) = 0.08 m/s.
 const LEG_SNAP_M: f32 = 1e-3;
 
-/// Home: NE from the origin (m) and D_home (m down) as A6 defines them.
+/// Home: NE from the origin (m) and D_home (m down).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Home {
     /// North and east from the origin, m.
@@ -316,9 +314,9 @@ pub enum LegEvent {
     None,
     /// Waypoint k (not the last) was reached; the leg to k + 1 started at it.
     Arrived(u8),
-    /// The last waypoint was reached (A6: HOLD at its height).
+    /// The last waypoint was reached (HOLD at its height).
     Done,
-    /// Within the radius of home (A7: LAND).
+    /// Within the radius of home (LAND).
     Home,
 }
 
@@ -333,10 +331,10 @@ pub struct LegOut {
     pub down_m: f32,
     /// The vertical carrot's rate, m/s down.
     pub velocity_d_ms: f32,
-    /// M2b: the vertical carrot's acceleration (the feed-forward), m/s^2 down: its rate's change over the step before the
+    /// The vertical carrot's acceleration (the feed-forward), m/s^2 down: its rate's change over the step before the
     /// snap to D_k, within +-`LEG_ACC_Z_MSS`; 0 while held, outside the lead cap, at Done and Home and for dt 0.
     pub accel_d_mss: f32,
-    /// e: horizontal distance vehicle to the carrot after this step, m (the track-fault input, H13 (1)).
+    /// e: horizontal distance vehicle to the carrot after this step, m (the track-fault input).
     pub e_m: f32,
     /// The active waypoint index.
     pub active: u8,
@@ -349,7 +347,7 @@ pub struct LegOut {
     pub held: bool,
 }
 
-/// A straight leg (as the shadow's `Leg`; a leg shorter than `LEG_MIN_M` has length 0 and no direction).
+/// A straight leg (a leg shorter than `LEG_MIN_M` has length 0 and no direction).
 #[derive(Clone, Copy, Debug)]
 struct Line {
     start: [f32; 2],
@@ -421,7 +419,7 @@ impl LegGuidance {
         }
     }
 
-    /// AUTO entry (L2) or re-entry (L7): the waypoints of `mission` converted at `origin` (as the shadow does), the
+    /// AUTO entry or re-entry: the waypoints of `mission` converted at `origin`, the
     /// first leg from the vehicle to waypoint `start`, both carrots at the vehicle and at rest. The radius is the
     /// mission's (GDN_RADIUS, at most X - `ARRIVAL_MARGIN_M`); the cruise speed min(`speed_ms`, `LEG_SPEED_MAX_MS`). Refused (false, `Idle`) when the
     /// position or home is not finite or `start` is not a waypoint.
@@ -455,7 +453,7 @@ impl LegGuidance {
         true
     }
 
-    /// RETURN entry (A7): H_r = max(`return_m` above home, the present height), latched here (a non-finite `return_m`
+    /// RETURN entry: H_r = max(`return_m` above home, the present height), latched here (a non-finite `return_m`
     /// counts as the present height); climb in place, then the leg to home. Refused (false, `Idle`) when the position
     /// or home is not finite.
     pub fn enter_return(&mut self, position_m: [f32; 3], home: Home, return_m: f32, radius_m: f32, speed_ms: f32) -> bool {
@@ -486,7 +484,7 @@ impl LegGuidance {
         self.phase
     }
 
-    /// The active waypoint index (for L7's resume).
+    /// The active waypoint index.
     pub fn active(&self) -> u8 {
         u8::try_from(self.idx).unwrap_or(u8::MAX)
     }
@@ -496,7 +494,7 @@ impl LegGuidance {
         self.d
     }
 
-    /// The lead cap of step.rs's `height_target` for the vertical carrot: the vehicle at `d_m` (m down) is within
+    /// The lead cap of the vertical carrot: the vehicle at `d_m` (m down) is within
     /// `lead_s` seconds of the carrot's rate in the direction it moves. False for a non-finite input.
     pub fn lead_ok(&self, d_m: f32, lead_s: f32) -> bool {
         let rate = if self.d_goal > self.d { LEG_DESCENT_MS } else { LEG_CLIMB_MS };
@@ -504,7 +502,7 @@ impl LegGuidance {
     }
 
     /// One step of `dt_s` seconds. `position_m` is the vehicle's NED position, `valid` its NE flag; `lead_ok` lets the
-    /// vertical carrot move (A6's lead cap, from the wiring).
+    /// vertical carrot move (the lead cap, from the wiring).
     #[allow(clippy::manual_clamp)] // not `clamp`: flight-core code, no panic path
     pub fn step(&mut self, dt_s: f32, position_m: [f32; 3], valid: bool, lead_ok: bool) -> LegOut {
         let dt = if dt_s.is_finite() && dt_s > 0.0 { dt_s } else { 0.0 };
@@ -522,7 +520,7 @@ impl LegGuidance {
                         self.s = self.line.len;
                         self.v = 0.0;
                     } else {
-                        // L3: the new leg starts at the reached target; the carrot at the vehicle's projection on it.
+                        // The new leg starts at the reached target; the carrot at the vehicle's projection on it.
                         event = LegEvent::Arrived(self.active());
                         self.idx += 1;
                         let [n, e, d] = self.waypoint(self.idx);
@@ -553,7 +551,7 @@ impl LegGuidance {
         if !matches!(self.phase, LegPhase::Leg | LegPhase::Climb | LegPhase::HomeLeg) {
             return self.out([0.0; 2], 0.0, 0.0, false, self.level_event());
         }
-        // L4: the advance is scaled by k (the profile runs on k dt).
+        // The advance is scaled by k (the profile runs on k dt).
         let k = (1.0 - Self::dist(veh, self.carrot_ne()) / LAG_E_MAX_M).max(0.0).min(1.0);
         let dte = k * dt;
         if self.s < self.line.len {
@@ -570,7 +568,7 @@ impl LegGuidance {
             self.v = 0.0;
         }
         let vel = [self.line.dir[0] * self.v * k, self.line.dir[1] * self.v * k];
-        // A6 and M2: toward D_k at most at the rate of its direction, the rate changing by at most `LEG_ACC_Z_MSS` dt and
+        // Toward D_k at most at the rate of its direction, the rate changing by at most `LEG_ACC_Z_MSS` dt and
         // braking into D_k (the horizontal's braking law); stopped and at rest outside the lead cap.
         let mut accel_d = 0.0;
         if lead_ok {
@@ -582,7 +580,7 @@ impl LegGuidance {
             let target_v = cap.min(brake.max(0.0));
             let max_dv = a * dt;
             let v_new = v + (target_v - v).max(-max_dv).min(max_dv);
-            // M2b: the rate's change before the snap, so that the snap step does not spike.
+            // The rate's change before the snap, so that the snap step does not spike.
             if dt > 0.0 {
                 accel_d = (sign * (v_new - v) / dt).max(-LEG_ACC_Z_MSS).min(LEG_ACC_Z_MSS);
             }
@@ -637,7 +635,7 @@ impl LegGuidance {
         }
     }
 
-    /// The arrival radius: min(GDN_RADIUS, X - `ARRIVAL_MARGIN_M`), X the track-fault bound of `speed_ms` (FX-2 item 1).
+    /// The arrival radius: min(GDN_RADIUS, X - `ARRIVAL_MARGIN_M`), X the track-fault bound of `speed_ms`.
     fn radius(radius_m: f32, speed_ms: f32) -> f32 {
         let cap = crate::hands_off::track_fault_m(speed_ms) - ARRIVAL_MARGIN_M;
         if radius_m.is_finite() { radius_m.min(cap).max(0.0) } else { 0.0 }
@@ -739,7 +737,7 @@ mod tests {
         outs
     }
 
-    /// H1: the target is converted with `ned_from_geo` at the origin's altitude, on every call.
+    /// The target is converted with `ned_from_geo` at the origin's altitude, on every call.
     #[test]
     fn h1_the_target_is_converted_at_the_origin() {
         let mut g = Guidance::<4>::new();
@@ -760,7 +758,7 @@ mod tests {
         assert!((o2.target_ne[0] - o.target_ne[0]).abs() > 50.0);
     }
 
-    /// H2: the bearing (clockwise from north) and the velocity direction for targets due N, E, S and W.
+    /// The bearing (clockwise from north) and the velocity direction for targets due N, E, S and W.
     #[test]
     fn h2_bearing_and_velocity_direction_for_the_four_compass_targets() {
         // (n, e) of the target; the expected unit vector (north, east) toward it.
@@ -820,7 +818,7 @@ mod tests {
         assert_eq!(o.status, status::RUNNING);
     }
 
-    /// H3: the speed profile of one leg.
+    /// The speed profile of one leg.
     #[test]
     fn h3_the_carrot_speed_is_bounded_by_cruise_the_acceleration_and_the_braking_curve() {
         let mut g = Guidance::<4>::new();
@@ -852,7 +850,7 @@ mod tests {
         assert!(steps > 1_000 && steps < 5_000, "{steps}");
     }
 
-    /// H4: the index advances exactly once per target, then done.
+    /// The index advances exactly once per target, then done.
     #[test]
     fn h4_the_index_advances_once_per_target_then_done() {
         let t: [GeoPoint; 3] = [
@@ -908,7 +906,7 @@ mod tests {
         assert_eq!((o.active, o.status), (0, status::RUNNING));
     }
 
-    /// H5: unusable input gives no setpoint, no NaN, and leaves the index.
+    /// Unusable input gives no setpoint, no NaN, and leaves the index.
     #[test]
     fn h5_invalid_input_gives_none_no_nan_and_the_index_stays() {
         let t = [geo_at(&ORIGIN, 100.0, 0.0, ORIGIN.alt_mm), geo_at(&ORIGIN, 100.0, 100.0, ORIGIN.alt_mm)];
@@ -953,7 +951,7 @@ mod tests {
         finite(&g.step(&good, Some(ORIGIN), -3.0, DT_US));
     }
 
-    /// H6: anchored once, a point mass that follows the setpoint exactly reaches every target.
+    /// Anchored once, a point mass that follows the setpoint exactly reaches every target.
     #[test]
     fn h6_a_point_mass_that_follows_exactly_reaches_every_target() {
         let t = [

@@ -1,6 +1,5 @@
-//! The flight step's side of the station's flight commands (`fw_core::flight_cmd`): the mailbox's request byte as the
-//! state machine's command, and its answer as the mailbox's answer byte and the COMMAND_ACK's result and
-//! `result_param2` (link-contract section 10, Amendment C).
+//! The flight step's side of the station's flight commands (`fw_core::flight_cmd`): mailbox request byte to state-machine
+//! command, and the answer back as the mailbox answer byte and the COMMAND_ACK result and `result_param2`.
 
 use fw_core::flight_cmd::{ACCEPTED, FlightCommand, Mailbox, request_of};
 
@@ -31,19 +30,17 @@ pub fn answer_byte(result: Option<CommandResult>) -> u8 {
     }
 }
 
-/// The COMMAND_ACK of an answer byte: (ACCEPTED, 0) or (DENIED, the reason code in `result_param2`). Section 10: "One
-/// COMMAND_ACK at once ... ACCEPTED when it takes the command ... otherwise DENIED", never another result.
+/// The COMMAND_ACK of an answer byte: (ACCEPTED, 0) or (DENIED, the reason code in `result_param2`).
 pub fn ack_of(byte: u8) -> (bool, i32) {
     if byte == ACCEPTED { (true, 0) } else { (false, i32::from(byte)) }
 }
 
-/// The state machine's plan id of a plan id from core 0: 0 is the empty list's (link-contract section 17), no list.
+/// The state machine's plan id of a plan id from core 0; 0 is the empty list, so no list.
 pub fn plan_id_of(plan_id: u32) -> Option<u32> {
     (plan_id != 0).then_some(plan_id)
 }
 
-/// The flight step's two calls around `Flight::step`: before, the waiting request, if any (its sequence number and the
-/// command; a byte that is no command is answered code 0 at once and not applied).
+/// The two calls around `Flight::step`: before, the waiting request if any; a byte that is no command is answered code 0 at once.
 pub fn take(mailbox: &Mailbox) -> Option<(u32, StationCommand)> {
     let (seq, byte) = mailbox.take()?;
     match command_of(byte) {
@@ -126,7 +123,7 @@ mod tests {
 
     #[test]
     fn mode_codes_of_the_contract_for_all_nine_values() {
-        // 0 is "not reported" (no step has run); 1 to 8 are the states (section 10's table).
+        // 0 is "not reported" (no step has run); 1 to 8 are the states.
         let states = [
             (State::Pilot, 1),
             (State::Takeover, 2),

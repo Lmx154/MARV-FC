@@ -1,5 +1,5 @@
-//! The three seams of the flight code and their types: [`Estimator`], [`Controller`], [`Allocator`]
-//! (decision-sim-seams-20261119, sections 3 to 5). Frames, units and signs: decision-sim-conventions-20261119.
+//! The three seams of the flight code and their types: [`Estimator`], [`Controller`], [`Allocator`].
+//! Frames, units and signs are NED, FRD, down positive.
 
 use crate::imu::ImuSample;
 use crate::tuning::Gains;
@@ -43,7 +43,7 @@ pub struct ExternalNavSample {
 pub struct Valid {
     /// Roll and pitch of `attitude`.
     pub tilt: bool,
-    /// The yaw of `attitude` is referenced to true north (false: relative yaw, as Mahony without a compass).
+    /// The yaw of `attitude` is referenced to true north (false: relative yaw).
     pub heading: bool,
     /// `rates_rads`.
     pub rates: bool,
@@ -114,7 +114,7 @@ pub struct NavState {
     pub position_m: [f32; 3],
     /// Which fields may be used.
     pub valid: Valid,
-    /// `None` for an estimator that has no covariance (Mahony).
+    /// `None` for an estimator that has no covariance.
     pub sigma: Option<NavSigma>,
 }
 
@@ -133,7 +133,7 @@ pub struct GeoPoint {
 pub trait Estimator {
     /// Takes this step's new samples, each by its own `t_us`, and returns the state at `sensors.imu1.t_us`.
     fn update(&mut self, sensors: &Sensors) -> NavState;
-    /// The NED origin once latched (rule: step 7). `None` before that, and always for attitude-only estimators.
+    /// The NED origin once latched. `None` before that, and always for attitude-only estimators.
     fn origin(&self) -> Option<GeoPoint> {
         None
     }
@@ -168,8 +168,8 @@ pub enum Mode {
     Position,
 }
 
-/// What the controller tracks this step. Thrust: collective, N, positive up (conventions 7d). Heading and heading rate
-/// are about NED down, positive nose right (conventions 7b, 7c).
+/// What the controller tracks this step. Thrust: collective, N, positive up. Heading and heading rate
+/// are about NED down, positive nose right.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Setpoint {
     /// Acro. Body rates, FRD, rad/s.
@@ -189,7 +189,7 @@ pub enum Setpoint {
         thrust_n: f32,
     },
     /// Altitude hold. Tilt and heading come from `attitude`; height is given as down from the origin, m, with its
-    /// rate, m/s. The controller makes the collective (decision-nav-eskf-20261120, 7b, F1).
+    /// rate, m/s. The controller makes the collective.
     Altitude {
         /// Body to NED [w, x, y, z].
         attitude: [f32; 4],
@@ -210,7 +210,7 @@ pub enum Setpoint {
         heading_rad: f32,
         /// Heading-rate feed-forward, rad/s.
         heading_rate_rads: f32,
-        /// Vertical acceleration feed-forward, m/s^2, down positive (M2b: the vertical carrot's; 0 from every other source).
+        /// Vertical acceleration feed-forward, m/s^2, down positive (the vertical carrot's; 0 from every other source).
         accel_d_mss: f32,
     },
     /// Declared, not built: every controller refuses it.
@@ -254,7 +254,7 @@ impl Setpoint {
 }
 
 /// The controller's demand. Collective thrust, N, >= 0, along body -z. Body torques, N.m, about the FRD axes: +x rolls
-/// the right side down, +y pitches the nose up, +z yaws the nose right (conventions 7b).
+/// the right side down, +y pitches the nose up, +z yaws the nose right.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ThrustTorque {
     /// Collective thrust, N, >= 0.
@@ -283,7 +283,7 @@ pub struct Saturation {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Refused;
 
-/// The rate loop of the latest `Controller::update`, for the log (PIDT and NTCH records, decision-rpm-notch-20261123, 1B).
+/// The rate loop of the latest `Controller::update`, for the log (PIDT and NTCH records).
 /// Per axis X, Y, Z (roll, pitch, yaw). For an update that made a demand, `p_nm` + `i_nm` + `d_nm` (summed in that order)
 /// is the torque it demanded.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -329,16 +329,16 @@ pub trait Controller {
     ) -> Result<ThrustTorque, Refused>;
     /// Clears integrators and filter memory. The step calls it on every step while the vehicle is disarmed.
     fn reset(&mut self);
-    /// The largest horizontal velocity setpoint of `Setpoint::Position`, m/s: the pilot's horizontal speed in force
-    /// (Amendment P, P2, P9), capped at `hands_off::SPEED_XY_CAP_MS` in the hands-off states (H13 (2)). `Flight::step`
+    /// The largest horizontal velocity setpoint of `Setpoint::Position`, m/s: the pilot's horizontal speed in force,
+    /// capped at `hands_off::SPEED_XY_CAP_MS` in the hands-off states. `Flight::step`
     /// calls it on every step; the value in force changes only on disarmed steps. The default ignores it.
     fn set_speed_limit_xy(&mut self, _ms: f32) {}
-    /// The 14 gains of the runtime parameters (decision-gain-params-20261123). `Flight::step` calls it on every disarmed
+    /// The 14 gains of the runtime parameters. `Flight::step` calls it on every disarmed
     /// step, so the values cannot change in flight. Gains only: integrator and filter memories are not touched. The
     /// default ignores it.
     fn set_gains(&mut self, _gains: &Gains) {}
-    /// The attitude setpoint [w, x, y, z] the latest `update` made from a `Setpoint::Position` (the SETP record of kind 3,
-    /// Amendment P, P5); [0; 4] when that update was not one. The default has none.
+    /// The attitude setpoint [w, x, y, z] the latest `update` made from a `Setpoint::Position` (the SETP record of kind 3);
+    /// [0; 4] when that update was not one. The default has none.
     fn attitude_setpoint(&self) -> [f32; 4] {
         [0.0; 4]
     }
@@ -351,9 +351,9 @@ pub trait Controller {
     }
 }
 
-/// Four DShot levels, 1 to 2000, indexed by DShot line: 0 front right, 1 rear right, 2 front left, 3 rear left
-/// (conventions 5). The lowest level the allocator emits is idle (the card's `idle_level`; value: owner, then the
-/// thrust test). The allocator never asks for Stop; only the gate does.
+/// Four DShot levels, 1 to 2000, indexed by DShot line: 0 front right, 1 rear right, 2 front left, 3 rear left.
+/// The lowest level the allocator emits is idle (the card's `idle_level`).
+/// The allocator never asks for Stop; only the gate does.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MotorLevels {
     /// By DShot line.

@@ -1,4 +1,4 @@
-//! Host tests of `LegGuidance` (A6, A7; guided-legs L2-L4, L7).
+//! Host tests of `LegGuidance`.
 
 extern crate std;
 
@@ -111,7 +111,7 @@ fn fly(g: &mut LegGuidance, p0: [f32; 3], veh: Vehicle, max: usize) -> Run {
     run
 }
 
-/// L2: the first leg starts at the vehicle, also when the start index is not 0 (not at the previous waypoint).
+/// The first leg starts at the vehicle, also when the start index is not 0 (not at the previous waypoint).
 #[test]
 fn first_leg_is_anchored_at_the_vehicle() {
     let m = mission(&[(30.0, 0.0, 10.0), (30.0, 30.0, 10.0), (0.0, 30.0, 10.0)], R);
@@ -163,7 +163,7 @@ fn carrot_speed_profile_accelerates_cruises_and_stops_at_the_waypoint() {
     }
 }
 
-/// L4 with the vehicle held still: the carrot stops at E_MAX ahead; e never exceeds E_MAX + v dt.
+/// With the vehicle held still: the carrot stops at E_MAX ahead; e never exceeds E_MAX + v dt.
 #[test]
 fn lag_rule_stops_the_carrot_at_e_max_from_a_still_vehicle() {
     for cruise in [3.0f32, 5.0] {
@@ -178,7 +178,7 @@ fn lag_rule_stops_the_carrot_at_e_max_from_a_still_vehicle() {
     }
 }
 
-/// L4 with a first-order lag of 1 s: e stays below 2.0 m on a 50 m leg and around a 90 deg corner, at 3 and 5 m/s.
+/// With a first-order lag of 1 s: e stays below 2.0 m on a 50 m leg and around a 90 deg corner, at 3 and 5 m/s.
 #[test]
 fn lag_rule_keeps_a_lagging_vehicle_within_e_max() {
     for cruise in [3.0f32, 5.0] {
@@ -194,7 +194,7 @@ fn lag_rule_keeps_a_lagging_vehicle_within_e_max() {
     }
 }
 
-/// A6 vertical: climb at up to 3.0 m/s, descent at up to 1.5 m/s (M2: ramped at `LEG_ACC_Z_MSS`), horizontal and
+/// Vertical: climb at up to 3.0 m/s, descent at up to 1.5 m/s (ramped at `LEG_ACC_Z_MSS`), horizontal and
 /// vertical together; arrival only when both are done.
 #[test]
 fn vertical_carrot_rates_and_arrival_needs_both_axes() {
@@ -224,13 +224,13 @@ fn vertical_carrot_rates_and_arrival_needs_both_axes() {
     assert_eq!(run.arrivals.len(), 2);
 }
 
-/// A6: the vertical carrot stops while the vehicle is outside the lead cap; the horizontal goes on.
+/// The vertical carrot stops while the vehicle is outside the lead cap; the horizontal goes on.
 #[test]
 fn vertical_carrot_stops_without_lead() {
     let m = mission(&[(50.0, 0.0, 30.0)], R);
     let mut g = LegGuidance::new();
     assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &m, 0, 3.0));
-    // M2: with the ramp, the carrot is 3 m above the still vehicle after sqrt(2 x 3 / LEG_ACC_Z_MSS) = 2.45 s.
+    // With the ramp, the carrot is 3 m above the still vehicle after sqrt(2 x 3 / LEG_ACC_Z_MSS) = 2.45 s.
     let mut n = 0;
     while g.lead_ok(-10.0, 1.0) {
         let o = g.step(DT, [0.0, 0.0, -10.0], true, true);
@@ -249,7 +249,7 @@ fn vertical_carrot_stops_without_lead() {
         p = [o.position_ne[0], o.position_ne[1], -10.0];
     }
     assert!(g.carrot_ne()[0] > 1.0);
-    // M2: the stop reset the rate; it ramps again from rest.
+    // The stop reset the rate; it ramps again from rest.
     let o = g.step(DT, p, true, true);
     assert!((o.velocity_d_ms + LEG_ACC_Z_MSS * DT).abs() < 1e-6, "{o:?}");
     // Descending, the cap is 1.5 m/s x lead (1.125 m below after the 1.5 s ramp).
@@ -292,7 +292,7 @@ fn check_vertical(outs: &[LegOut], goals: &[f32]) -> f32 {
     snap_dv
 }
 
-/// M2: the vertical carrot is acceleration limited at `LEG_ACC_Z_MSS`, capped at 3.0 up and 1.5 down, brakes into D_k
+/// The vertical carrot is acceleration limited at `LEG_ACC_Z_MSS`, capped at 3.0 up and 1.5 down, brakes into D_k
 /// and reaches it exactly at rest: a 30 m climb, a 3 m descent, a 1 m climb (never at the cap) and RETURN's climb.
 #[test]
 fn vertical_carrot_is_acceleration_limited() {
@@ -313,7 +313,7 @@ fn vertical_carrot_is_acceleration_limited() {
     std::eprintln!("vertical carrot: largest snap-step d rate {snap_auto:.4} (AUTO), {snap_ret:.4} (RETURN) m/s");
 }
 
-/// M2: the vertical rate is 0 again at `enter` and `enter_return`: the first step after either, entered mid-climb at
+/// The vertical rate is 0 again at `enter` and `enter_return`: the first step after either, entered mid-climb at
 /// 3.0 m/s, moves the rate by a dt from rest.
 #[test]
 fn vertical_rate_restarts_from_rest_at_entry() {
@@ -338,7 +338,7 @@ fn vertical_rate_restarts_from_rest_at_entry() {
     }
 }
 
-/// M2b: the vertical feed-forward over `outs` (one run from entry): within +-`LEG_ACC_Z_MSS`, the change of the published
+/// The vertical feed-forward over `outs` (one run from entry): within +-`LEG_ACC_Z_MSS`, the change of the published
 /// rate over the step except at a snap to D_k (there the change before the snap, within the bound), 0 at Done and Home.
 /// Returns the largest |naive| (published rate change / dt) of a snap step: the spike a post-snap difference would give.
 fn check_accel(outs: &[LegOut]) -> f32 {
@@ -363,7 +363,7 @@ fn check_accel(outs: &[LegOut]) -> f32 {
     naive_snap
 }
 
-/// M2b: the vertical carrot's acceleration is its rate's change before the snap, within +-`LEG_ACC_Z_MSS`, and 0 at
+/// The vertical carrot's acceleration is its rate's change before the snap, within +-`LEG_ACC_Z_MSS`, and 0 at
 /// Done and Home, over the climbs and the descent of an AUTO run and RETURN's climb. Control: the published rate's own
 /// difference at the snap steps is far outside the bound (the spike the feed-forward must not carry).
 #[test]
@@ -388,7 +388,7 @@ fn vertical_accel_is_the_rate_change_before_the_snap_within_the_bound() {
     assert!(naive_auto > 2.0 * LEG_ACC_Z_MSS && naive_ret > 2.0 * LEG_ACC_Z_MSS);
 }
 
-/// M2b: the acceleration is 0 while the carrot is held (invalid or non-finite position), outside the lead cap and for a
+/// The acceleration is 0 while the carrot is held (invalid or non-finite position), outside the lead cap and for a
 /// dt of 0 or not usable; an entry (`begin`) carries none over: entered while braking a climb (+a), the first step
 /// ramps from rest (-a), and with nothing to climb it is 0. Control: the published rate's difference at the stop is far
 /// outside the bound.
@@ -437,7 +437,7 @@ fn vertical_accel_is_zero_when_held_and_restarts_at_entry() {
     assert_eq!(g.step(DT, p, true, true).accel_d_mss, 0.0);
 }
 
-/// M2b closed loop: the 25 m Start climb (5 -> 30 m in place) flown by `CascadedPid`'s altitude loop on a level vertical
+/// Closed loop: the 25 m Start climb (5 -> 30 m in place) flown by `CascadedPid`'s altitude loop on a level vertical
 /// point mass (a = g - thrust / m, 800 Hz). Without the acceleration feed-forward the vehicle runs ahead of the braking
 /// carrot, toward a / (posz_p velz_p) (the cascade's steady lead, less what the velocity integrator takes up in the 3 s
 /// of braking), and overshoots D_k; with it the lead and the overshoot shrink.
@@ -513,7 +513,7 @@ fn sixteen_waypoints_run_to_done() {
     }
 }
 
-/// L7: re-entry resumes the active index with a new first leg from the vehicle.
+/// Re-entry resumes the active index with a new first leg from the vehicle.
 #[test]
 fn resume_starts_a_new_first_leg_from_the_vehicle() {
     let m = mission(&[(30.0, 0.0, 10.0), (30.0, 30.0, 10.0), (0.0, 30.0, 10.0)], R);
@@ -542,7 +542,7 @@ fn resume_starts_a_new_first_leg_from_the_vehicle() {
     assert_eq!(events, [LegEvent::Arrived(1), LegEvent::Done]);
 }
 
-/// A7: already above H_r there is no climb; the leg to home starts at once at the present height.
+/// Already above H_r there is no climb; the leg to home starts at once at the present height.
 #[test]
 fn return_from_above_the_return_height_does_not_climb() {
     let mut g = LegGuidance::new();
@@ -561,7 +561,7 @@ fn return_from_above_the_return_height_does_not_climb() {
     assert_eq!(g.step(DT, [0.0, 0.0, -30.0], true, true).event, LegEvent::Home);
 }
 
-/// A7: below H_r it climbs in place at up to 3.0 m/s first (M2: ramped at `LEG_ACC_Z_MSS`); the horizontal carrot
+/// Below H_r it climbs in place at up to 3.0 m/s first (ramped at `LEG_ACC_Z_MSS`); the horizontal carrot
 /// does not move until the vertical is at H_r.
 #[test]
 fn return_from_below_climbs_in_place_first() {

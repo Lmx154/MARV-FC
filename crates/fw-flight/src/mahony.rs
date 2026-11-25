@@ -1,7 +1,7 @@
-//! The attitude estimator: Mahony's complementary filter on IMU1, Betaflight's form, no integral term
-//! (decision-first-pair-20261119, section 2). The accelerometer is low-passed (PT1, `Tuning::ins_accel_lpf_hz`)
+//! The attitude estimator: Mahony's complementary filter on IMU1, Betaflight's form, no integral term.
+//! The accelerometer is low-passed (PT1, `Tuning::ins_accel_lpf_hz`)
 //! before anything is decided on it: the 0.9 g to 1.1 g window and the direction both come from the filtered
-//! vector, never from a raw sample (decision-estimator-accel-20261120). q is body to NED, Hamilton, [w, x, y, z]; gyro rad/s and specific
+//! vector, never from a raw sample. q is body to NED, Hamilton, [w, x, y, z]; gyro rad/s and specific
 //! force m/s^2, both FRD. Tilt only: no heading, velocity or position.
 
 use crate::gnc::{Estimator, NavState, Sensors, Valid};
@@ -9,15 +9,15 @@ use crate::quat::{cross, down_in_body, mul, normalise, pt1};
 use crate::tuning::Tuning;
 use fw_core::calib::GRAVITY_MSS;
 
-/// Correction gain while armed, 1/s: Betaflight's 2500/10000 (decision 2e, section 6a).
+/// Correction gain while armed, 1/s: Betaflight's 2500/10000.
 pub const KP_ARMED: f32 = 0.25;
-/// Correction gain while disarmed, 1/s: Betaflight's x10 (decision 2e, section 6a).
+/// Correction gain while disarmed, 1/s: Betaflight's x10.
 pub const KP_DISARMED: f32 = 2.5;
-/// The filtered accelerometer is used only from this |f|, in g (decision 2b: Betaflight and PX4).
+/// The filtered accelerometer is used only from this |f|, in g (Betaflight and PX4).
 pub const ACCEL_MIN_G: f32 = 0.9;
-/// ... up to this |f|, in g (decision 2b).
+/// ... up to this |f|, in g.
 pub const ACCEL_MAX_G: f32 = 1.1;
-/// Longest time step, us: four IMU periods; a longer gap is an IMU fault (decision 2d, 3d). The controller uses it
+/// Longest time step, us: four IMU periods; a longer gap is an IMU fault. The controller uses it
 /// too.
 pub const DT_MAX_US: u64 = 5_000;
 
@@ -30,7 +30,7 @@ pub struct Mahony {
     rates: [f32; 3],
     /// The previous sample's `t_us`; `None` before the first sample.
     t_prev_us: Option<u64>,
-    /// Set by the first accepted accelerometer sample with d_z > 0 (decision 2f); never cleared.
+    /// Set by the first accepted accelerometer sample with d_z > 0; never cleared.
     tilt: bool,
     /// The gate's state after the previous step: selects the correction gain.
     armed: bool,
@@ -70,8 +70,8 @@ impl Estimator for Mahony {
             None => 0.0,
         };
 
-        // rates_rads: PT1 of the gyro (decision 2h), started at the first sample. The accelerometer gets a PT1 of
-        // its own, the same way (decision-estimator-accel-20261120, section 1).
+        // rates_rads: PT1 of the gyro, started at the first sample. The accelerometer gets a PT1 of
+        // its own, the same way.
         match self.t_prev_us {
             Some(_) => {
                 let [r0, r1, r2] = self.rates;
@@ -94,7 +94,7 @@ impl Estimator for Mahony {
         }
         self.t_prev_us = Some(t_us);
 
-        // Measured down, d_meas = -f/|f| of the filtered f, only inside the window (decision 2b): the window and
+        // Measured down, d_meas = -f/|f| of the filtered f, only inside the window: the window and
         // the direction come from the same filtered vector.
         let fl = self.accel_lpf;
         let norm = libm::sqrtf(fl.iter().map(|v| v * v).sum());
@@ -102,14 +102,14 @@ impl Estimator for Mahony {
         let d_meas = fl.map(|v| -v / norm);
 
         if !self.tilt {
-            // Initialisation (decision 2f): the shortest rotation from d_meas to NED down, no yaw.
+            // Initialisation: the shortest rotation from d_meas to NED down, no yaw.
             let [dx, dy, dz] = d_meas;
             if accepted && dz > 0.0 {
                 self.q = normalise([1.0 + dz, dy, -dx, 0.0]);
                 self.tilt = true;
             }
         } else {
-            // Correction e = d_meas x d_est (decision 2c), then q <- q + 0.5 dt q (x) [0, omega_c] (decision 2d).
+            // Correction e = d_meas x d_est, then q <- q + 0.5 dt q (x) [0, omega_c].
             let e = if accepted {
                 cross(d_meas, down_in_body(self.q))
             } else {
@@ -156,7 +156,7 @@ mod tests {
     use super::*;
     use crate::imu::{ImuReading, ImuSample};
 
-    /// IMU period, us: 800 Hz (decision-sim-conventions 6).
+    /// IMU period, us: 800 Hz.
     const PERIOD_US: u64 = 1_250;
 
     fn sensors(t_us: u64, gyro_rads: [f32; 3], accel_ms2: [f32; 3]) -> Sensors {
@@ -178,7 +178,7 @@ mod tests {
         }
     }
 
-    /// Z-Y-X roll, rad (conventions 7c), on the host with std.
+    /// Z-Y-X roll, rad, on the host with std.
     fn roll(q: [f32; 4]) -> f32 {
         let [w, x, y, z] = q;
         (2.0 * (w * x + y * z)).atan2(1.0 - 2.0 * (x * x + y * y))
@@ -212,9 +212,9 @@ mod tests {
 
     #[test]
     fn mahony_converges_to_gravity_with_a_unit_quaternion() {
-        // Rolled +20 deg (right side down, conventions 7b): R = Rx(phi) body to NED, so NED down in the body is
-        // R^T [0, 0, 1] = [0, sin phi, cos phi], and at rest the accelerometer reads f = -g times that (7g):
-        // [0, -g sin 20, -g cos 20]. Agrees with the packet.
+        // Rolled +20 deg (right side down): R = Rx(phi) body to NED, so NED down in the body is
+        // R^T [0, 0, 1] = [0, sin phi, cos phi], and at rest the accelerometer reads f = -g times that:
+        // [0, -g sin 20, -g cos 20].
         let phi = 20.0f32.to_radians();
         let f = [0.0, -GRAVITY_MSS * phi.sin(), -GRAVITY_MSS * phi.cos()];
         let mut m = Mahony::new(&Tuning::DEFAULT);
@@ -297,13 +297,13 @@ mod tests {
         );
     }
 
-    /// Pitch, rad (conventions 7c): sin(pitch) = 2 (w y - z x).
+    /// Pitch, rad: sin(pitch) = 2 (w y - z x).
     fn pitch(q: [f32; 4]) -> f32 {
         let [w, x, y, z] = q;
         (2.0 * (w * y - z * x)).asin()
     }
 
-    /// One record of `ground-run-20261120.bin`: log 182 of the first flights, IMU1, 23.0 s to 40.0 s, the motors
+    /// One record of `ground-run-20261120.bin`: a recorded ground run, IMU1, the motors
     /// spinning up with the vehicle on the ground. IMU and armed flag only. 33 bytes, little-endian: u64 t_us,
     /// f32 gyro x y z (rad/s), f32 accel x y z (m/s^2), u8 armed.
     const RECORD_BYTES: usize = 33;
@@ -333,7 +333,7 @@ mod tests {
                 *m += f64::from(*v) / records as f64;
             }
         }
-        // Down in the body is -f/|f| (conventions 7g): roll = atan2(d_y, d_z), pitch = atan2(-d_x, hypot(d_y, d_z)).
+        // Down in the body is -f/|f|: roll = atan2(d_y, d_z), pitch = atan2(-d_x, hypot(d_y, d_z)).
         let [dx, dy, dz] = mean.map(|v| -v);
         let ref_roll = dy.atan2(dz).to_degrees();
         let ref_pitch = (-dx).atan2(dy.hypot(dz)).to_degrees();

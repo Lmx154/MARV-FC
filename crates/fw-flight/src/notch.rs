@@ -1,8 +1,7 @@
-//! The RPM notch of the rate loop (decision-rpm-notch-20261123, sections 1 and 2): per axis a bank of `LINES` x
-//! `HARMONICS` RBJ notch biquads (direct form I, f32) whose centres follow the rotors' frequencies. The reference is the
-//! what-if `t292-notch.py`: each stage is the mix y = x + w (notch(x) - x) with the Betaflight weight rule, the stages
-//! in series (harmonic outer, line inner), each stage's state holding its own input and its own unweighted output.
-//! The coefficients are the same for the three axes, so they are made once per step (`Notch::set_rotor_hz`).
+//! The RPM notch of the rate loop: per axis a bank of `LINES` x `HARMONICS` RBJ notch biquads (direct form I, f32)
+//! whose centres follow the rotors' frequencies. Each stage is the mix y = x + w (notch(x) - x) with the Betaflight
+//! weight rule, stages in series (harmonic outer, line inner); each stage's state holds its own input and unweighted
+//! output. The coefficients are the same for the three axes, so they are made once per step (`Notch::set_rotor_hz`).
 
 use crate::tuning::Tuning;
 use fw_core::esc::LINES;
@@ -10,7 +9,7 @@ use fw_core::esc::LINES;
 /// The most harmonics per line: the multiple-angle identities of `multiple` stop at the third.
 pub const HARMONICS: usize = 3;
 
-/// A frequency that may centre a notch: finite and above 0. Everything else (no eRPM, eRPM 0) is "no usable value".
+/// A frequency that may centre a notch: finite and above 0 (no eRPM, eRPM 0 are "no usable value").
 pub fn usable(f1_hz: Option<f32>) -> Option<f32> {
     f1_hz.filter(|f| f.is_finite() && *f > 0.0)
 }
@@ -76,7 +75,7 @@ impl Bank {
     };
 
     /// `x` through the first `harmonics` rows of stages. `seed`: the first sample after a reset, each stage's memory
-    /// starts at its own input (the reference starts its filters at the first sample). A stage of weight 0 passes its
+    /// starts at its own input. A stage of weight 0 passes its
     /// input on untouched (a true bypass: `x + 0 (n - x)` would turn -0.0 into 0.0 and a NaN into NaN) but still
     /// runs, so its memory is current when its weight rises.
     fn apply(

@@ -1,8 +1,7 @@
-//! The phase-1 steering estimator (decision-nav-eskf-20261120, Amendment B, B1; packet E1a): the flight-proven
-//! [`Mahony`] unchanged, plus [`VertKf`], a 3-state vertical Kalman filter on the barometer and the accelerometer.
-//! Attitude, rates and the tilt and rates flags are Mahony's, bit for bit (invariant I9). States, f32: D (down from
+//! The steering estimator: [`Mahony`] plus [`VertKf`], a 3-state vertical Kalman filter on the barometer and the
+//! accelerometer. Attitude, rates and the tilt and rates flags are Mahony's, bit for bit. States, f32: D (down from
 //! the barometer datum, m), vD (m/s), bD (earth-down accelerometer bias, m/s^2). Pure arithmetic: no lock, timer or
-//! log. Not in the flight image yet (packet E2).
+//! log.
 
 use crate::gnc::{Estimator, NavSigma, NavState, Sensors};
 use crate::mahony::{DT_MAX_US, Mahony};
@@ -48,10 +47,10 @@ pub struct VertKf {
     fused: u32,
     rejected: u32,
     resets: u32,
-    /// Covariance propagations so far (the NKF records' rate, packet E2).
+    /// Covariance propagations so far (the NKF records' rate).
     predicts: u32,
     /// The latest barometer step's (innovation, its variance), or for a height reset (applied change, new variance),
-    /// or at the initialisation (0, the measurement variance): the NKI record's Inn and Var (packet E2).
+    /// or at the initialisation (0, the measurement variance): the NKI record's Inn and Var.
     last_baro: (f32, f32),
     predict_us: u64,
     baro_delay_us: u64,
@@ -65,7 +64,7 @@ pub struct VertKf {
 }
 
 impl VertKf {
-    /// Not initialised; the numbers from `tuning` (B3).
+    /// Not initialised; the numbers from `tuning`.
     pub fn new(tuning: &Tuning) -> Self {
         VertKf {
             x: [0.0; 3],
@@ -112,7 +111,7 @@ impl VertKf {
         self.rejected
     }
 
-    /// Height resets so far (NKI Src 6 when logged, packet E2).
+    /// Height resets so far.
     pub fn resets(&self) -> u32 {
         self.resets
     }
@@ -294,7 +293,7 @@ impl VertKf {
     }
 }
 
-/// [`Mahony`] plus [`VertKf`] (B1).
+/// [`Mahony`] plus [`VertKf`].
 #[derive(Clone, Copy, Debug)]
 pub struct MahonyBaro {
     mahony: Mahony,
@@ -367,11 +366,11 @@ mod tests {
     use fw_core::sample::BaroReading;
     use std::vec::Vec;
 
-    /// IMU period, us: 800 Hz (decision-sim-conventions 6).
+    /// IMU period, us: 800 Hz.
     const PERIOD_US: u64 = 1_250;
-    /// The barometer every 16 IMU1 samples: 50 Hz (decision-nav-eskf-20261120, section 3b).
+    /// The barometer every 16 IMU1 samples: 50 Hz.
     const BARO_EVERY: u64 = 16;
-    /// Level and at rest: f = -g along body z (conventions 7g).
+    /// Level and at rest: f = -g along body z.
     const LEVEL: [f32; 3] = [0.0, 0.0, -GRAVITY_MSS];
 
     /// The ISA pressure at `height_m`, Pa: the simulator's law, in f64.
@@ -434,7 +433,7 @@ mod tests {
             .collect()
     }
 
-    /// I10: the value fields are finite on every step, and so is the sigma of a group whose flag is set.
+    /// The value fields are finite on every step, and so is the sigma of a group whose flag is set.
     fn check_finite(nav: &NavState) {
         let values = nav
             .attitude
@@ -461,7 +460,7 @@ mod tests {
     }
 
     const RECORD_BYTES: usize = 33;
-    /// Log 182's ground run, the record format of mahony.rs's test.
+    /// A recorded ground run, in the record format of mahony.rs's test.
     const GROUND_RUN: &[u8] = include_bytes!("../testdata/ground-run-20261120.bin");
 
     #[test]
@@ -583,7 +582,7 @@ mod tests {
     /// 2 s still, then a height step four gates wide held; returns (navs from the step on, the step's first sample k,
     /// h_b of the faulted samples).
     fn step_fault(armed: bool, climb_ms: f64) -> (MahonyBaro, Vec<NavState>, u64, f32) {
-        // Scenario dimensioned at nav_baro_sigma_m 0.5 (the default until 2026-11-22); kept whatever the default.
+        // Scenario dimensioned at nav_baro_sigma_m 0.5; kept whatever the default.
         step_fault_with(&Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT }, armed, climb_ms)
     }
 
@@ -634,7 +633,7 @@ mod tests {
 
     #[test]
     fn a6_b_held_step_fault_at_the_default_tuning_is_rejected_then_reset() {
-        // a6 at Tuning::DEFAULT (nav_baro_sigma_m 2.0 since 2026-11-22): the gate, rejection and reset still work.
+        // a6 at Tuning::DEFAULT: the gate, rejection and reset still work.
         let t = Tuning::DEFAULT;
         let (e, navs, _, h_b) = step_fault_with(&t, false, 0.0);
         assert_eq!(e.vert().resets(), 1, "Src 6: one height reset");

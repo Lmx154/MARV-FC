@@ -1,6 +1,5 @@
 //! ESC telemetry logic for the flight core's `esc` task: pure functions and plain data. No HAL, no
 //! clock of its own (every function is given `now_us`), no logging, no lock.
-//! Design: `decision-esc-telemetry-20261118` Q1, Q3 and Q4.
 //!
 //! The task, per exchange: [`Esc::frames`] chooses the four frames, the driver exchanges them,
 //! [`Esc::record`] folds the four captures in and the task publishes [`Esc::status`]; the wait for
@@ -10,9 +9,7 @@
 //! A frame is [`Value::Stop`]; or, for a command-13 burst on one line,
 //! [`Command::ExtendedTelemetryOn`]; or, on the one line of a motor-test spin, a throttle built by
 //! `capped` (the motor test's only `Throttle` constructor); or, on all four lines, the throttles of
-//! the flight command while [`hold`] keeps it spinning (built only by `crate::gate`). Motor test:
-//! `decision-motor-test-20261118` amendment A, ported from `dshot_spin` (DS =
-//! `dshot/hil/src/bin/dshot_spin.rs` at dshot 3557eb1). Flight command: decision-first-pair-wiring-20261119, A2.
+//! the flight command while [`hold`] keeps it spinning (built only by `crate::gate`).
 
 use crate::gate::{FLIGHT_GAP_DISARM_US, MotorCommand};
 use dshot::{Command, LineCapture, LineFrame, Reply, Throttle, Value};
@@ -31,8 +28,8 @@ pub const BURST_FRAMES: u8 = 10;
 /// a burst starts; after a burst the line is held off this long, in us.
 pub const BURST_GATE_US: u64 = 1_000_000;
 
-/// Longest age of a flight command still sent, us: eight IMU periods (owner, 2026-11-19; bounded
-/// below by about 2 ms of normal age and above by the ESC's own 510 ms timeout).
+/// Longest age of a flight command still sent, us: eight IMU periods (about 2 ms of normal age; the ESC's own
+/// timeout is 510 ms).
 pub const MOTOR_HOLD_MAX_US: u64 = 10_000;
 
 /// The command to send at `now_us`: `cmd` while `now_us - t_us <= MOTOR_HOLD_MAX_US`, else STOP. The
@@ -184,7 +181,7 @@ impl Esc {
     ///
     /// While a spin is active (see `spin`): its throttle on its line, Stop on the other
     /// three, and no command 13 on any line: a running EDT burst is cut and that line held off
-    /// 1 s from the cut. These are the frames DS:863-866 sent.
+    /// 1 s from the cut.
     ///
     /// Otherwise: Stop, except on a line in an EDT burst. A line starts a burst when it has
     /// answered continuously for 1 s or more, has given no extended reply for 1 s (or ever), and
@@ -249,13 +246,13 @@ impl Esc {
 
     /// The throttle and its driver line for the exchange at `now_us`, if `test` keeps a spin
     /// active, and the spin status and ending. A spin is active while all of these hold, checked
-    /// on every frame in this order (the cap before the time limit, as DS:401-440):
+    /// on every frame in this order (the cap before the time limit):
     ///
     /// 1. the level is above 0 and at or below [`TEST_CAP`], the throttle built by `capped`
-    ///    (DS:175-185, checked again per frame as DS:404-417 does) and the line is 0..=3;
+    ///    (checked again per frame) and the line is 0..=3;
     /// 2. `now < until_us`;
     /// 3. the frame is within [`TEST_BURST_MAX_US`] of the spin's first throttle frame, with the
-    ///    [`TEST_PUSH_MARGIN_US`] margin (DS:418-440: the burst starts at its first throttle frame).
+    /// [`TEST_PUSH_MARGIN_US`] margin (the burst starts at its first throttle frame).
     ///
     /// A new `seq` ends a running spin (cause `Replaced`, or `Stop` for a level 0) and starts its
     /// own count. A command ends once; its `seq` gets no throttle again. Nothing catches up: every
@@ -367,7 +364,7 @@ impl Esc {
     }
 }
 
-/// G3 (DS:175-185): the motor test's only throttle constructor (the flight command's is the gate's). A level above [`TEST_CAP`] (or outside
+/// The motor test's only throttle constructor (the flight command's is the gate's). A level above [`TEST_CAP`] (or outside
 /// 1..=2000) is refused.
 fn capped(level: u16) -> Option<Throttle> {
     if !within_cap(level) {
@@ -376,12 +373,12 @@ fn capped(level: u16) -> Option<Throttle> {
     Throttle::new(level)
 }
 
-/// G3 (DS:183-185): whether a level is at or below the cap.
+/// Whether a level is at or below the cap.
 const fn within_cap(level: u16) -> bool {
     level <= TEST_CAP
 }
 
-/// G4 (DS:187-191): whether a frame pushed `elapsed_us` after the start of its spin stays within
+/// Whether a frame pushed `elapsed_us` after the start of its spin stays within
 /// `limit_us`, with the margin for the push.
 const fn within_limit(elapsed_us: u64, limit_us: u64) -> bool {
     elapsed_us.saturating_add(TEST_PUSH_MARGIN_US) <= limit_us
@@ -507,7 +504,7 @@ mod tests {
         }
     }
 
-    /// I2: `next += 1000`; more than one period behind: `next = now`.
+    /// `next += 1000`; more than one period behind: `next = now`.
     #[test]
     fn deadline_advances_by_one_period_and_a_stall_gives_one_late_frame() {
         let mut next = 5_000;
@@ -525,7 +522,7 @@ mod tests {
         assert_eq!(next_deadline(next, next + 145), stalled_now + 1000);
     }
 
-    /// I3: nothing stops on errors; I1: only Stop comes out.
+    /// Nothing stops on errors; only Stop comes out.
     #[test]
     fn ten_thousand_non_replies_keep_the_frames_coming_and_stop_stays_stop() {
         let mut esc = Esc::new();
@@ -552,7 +549,7 @@ mod tests {
         }
     }
 
-    /// I6: the gate, the burst, the hold-off, the restart after a dropout, no burst while extended
+    /// The burst gate, the hold-off, the restart after a dropout, no burst while extended
     /// replies arrive. Lines 0 and 1 answer; 2 and 3 are silent.
     #[test]
     fn the_edt_burst_follows_the_gate() {
@@ -697,7 +694,7 @@ mod tests {
         })
     }
 
-    /// T1: a level above the cap gives Stop and a Cap ending; `capped` never builds above the cap.
+    /// A level above the cap gives Stop and a Cap ending; `capped` never builds above the cap.
     #[test]
     fn a_level_above_the_cap_gives_stop_and_a_cap_ending() {
         for level in 0..=u16::MAX {
@@ -768,8 +765,8 @@ mod tests {
         }
     }
 
-    /// T2: one throttle frame, Stop on the other three, no command 13 during a spin; a running EDT
-    /// burst is cut, held off 1 s from the cut, and the M1 gate resumes after the spin.
+    /// one throttle frame, Stop on the other three, no command 13 during a spin; a running EDT
+    /// burst is cut, held off 1 s from the cut, and the burst gate resumes after the spin.
     #[test]
     fn a_spin_sends_one_throttle_frame_and_cuts_the_edt_burst() {
         let mut esc = Esc::new();
@@ -815,7 +812,7 @@ mod tests {
         );
     }
 
-    /// T3: a spin ends on the task's clock at min(until, first + 3 s) with no further command.
+    /// a spin ends on the task's clock at min(until, first + 3 s) with no further command.
     #[test]
     fn a_spin_ends_at_its_until_or_three_seconds_after_its_first_frame() {
         let mut esc = Esc::new();
@@ -856,7 +853,7 @@ mod tests {
         assert_eq!((s.test_spin, s.throttle_frames), (None, 2));
     }
 
-    /// T4: a stop ends a spin at the next exchange; a new seq on another line replaces it and its
+    /// a stop ends a spin at the next exchange; a new seq on another line replaces it and its
     /// 3 s count from its own first throttle frame.
     #[test]
     fn a_stop_ends_a_spin_and_a_new_seq_replaces_it() {
@@ -911,7 +908,7 @@ mod tests {
         );
     }
 
-    /// A2: a fresh command passes, one older than the limit is Stop, the initial cell is Stop.
+    /// A fresh command passes, one older than the limit is Stop, the initial cell is Stop.
     #[test]
     fn hold_passes_a_fresh_command_and_stops_a_stale_one() {
         let spin = MotorCommand::spinning([120, 250, 400, 1000]);
@@ -923,7 +920,7 @@ mod tests {
         );
         assert_eq!(hold(0, MotorCommand::STOP, 0), MotorCommand::STOP);
         assert_eq!(hold(0, MotorCommand::STOP, 50_000_000), MotorCommand::STOP);
-        // I3: `stale_spin` is true only for a spinning command older than FLIGHT_GAP_DISARM_US, not MOTOR_HOLD_MAX_US.
+        // `stale_spin` is true only for a spinning command older than FLIGHT_GAP_DISARM_US, not MOTOR_HOLD_MAX_US.
         assert!(!stale_spin(5_000, spin, 5_000));
         assert!(!stale_spin(5_000, spin, 5_001 + MOTOR_HOLD_MAX_US));
         assert!(!stale_spin(5_000, spin, 5_000 + FLIGHT_GAP_DISARM_US));
@@ -931,8 +928,8 @@ mod tests {
         assert!(!stale_spin(0, MotorCommand::STOP, 50_000_000));
     }
 
-    /// A2: a spinning flight command gives its throttles on all four lines, cuts the EDT burst and
-    /// ends a running motor test as `Replaced`, not resumed; a stale one gives today's Stop behaviour.
+    /// a spinning flight command gives its throttles on all four lines, cuts the EDT burst and
+    /// ends a running motor test as `Replaced`, not resumed; a stale one gives Stop.
     #[test]
     fn a_spinning_flight_command_takes_all_four_lines() {
         let mut esc = Esc::new();
@@ -1001,7 +998,7 @@ mod tests {
         assert_eq!(throttle_of(&esc.frames(3_002_000, test, stale)), None);
     }
 
-    /// T7: a 50 ms clock jump: the next frame is throttle if the spin still holds, Stop if it
+    /// a 50 ms clock jump: the next frame is throttle if the spin still holds, Stop if it
     /// expired meanwhile; one frame per exchange, no catch-up.
     #[test]
     fn a_clock_jump_gives_stop_if_expired_and_no_catch_up() {

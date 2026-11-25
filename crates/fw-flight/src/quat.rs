@@ -1,5 +1,4 @@
-//! Small vector and quaternion helpers for the estimator and the controller. Quaternions are Hamilton, body to NED,
-//! stored [w, x, y, z] (decision-sim-conventions 2a). Square roots come from `libm`.
+//! Vector and quaternion helpers. Quaternions are Hamilton, body to NED, stored [w, x, y, z]. Square roots come from `libm`.
 
 use core::f32::consts::PI;
 
@@ -38,8 +37,8 @@ pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
     [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx]
 }
 
-/// NED down seen in the body frame (FRD, unit vector) for a body-to-NED q: the third row of R(q)
-/// (decision-first-pair 2a).
+/// NED down seen in the body frame (FRD, unit vector) for a body-to-NED q:
+/// third row of R(q).
 pub(crate) fn down_in_body(q: [f32; 4]) -> [f32; 3] {
     let [w, x, y, z] = q;
     [
