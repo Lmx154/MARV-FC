@@ -54,7 +54,8 @@ fn fnv(h: &mut u64, bytes: &[u8]) {
 
 /// One step's output as the log and the board see it: `StepOut`'s `Debug` text and the step block, SPN and MODE bytes.
 fn digest_step(h: &mut u64, o: &StepOut) {
-    fnv(h, std::format!("{o:?}").as_bytes());
+    // M2b: the step before had no `accel_d_mss`; its text at exactly 0.0 is left out, any other value stays in.
+    fnv(h, std::format!("{o:?}").replace(", accel_d_mss: 0.0 }", " }").as_bytes());
     let mut b = [0u8; 256];
     let n = encode_step(o, &mut b);
     fnv(h, &b[..n]);

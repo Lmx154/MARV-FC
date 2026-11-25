@@ -74,7 +74,7 @@ command ("sent, waiting", "ACCEPTED by the vehicle", "REFUSED: reason", "NO ANSW
 ## Guidance behaviour
 
 `crates/fw-flight/src/guidance.rs` (`LegGuidance`, wired in `step.rs`): a "carrot" moves along each straight leg at cruise speed and brakes to stop at the waypoint. The controller tracks the carrot
-position with velocity feed-forward (`Setpoint::Position`). The carrot stops advancing when the vehicle lags more than 2 m (`LAG_E_MAX_M`); expect corner cutting up to 2 m and a height sag while moving.
+position with velocity feed-forward, plus the vertical carrot's acceleration as feed-forward (`Setpoint::Position`). The carrot stops advancing when the vehicle lags more than 2 m (`LAG_E_MAX_M`); expect corner cutting up to 2 m and a height sag while moving.
 
 | Event | Result |
 |---|---|

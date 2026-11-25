@@ -338,6 +338,159 @@ fn vertical_rate_restarts_from_rest_at_entry() {
     }
 }
 
+/// M2b: the vertical feed-forward over `outs` (one run from entry): within +-`LEG_ACC_Z_MSS`, the change of the published
+/// rate over the step except at a snap to D_k (there the change before the snap, within the bound), 0 at Done and Home.
+/// Returns the largest |naive| (published rate change / dt) of a snap step: the spike a post-snap difference would give.
+fn check_accel(outs: &[LegOut]) -> f32 {
+    let (a, eps) = (LEG_ACC_Z_MSS, 1e-3);
+    let (mut prev, mut naive_snap, mut snaps) = (0.0f32, 0.0f32, 0);
+    for (i, o) in outs.iter().enumerate() {
+        let naive = (o.velocity_d_ms - prev) / DT;
+        assert!(libm::fabsf(o.accel_d_mss) <= a, "step {i}: {}", o.accel_d_mss);
+        if matches!(o.event, LegEvent::Done | LegEvent::Home) {
+            assert_eq!(o.accel_d_mss, 0.0, "step {i}");
+        } else if o.velocity_d_ms == 0.0 && prev != 0.0 {
+            snaps += 1;
+            naive_snap = naive_snap.max(libm::fabsf(naive));
+            // The rate before the snap was prev + accel dt: braking (same sign as the snap's change), within the bound.
+            assert!(o.accel_d_mss * naive > 0.0, "step {i}: {} {naive}", o.accel_d_mss);
+        } else {
+            assert!(libm::fabsf(o.accel_d_mss - naive) < eps, "step {i}: {} vs {naive}", o.accel_d_mss);
+        }
+        prev = o.velocity_d_ms;
+    }
+    assert!(snaps > 0);
+    naive_snap
+}
+
+/// M2b: the vertical carrot's acceleration is its rate's change before the snap, within +-`LEG_ACC_Z_MSS`, and 0 at
+/// Done and Home, over the climbs and the descent of an AUTO run and RETURN's climb. Control: the published rate's own
+/// difference at the snap steps is far outside the bound (the spike the feed-forward must not carry).
+#[test]
+fn vertical_accel_is_the_rate_change_before_the_snap_within_the_bound() {
+    let m = mission(&[(10.0, 0.0, 35.0), (70.0, 0.0, 32.0), (70.0, 10.0, 33.0)], R);
+    let mut g = LegGuidance::new();
+    assert!(g.enter([0.0, 0.0, -5.0], HOME, &ORIGIN, &m, 0, 3.0));
+    let run = fly(&mut g, [0.0, 0.0, -5.0], Vehicle::Follow, 50_000);
+    assert_eq!(run.outs.last().unwrap().event, LegEvent::Done);
+    let o = &run.outs;
+    // From rest: up at a; at 3.0 m/s: 0; braking the climb: down at a.
+    assert!((o[0].accel_d_mss + LEG_ACC_Z_MSS).abs() < 1e-3, "{:?}", o[0]);
+    assert_eq!(o[600].accel_d_mss, 0.0);
+    assert!(o.iter().any(|x| (x.accel_d_mss - LEG_ACC_Z_MSS).abs() < 1e-3 && x.velocity_d_ms < 0.0));
+    let naive_auto = check_accel(o);
+    let home = Home { ne: [-10.0, 5.0], d: -2.0 };
+    assert!(g.enter_return([40.0, 30.0, -7.0], home, 20.0, R, 3.0));
+    let run = fly(&mut g, [40.0, 30.0, -7.0], Vehicle::Follow, 20_000);
+    assert_eq!(run.outs.last().unwrap().event, LegEvent::Home);
+    let naive_ret = check_accel(&run.outs);
+    std::eprintln!("snap steps: published rate change / dt up to {naive_auto:.2} (AUTO), {naive_ret:.2} (RETURN) m/s^2");
+    assert!(naive_auto > 2.0 * LEG_ACC_Z_MSS && naive_ret > 2.0 * LEG_ACC_Z_MSS);
+}
+
+/// M2b: the acceleration is 0 while the carrot is held (invalid or non-finite position), outside the lead cap and for a
+/// dt of 0 or not usable; an entry (`begin`) carries none over: entered while braking a climb (+a), the first step
+/// ramps from rest (-a), and with nothing to climb it is 0. Control: the published rate's difference at the stop is far
+/// outside the bound.
+#[test]
+fn vertical_accel_is_zero_when_held_and_restarts_at_entry() {
+    let m = mission(&[(50.0, 0.0, 30.0)], R);
+    let mut g = LegGuidance::new();
+    assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &m, 0, 3.0));
+    let mut p = [0.0, 0.0, -10.0];
+    let mut o = g.step(DT, p, true, true);
+    for _ in 0..150 {
+        o = g.step(DT, p, true, true);
+        p = [o.position_ne[0], o.position_ne[1], o.down_m];
+    }
+    assert!((o.accel_d_mss + LEG_ACC_Z_MSS).abs() < 1e-3, "{o:?}");
+    let rate = o.velocity_d_ms;
+    let stop = g.step(DT, p, true, false);
+    assert_eq!((stop.accel_d_mss, stop.velocity_d_ms), (0.0, 0.0));
+    assert!(libm::fabsf((stop.velocity_d_ms - rate) / DT) > 100.0 * LEG_ACC_Z_MSS, "control: {rate}");
+    for q in [[f32::NAN, 0.0, 0.0], [0.0, 0.0, f32::INFINITY]] {
+        assert_eq!(g.step(DT, q, true, true).accel_d_mss, 0.0);
+    }
+    assert_eq!(g.step(DT, p, false, true).accel_d_mss, 0.0);
+    for dt in [0.0, f32::NAN, f32::INFINITY, -1.0] {
+        let x = g.step(dt, p, true, true);
+        finite(&x);
+        assert_eq!(x.accel_d_mss, 0.0, "dt {dt}");
+    }
+    // Braking a 4 m climb: 2 s up to 2 m/s, then 2 s braking.
+    let m = mission(&[(0.0, 0.0, 14.0)], R);
+    assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &m, 0, 3.0));
+    let mut p = [0.0, 0.0, -10.0];
+    for _ in 0..300 {
+        o = g.step(DT, p, true, true);
+        p = [0.0, 0.0, o.down_m];
+    }
+    assert!((o.accel_d_mss - LEG_ACC_Z_MSS).abs() < 1e-3, "{o:?}");
+    let m = mission(&[(0.0, 0.0, 30.0)], R);
+    assert!(g.enter(p, HOME, &ORIGIN, &m, 0, 3.0));
+    let x = g.step(DT, p, true, true);
+    assert!((x.accel_d_mss + LEG_ACC_Z_MSS).abs() < 1e-3, "{x:?}");
+    let level = mission(&[(0.0, 0.0, -p[2])], R);
+    assert!(g.enter(p, HOME, &ORIGIN, &level, 0, 3.0));
+    assert_eq!(g.step(DT, p, true, true).accel_d_mss, 0.0);
+    assert!(g.enter_return(p, HOME, 1.0, R, 3.0));
+    assert_eq!(g.step(DT, p, true, true).accel_d_mss, 0.0);
+}
+
+/// M2b closed loop: the 25 m Start climb (5 -> 30 m in place) flown by `CascadedPid`'s altitude loop on a level vertical
+/// point mass (a = g - thrust / m, 800 Hz). Without the acceleration feed-forward the vehicle runs ahead of the braking
+/// carrot, toward a / (posz_p velz_p) (the cascade's steady lead, less what the velocity integrator takes up in the 3 s
+/// of braking), and overshoots D_k; with it the lead and the overshoot shrink.
+#[test]
+fn closed_loop_vertical_lead_while_braking_shrinks_with_the_accel_feed_forward() {
+    use crate::gnc::{Controller, Saturation, Valid};
+    use crate::pid::CascadedPid;
+    let t = Tuning::DEFAULT;
+    let dt = 1.25e-3;
+    let fly_climb = |ff: bool| {
+        let m = mission(&[(0.0, 0.0, 30.0)], R);
+        let mut g = LegGuidance::new();
+        assert!(g.enter([0.0, 0.0, -5.0], HOME, &ORIGIN, &m, 0, 3.0));
+        let mut pid = CascadedPid::new(&t, 800.0);
+        let (mut d, mut vd) = (-5.0f32, 0.0f32);
+        let (mut lead, mut over, mut thr) = (0.0f32, 0.0f32, (f32::MAX, 0.0f32));
+        let all = Valid { tilt: true, heading: true, rates: true, velocity_ne: true, velocity_d: true, position_ne: true, position_d: true };
+        let none = Saturation { roll: false, pitch: false, yaw: false, thrust_low: false, thrust_high: false };
+        for k in 0..(25.0 / dt) as u64 {
+            let o = g.step(dt, [0.0, 0.0, d], true, g.lead_ok(d, t.pilot_alt_lead_s));
+            let sp = Setpoint::Position {
+                position_m: [o.position_ne[0], o.position_ne[1], o.down_m],
+                velocity_ms: [o.velocity_ne[0], o.velocity_ne[1], o.velocity_d_ms],
+                heading_rad: 0.0,
+                heading_rate_rads: 0.0,
+                accel_d_mss: if ff { o.accel_d_mss } else { 0.0 },
+            };
+            let nav = NavState { t_us: k * 1_250, attitude: [1.0, 0.0, 0.0, 0.0], rates_rads: [0.0; 3], velocity_ms: [0.0, 0.0, vd], position_m: [0.0, 0.0, d], valid: all, sigma: None };
+            let thrust = pid.update(&nav, &sp, &none).unwrap().thrust_n;
+            thr = (thr.0.min(thrust), thr.1.max(thrust));
+            if o.accel_d_mss > 0.0 && o.velocity_d_ms < 0.0 {
+                lead = lead.max(o.down_m - d);
+            }
+            over = over.max(-30.0 - d);
+            vd += (fw_core::calib::GRAVITY_MSS - thrust / marv_card::MASS) * dt;
+            d += vd * dt;
+        }
+        assert_eq!(g.phase(), LegPhase::Done);
+        (lead, over, thr)
+    };
+    let (lead, over, thr) = fly_climb(true);
+    let (lead0, over0, thr0) = fly_climb(false);
+    let steady = LEG_ACC_Z_MSS / (t.psc_posz_p * t.psc_velz_p);
+    std::eprintln!(
+        "25 m climb: lead while braking {lead:.3} m, overshoot {over:.3} m, thrust {:.2}..{:.2} N with the feed-forward; \
+         without {lead0:.3} m, {over0:.3} m, {:.2}..{:.2} N (a / (posz_p velz_p) = {steady:.3} m)",
+        thr.0, thr.1, thr0.0, thr0.1
+    );
+    // Control: without it the lead appears.
+    assert!(lead0 > 0.5 * steady && over0 > 0.05, "{lead0} {over0}");
+    assert!(lead < 0.25 * lead0 && over < 0.25 * over0, "{lead} {over}");
+}
+
 /// 16 waypoints run to Done, each Arrived once and in order; the carrot frozen at the last one and its height.
 #[test]
 fn sixteen_waypoints_run_to_done() {

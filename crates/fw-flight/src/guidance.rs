@@ -201,6 +201,7 @@ impl<const N: usize> Guidance<N> {
                         velocity_ms: [leg.dir[0] * self.v, leg.dir[1] * self.v, 0.0],
                         heading_rad: heading,
                         heading_rate_rads: 0.0,
+                        accel_d_mss: 0.0,
                     }),
                     active: self.idx as u8,
                     status: status | status::RUNNING,
@@ -221,6 +222,7 @@ impl<const N: usize> Guidance<N> {
                 velocity_ms: [0.0; 3],
                 heading_rad: heading,
                 heading_rate_rads: 0.0,
+                accel_d_mss: 0.0,
             }),
             active: self.idx as u8,
             status: status | status::DONE,
@@ -331,6 +333,9 @@ pub struct LegOut {
     pub down_m: f32,
     /// The vertical carrot's rate, m/s down.
     pub velocity_d_ms: f32,
+    /// M2b: the vertical carrot's acceleration (the feed-forward), m/s^2 down: its rate's change over the step before the
+    /// snap to D_k, within +-`LEG_ACC_Z_MSS`; 0 while held, outside the lead cap, at Done and Home and for dt 0.
+    pub accel_d_mss: f32,
     /// e: horizontal distance vehicle to the carrot after this step, m (the track-fault input, H13 (1)).
     pub e_m: f32,
     /// The active waypoint index.
@@ -505,7 +510,7 @@ impl LegGuidance {
         let dt = if dt_s.is_finite() && dt_s > 0.0 { dt_s } else { 0.0 };
         let [pn, pe, pd] = position_m;
         if !valid || ![pn, pe, pd].iter().all(|x| x.is_finite()) {
-            return self.out([0.0; 2], 0.0, true, self.level_event());
+            return self.out([0.0; 2], 0.0, 0.0, true, self.level_event());
         }
         let veh = [pn, pe];
         let mut event = LegEvent::None;
@@ -546,7 +551,7 @@ impl LegGuidance {
             LegPhase::Idle | LegPhase::Done | LegPhase::Home => {}
         }
         if !matches!(self.phase, LegPhase::Leg | LegPhase::Climb | LegPhase::HomeLeg) {
-            return self.out([0.0; 2], 0.0, false, self.level_event());
+            return self.out([0.0; 2], 0.0, 0.0, false, self.level_event());
         }
         // L4: the advance is scaled by k (the profile runs on k dt).
         let k = (1.0 - Self::dist(veh, self.carrot_ne()) / LAG_E_MAX_M).max(0.0).min(1.0);
@@ -567,6 +572,7 @@ impl LegGuidance {
         let vel = [self.line.dir[0] * self.v * k, self.line.dir[1] * self.v * k];
         // A6 and M2: toward D_k at most at the rate of its direction, the rate changing by at most `LEG_ACC_Z_MSS` dt and
         // braking into D_k (the horizontal's braking law); stopped and at rest outside the lead cap.
+        let mut accel_d = 0.0;
         if lead_ok {
             let gap = self.d_goal - self.d;
             let sign = libm::copysignf(1.0, gap);
@@ -576,13 +582,17 @@ impl LegGuidance {
             let target_v = cap.min(brake.max(0.0));
             let max_dv = a * dt;
             let v_new = v + (target_v - v).max(-max_dv).min(max_dv);
+            // M2b: the rate's change before the snap, so that the snap step does not spike.
+            if dt > 0.0 {
+                accel_d = (sign * (v_new - v) / dt).max(-LEG_ACC_Z_MSS).min(LEG_ACC_Z_MSS);
+            }
             let r_new = r - 0.5 * (v + v_new) * dt;
             (self.d, self.vd) = if r_new <= LEG_SNAP_M { (self.d_goal, 0.0) } else { (self.d_goal - sign * r_new, sign * v_new) };
         } else {
             self.vd = 0.0;
         }
         self.e_m = Self::dist(veh, self.carrot_ne());
-        self.out(vel, self.vd, false, event)
+        self.out(vel, self.vd, accel_d, false, event)
     }
 
     /// Both carrots at the vehicle (`s` 0 on `line`, which starts there) and at rest; the vertical goal `d_goal`.
@@ -612,12 +622,13 @@ impl LegGuidance {
         }
     }
 
-    fn out(&self, velocity_ne: [f32; 2], velocity_d_ms: f32, held: bool, event: LegEvent) -> LegOut {
+    fn out(&self, velocity_ne: [f32; 2], velocity_d_ms: f32, accel_d_mss: f32, held: bool, event: LegEvent) -> LegOut {
         LegOut {
             position_ne: self.carrot_ne(),
             velocity_ne,
             down_m: self.d,
             velocity_d_ms,
+            accel_d_mss,
             e_m: self.e_m,
             active: self.active(),
             phase: self.phase,
@@ -693,7 +704,7 @@ mod tests {
 
     fn position_of(out: &GuidanceOut) -> ([f32; 3], [f32; 3], f32) {
         match out.setpoint {
-            Some(Setpoint::Position { position_m, velocity_ms, heading_rad, heading_rate_rads }) => {
+            Some(Setpoint::Position { position_m, velocity_ms, heading_rad, heading_rate_rads, .. }) => {
                 assert_eq!(heading_rate_rads, 0.0);
                 (position_m, velocity_ms, heading_rad)
             }
@@ -703,7 +714,7 @@ mod tests {
 
     fn finite(o: &GuidanceOut) {
         assert!(o.target_ne.iter().chain([&o.dist_m, &o.bearing_rad]).all(|x| x.is_finite()), "{o:?}");
-        if let Some(Setpoint::Position { position_m, velocity_ms, heading_rad, heading_rate_rads }) = o.setpoint {
+        if let Some(Setpoint::Position { position_m, velocity_ms, heading_rad, heading_rate_rads, .. }) = o.setpoint {
             assert!(position_m.iter().chain(&velocity_ms).chain([&heading_rad, &heading_rate_rads]).all(|x| x.is_finite()), "{o:?}");
         }
     }

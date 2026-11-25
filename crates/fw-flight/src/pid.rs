@@ -244,12 +244,14 @@ impl CascadedPid {
 
     /// The collective of altitude hold, N (F1, F4, F5). Signs: NED, down positive for height D, climb rate vD,
     /// acceleration a_d and the integrator; the thrust is positive up. `down_m` and `v_ff` are the shaper's target
-    /// height and its climb-rate feed-forward (down positive). `dt_s` is 0 on the first step after `reset`.
+    /// height and its climb-rate feed-forward (down positive); `a_ff` the acceleration feed-forward, m/s^2 down positive
+    /// (M2b; 0 for `Altitude`). `dt_s` is 0 on the first step after `reset`.
     fn vertical_thrust(
         &mut self,
         nav: &NavState,
         down_m: f32,
         v_ff: f32,
+        a_ff: f32,
         dt_s: f32,
         limited: &Saturation,
     ) -> f32 {
@@ -268,7 +270,7 @@ impl CascadedPid {
             .min(self.speed_dn_ms);
         // e_v > 0: the vehicle moves up or hovers where it should move down more; a_d > 0 asks to accelerate down.
         let e_v = v_sp - v_d;
-        let a_d = self.velz_p * e_v + self.alt_i;
+        let a_d = self.velz_p * e_v + self.alt_i + a_ff;
         // Thrust, N, positive up: m (g - a_d) holds at a_d = 0 and falls when a_d > 0; then the tilt factor (F4).
         let cos = down_in_body(nav.attitude)[2];
         let wanted = MASS * (GRAVITY_MSS - a_d) * tilt_factor(cos, self.tilt_cos_min, self.tilt_inverted_gain);
@@ -428,13 +430,14 @@ impl Controller for CascadedPid {
             } => (
                 self.attitude_to_rates(nav.attitude, attitude, heading_rate_rads),
                 None,
-                Some((down_m, velocity_d_ms)),
+                Some((down_m, velocity_d_ms, 0.0)),
             ),
             Setpoint::Position {
                 position_m,
                 velocity_ms,
                 heading_rad,
                 heading_rate_rads,
+                accel_d_mss,
             } => {
                 // The vertical integrator stays live across Altitude and Position (P2).
                 #[cfg(test)]
@@ -446,7 +449,7 @@ impl Controller for CascadedPid {
                 (
                     self.attitude_to_rates(nav.attitude, q_sp, heading_rate_rads),
                     None,
-                    Some((position_m[2], velocity_ms[2])),
+                    Some((position_m[2], velocity_ms[2], accel_d_mss)),
                 )
             }
             Setpoint::Waypoint { .. } => {
@@ -456,7 +459,7 @@ impl Controller for CascadedPid {
         };
         self.t_prev_us = Some(nav.t_us);
         let thrust_n = match (thrust_n, alt) {
-            (_, Some((down_m, v_ff))) => self.vertical_thrust(nav, down_m, v_ff, dt, limited),
+            (_, Some((down_m, v_ff, a_ff))) => self.vertical_thrust(nav, down_m, v_ff, a_ff, dt, limited),
             (stick, None) => {
                 self.alt_active = false;
                 stick.unwrap_or(0.0)
@@ -924,6 +927,7 @@ mod tests {
             velocity_ms: v_ff,
             heading_rad,
             heading_rate_rads: 0.0,
+            accel_d_mss: 0.0,
         }
     }
 
