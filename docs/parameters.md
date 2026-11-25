@@ -61,11 +61,8 @@ Code: `src/settings.rs`; record format `fw_core::record`. See [architecture](arc
 
 | Name | Default | Range | Meaning |
 |---|---|---|---|
-| `GDN_SRC` | 0 | 0..1 | 1: guidance and Start use the uploaded mission; 0: the `GDN_*` parameters. Start refused (code 20) if a list is stored and this is 0 |
 | `GDN_ALT_MIN` / `GDN_ALT_MAX` | 5 / 50 m | 3..120 | Height limits for uploaded waypoints and the return item |
 | `GDN_RADIUS` | 2.0 m | 0.05..10 | Waypoint arrival radius |
-| `GDN_COUNT` | 0 | 0..4 | Number of parameter targets (0 = off; used when `GDN_SRC` 0) |
-| `GDN_LAT1..4`, `GDN_LON1..4` | 0 | lat +-900000000, lon +-1800000000 | Target positions, 1e-7 degree |
 
 ### Controller gains (taken at arming)
 
@@ -108,7 +105,7 @@ Device parameter tables (BARO, MAG offsets and calibration, IMU orientation, SD)
 
 | File | Role |
 |---|---|
-| `crates/fw-settings/src/lib.rs` | `TABLE`: all 127 definitions, in order |
+| `crates/fw-settings/src/lib.rs` | `TABLE`: all 117 definitions, in order |
 | `crates/fw-settings/src/flight.rs` | Flight, guidance and gain parameters |
 | `crates/fw-settings/src/{baro,mag,batt,imu,sd,rc,esc,led,gnss}.rs` | Per-device tables and validators |
 | `crates/fw-core/src/params.rs` | `Params` store, `ParamDef`, `Apply` |

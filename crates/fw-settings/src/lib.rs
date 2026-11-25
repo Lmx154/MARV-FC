@@ -53,7 +53,7 @@ pub const COUNT: usize = baro::COUNT
     + flight::COUNT
     + batt::FS_COUNT;
 
-/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC, then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, the ten `GDN_*` parameters, the 14 `ATC_*` gains, `GDN_SRC`, `GDN_ALT_MIN` and `GDN_ALT_MAX`, then the five low-battery monitor parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` (appended, so the first 81 indices did not change).
+/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC, then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, `GDN_RADIUS`, the 14 `ATC_*` gains, `GDN_ALT_MIN` and `GDN_ALT_MAX`, then the five low-battery monitor parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` (appended, so the first 81 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters (settings) go back to their defaults in RAM; its `Live` parameters (the calibration offsets) are kept.
@@ -187,7 +187,7 @@ mod tests {
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 127);
+        assert_eq!(COUNT, 117);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -315,16 +315,7 @@ mod tests {
             "GPS_GNSS",
             "PILOT_SPEED_XY",
             "RPM_NOTCH_EN",
-            "GDN_COUNT",
             "GDN_RADIUS",
-            "GDN_LAT1",
-            "GDN_LON1",
-            "GDN_LAT2",
-            "GDN_LON2",
-            "GDN_LAT3",
-            "GDN_LON3",
-            "GDN_LAT4",
-            "GDN_LON4",
             "ATC_ANG_RP_P",
             "ATC_ANG_YAW_P",
             "ATC_RAT_RLL_P",
@@ -339,7 +330,6 @@ mod tests {
             "ATC_RAT_PIT_IMAX",
             "ATC_RAT_YAW_IMAX",
             "ATC_RAT_FLTD",
-            "GDN_SRC",
             "GDN_ALT_MIN",
             "GDN_ALT_MAX",
             "BATT_CELLS",
@@ -359,7 +349,7 @@ mod tests {
     fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
         use mavlink_device::{ParamError, ParamValue};
         use ParamValue::{F32, I32};
-        assert_eq!(COUNT, 127);
+        assert_eq!(COUNT, 117);
         assert_eq!(mag::CAL_OFFSET, 81);
         let expected = [
             ("MAG_DIAGX", F32(1.0), F32(0.2), F32(5.0), true),
@@ -442,7 +432,7 @@ mod tests {
     #[test]
     fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
         use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 127);
+        assert_eq!(COUNT, 117);
         let mut p = Params::<COUNT>::new(&TABLE).unwrap();
         for (k, name) in [
             "IMU1_ACC_FS",

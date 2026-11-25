@@ -170,8 +170,7 @@ pub const ID_PPS: u8 = 153;
 pub const ID_PIDT: u8 = 154;
 /// Type number of NTCH (the rate the loop used, the four rotor frequencies and the notch switch).
 pub const ID_NTCH: u8 = 155;
-/// Type number of GDN (the shadow guidance's target, setpoint and range; decision-guidance-shadow-20261123, section 1 item 5).
-pub const ID_GDN: u8 = 156;
+// 156 was GDN: retired, never reused.
 /// Type number of BFS (a battery level reached; Amendment BATT).
 pub const ID_BFS: u8 = 157;
 
@@ -278,14 +277,6 @@ pub const NTCH: RecordDef = def(
     "TimeUS,GX,GY,GZ,F0,F1,F2,F3,On",
 );
 
-/// GDN: the shadow guidance of one step (not a flight-step record: written on its own, every 8th step): the active target's index, the status bits (1 running, 2 arrived, 4 done, 8 invalid), the target and the setpoint position in NE (m), the setpoint velocity in NE (m/s), the distance (m) and the bearing (rad, clockwise from north) from the vehicle to the target.
-pub const GDN: RecordDef = def(
-    ID_GDN,
-    "GDN",
-    "QBBffffffff",
-    "TimeUS,Idx,St,TN,TE,PN,PE,VN,VE,Dist,Brg",
-);
-
 /// BFS: the low-battery monitor reached a level (Amendment BATT): the level (1 LOW, 2 CRITICAL), the critical action (`BATT_FS_CRT_ACT`: 0 warn, 1 descend), the pack voltage (V) and `BATT_CELLS`.
 pub const BFS: RecordDef = def(ID_BFS, "BFS", "QBBfB", "TimeUS,Level,Act,Volt,Cells");
 
@@ -317,9 +308,9 @@ pub const SPN: RecordDef = def(
 );
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 30] = [
+pub const TYPES: [RecordDef; 29] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH, GDN, BFS,
+    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH, BFS,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -772,32 +763,6 @@ pub fn encode_ntch(
     w.pos
 }
 
-/// GDN: the active target's index, the status bits, the target (TN, TE) and the setpoint position (PN, PE) in NE (m), the setpoint velocity (VN, VE, m/s), the distance (m) and the bearing (rad) to the target.
-#[allow(clippy::too_many_arguments)]
-pub fn encode_gdn(
-    out: &mut [u8],
-    time_us: u64,
-    index: u8,
-    status: u8,
-    target_ne_m: [f32; 2],
-    position_ne_m: [f32; 2],
-    velocity_ne_ms: [f32; 2],
-    dist_m: f32,
-    bearing_rad: f32,
-) -> usize {
-    let Some(mut w) = Writer::start(out, &GDN) else {
-        return 0;
-    };
-    w.u64(time_us);
-    w.u8(index);
-    w.u8(status);
-    for v in target_ne_m.into_iter().chain(position_ne_m).chain(velocity_ne_ms) {
-        w.f32(v);
-    }
-    w.f32(dist_m);
-    w.f32(bearing_rad);
-    w.pos
-}
 
 /// ESC: raw eRPM, volts in centivolts, temperature in degC, by DShot line, and the flag bits (bit i: line i captured an eRPM since the previous ESC record; bit 4: this exchange sent the flight throttles).
 pub fn encode_esc(
@@ -1159,8 +1124,6 @@ mod tests {
         out.push((ID_PIDT, b[..n].to_vec()));
         let n = encode_ntch(&mut b, 1, [1.0; 3], [2.0; 4], true);
         out.push((ID_NTCH, b[..n].to_vec()));
-        let n = encode_gdn(&mut b, 1, 2, 5, [1.0; 2], [2.0; 2], [3.0; 2], 4.0, 5.0);
-        out.push((ID_GDN, b[..n].to_vec()));
         let n = encode_bfs(&mut b, 1, 2, 1, 13.5, 4);
         out.push((ID_BFS, b[..n].to_vec()));
         out
@@ -1225,12 +1188,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_30_fmt_records() {
-        assert_eq!(TYPES.len(), 30);
-        assert_eq!(HEADER_SEQUENCE_LEN, 2670);
+    fn header_sequence_is_29_fmt_records() {
+        assert_eq!(TYPES.len(), 29);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2581);
         let mut buf = [0u8; 2680];
-        assert_eq!(write_header(&mut buf), 2670);
-        assert_eq!(write_header(&mut [0u8; 2669]), 0);
+        assert_eq!(write_header(&mut buf), 2581);
+        assert_eq!(write_header(&mut [0u8; 2580]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -1280,11 +1243,6 @@ mod tests {
         assert_eq!(ntch[9..25], *b"QfffffffB       ");
         assert_eq!(ntch[25..55], *b"TimeUS,GX,GY,GZ,F0,F1,F2,F3,On");
         assert!(ntch[55..].iter().all(|&c| c == 0));
-        let gdn = &buf[28 * 89..29 * 89];
-        assert_eq!(gdn[3..9], [0x9C, 45, b'G', b'D', b'N', 0]);
-        assert_eq!(gdn[9..25], *b"QBBffffffff\0\0\0\0\0");
-        assert_eq!(gdn[25..65], *b"TimeUS,Idx,St,TN,TE,PN,PE,VN,VE,Dist,Brg");
-        assert!(gdn[65..].iter().all(|&c| c == 0));
     }
 
     /// The table, as the file announces it (also printed into the report by hand).
@@ -1322,7 +1280,6 @@ mod tests {
                 ("PPS", 31),
                 ("PIDT", 59),
                 ("NTCH", 40),
-                ("GDN", 45),
                 ("BFS", 18)
             ]
         );
@@ -1660,25 +1617,6 @@ mod tests {
         assert_eq!((ID_PIDT, ID_NTCH), (154, 155));
         assert_eq!(PIDT.format, "Qffffffffffff");
         assert_eq!(NTCH.format, "QfffffffB");
-    }
-
-    #[test]
-    fn golden_gdn() {
-        let mut b = [0xEEu8; 60];
-        assert_eq!(
-            encode_gdn(&mut b, 7, 2, 5, [1.0, 2.0], [3.0, 4.0], [5.0, 6.0], 7.0, 8.0),
-            45
-        );
-        let mut want = cat(&[&[0xA3, 0x95, 0x9C], &7u64.to_le_bytes(), &[2, 5]]);
-        for v in 1..=8 {
-            want.extend_from_slice(&(v as f32).to_le_bytes());
-        }
-        assert_eq!(b[..45], want[..]);
-        assert_eq!(b[45..], [0xEE; 15], "nothing beyond the record is touched");
-        assert_eq!(encode_gdn(&mut [0u8; 44], 7, 0, 0, [0.0; 2], [0.0; 2], [0.0; 2], 0.0, 0.0), 0);
-        assert_eq!(ID_GDN, 156);
-        assert_eq!(GDN.format, "QBBffffffff");
-        assert!(!FLIGHT_TYPES.iter().any(|d| d.type_id == ID_GDN), "not part of the per-step block");
     }
 
     /// BFS by hand: type 157 = 0x9D, length 18; Level 2, Act 1, Volt 13.5 V, Cells 4. Not part of the per-step block.

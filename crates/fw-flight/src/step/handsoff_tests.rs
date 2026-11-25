@@ -1810,8 +1810,8 @@ fn command_msg_names_the_command_and_its_answer() {
     assert_eq!(text(&command_msg(Command::Abort, Some(CommandResult::Denied(DenyReason::NotT3)))), "CMD ABORT den 13");
     assert_eq!(text(&command_msg(Command::Land, Some(CommandResult::Accepted))), "CMD LAND ok");
     assert_eq!(
-        text(&command_msg(Command::Return, Some(CommandResult::Denied(DenyReason::MissionNotSelected)))),
-        "CMD RETURN den 20"
+        text(&command_msg(Command::Return, Some(CommandResult::Denied(DenyReason::MissionSwitchOff)))),
+        "CMD RETURN den 19"
     );
     assert_eq!(text(&command_msg(Command::Start, None)), "CMD START den 0", "no answer: the mailbox's code 0");
 }

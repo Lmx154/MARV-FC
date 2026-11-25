@@ -402,7 +402,7 @@ mod tests {
 
     #[test]
     fn the_six_settings_follow_rc_with_their_defaults_ranges_and_reboot_class() {
-        assert_eq!(crate::COUNT, 127);
+        assert_eq!(crate::COUNT, 117);
         let expected = [
             ("IMU1_ACC_FS", IMU1, 16, 2, 32),
             ("IMU1_GYR_FS", IMU1, 2000, 125, 4000),

@@ -2,8 +2,7 @@
 //! section 1 item C): `fw_core::mission::MissionService` in one critical-section static shared by both links, the
 //! accept list, the wire decode and encode of the six messages, and one reply slot per link.
 //!
-//! Core 0 only. Nothing here runs on core 1 and nothing flies a list: the committed list reaches the shadow guidance through
-//! `flight::push_gdn` (`GDN_SRC` 1), which core 1 takes on a disarmed step.
+//! Core 0 only. Nothing here runs on core 1: the committed list reaches the flight core through `flight::push_gdn`.
 //!
 //! Each link's task hands its mission frames to [`message`] (the USB task from its `receive_with` hook, the radio from the
 //! port's `Hooks::mavlink`) and drains its reply slot through [`sample`], the sample of a stream slot of its node with the id
@@ -111,7 +110,7 @@ pub fn message(link: Link, m: Incoming<'_>) -> bool {
         msg,
     };
     // Amendment A (A4, packet H2): MISSION_COUNT, MISSION_CLEAR_ALL and the items of an upload are no longer refused
-    // while armed, in every state; a new plan id reaches the state machine through `station::push_plan`.
+    // while armed, in every state; a new plan id reaches the state machine through `flight::push_gdn`.
     let armed = false;
     // The height limits in force now, read before the lock is taken (the store is never nested in it). A value that cannot be
     // read or has the wrong type is NaN: every `z` is refused (fail closed).

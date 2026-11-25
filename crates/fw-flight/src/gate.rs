@@ -1090,7 +1090,6 @@ mod tests {
             mission: MissionFacts {
                 plan_id: Some(7),
                 has_waypoints: true,
-                mission_stored: true,
                 z_within_limits: true,
                 max_waypoint_distance_m: Some(100.0),
                 return_height_m: Some(20.0),

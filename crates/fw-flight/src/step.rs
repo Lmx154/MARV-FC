@@ -218,20 +218,8 @@ impl CrashStatus {
     }
 }
 
-/// The mission facts of a set that is not the uploaded mission (`GDN_SRC` 0: the `GDN_*` parameters have no heights):
-/// none, so Start is DENIED NoWaypoints.
-const NO_MISSION: MissionFacts = MissionFacts {
-    plan_id: None,
-    has_waypoints: false,
-    mission_stored: false,
-    z_within_limits: true,
-    max_waypoint_distance_m: None,
-    return_height_m: None,
-    alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
-};
-
-/// The target set before the first `set_mission`: off, not the mission; GDN_RADIUS's default (the board's `GDN_OFF`),
-/// so a RETURN before any push still arrives.
+/// The target set before the first `set_mission`: no mission; GDN_RADIUS's default (the board's `GDN_OFF`), so a RETURN
+/// before any push still arrives.
 const MISSION_OFF: GdnTargets = GdnTargets {
     count: 0,
     radius_m: 2.0,
@@ -239,23 +227,12 @@ const MISSION_OFF: GdnTargets = GdnTargets {
     alts_m: [0.0; GDN_TARGETS],
     return_m: 0.0,
     plan_id: 0,
-    from_mission: false,
     heights_ok: false,
     alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
-    mission_stored: false,
 };
 
 /// The state machine's mission facts from `set`, the target set in force.
-fn mission_facts(
-    set: &GdnTargets,
-    station_plan: Option<u32>,
-    home: Option<hands_off::Home>,
-    origin: Option<GeoPoint>,
-    start: bool,
-) -> MissionFacts {
-    if !set.from_mission {
-        return MissionFacts { plan_id: station_plan, mission_stored: set.mission_stored, ..NO_MISSION };
-    }
+fn mission_facts(set: &GdnTargets, home: Option<hands_off::Home>, origin: Option<GeoPoint>, start: bool) -> MissionFacts {
     let far = match (home, origin) {
         (Some(h), Some(o)) if start => {
             let mut far = 0.0f32;
@@ -276,7 +253,6 @@ fn mission_facts(
     MissionFacts {
         plan_id,
         has_waypoints: set.count > 0,
-        mission_stored: set.mission_stored,
         z_within_limits: set.heights_ok,
         max_waypoint_distance_m: far,
         return_height_m: plan_id.map(|_| set.return_m),
@@ -594,8 +570,6 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     command: Option<hands_off::StationCommand>,
     /// The answer of the latest step to its command (`take_command_result`)
     command_result: Option<hands_off::CommandResult>,
-    /// The plan id of the committed list (`set_plan_id`); `None` when none is stored.
-    plan_id: Option<u32>,
     /// The newest target set from core 0 (`set_mission`): the mission facts at every step, and AUTO's list at Start.
     mission: GdnTargets,
     /// AUTO's leg law: entered at Start (the list copied from `mission` then), stepped on AUTO's steps, stopped on
@@ -774,7 +748,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             last_radio_status_us: None,
             command: None,
             command_result: None,
-            plan_id: None,
             mission: MISSION_OFF,
             legs: LegGuidance::new(),
             leg_heading_rad: 0.0,
@@ -895,11 +868,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.command = Some(command);
     }
 
-    /// The plan id of the committed list (a new one is the state machine's "new plan"); `None` when none is stored.
-    pub fn set_plan_id(&mut self, plan_id: Option<u32>) {
-        self.plan_id = plan_id;
-    }
-
     /// The newest target set core 0 pushed (`FLIGHT_GDN`, whole sets only), at any step, armed or not: the mission
     /// facts from the next step on; AUTO takes its list from it at Start only, never mid-leg.
     pub fn set_mission(&mut self, set: GdnTargets) {
@@ -945,11 +913,10 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.last_radio_heartbeat_us
     }
 
-    /// The plan id the state machine is given at every step.
-    /// `mission_facts` chooses) and the waypoints it sees (0 unless the set is the mission): the board's PLAN MSG.
+    /// The plan id the state machine is given at every step and the waypoints it sees: the board's PLAN MSG.
     pub fn plan_seen(&self) -> (Option<u32>, u8) {
-        let facts = mission_facts(&self.mission, self.plan_id, None, None, false);
-        (facts.plan_id, if self.mission.from_mission { self.mission.count } else { 0 })
+        let facts = mission_facts(&self.mission, None, None, false);
+        (facts.plan_id, self.mission.count)
     }
 
     /// Crash rule K after the latest step: the four terms and how long they have held.
@@ -1121,7 +1088,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let (lifted_in, td_in) = (self.lifted, self.still_us >= self.land_detect_us);
         let command = self.command.take();
         let start = command.is_some_and(|c| c.command == hands_off::Command::Start);
-        let mission = mission_facts(&self.mission, self.plan_id, self.hands_off.home(), self.estimator.origin(), start);
+        let mission = mission_facts(&self.mission, self.hands_off.home(), self.estimator.origin(), start);
         let ho = self.hands_off.step(&hands_off::Inputs {
             now_us: t_us,
             crsf: self.rc_newest,

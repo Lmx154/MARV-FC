@@ -45,7 +45,6 @@ Upload: station Map tab, "Waypoints" panel, "Upload to vehicle"; or `marv-cli mi
 | Return height | the return item's z, capped at `GDN_ALT_MAX`, never lower than the present height above home |
 | Arrival radius | `GDN_RADIUS` (default 2.0 m, range 0.05..10) |
 | Cruise speed | min(`PILOT_SPEED_XY`, 6.8 m/s); climb at most 3.0, descent at most 1.5 m/s, vertical acceleration 1.0 m/s^2 (`LEG_ACC_Z_MSS`); carrot acceleration 3 m/s^2 |
-| Guidance source | `GDN_SRC` 1 uses the uploaded list; 0 uses `GDN_COUNT` / `GDN_LAT1..4` / `GDN_LON1..4` |
 
 ## Start preconditions and refusal codes
 
@@ -58,7 +57,7 @@ Start is `MAV_CMD_MISSION_START` from state HOLD. It must arrive on the radio li
 | b | flight armed on CRSF | 3 |
 | c | state is not HOLD (or AUTO already) | 4 |
 | 1 | station heartbeat heard within 10 s | 5 |
-| 2 | a list with a waypoint stored and `GDN_SRC` is 1 | 6 (none stored), 20 (stored but `GDN_SRC` not 1) |
+| 2 | a list with a waypoint stored | 6 (code 20 retired) |
 | 3 | every z within `GDN_ALT_MIN`..`GDN_ALT_MAX` | 7 |
 | 4 | home latched | 8 |
 | 5 | vehicle position valid and within 1 km of home | 9 |

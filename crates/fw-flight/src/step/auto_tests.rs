@@ -29,10 +29,10 @@ pub(super) fn geo(n: f32, e: f32) -> (i32, i32) {
     (ORIGIN.lat_e7 + libm::roundf(n / kn) as i32, ORIGIN.lon_e7 + libm::roundf(e / ke) as i32)
 }
 
-/// The uploaded mission (`GDN_SRC` 1) of waypoints (north, east, z above home), GDN_RADIUS `radius_m`, return height
+/// The uploaded mission of waypoints (north, east, z above home), GDN_RADIUS `radius_m`, return height
 /// 20 m, heights checked by core 0.
 pub(super) fn mission(wps: &[(f32, f32, f32)], radius_m: f32, plan_id: u32) -> GdnTargets {
-    let mut m = GdnTargets { from_mission: true, heights_ok: true, return_m: 20.0, plan_id, radius_m, count: wps.len() as u8, mission_stored: !wps.is_empty(), ..MISSION_OFF };
+    let mut m = GdnTargets { heights_ok: true, return_m: 20.0, plan_id, radius_m, count: wps.len() as u8, ..MISSION_OFF };
     for (k, &(n, e, z)) in wps.iter().enumerate() {
         m.targets[k] = geo(n, e);
         m.alts_m[k] = z;
@@ -186,17 +186,11 @@ fn accel_ne(q: [f32; 4]) -> [f32; 2] {
     [-GRAVITY_MSS * col[0] / col[2], -GRAVITY_MSS * col[1] / col[2]]
 }
 
-/// Item 1: the facts come from the pushed set. `GDN_SRC` 0 (the parameters, no heights) is no mission; a height
-/// outside the limits, then a valid list, reach Start's checks in their order.
+/// Item 1: the facts come from the pushed set. An empty set is no mission; a height outside the limits, then no list,
+/// reach Start's checks in their order.
 #[test]
 fn mission_facts_from_the_pushed_set_reach_start() {
-    let mut params = square();
-    params.from_mission = false;
-    params.heights_ok = false;
-    let mut r = Run::new(3.0, Some(params));
-    assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::MissionNotSelected));
-    params.mission_stored = false;
-    r.f.set_mission(params);
+    let mut r = Run::new(3.0, Some(MISSION_OFF));
     assert_eq!(r.command(Command::Start), CommandResult::Denied(DenyReason::NoWaypoints));
     let mut high = square();
     high.heights_ok = false;
@@ -385,18 +379,12 @@ fn b_pause_resumes_the_same_waypoint_from_the_vehicle_and_abort_starts_over() {
 #[test]
 fn g_start_denied_with_its_reason() {
     let deny = |r: &mut Run| r.command(Command::Start);
-    let mut gdn_src_0 = square();
-    gdn_src_0.from_mission = false;
-    gdn_src_0.heights_ok = false;
-    let gdn_src_0_empty = GdnTargets { mission_stored: false, ..gdn_src_0 };
     let mut high = square();
     high.heights_ok = false;
     let far = mission(&[(30.0, 0.0, 10.0), (1_001.0, 0.0, 10.0)], 2.0, 0x5157_0002);
     let near = mission(&[(30.0, 0.0, 10.0), (999.0, 0.0, 10.0)], 2.0, 0x5157_0003);
-    let cases: [(&str, Option<GdnTargets>, DenyReason); 5] = [
+    let cases: [(&str, Option<GdnTargets>, DenyReason); 3] = [
         ("no mission", None, DenyReason::NoWaypoints),
-        ("GDN_SRC 0, a mission stored", Some(gdn_src_0), DenyReason::MissionNotSelected),
-        ("GDN_SRC 0, nothing stored", Some(gdn_src_0_empty), DenyReason::NoWaypoints),
         ("a waypoint beyond 1 km", Some(far), DenyReason::WaypointBeyondRange),
         ("a height outside the limits", Some(high), DenyReason::HeightOutsideLimits),
     ];
@@ -516,10 +504,8 @@ fn auto_exits_give_their_reason_and_the_plan_seen_follows_the_set() {
     assert_eq!(r.command(Command::Abort), CommandResult::Accepted);
     assert_eq!(ho(&r), "HO 3 HOLD abort");
 
-    let mut r = Run::new(3.0, None);
+    let r = Run::new(3.0, None);
     assert_eq!(r.f.plan_seen(), (None, 0));
-    r.f.set_plan_id(Some(0x1862_F4A2));
-    assert_eq!(r.f.plan_seen(), (Some(0x1862_F4A2), 0));
 }
 
 /// (e) A plant that cannot follow (a steady push of 15 m/s^2 south, more than the tilt limit gives): e grows to E_MAX

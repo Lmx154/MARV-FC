@@ -37,8 +37,7 @@ use fw_flight::eskf::{Eskf, EskfError, EskfStats, RING};
 use fw_flight::eskf_n0::{POS, VEL};
 use fw_flight::eskf_out::{EskfSteer, SteerMix};
 use fw_flight::gate::MotorCommand;
-use fw_flight::gnc::{Estimator, GeoPoint, NavState, Sensors, Setpoint};
-use fw_flight::guidance::Guidance;
+use fw_flight::gnc::{NavState, Sensors, Setpoint};
 use fw_flight::imu::{ImuSample, SampleSink};
 use fw_flight::pid::CascadedPid;
 use fw_flight::step::{
@@ -505,9 +504,7 @@ pub fn push_gains(why: &str) {
     );
 }
 
-/// The shadow guidance's targets: how many are in use (0 is off), the arrival radius (m) and the 16 slots as latitude and
-/// longitude (the guidance gets `alt_mm` 0: it converts at the origin's altitude). From [`fw_core::mission::select_targets`]:
-/// the `GDN_*` parameters or the committed mission, by `GDN_SRC`.
+/// The committed mission as the flight core takes it ([`fw_core::mission::select_targets`]).
 pub type GdnSet = GdnTargets;
 
 /// What [`FLIGHT_GDN`] holds before the first push: off.
@@ -518,15 +515,12 @@ const GDN_OFF: GdnSet = GdnTargets {
     alts_m: [0.0; GDN_TARGETS],
     return_m: 0.0,
     plan_id: 0,
-    from_mission: false,
     heights_ok: false,
     alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
-    mission_stored: false,
 };
 
-/// Core 0 -> flight core: the stored `GDN_*` parameters (decision-guidance-shadow-20261123, sections 1 and 3; one writer,
-/// core 0, through [`push_gdn`]; one reader, IMU1's [`Stepper`]). The Stepper takes new targets on a disarmed step only.
-/// No flash access on core 1: the value is a copy of the stored ones.
+/// Core 0 -> flight core: the committed mission with `GDN_RADIUS` and the height limits (one writer, core 0, through
+/// [`push_gdn`]; one reader, IMU1's [`Stepper`]). No flash access on core 1: the value is a copy.
 pub static FLIGHT_GDN: TripleBuffer<GdnSet> = TripleBuffer::new(GDN_OFF);
 
 /// Core 0's writer of [`FLIGHT_GDN`].
@@ -543,18 +537,12 @@ pub fn init_gdn() {
     push_gdn("boot");
 }
 
-/// Pushes the shadow guidance's targets to the flight core (core 0; call with no store access in progress): by `GDN_SRC`
-/// the stored `GDN_*` parameters (0, the default) or the committed mission's waypoints with `GDN_RADIUS` (1), chosen by
-/// [`select_targets`]. Runs when a `GDN_*` parameter or `GDN_SRC` changes and when the mission's change counter moves
-/// (the supervisor tick, [`crate::mission::changed`]). A value that cannot be read or has the wrong type is the table's
-/// default (count 0: off).
+/// Pushes the committed mission's waypoints with `GDN_RADIUS` and the height limits to the flight core (core 0; call with
+/// no store access in progress). Runs when a `GDN_*` parameter changes and when the mission's change counter moves (the
+/// supervisor tick, [`crate::mission::changed`]). A radius that cannot be read is the table's default.
 pub fn push_gdn(why: &str) {
-    use fw_settings::flight::{GDN_ALT_MAX, GDN_ALT_MIN, GDN_COUNT, GDN_LAT, GDN_LON, GDN_RADIUS, GDN_SLOTS, GDN_SRC};
-    let (source, count, radius, params, limits) = crate::store::with(|p| {
-        let int = |name| match p.get_named(name) {
-            Some(mavlink_device::ParamValue::I32(v)) => v,
-            _ => 0,
-        };
+    use fw_settings::flight::{GDN_ALT_MAX, GDN_ALT_MIN, GDN_RADIUS};
+    let (radius, limits) = crate::store::with(|p| {
         // The height limits as the upload reads them: a value that cannot be read is NaN (no heights pass).
         let float = |name| match p.get_named(name) {
             Some(mavlink_device::ParamValue::F32(v)) => v,
@@ -564,17 +552,12 @@ pub fn push_gdn(why: &str) {
             Some(mavlink_device::ParamValue::F32(v)) => v,
             _ => GDN_OFF.radius_m,
         };
-        let mut params = [(0, 0); GDN_SLOTS];
-        for k in 0..GDN_SLOTS {
-            params[k] = (int(GDN_LAT[k]), int(GDN_LON[k]));
-        }
-        (int(GDN_SRC), int(GDN_COUNT), radius, params, (float(GDN_ALT_MIN), float(GDN_ALT_MAX)))
+        (radius, (float(GDN_ALT_MIN), float(GDN_ALT_MAX)))
     })
-    .unwrap_or((0, 0, GDN_OFF.radius_m, [(0, 0); GDN_SLOTS], (f32::NAN, f32::NAN)));
+    .unwrap_or((GDN_OFF.radius_m, (f32::NAN, f32::NAN)));
     // The mission is read after the store is released (never nested); the counter noted is the one of the copy used.
     let (items, items_len, changes, plan_id) = crate::mission::committed();
-    let value =
-        select_targets(source, count, radius, &params, items.get(..items_len).unwrap_or(&[]), plan_id, limits);
+    let value = select_targets(radius, items.get(..items_len).unwrap_or(&[]), plan_id, limits);
     crate::mission::note_pushed(changes);
     GDN_WRITER.lock(|w| {
         if let Some(writer) = w.borrow_mut().as_mut() {
@@ -582,8 +565,7 @@ pub fn push_gdn(why: &str) {
         }
     });
     defmt::info!(
-        "[INFO] GDN_SRC {=i32}, {=u8} targets, GDN_RADIUS {=f32} m pushed to the flight core ({=str}); new targets are taken on a disarmed step",
-        source,
+        "[INFO] mission: {=u8} targets, GDN_RADIUS {=f32} m pushed to the flight core ({=str})",
         value.count,
         value.radius_m,
         why
@@ -646,14 +628,6 @@ pub struct Stepper {
     card_logged: bool,
     /// The plan id and waypoints of the last "PLAN" MSG written (`None` before the first; `Flight::plan_seen`).
     plan_logged: Option<(Option<u32>, u8)>,
-    /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
-    guidance: Guidance<GDN_TARGETS>,
-    /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
-    /// whether the previous step was armed.
-    gdn_in_force: GdnSet,
-    gdn_pushed: GdnSet,
-    gdn_wait: bool,
-    was_armed: bool,
 }
 
 impl Stepper {
@@ -700,11 +674,6 @@ impl Stepper {
             k_logged: false,
             card_logged: false,
             plan_logged: None,
-            guidance: Guidance::new(),
-            gdn_in_force: GDN_OFF,
-            gdn_pushed: GDN_OFF,
-            gdn_wait: false,
-            was_armed: false,
         })
     }
 
@@ -792,54 +761,6 @@ impl Stepper {
     fn push_msg(&mut self, t_us: u64, text: &[u8]) -> bool {
         self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, t_us, text))
     }
-
-    /// The shadow guidance (decision-guidance-shadow-20261123, section 3), after the command is out and the step's own
-    /// records are pushed. New targets are taken on a disarmed step only and start the guidance over, and so does arming.
-    /// Only with a count in force above 0, and on every 8th step, armed or not: `anchor`, then `step`, from copies of
-    /// `out.nav`, the estimator's origin and the speed in force; one GDN record, a push of its own (it is dropped and
-    /// counted by the ring if it does not fit, and the step block is never affected). Nothing here reaches `Flight`.
-    fn guide(&mut self, out: &StepOut, step: u32) {
-        if self.gdn_wait && !out.armed {
-            self.gdn_wait = false;
-            // The three facts the shadow does not use are left out of the comparison, so it starts over exactly as before.
-            let pushed = GdnTargets {
-                from_mission: self.gdn_in_force.from_mission,
-                heights_ok: self.gdn_in_force.heights_ok,
-                alt_max_m: self.gdn_in_force.alt_max_m,
-                mission_stored: self.gdn_in_force.mission_stored,
-                ..self.gdn_pushed
-            };
-            if pushed != self.gdn_in_force {
-                self.gdn_in_force = self.gdn_pushed;
-                let GdnTargets { count, radius_m, targets, .. } = self.gdn_in_force;
-                let mut geo = [GeoPoint { lat_e7: 0, lon_e7: 0, alt_mm: 0 }; GDN_TARGETS];
-                for (g, &(lat_e7, lon_e7)) in geo.iter_mut().zip(targets.iter()) {
-                    *g = GeoPoint { lat_e7, lon_e7, alt_mm: 0 };
-                }
-                self.guidance.set_targets(geo.get(..usize::from(count)).unwrap_or(&[]), radius_m);
-            }
-        }
-        if out.armed && !self.was_armed {
-            self.guidance.reset();
-        }
-        self.was_armed = out.armed;
-        if self.gdn_in_force.count == 0 || step % 8 != 0 {
-            return;
-        }
-        let nav = out.nav;
-        let mix: &BoardMix = self.flight.estimator();
-        let origin = mix.origin();
-        let speed = self.flight.speed_xy_in_force();
-        self.guidance.anchor(&nav);
-        let g = self.guidance.step(&nav, origin, speed, out.t_us);
-        let (position, velocity) = match g.setpoint {
-            Some(Setpoint::Position { position_m, velocity_ms, .. }) => ([position_m[0], position_m[1]], [velocity_ms[0], velocity_ms[1]]),
-            _ => ([0.0; 2], [0.0; 2]),
-        };
-        self.log.push_with(dflog::GDN.length.into(), |b| {
-            dflog::encode_gdn(b, out.t_us, g.active, g.status, g.target_ne, position, velocity, g.dist_m, g.bearing_rad)
-        });
-    }
 }
 
 impl SampleSink for Stepper {
@@ -868,12 +789,9 @@ impl SampleSink for Stepper {
         if radio_status_fresh {
             self.flight.set_last_radio_status_us(Some(radio_status));
         }
-        // The whole set, read wait-free: the flight's mission facts and AUTO's list (taken at Start) at once, armed or not
-        // (Amendment A, A4); the shadow's copy waits for a disarmed step as before.
+        // The whole set, read wait-free: the flight's mission facts and AUTO's list (taken at Start) at once, armed or not.
         let (gdn, gdn_fresh) = self.gdn.read();
         if gdn_fresh {
-            self.gdn_pushed = gdn;
-            self.gdn_wait = true;
             self.flight.set_mission(gdn);
         }
         // The ESC status, once: the eRPM of the step's notch and the ESC record below both come from this copy. A read
@@ -904,7 +822,6 @@ impl SampleSink for Stepper {
         crate::batt_fs::DESCENT.store(self.flight.batt_descent() as u8, Ordering::Relaxed);
         // The log, after the command is out. A record that does not fit is dropped and counted by the ring.
         let due = log_due(self.step, out.armed);
-        let gdn_step = self.step;
         self.step = self.step.wrapping_add(1);
         if due.imu {
             let r = &sample.reading;
@@ -1033,6 +950,5 @@ impl SampleSink for Stepper {
             });
         }
         self.log_nav(&out);
-        self.guide(&out, gdn_step);
     }
 }

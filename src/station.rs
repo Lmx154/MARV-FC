@@ -13,9 +13,9 @@
 //! Mode: after each step core 1 stores the state machine's mode code in [`MODE`] (0 until the first step); both nodes put
 //! it in HEARTBEAT `custom_mode` ([`custom_mode`]).
 //!
-//! Heartbeat and plan: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the
-//! station's sender only ([`FLIGHT_STATION_HB`], the clock of `rc::FLIGHT_RADIO_STATUS`) and the committed list's plan id ([`FLIGHT_PLAN`],
-//! 0 for no list); core 1 gives them to `Flight::set_last_radio_heartbeat_us` and `Flight::set_plan_id`.
+//! Heartbeat: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the station's sender
+//! only ([`FLIGHT_STATION_HB`], the clock of `rc::FLIGHT_RADIO_STATUS`); core 1 gives it to
+//! `Flight::set_last_radio_heartbeat_us`.
 
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
@@ -45,9 +45,6 @@ pub static MODE: AtomicU8 = AtomicU8::new(0);
 /// when it is new; nothing before the first).
 pub static FLIGHT_STATION_HB: TripleBuffer<u64> = TripleBuffer::new(0);
 
-/// Core 0 -> flight step: the plan id of the committed list; 0 when none is stored (the empty list's plan id).
-pub static FLIGHT_PLAN: TripleBuffer<u32> = TripleBuffer::new(0);
-
 /// Core 0 -> flight step's log: the sender of the RC port's latest ground-station HEARTBEAT (any sender of type GCS) as
 /// `0x1_0000 | system << 8 | component`; 0 before the first. Logged only ([`gcs_sender`]); nothing decides on it.
 pub static GCS_SENDER: AtomicU32 = AtomicU32::new(0);
@@ -69,15 +66,12 @@ struct Outstanding {
 
 static OUTSTANDING: Mutex<CriticalSectionRawMutex, Cell<Option<Outstanding>>> = Mutex::new(Cell::new(None));
 
-/// Core 0: the writers of [`FLIGHT_STATION_HB`] (with the station's own last time, the one written) and [`FLIGHT_PLAN`],
-/// taken at first use.
+/// Core 0: the writer of [`FLIGHT_STATION_HB`] (with the station's own last time, the one written), taken at first use.
 struct Writers {
     hb: Option<(TripleWriter<'static, u64>, Option<u64>)>,
-    plan: Option<TripleWriter<'static, u32>>,
 }
 
-static WRITERS: Mutex<CriticalSectionRawMutex, RefCell<Writers>> =
-    Mutex::new(RefCell::new(Writers { hb: None, plan: None }));
+static WRITERS: Mutex<CriticalSectionRawMutex, RefCell<Writers>> = Mutex::new(RefCell::new(Writers { hb: None }));
 
 /// Core 0: `None` for every command but the five (it goes on as before); `Some(None)`: posted, its ACK follows through
 /// [`next_ack`]; `Some(Some(ack))`: DENIED code 0 at once.
@@ -193,24 +187,9 @@ pub fn station_heartbeat(t_us: Option<u64>, sender: Option<(u8, u8)>) {
     });
 }
 
-/// Core 0, on a change of the committed list: its plan id to the flight step (0 when it is empty).
-pub fn push_plan() {
-    let (_, len, _, plan_id) = crate::mission::committed();
-    WRITERS.lock(|w| {
-        let mut w = w.borrow_mut();
-        if w.plan.is_none() {
-            w.plan = FLIGHT_PLAN.take_writer();
-        }
-        if let Some(wr) = &mut w.plan {
-            wr.write(if len == 0 { 0 } else { plan_id });
-        }
-    });
-}
-
-/// Core 1: the readers of [`FLIGHT_STATION_HB`] and [`FLIGHT_PLAN`].
+/// Core 1: the reader of [`FLIGHT_STATION_HB`].
 pub struct Core1 {
     hb: TripleReader<'static, u64>,
-    plan: TripleReader<'static, u32>,
 }
 
 impl Core1 {
@@ -218,12 +197,11 @@ impl Core1 {
     pub fn new() -> Option<Self> {
         Some(Self {
             hb: FLIGHT_STATION_HB.take_reader()?,
-            plan: FLIGHT_PLAN.take_reader()?,
         })
     }
 }
 
-/// Core 1, before `Flight::step`: the station heartbeat time and the plan id when new, and the waiting command, given to
+/// Core 1, before `Flight::step`: the station heartbeat time when new, and the waiting command, given to
 /// the flight for that step; the command's number and the command.
 pub fn before_step<E: Estimator, C: Controller, A: Allocator>(
     io: &mut Core1,
@@ -232,10 +210,6 @@ pub fn before_step<E: Estimator, C: Controller, A: Allocator>(
     let (hb, hb_fresh) = io.hb.read();
     if hb_fresh {
         flight.set_last_radio_heartbeat_us(Some(hb));
-    }
-    let (plan, plan_fresh) = io.plan.read();
-    if plan_fresh {
-        flight.set_plan_id(fw_flight::station::plan_id_of(plan));
     }
     let (seq, c) = fw_flight::station::take(&FLIGHT_CMD)?;
     flight.set_command(c);
