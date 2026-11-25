@@ -7,8 +7,6 @@
 //! Jobs: [`nominal_step`] on every IMU sample; [`covariance_predict`] (the
 //! structured P <- F P F^T + Q; [`covariance_predict_dense`] is the naive dense form, for comparison);
 //! one scalar fusion, [`fuse`] (dense H row) or [`fuse_position`] (H has a single 1).
-// Fixed-size arrays only; every index is a loop bound or a constant below the array length (matrix
-// code reads more plainly with indices).
 #![allow(clippy::indexing_slicing, clippy::needless_range_loop)]
 
 use fw_core::calib::GRAVITY_MSS;
@@ -96,9 +94,7 @@ fn dot3(a: &[f32; 3], b: &[f32; 3]) -> f32 {
 }
 
 /// The nominal propagation of one IMU sample: the quaternion from the bias-corrected gyro (exact
-/// axis-angle increment, libm `sinf`/`cosf`), the bias-corrected specific force rotated to NED plus
-/// gravity, velocity and (trapezoidal) position integration; sums the velocity increment for the
-/// next covariance propagation.
+/// axis-angle increment, libm `sinf`/`cosf`), the bias-corrected specific force rotated to NED plus.
 #[inline(never)]
 pub fn nominal_step(n: &mut Nominal, gyro: &[f32; 3], accel: &[f32; 3], dt: f32) {
     let da = [
@@ -153,11 +149,6 @@ fn add_q(p: &mut Cov, dt: f32, noise: &Noise) {
 }
 
 /// P <- F P F^T + Q over `dt` (the time summed since the last propagation), using F's structure:
-/// identity plus -R dt (attitude <- gyro bias, velocity <- accelerometer bias), -[R dvel]x
-/// (velocity <- attitude) and dt I (position <- velocity). In place: the row pass (F P) updates
-/// position rows before velocity rows before attitude rows, so each reads rows not yet changed; the
-/// column pass (. F^T) runs on rows 0 to 8 only (rows 9 to 14 keep their upper part, columns 9 to 14,
-/// which F^T does not change), then the upper triangle is mirrored and Q added.
 #[inline(never)]
 pub fn covariance_predict(p: &mut Cov, q: &[f32; 4], dvel: &[f32; 3], dt: f32, noise: &Noise) {
     let (rdt, skew) = blocks(q, dvel, dt);
@@ -237,7 +228,6 @@ pub fn covariance_predict_dense(p: &mut Cov, q: &[f32; 4], dvel: &[f32; 3], dt: 
 }
 
 /// The error-state injection: attitude by a left (NED-frame) small-angle quaternion, normalised;
-/// the others added. The error state is then zero (reset Jacobian taken as identity).
 #[inline(always)]
 fn inject(n: &mut Nominal, dx: &[f32; N]) {
     let dq = [1.0, 0.5 * dx[ATT], 0.5 * dx[ATT + 1], 0.5 * dx[ATT + 2]];
@@ -251,9 +241,7 @@ fn inject(n: &mut Nominal, dx: &[f32; N]) {
 }
 
 /// The rest of a scalar fusion once P H^T (`ph`) and the innovation variance `s` are known: the gate
-/// (innovation^2 <= gate^2 s), K = P H^T / s, the state correction K innovation injected into the
-/// nominal state, and P <- P - K (H P), with H P = (P H^T)^T by symmetry: the upper triangle is
-/// computed and mirrored (symmetrised) and the diagonal held at or above 0.
+/// (innovation^2 <= gate^2 s), K = P H^T / s, the state correction K innovation injected into the.
 #[inline(always)]
 fn finish(n: &mut Nominal, p: &mut Cov, ph: &[f32; N], s: f32, innov: f32, gate: f32) -> bool {
     if s.is_nan() || s <= 0.0 || innov * innov > gate * gate * s {
@@ -399,8 +387,7 @@ mod tests {
         std::println!("structured vs dense: worst relative difference {worst:e}");
     }
 
-    /// The textbook scalar update: K = P H^T / (H P H^T + R), P = (I - K H) P with full products,
-    /// then (P + P^T) / 2 and the diagonal floor; dx = K innovation.
+    /// The textbook scalar update: K = P H^T / (H P H^T + R), P = (I - K H) P with full products.
     fn textbook(p: &Cov, h: &[f32; N], innov: f32, var: f32) -> (Cov, [f32; N]) {
         let mut ph = [0.0f32; N];
         for i in 0..N {
@@ -452,12 +439,10 @@ mod tests {
             let n0 = random_nominal(&mut rng);
             let p0 = random_p(&mut rng);
             let innov = rng.next() * 0.5;
-            // Dense row.
             let h: [f32; N] = core::array::from_fn(|_| rng.next());
             let (mut n, mut p) = (n0, p0);
             assert!(fuse(&mut n, &mut p, &h, innov, 0.25, 1e3));
             check_fusion(&n0, &p0, &h, &n, &p, innov, 0.25);
-            // Position row, and the same row through the general fusion.
             let axis = round % 3;
             let mut e = [0.0f32; N];
             e[POS + axis] = 1.0;
@@ -482,7 +467,6 @@ mod tests {
 
     #[test]
     fn nominal_step_integrates_rate_and_gravity() {
-        // Level, at rest: specific force -g on body z; 1 rad/s about z for 803.5 samples (1 s).
         let mut n = Nominal {
             q: [1.0, 0.0, 0.0, 0.0],
             v: [0.0; 3],

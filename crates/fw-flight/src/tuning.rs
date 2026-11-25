@@ -50,7 +50,6 @@ pub struct Tuning {
     pub arm_thr_max: f32,
     /// Below this multiple of the weight m g the collective cannot lift the vehicle at any point of the thrust
     /// spread, so the vehicle is treated as on the ground and the rate integrators are held at 0. 0.5/0.7 = 0.714:
-    /// half of the hover collective at the weakest point of the +/-30 % thrust spread (ArduPilot's hover/2).
     pub ground_thrust_g: f32,
     /// `MahonyBaro`'s vertical filter: covariance propagation period, us.
     pub nav_predict_us: u64,
@@ -86,7 +85,6 @@ pub struct Tuning {
     /// Fastest descent the throttle stick asks for, and the largest descent-rate setpoint, m/s. PX4 MPC_Z_VEL_MAX_DN.
     pub pilot_speed_dn_ms: f32,
     /// Dead zone of the throttle stick in altitude hold, as a share of full travel on each side of the centre 0.5.
-    /// ArduPilot THR_DZ, 100 us of 1000 (ArduCopter/config.h:523).
     pub pilot_thr_dz: f32,
     /// Altitude hold: the height target is integrated only while it is within this many seconds of the limit climb or
     /// descent speed from the estimate, s (Betaflight alt_hold_multirotor.c:146).
@@ -105,22 +103,18 @@ pub struct Tuning {
     /// Velocity error integral to horizontal acceleration, (m/s^2)/m. PX4 MPC_XY_VEL_I_ACC (ArduPilot 1.0).
     pub psc_velxy_i: f32,
     /// Fastest horizontal speed the sticks ask for at full deflection, and the largest horizontal velocity setpoint,
-    /// m/s. The default of the runtime parameter `PILOT_SPEED_XY` (range 3 to 20): the
-    /// flight code takes the value in force at the arming step. ArduPilot POSCONTROL_SPEED_MS (AC_PosControl.h:25).
+    /// m/s. The default of the runtime parameter `PILOT_SPEED_XY` (range 3 to 20): the.
     pub pilot_speed_xy_ms: f32,
     /// Dead zone of the roll and pitch sticks in position hold, as a share of full travel on each side of the centre.
-    /// PX4 MAN_DEADZONE; equals `pilot_thr_dz`.
     pub pilot_xy_dz: f32,
     /// Dead zone of the yaw stick in every mode, as a share of full travel on each side of the centre. ArduPilot
-    /// `channel_yaw->set_default_dead_zone(15)` (ArduCopter/radio.cpp:13), 15 us of the 400 us half-range of the default
-    /// calibration (RC min 1100, trim 1500, max 1900, `fw_settings::rc`), so 0.0375.
+    /// `channel_yaw->set_default_dead_zone(15)` (ArduCopter/radio.cpp:13), 15 us of the 400 us half-range of the default.
     pub pilot_y_dz: f32,
     /// Position hold: with the sticks centred the position is captured once the ground speed is below this, m/s. PX4
     /// MPC_HOLD_MAX_XY.
     pub pilot_hold_speed_ms: f32,
     /// Position hold's airborne latch: the time the collective must stay below the ground
-    /// threshold, armed, before the vehicle counts as landed, us. ArduPilot LAND_DETECTOR_TRIGGER_SEC 1.0 s
-    /// (ArduCopter/config.h:359-360; land_detector.cpp:78, :151-156).
+    /// threshold, armed, before the vehicle counts as landed, us. ArduPilot LAND_DETECTOR_TRIGGER_SEC 1.0 s.
     pub land_detect_us: u64,
     /// `Eskf`: the IMU history the delayed horizon
     /// may use, us.
@@ -165,25 +159,19 @@ pub struct Tuning {
     /// Magnetic declination, east positive, rad: 3.195 deg E (WMM2025).
     pub nav_mag_declination_rad: f32,
     /// `EskfSteer` output predictor: time constant of the velocity tracking, s.
-    /// PX4 EKF2_TAU_VEL default, `output_predictor.cpp:326`; ArduPilot EK3_TAU_OUTPUT 25 cs.
     pub nav_out_tau_vel_s: f32,
     /// `EskfSteer` output predictor: time constant of the position tracking, s.
-    /// PX4 EKF2_TAU_POS, `output_predictor.cpp:327`.
     pub nav_out_tau_pos_s: f32,
     /// `EskfSteer` output predictor: the share of the attitude error taken out per delay time.
-    /// PX4 `output_predictor.cpp:311`; ArduPilot `AP_NavEKF3_core.cpp:938`.
     pub nav_out_att_gain: f32,
     /// `EskfSteer` output predictor: gain of the integral term of the velocity and position tracking.
-    /// PX4 `output_predictor.cpp:350`, `:354`; ArduPilot `AP_NavEKF3_core.cpp:970-973`.
     pub nav_out_int_gain: f32,
     /// RPM notch: harmonics of each
-    /// rotor's frequency that get a notch, at most 3 (the multiple-angle identities stop there). Betaflight
-    /// pg/rpm_filter.c:33 (rpm_filter_harmonics 3).
+    /// rotor's frequency that get a notch, at most 3 (the multiple-angle identities stop there). Betaflight.
     pub notch_harmonics: usize,
     /// RPM notch: Q of every notch. Betaflight pg/rpm_filter.c:36 (rpm_filter_q 500, shown /100 = 5).
     pub notch_q: f32,
     /// RPM notch: lowest centre, Hz, and the frequency where a harmonic's weight starts to rise from 0.
-    /// Chosen so the notch crosses smoothly near the ground idle (61 Hz).
     pub notch_min_hz: f32,
     /// RPM notch: the width of the weight's rise, Hz: full weight from `notch_min_hz` + this.
     pub notch_fade_hz: f32,
@@ -304,38 +292,38 @@ impl Gains {
     /// The lower bounds: default / 3 rounded outward to 3 significant figures (only refuses a downward
     /// slip).
     pub const MIN: Gains = Gains([
-        1.5,     // ATC_ANG_RP_P: R
-        0.45,    // ATC_ANG_YAW_P: R
-        0.0553,  // ATC_RAT_RLL_P: R
-        0.0530,  // ATC_RAT_PIT_P: R
-        0.0295,  // ATC_RAT_YAW_P: R
-        0.0553,  // ATC_RAT_RLL_I: R
-        0.0530,  // ATC_RAT_PIT_I: R
-        0.00295, // ATC_RAT_YAW_I: R
-        0.00248, // ATC_RAT_RLL_D: R
-        0.00238, // ATC_RAT_PIT_D: R
-        0.0910,  // ATC_RAT_RLL_IMAX: R
-        0.0830,  // ATC_RAT_PIT_IMAX: R
-        0.0118,  // ATC_RAT_YAW_IMAX: R
-        6.66,    // ATC_RAT_FLTD: R
+        1.5,
+        0.45,
+        0.0553,
+        0.0530,
+        0.0295,
+        0.0553,
+        0.0530,
+        0.00295,
+        0.00248,
+        0.00238,
+        0.0910,
+        0.0830,
+        0.0118,
+        6.66,
     ]);
 
     /// The upper bounds: default x 3 rounded outward to 3 significant figures, except ATC_ANG_RP_P.
     pub const MAX: Gains = Gains([
-        12.0,   // ATC_ANG_RP_P: the exception: ArduPilot 3-12, PX4 max 12; x3 = 13.5 exceeds both
-        4.05,   // ATC_ANG_YAW_P: R
-        0.498,  // ATC_RAT_RLL_P: R
-        0.477,  // ATC_RAT_PIT_P: R
-        0.266,  // ATC_RAT_YAW_P: R
-        0.498,  // ATC_RAT_RLL_I: R
-        0.477,  // ATC_RAT_PIT_I: R
-        0.0266, // ATC_RAT_YAW_I: R
-        0.0224, // ATC_RAT_RLL_D: R
-        0.0215, // ATC_RAT_PIT_D: R
-        0.819,  // ATC_RAT_RLL_IMAX: R, below the 0.911 N.m authority
-        0.747,  // ATC_RAT_PIT_IMAX: R, below 0.831 N.m
-        0.107,  // ATC_RAT_YAW_IMAX: R, below 0.118 N.m
-        60.0,   // ATC_RAT_FLTD: R, equals the gyro PT1
+        12.0,
+        4.05,
+        0.498,
+        0.477,
+        0.266,
+        0.498,
+        0.477,
+        0.0266,
+        0.0224,
+        0.0215,
+        0.819,
+        0.747,
+        0.107,
+        60.0,
     ]);
 
     /// The 14 gains of `tuning`.
@@ -454,11 +442,9 @@ mod tests {
         let back = d.with_gains(Gains::of(&d));
         assert_eq!(back, d);
         assert_eq!(std::format!("{back:?}"), std::format!("{d:?}"));
-        // Yaw D is not a gain: any tuning keeps its own.
         let mut other = d;
         other.atc_rat_d[2] = 0.125;
         assert_eq!(other.with_gains(Gains::of(&d)).atc_rat_d[2].to_bits(), 0.125f32.to_bits());
-        // `of` reads what `named` reads.
         assert_eq!(Gains::of(&d).0.map(f32::to_bits), named(&d).map(f32::to_bits));
     }
 
@@ -467,7 +453,6 @@ mod tests {
         let d = Tuning::DEFAULT;
         let base = Gains::of(&d);
         for i in 0..GAIN_COUNT {
-            // A value that is none of the other fields' defaults.
             let marker = 1234.5 + i as f32;
             let mut g = base;
             g.0[i] = marker;

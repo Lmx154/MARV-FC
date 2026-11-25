@@ -124,8 +124,7 @@ impl<const N: usize> Guidance<N> {
     }
 
     /// The vehicle's NE position and velocity, for the next `step` to place the carrot on the leg: `s` at the vehicle's
-    /// projection on the leg clamped to [0, L], `v` at its speed along the leg clamped to [0, cruise]. Unusable input
-    /// leaves no anchor.
+    /// projection on the leg clamped to [0, L], `v` at its speed along the leg clamped to [0, cruise]. Unusable input.
     pub fn anchor(&mut self, nav: &NavState) {
         let [pn, pe, _] = nav.position_m;
         let [vn, ve, _] = nav.velocity_ms;
@@ -185,8 +184,6 @@ impl<const N: usize> Guidance<N> {
             }
             if !self.done {
                 self.s = self.s.min(leg.len);
-                // The braking curve is taken at the end of this step's displacement at the present speed, so that v stays
-                // within sqrt(2 a r) of the distance left at the step's start (at the start, the curve lags one step).
                 let rem = (leg.len - self.s - self.v * dt_s).max(0.0);
                 let target_v = cruise.min(sqrtf(2.0 * Tuning::GUIDANCE_ACC_MS2 * rem));
                 let max_dv = Tuning::GUIDANCE_ACC_MS2 * dt_s;
@@ -259,8 +256,6 @@ impl<const N: usize> Guidance<N> {
     }
 }
 
-// Autonomous legs and the return leg: the law the AUTO and RETURN states fly. No indexing, no `clamp`, no
-// division by a value that can be 0; every output finite for any input.
 
 /// The vertical carrot's climb rate toward D_k, m/s (also the climb in place of RETURN).
 pub const LEG_CLIMB_MS: f32 = 3.0;
@@ -277,8 +272,7 @@ pub const ARRIVAL_MARGIN_M: f32 = LAG_E_MAX_M + 1.0;
 /// The AUTO and RETURN cruise speed is min(speed in force, this), m/s.
 pub const LEG_SPEED_MAX_MS: f32 = 6.8;
 /// The carrot closer than this to the leg's end, m, is at the end and at rest (f32 rounding, not a tuning value: 2 km out,
-/// a 1 ms braking step this close to the end is below half an ulp of `s`). The stop from there is at most
-/// sqrt(2 a 1 mm) = 0.08 m/s.
+/// a 1 ms braking step this close to the end is below half an ulp of `s`). The stop from there is at most.
 const LEG_SNAP_M: f32 = 1e-3;
 
 /// Home: NE from the origin (m) and D_home (m down).
@@ -420,9 +414,7 @@ impl LegGuidance {
     }
 
     /// AUTO entry or re-entry: the waypoints of `mission` converted at `origin`, the
-    /// first leg from the vehicle to waypoint `start`, both carrots at the vehicle and at rest. The radius is the
-    /// mission's (GDN_RADIUS, at most X - `ARRIVAL_MARGIN_M`); the cruise speed min(`speed_ms`, `LEG_SPEED_MAX_MS`). Refused (false, `Idle`) when the
-    /// position or home is not finite or `start` is not a waypoint.
+    /// first leg from the vehicle to waypoint `start`, both carrots at the vehicle and at rest. The radius is the.
     pub fn enter(&mut self, position_m: [f32; 3], home: Home, origin: &GeoPoint, mission: &GdnTargets, start: u8, speed_ms: f32) -> bool {
         let [pn, pe, pd] = position_m;
         let count = usize::from(mission.count).min(GDN_TARGETS);
@@ -454,8 +446,7 @@ impl LegGuidance {
     }
 
     /// RETURN entry: H_r = max(`return_m` above home, the present height), latched here (a non-finite `return_m`
-    /// counts as the present height); climb in place, then the leg to home. Refused (false, `Idle`) when the position
-    /// or home is not finite.
+    /// counts as the present height); climb in place, then the leg to home. Refused (false, `Idle`) when the position.
     pub fn enter_return(&mut self, position_m: [f32; 3], home: Home, return_m: f32, radius_m: f32, speed_ms: f32) -> bool {
         let [pn, pe, pd] = position_m;
         let finite = [pn, pe, pd, home.ne[0], home.ne[1], home.d].iter().all(|x| x.is_finite());
@@ -555,8 +546,6 @@ impl LegGuidance {
         let k = (1.0 - Self::dist(veh, self.carrot_ne()) / LAG_E_MAX_M).max(0.0).min(1.0);
         let dte = k * dt;
         if self.s < self.line.len {
-            // Braking: the speed v' with v'^2 = 2 a (r - (v + v') dte / 2), r the distance left, so that the carrot
-            // decelerates at exactly a and stops at the end.
             let (a, r) = (Tuning::GUIDANCE_ACC_MS2, self.line.len - self.s);
             let brake = 0.5 * (sqrtf((a * a * dte * dte + 8.0 * a * r - 4.0 * a * dte * self.v).max(0.0)) - a * dte);
             let target_v = self.cruise_ms.min(brake.max(0.0));
@@ -568,8 +557,6 @@ impl LegGuidance {
             self.v = 0.0;
         }
         let vel = [self.line.dir[0] * self.v * k, self.line.dir[1] * self.v * k];
-        // Toward D_k at most at the rate of its direction, the rate changing by at most `LEG_ACC_Z_MSS` dt and
-        // braking into D_k (the horizontal's braking law); stopped and at rest outside the lead cap.
         let mut accel_d = 0.0;
         if lead_ok {
             let gap = self.d_goal - self.d;
@@ -717,8 +704,7 @@ mod tests {
         }
     }
 
-    /// A vehicle that follows the setpoint exactly (a point mass with no lag): its position is the last setpoint's, its
-    /// velocity too. Anchored once. Returns every output.
+    /// A vehicle that follows the setpoint exactly (a point mass with no lag): its position is the last setpoint's, its.
     fn follow(g: &mut Guidance<4>, start: NavState, speed: f32, max_steps: usize, stop_when_done: bool) -> Vec<GuidanceOut> {
         let mut outs = Vec::new();
         g.anchor(&start);
@@ -741,7 +727,6 @@ mod tests {
     #[test]
     fn h1_the_target_is_converted_at_the_origin() {
         let mut g = Guidance::<4>::new();
-        // 300 m north, 200 m east, at an altitude 500 m above the origin's: the altitude must not matter.
         let t = geo_at(&ORIGIN, 300.0, 200.0, ORIGIN.alt_mm + 500_000);
         g.set_targets(&[t], 2.0);
         let o = g.step(&at_rest(0.0, 0.0), Some(ORIGIN), 5.0, 0);
@@ -750,7 +735,6 @@ mod tests {
         assert_eq!(d, 0.0);
         assert_eq!(o.target_ne, [n, e]);
         assert!((o.dist_m - hypotf(300.0, 200.0)).abs() < 0.05, "{}", o.dist_m);
-        // The target follows the origin it is given on every call (nothing is cached).
         let moved = GeoPoint { lat_e7: ORIGIN.lat_e7 + 10_000, ..ORIGIN };
         let o2 = g.step(&at_rest(0.0, 0.0), Some(moved), 5.0, DT_US);
         let [n2, e2, _] = ned_from_geo(&moved, &GeoPoint { alt_mm: moved.alt_mm, ..t });
@@ -761,7 +745,6 @@ mod tests {
     /// The bearing (clockwise from north) and the velocity direction for targets due N, E, S and W.
     #[test]
     fn h2_bearing_and_velocity_direction_for_the_four_compass_targets() {
-        // (n, e) of the target; the expected unit vector (north, east) toward it.
         for (tn, te) in [(200.0f32, 0.0f32), (0.0, 200.0), (-200.0, 0.0), (0.0, -200.0)] {
             let mut g = Guidance::<4>::new();
             g.set_targets(&[geo_at(&ORIGIN, f64::from(tn), f64::from(te), ORIGIN.alt_mm)], 2.0);
@@ -777,7 +760,6 @@ mod tests {
                 last = Some(o);
             }
             let o = last.unwrap();
-            // The vehicle is at (10, -10): the direction to the target is the leg's.
             let (dn, de) = (tn - 10.0, te + 10.0);
             let d = hypotf(dn, de);
             assert!((libm::cosf(o.bearing_rad) - dn / d).abs() < 1e-3 && (libm::sinf(o.bearing_rad) - de / d).abs() < 1e-3, "bearing {} for {tn} {te}", o.bearing_rad);
@@ -787,7 +769,6 @@ mod tests {
             assert!((v[0] / speed - dn / d).abs() < 1e-3 && (v[1] / speed - de / d).abs() < 1e-3, "velocity {v:?} for {tn} {te}");
             assert_eq!(v[2], 0.0);
         }
-        // Exactly due: the compass bearings themselves.
         for (te_n, te_e, brg) in [(200.0, 0.0, 0.0), (0.0, 200.0, core::f32::consts::FRAC_PI_2), (0.0, -200.0, -core::f32::consts::FRAC_PI_2)] {
             let mut g = Guidance::<4>::new();
             g.set_targets(&[geo_at(&ORIGIN, te_n, te_e, ORIGIN.alt_mm)], 2.0);
@@ -813,7 +794,6 @@ mod tests {
         let [w, _, _, z] = nav.attitude;
         assert_eq!(h, 2.0 * libm::atan2f(z, w));
         assert!((h - 0.7).abs() < 1e-5);
-        // The first call places the carrot at the vehicle.
         assert_eq!([p[0], p[1]], [1.0, 2.0]);
         assert_eq!(o.status, status::RUNNING);
     }
@@ -869,16 +849,13 @@ mod tests {
             tick += 1;
             g.step(&at_rest(n, e), Some(ORIGIN), 5.0, tick * DT_US)
         };
-        // Far from target 0 (3 m away from the radius): stays.
         let (n0, e0) = ne(0);
         for _ in 0..5 {
             let o = step(&mut g, n0 - 3.0, e0);
             assert_eq!((o.active, o.status), (0, status::RUNNING));
         }
-        // Inside the radius: advances once, and does so at the first call inside.
         let o = step(&mut g, n0 - 1.9, e0);
         assert_eq!((o.active, o.status), (1, status::ARRIVED | status::RUNNING));
-        // Still inside target 0's radius on the next calls: no second advance (target 1 is 100 m away).
         for _ in 0..5 {
             let o = step(&mut g, n0 - 1.9, e0);
             assert_eq!((o.active, o.status), (1, status::RUNNING));
@@ -886,21 +863,18 @@ mod tests {
         let (n1, e1) = ne(1);
         let o = step(&mut g, n1, e1 - 1.0);
         assert_eq!((o.active, o.status), (2, status::ARRIVED | status::RUNNING));
-        // The last target: done, once.
         let (n2, e2) = ne(2);
         let o = step(&mut g, n2 + 1.0, e2);
         assert_eq!((o.active, o.status), (2, status::ARRIVED | status::DONE));
         let (p, v, _) = position_of(&o);
         assert_eq!([p[0], p[1]], [n2, e2]);
         assert_eq!(v, [0.0; 3]);
-        // Done stays done, holding at the last target, wherever the vehicle is.
         for (n, e) in [(n2 + 1.0, e2), (n2 + 50.0, e2 - 30.0), (0.0, 0.0)] {
             let o = step(&mut g, n, e);
             assert_eq!((o.active, o.status), (2, status::DONE));
             let (p, v, _) = position_of(&o);
             assert_eq!(([p[0], p[1]], v), ([n2, e2], [0.0; 3]));
         }
-        // Reset starts over.
         g.reset();
         let o = step(&mut g, 0.0, 0.0);
         assert_eq!((o.active, o.status), (0, status::RUNNING));
@@ -931,8 +905,6 @@ mod tests {
             assert_eq!((out.active, out.status), (1, status::INVALID), "case {k}");
             finite(&out);
         }
-        // The first-leg start was dropped: after the dropout the leg starts at the vehicle's new position (index 1 here
-        // starts at target 0, so use a fresh run for the first leg).
         let mut g = Guidance::<4>::new();
         g.set_targets(&t, 2.0);
         let _ = g.step(&at_rest(0.0, 0.0), Some(ORIGIN), 5.0, 0);
@@ -941,11 +913,9 @@ mod tests {
         let o = g.step(&at_rest(20.0, 30.0), Some(ORIGIN), 5.0, 2 * DT_US);
         let (p, v, _) = position_of(&o);
         assert_eq!(([p[0], p[1]], [v[0], v[1]]), ([20.0, 30.0], [0.0, 0.0]), "a fresh start at the new position");
-        // No targets: no setpoint, not an error.
         let mut off = Guidance::<4>::new();
         let o = off.step(&good, Some(ORIGIN), 5.0, 0);
         assert_eq!((o.setpoint, o.status), (None, 0));
-        // No NaN from a NaN radius or speed zero.
         g.set_targets(&t, f32::NAN);
         finite(&g.step(&good, Some(ORIGIN), 0.0, 0));
         finite(&g.step(&good, Some(ORIGIN), -3.0, DT_US));
@@ -965,7 +935,6 @@ mod tests {
         let outs = follow(&mut g, at_rest(0.0, 0.0), 5.0, 20_000, true);
         let last = outs.last().unwrap();
         assert!(last.status & status::DONE != 0, "not done after {} steps", outs.len());
-        // Every advance happened once, in order, and within the radius of the target it left.
         let mut adv = Vec::new();
         for (k, w) in outs.windows(2).enumerate() {
             if w[1].active != w[0].active {
@@ -978,7 +947,6 @@ mod tests {
         for (i, &k) in adv.iter().enumerate() {
             assert!(outs[k].dist_m <= 2.0 + 5.0 * DT, "target {i}: {}", outs[k].dist_m);
         }
-        // At the end it is at the last target.
         let [n, e, _] = ned_from_geo(&ORIGIN, &GeoPoint { alt_mm: ORIGIN.alt_mm, ..t[3] });
         let (p, v, _) = position_of(last);
         assert_eq!(([p[0], p[1]], v), ([n, e], [0.0; 3]));
@@ -989,16 +957,13 @@ mod tests {
     fn anchor_places_the_carrot_on_the_leg_clamped() {
         let mut g = Guidance::<4>::new();
         g.set_targets(&[geo_at(&ORIGIN, 100.0, 0.0, ORIGIN.alt_mm)], 2.0);
-        // The first call starts the leg at the vehicle (0, 0); a later anchor moves the carrot along it.
         let _ = g.step(&at_rest(0.0, 0.0), Some(ORIGIN), 5.0, 0);
         let off = nav([40.0, 7.0, -1.0], [3.0, 4.0], 0.0, OK);
         g.anchor(&off);
         let o = g.step(&off, Some(ORIGIN), 5.0, DT_US);
         let (p, v, _) = position_of(&o);
-        // Projection 40 m along the leg (due north from (0, 0)), speed along it 3 m/s, then one step of a dt.
         assert!((p[0] - (40.0 + 3.0 * DT)).abs() < 0.01 && p[1].abs() < 1e-3, "{p:?}");
         assert!((v[0] - (3.0 + A * DT)).abs() < 1e-3, "{v:?}");
-        // Behind the start: clamped to 0; a speed backwards: 0; a speed above cruise: cruise.
         let back = nav([-10.0, 0.0, 0.0], [-2.0, 0.0], 0.0, OK);
         g.anchor(&back);
         let o = g.step(&back, Some(ORIGIN), 5.0, 2 * DT_US);

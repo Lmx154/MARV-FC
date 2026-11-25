@@ -70,8 +70,6 @@ impl Estimator for Mahony {
             None => 0.0,
         };
 
-        // rates_rads: PT1 of the gyro, started at the first sample. The accelerometer gets a PT1 of
-        // its own, the same way.
         match self.t_prev_us {
             Some(_) => {
                 let [r0, r1, r2] = self.rates;
@@ -94,8 +92,6 @@ impl Estimator for Mahony {
         }
         self.t_prev_us = Some(t_us);
 
-        // Measured down, d_meas = -f/|f| of the filtered f, only inside the window: the window and
-        // the direction come from the same filtered vector.
         let fl = self.accel_lpf;
         let norm = libm::sqrtf(fl.iter().map(|v| v * v).sum());
         let accepted = (ACCEL_MIN_G * GRAVITY_MSS..=ACCEL_MAX_G * GRAVITY_MSS).contains(&norm);
@@ -212,14 +208,10 @@ mod tests {
 
     #[test]
     fn mahony_converges_to_gravity_with_a_unit_quaternion() {
-        // Rolled +20 deg (right side down): R = Rx(phi) body to NED, so NED down in the body is
-        // R^T [0, 0, 1] = [0, sin phi, cos phi], and at rest the accelerometer reads f = -g times that:
-        // [0, -g sin 20, -g cos 20].
         let phi = 20.0f32.to_radians();
         let f = [0.0, -GRAVITY_MSS * phi.sin(), -GRAVITY_MSS * phi.cos()];
         let mut m = Mahony::new(&Tuning::DEFAULT);
         let mut t = 0;
-        // 1. Constant tilted gravity, zero gyro, from the first sample on: 2 s.
         for _ in 0..1600 {
             let nav = m.update(&sensors(t, [0.0; 3], f));
             check(&nav, t);
@@ -233,10 +225,6 @@ mod tests {
         }
         let held = m.update(&sensors(t, [0.0; 3], f)).attitude;
         t += PERIOD_US;
-        // 2. |f| held outside the window for 0.25 s (200 samples), each hold from a fresh estimator converged on d1 (the
-        //    tilt above, disarmed): 2 g along d2, the mirrored tilt; 0.5 g along d2; 0 g. The attitude at the end of
-        //    the hold is within the 0.1 deg of phases 1 and 4 of where it was before. Only a window that rejects the
-        //    filtered vector keeps it there: along d2 an accepted vector would pull the estimate toward d2.
         let f2 = [f[0], -f[1], f[2]];
         let tol_rad = 0.1f32.to_radians();
         for (name, scale, dir) in [("2 g", 2.0, f2), ("0.5 g", 0.5, f2), ("0 g", 0.0, f)] {
@@ -272,7 +260,6 @@ mod tests {
                 angle(end, before).to_degrees()
             );
         }
-        // 3. +1 rad/s about x for 0.1 s (80 samples), accelerometer outside the window: roll +0.1 rad within 1 %.
         let before = roll(held);
         let mut nav = m.update(&sensors(t, [0.0; 3], [0.0; 3]));
         for _ in 0..80 {
@@ -282,8 +269,6 @@ mod tests {
         }
         let gained = roll(nav.attitude) - before;
         assert!((gained - 0.1).abs() < 0.001, "gained {gained} rad");
-        // 4. Tilted gravity again: the estimate converges back to +20 deg (Kp 2.5 1/s disarmed: 3 s is 7.5 time
-        //    constants).
         for _ in 0..2400 {
             t += PERIOD_US;
             nav = m.update(&sensors(t, [0.0; 3], f));
@@ -303,16 +288,12 @@ mod tests {
         (2.0 * (w * y - z * x)).asin()
     }
 
-    /// One record of `ground-run-20261120.bin`: a recorded ground run, IMU1, the motors
-    /// spinning up with the vehicle on the ground. IMU and armed flag only. 33 bytes, little-endian: u64 t_us,
-    /// f32 gyro x y z (rad/s), f32 accel x y z (m/s^2), u8 armed.
+    /// One record of `ground-run-20261120.bin`: a recorded ground run, IMU1, the motors.
     const RECORD_BYTES: usize = 33;
     const GROUND_RUN: &[u8] = include_bytes!("../testdata/ground-run-20261120.bin");
 
     #[test]
     fn tilt_holds_on_the_ground_with_the_motors_running() {
-        // The motors' vibration puts |f| in and out of the window by sample; selecting or normalising raw samples
-        // slid the tilt by 3 deg here. The reference is the tilt of the mean of all the accelerometer samples.
         assert_eq!(GROUND_RUN.len() % RECORD_BYTES, 0);
         let records = GROUND_RUN.len() / RECORD_BYTES;
         assert_eq!(records, 12_075);
@@ -333,7 +314,6 @@ mod tests {
                 *m += f64::from(*v) / records as f64;
             }
         }
-        // Down in the body is -f/|f|: roll = atan2(d_y, d_z), pitch = atan2(-d_x, hypot(d_y, d_z)).
         let [dx, dy, dz] = mean.map(|v| -v);
         let ref_roll = dy.atan2(dz).to_degrees();
         let ref_pitch = (-dx).atan2(dy.hypot(dz)).to_degrees();

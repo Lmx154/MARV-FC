@@ -39,8 +39,6 @@ impl CardAllocator {
         let c = demand.thrust_n.max(4.0 * lo).min(4.0 * hi);
         let thrust_low = c > demand.thrust_n;
         let mut thrust_high = c < demand.thrust_n;
-        // At the floor the shares a and e are 0 (no authority at idle, no airmode): all four
-        // rotors at T_lo, so exactly IDLE_LEVEL, whatever the torques and the card's symmetry.
         if thrust_low {
             let all = Saturation {
                 roll: true,
@@ -52,8 +50,6 @@ impl CardAllocator {
             return ([lo; 4], all);
         }
 
-        // 2. Roll and pitch: the largest share a that keeps every rotor above T_lo and fits the span T_hi - T_lo,
-        //    then lower the collective by d (<= 0) so the top rotor is at most T_hi.
         let base = MIX.map(|[m_t, ..]| m_t * c);
         let roll_pitch = MIX.map(|[_, m_x, m_y, _]| m_x * tx + m_y * ty);
         let spread = largest(&roll_pitch) - smallest(&roll_pitch);
@@ -120,7 +116,6 @@ fn speed(level: u16) -> f32 {
 }
 
 /// [IDLE_LEVEL, LEVEL_MAX]. A NaN thrust gives IDLE_LEVEL.
-/// [IDLE_LEVEL, LEVEL_MAX] (decision 1b). A NaN thrust gives IDLE_LEVEL.
 fn level(thrust_n: f32) -> u16 {
     let w = libm::sqrtf(thrust_n / K_F);
     let span = (w - SPEED_AT_LEVEL_MIN) / (MAX_ROTOR_SPEED - SPEED_AT_LEVEL_MIN);
@@ -189,7 +184,6 @@ mod tests {
             thrust_high: false,
         };
         assert_eq!(out.saturation, want);
-        // A large torque demand at zero throttle: still idle on all four.
         let out = CardAllocator::new().allocate(&demand(0.0, [5.0, -5.0, 5.0]));
         assert_eq!(out.levels.level, [IDLE_LEVEL; 4]);
         assert_eq!(out.saturation, want);
@@ -201,7 +195,6 @@ mod tests {
         let hover = MASS * GRAVITY_MSS;
         let base = alloc.allocate(&demand(hover, [0.0; 3]));
         assert_eq!(base.saturation, NO_FLAGS);
-        // Hover: each rotor at sqrt(m g / (4 K_F)) through the map.
         let w = libm::sqrtf(hover / (4.0 * K_F));
         let want = f32::from(LEVEL_MIN)
             + (w - SPEED_AT_LEVEL_MIN) / (MAX_ROTOR_SPEED - SPEED_AT_LEVEL_MIN)
@@ -215,9 +208,7 @@ mod tests {
             "{lv:?}"
         );
 
-        // A small torque that fits at hover on every axis (yaw has far less authority than roll and pitch).
         let small = 0.01;
-        // (axis, lines that rise for + torque): +x left (2, 3); +y front (0, 2); +z CCW (0, 3).
         for (axis, up) in [(0, [2, 3]), (1, [0, 2]), (2, [0, 3])] {
             for sign in [1.0f32, -1.0] {
                 let mut t = [0.0; 3];
@@ -240,12 +231,10 @@ mod tests {
     fn allocator_gives_up_yaw_first() {
         let mut alloc = CardAllocator::new();
         let hover = MASS * GRAVITY_MSS;
-        // Roll 0.1 N.m fits the roll authority; yaw 10 N.m is far beyond the yaw authority.
         let (tx, tz) = (0.1, 10.0);
         let d = demand(hover, [tx, 0.0, tz]);
         let (u, sat) = alloc.thrusts(&d);
         assert!(sat.yaw && !sat.roll && !sat.pitch, "{sat:?}");
-        // The roll and pitch torques the four thrusts make: roll fully applied, no pitch.
         let roll: f32 = ROTORS
             .iter()
             .zip(u)
@@ -260,7 +249,6 @@ mod tests {
         for l in alloc.allocate(&d).levels.level {
             assert!((IDLE_LEVEL..=LEVEL_MAX).contains(&l));
         }
-        // A collective above 4 T_hi.
         let out = alloc.allocate(&demand(8.0 * alloc.t_hi, [0.0; 3]));
         assert!(out.saturation.thrust_high, "{:?}", out.saturation);
         assert_eq!(out.levels.level, [LEVEL_MAX; 4]);

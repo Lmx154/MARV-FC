@@ -255,7 +255,6 @@ impl VertKf {
         self.rejected = self.rejected.wrapping_add(1);
         if t_us.saturating_sub(self.last_aid_us) >= self.aid_timeout_us {
             // EKF3 ResetHeight: D to the barometer, the D row and column of P zeroed, P_DD the measurement variance;
-            // vD to 0 on the ground (disarmed), kept in the air.
             self.last_baro = (-h_b - self.x[0], r);
             self.x[0] = -h_b;
             if !armed {
@@ -493,7 +492,6 @@ mod tests {
         };
         let (mut differ, mut aided) = (0, 0);
         for (i, &(t_us, gyro, accel, armed)) in rows.iter().enumerate() {
-            // The log has no barometer: a constant sea-level pressure every 16th sample exercises VertKf.
             let p = (i as u64 % BARO_EVERY == 0).then_some(ISA_P0_PA);
             let s = sensors(t_us, gyro, accel, p);
             m.set_armed(armed);
@@ -502,7 +500,6 @@ mod tests {
             let (a, b) = (m.update(&s), mb.update(&s));
             assert!(same(&a, &b), "record {i}: Mahony {a:?} MahonyBaro {b:?}");
             aided += usize::from(b.valid.position_d);
-            // Negative control: the same Mahony with one gyro value one ulp up at record 1000.
             let mut sp = s;
             if i == 1000 {
                 sp.imu1.reading.gyro_rads[0] = f32::from_bits(gyro[0].to_bits() + 1);
@@ -529,7 +526,6 @@ mod tests {
         let navs = drive(&mut e, 0, k_baro, still);
         assert!(navs.last().unwrap().valid.position_d && navs.last().unwrap().valid.velocity_d);
         let last_fusion_us = (k_baro - 1) / BARO_EVERY * BARO_EVERY * PERIOD_US;
-        // The barometer stops for the timeout plus 1 s.
         let k_none = (t.nav_aid_timeout_us + 1_000_000) / PERIOD_US;
         let quiet = drive(&mut e, k_baro, k_none, |_| None);
         let drop = quiet
@@ -557,7 +553,6 @@ mod tests {
             late >= t.nav_aid_timeout_us && late < t.nav_aid_timeout_us + PERIOD_US,
             "dropped after {late} us"
         );
-        // It returns.
         let (fused, resets) = (e.vert().fused(), e.vert().resets());
         let k_back = k_baro + k_none;
         let back = drive(&mut e, k_back, 2 * BARO_EVERY, still);
@@ -579,10 +574,8 @@ mod tests {
         assert!(e.vert().fused() > fused);
     }
 
-    /// 2 s still, then a height step four gates wide held; returns (navs from the step on, the step's first sample k,
-    /// h_b of the faulted samples).
+    /// 2 s still, then a height step four gates wide held; returns (navs from the step on, the step's first sample k.
     fn step_fault(armed: bool, climb_ms: f64) -> (MahonyBaro, Vec<NavState>, u64, f32) {
-        // Scenario dimensioned at nav_baro_sigma_m 0.5; kept whatever the default.
         step_fault_with(&Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT }, armed, climb_ms)
     }
 
@@ -623,7 +616,6 @@ mod tests {
             after_us >= t.nav_aid_timeout_us
                 && after_us < t.nav_aid_timeout_us + BARO_EVERY * PERIOD_US
         );
-        // Afterwards the faulted barometer is accepted and D follows it.
         for n in &navs[reset..] {
             assert!((n.position_m[2] + h_b).abs() < 1e-3, "{n:?}");
             assert!(n.valid.position_d && n.valid.velocity_d);
@@ -633,7 +625,6 @@ mod tests {
 
     #[test]
     fn a6_b_held_step_fault_at_the_default_tuning_is_rejected_then_reset() {
-        // a6 at Tuning::DEFAULT: the gate, rejection and reset still work.
         let t = Tuning::DEFAULT;
         let (e, navs, _, h_b) = step_fault_with(&t, false, 0.0);
         assert_eq!(e.vert().resets(), 1, "Src 6: one height reset");
@@ -647,7 +638,6 @@ mod tests {
 
     #[test]
     fn a8_a_reset_disarmed_zeroes_vd_and_armed_keeps_it() {
-        // Any steady climb: 1 m/s up.
         for armed in [false, true] {
             let (e, navs, _, _) = step_fault(armed, 1.0);
             assert_eq!(e.vert().resets(), 1);
@@ -660,7 +650,6 @@ mod tests {
             std::println!("a8: armed {armed}: vD {before} m/s before the reset, {at} m/s after");
             assert!((before + 1.0).abs() < 0.1, "vD before {before}");
             if armed {
-                // Kept: only the step's propagation (a_D = -bD here) moves it.
                 assert!((at - before).abs() < 1e-3, "vD {before} -> {at}");
             } else {
                 assert_eq!(at, 0.0);
@@ -673,7 +662,6 @@ mod tests {
         let t = Tuning::DEFAULT;
         let bad = [f32::NAN, 0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY];
         let (mut a, mut b) = (MahonyBaro::new(&t), MahonyBaro::new(&t));
-        // Every third barometer sample bad from the first one on (so the first, bad, one does not initialise).
         let n = 4_000_000 / PERIOD_US;
         for k in 0..n {
             let tk = k * PERIOD_US;
@@ -707,8 +695,6 @@ mod tests {
         drive(&mut e, 0, k0, |_| Some(pressure_at(0.0)));
         e.vert.x[1] = f32::NAN;
         let navs = drive(&mut e, k0, BARO_EVERY, |_| Some(pressure_at(1.0)));
-        // k0 is a barometer step (k0 % 16 == 0): the NaN reached the fusion, the filter dropped out, and the next
-        // sample re-initialised it at the barometer, relative to the first datum.
         assert!(!navs[0].valid.position_d && !navs[0].valid.velocity_d && navs[0].valid.tilt);
         assert!(navs[1..].iter().all(|n| !n.valid.position_d));
         navs.iter().for_each(check_finite);
@@ -718,7 +704,6 @@ mod tests {
             n.valid.position_d && n.position_m[2] == -h_b && n.velocity_ms[2] == 0.0,
             "{n:?}"
         );
-        // The Mahony part is unaffected.
         let mut last = None;
         for k in 0..=k0 + BARO_EVERY {
             last = Some(m.update(&sensors(k * PERIOD_US, [0.0; 3], LEVEL, None)));

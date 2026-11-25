@@ -87,8 +87,7 @@ pub fn log_fields(status: &EscStatus, since_us: u64) -> LogFields {
 }
 
 /// The deadline of the exchange after the one due at `deadline_us`, given `now_us` (the time the
-/// task looks at the clock): `deadline + 1000 us`; but when `now` is already more than one period
-/// past that, `now`, so a stall costs one late frame and never a burst of catch-up frames.
+/// task looks at the clock): `deadline + 1000 us`; but when `now` is already more than one period.
 pub fn next_deadline(deadline_us: u64, now_us: u64) -> u64 {
     let next = deadline_us.saturating_add(PERIOD_US);
     if now_us.saturating_sub(next) > PERIOD_US {
@@ -173,21 +172,6 @@ impl Esc {
 
     /// The four frames of the exchange at `now_us`, by driver line, given the latest motor-test
     /// command `test` and the latest flight command `flight` (its step time, us, and the command).
-    ///
-    /// While [`hold`] keeps the flight command spinning: its throttles on all four lines and no
-    /// command 13 on any line (a running EDT burst is cut and held off as for a test spin); a
-    /// running motor-test spin ends as `Replaced` and is not resumed. The motor test runs only
-    /// while the flight command is Stop.
-    ///
-    /// While a spin is active (see `spin`): its throttle on its line, Stop on the other
-    /// three, and no command 13 on any line: a running EDT burst is cut and that line held off
-    /// 1 s from the cut.
-    ///
-    /// Otherwise: Stop, except on a line in an EDT burst. A line starts a burst when it has
-    /// answered continuously for 1 s or more, has given no extended reply for 1 s (or ever), and
-    /// is not held off; the burst is [`BURST_FRAMES`] consecutive `ExtendedTelemetryOn` frames on
-    /// that line only, then a 1 s hold-off. Nothing here depends on errors: the choice never stops
-    /// the stream.
     pub fn frames(
         &mut self,
         now_us: u64,
@@ -245,18 +229,7 @@ impl Esc {
     }
 
     /// The throttle and its driver line for the exchange at `now_us`, if `test` keeps a spin
-    /// active, and the spin status and ending. A spin is active while all of these hold, checked
-    /// on every frame in this order (the cap before the time limit):
-    ///
-    /// 1. the level is above 0 and at or below [`TEST_CAP`], the throttle built by `capped`
-    ///    (checked again per frame) and the line is 0..=3;
-    /// 2. `now < until_us`;
-    /// 3. the frame is within [`TEST_BURST_MAX_US`] of the spin's first throttle frame, with the
-    /// [`TEST_PUSH_MARGIN_US`] margin (the burst starts at its first throttle frame).
-    ///
-    /// A new `seq` ends a running spin (cause `Replaced`, or `Stop` for a level 0) and starts its
-    /// own count. A command ends once; its `seq` gets no throttle again. Nothing catches up: every
-    /// frame is judged at its own `now_us`.
+    /// active, and the spin status and ending. A spin is active while all of these hold, checked.
     fn spin(&mut self, now_us: u64, test: TestCmd) -> Option<(usize, Throttle)> {
         if test.seq != self.test.seq {
             if self.status.test_spin.is_some() {
@@ -326,12 +299,6 @@ impl Esc {
 
     /// Folds one exchange (finished at `now_us`, `duration_us` long) into the counters and latest
     /// values.
-    ///
-    /// - A good reply is [`LineCapture::Reply`]; every other capture counts as a non-reply.
-    /// - A line is answering while its latest good reply is younger than 100 ms; when that stops
-    ///   being true (found at the next exchange, whatever came with it) it counts one dropout, and
-    ///   its answering run starts again at its next good reply.
-    /// - An eRPM above 1 000 000 does not replace the stored eRPM.
     pub fn record(&mut self, now_us: u64, duration_us: u32, captures: &[LineCapture; LINES]) {
         let s = &mut self.status;
         if s.exchanges > 0 {
@@ -441,7 +408,6 @@ mod tests {
     #[test]
     fn log_fields_fresh_bits_and_units() {
         let mut st = EscStatus::INITIAL;
-        // Nothing reported: all 0, no bits.
         let f = log_fields(&st, 0);
         assert_eq!(
             (f.erpm, f.volts_cv, f.temp_c, f.flags),
@@ -461,7 +427,6 @@ mod tests {
         assert_eq!(f.volts_cv, [1_684, 0, i16::MAX, 0]);
         assert_eq!(f.temp_c, [42, 0, 0, 255]);
         assert_eq!(f.flags, 0b0_0001);
-        // All four captured after `since`, and the exchange sent the flight throttles.
         for line in &mut st.lines {
             line.erpm = Some((1, 9_000));
         }
@@ -512,10 +477,8 @@ mod tests {
             next = next_deadline(next, next + 145);
             assert_eq!(next, 5_000 + k * 1000);
         }
-        // One period behind is still caught up by the normal step, more than one is not.
         assert_eq!(next_deadline(10_000, 12_000), 11_000);
         assert_eq!(next_deadline(10_000, 12_001), 12_001);
-        // A 50 ms stall: the next deadline is `now`, then the period is normal again.
         let stalled_now = 10_000 + 50_000;
         let next = next_deadline(10_000, stalled_now);
         assert_eq!(next, stalled_now);
@@ -549,8 +512,7 @@ mod tests {
         }
     }
 
-    /// The burst gate, the hold-off, the restart after a dropout, no burst while extended
-    /// replies arrive. Lines 0 and 1 answer; 2 and 3 are silent.
+    /// The burst gate, the hold-off, the restart after a dropout, no burst while extended.
     #[test]
     fn the_edt_burst_follows_the_gate() {
         let mut esc = Esc::new();
@@ -558,11 +520,9 @@ mod tests {
         esc.start_end(0);
         let silent = LineCapture::Silent;
         let mut bursts: [Vec<u64>; LINES] = Default::default();
-        // 1. Answering from t = 0 (the first reply at the first exchange): no frame before 1 s.
         let both = |_t: u64| [stopped(), stopped(), silent, silent];
         run(&mut esc, &mut bursts, 0, 1000, &both);
         assert!(bursts.iter().all(|b| b.is_empty()));
-        // 2. At t = 1000 ms exactly 10 consecutive frames on lines 0 and 1 only.
         run(&mut esc, &mut bursts, 1000, 1100, &both);
         let expect: Vec<u64> = (1000..1010).collect();
         assert_eq!(bursts[0], expect);
@@ -570,16 +530,11 @@ mod tests {
         assert!(bursts[2].is_empty() && bursts[3].is_empty());
         assert_eq!(esc.status().lines[0].edt_bursts, 1);
         assert_eq!(esc.status().lines[2].edt_bursts, 0);
-        // 3. Hold-off of 1 s after the 10th frame (t = 1009): none before t = 2009.
         run(&mut esc, &mut bursts, 1100, 2009, &both);
         assert_eq!(bursts[0].len(), 10);
-        // 4. No extended reply came: a second burst at 2009.
         run(&mut esc, &mut bursts, 2009, 2100, &both);
         assert_eq!(bursts[0].len(), 20);
         assert_eq!(bursts[0].get(10), Some(&2009));
-        // 5. A dropout (line 1 silent 150 ms) and its return: the 1 s count restarts, so the burst
-        // comes 1 s after the first good reply back. Line 0 keeps answering and sees extended
-        // replies every 100 ms: no burst on it.
         let mixed = |t: u64| {
             let l0 = if t % 100 == 0 { voltage() } else { stopped() };
             let l1 = if (2100..2250).contains(&t) {
@@ -649,8 +604,7 @@ mod tests {
         }
     }
 
-    /// The line and level of the throttle frame, checking the motor-test frame rules: at most one
-    /// throttle frame, never above the cap, and only Stop beside it.
+    /// The line and level of the throttle frame, checking the motor-test frame rules: at most one.
     fn throttle_of(frames: &[LineFrame; LINES]) -> Option<(usize, u16)> {
         let mut found = None;
         for (l, f) in frames.iter().enumerate() {
@@ -717,7 +671,6 @@ mod tests {
             ending(1, 2, TEST_CAP + 1, TestCause::Cap, None, 0)
         );
         assert_eq!((s.test_spin, s.throttle_frames), (None, 0));
-        // A spin at the cap, then a new seq above it: Stop on all four from that exchange.
         let at_cap = spin_cmd(2, 2, TEST_CAP, 1_000_000);
         assert_eq!(exchange(&mut esc, 10_000, at_cap), Some((2, TEST_CAP)));
         let over = spin_cmd(3, 2, TEST_CAP + 1, 1_000_000);
@@ -730,7 +683,6 @@ mod tests {
             s.test_ended,
             ending(3, 2, TEST_CAP + 1, TestCause::Cap, None, 11_000)
         );
-        // A line above 3 is refused the same way.
         assert_eq!(
             esc.frames(12_000, spin_cmd(4, 4, 50, 1_000_000), NO_FLIGHT),
             [LineFrame::STOP; LINES]
@@ -740,8 +692,7 @@ mod tests {
         assert_eq!((s.test_spin, s.throttle_frames), (None, 1));
     }
 
-    /// Runs exchanges `from..to` ms with `test`, recording the times of command-13 frames per line
-    /// and of throttle frames with their line.
+    /// Runs exchanges `from..to` ms with `test`, recording the times of command-13 frames per line.
     fn run_cmd(
         esc: &mut Esc,
         from: u64,
@@ -765,8 +716,7 @@ mod tests {
         }
     }
 
-    /// one throttle frame, Stop on the other three, no command 13 during a spin; a running EDT
-    /// burst is cut, held off 1 s from the cut, and the burst gate resumes after the spin.
+    /// one throttle frame, Stop on the other three, no command 13 during a spin; a running EDT.
     #[test]
     fn a_spin_sends_one_throttle_frame_and_cuts_the_edt_burst() {
         let mut esc = Esc::new();
@@ -776,7 +726,6 @@ mod tests {
         let caps = [stopped(), stopped(), silent, silent];
         let mut edt: [Vec<u64>; LINES] = Default::default();
         let mut thr = Vec::new();
-        // Lines 0 and 1 are 3 frames into their burst (1000..1010) when the spin starts.
         run_cmd(
             &mut esc,
             0,
@@ -792,7 +741,6 @@ mod tests {
         assert_eq!(thr, (1003..1500).map(|t| (t, 1)).collect::<Vec<_>>());
         assert_eq!(edt[0], [1000, 1001, 1002]);
         assert_eq!(edt[1], [1000, 1001, 1002]);
-        // Stop at 1500; the cut lines' next burst is 1 s after the cut (1003), not after the spin.
         let stop = TestCmd {
             seq: 2,
             ..TestCmd::INITIAL
@@ -830,7 +778,6 @@ mod tests {
             ending(7, 3, 60, TestCause::Expiry, Some(5_000_000), 7_000_000)
         );
         assert_eq!(s.test_spin, None);
-        // A far-future until: the last throttle frame 3 s - 1 ms after the first, then Stop.
         let mut esc = Esc::new();
         let cmd = spin_cmd(8, 0, TEST_CAP, u64::MAX);
         assert_eq!(exchange(&mut esc, 1_000_000, cmd), Some((0, TEST_CAP)));
@@ -853,8 +800,7 @@ mod tests {
         assert_eq!((s.test_spin, s.throttle_frames), (None, 2));
     }
 
-    /// a stop ends a spin at the next exchange; a new seq on another line replaces it and its
-    /// 3 s count from its own first throttle frame.
+    /// a stop ends a spin at the next exchange; a new seq on another line replaces it and its.
     #[test]
     fn a_stop_ends_a_spin_and_a_new_seq_replaces_it() {
         let mut esc = Esc::new();
@@ -872,7 +818,6 @@ mod tests {
             ending(1, 3, 100, TestCause::Stop, Some(1_000_000), 1_002_000)
         );
         assert_eq!(s.test_spin, None);
-        // A stop with the spin's own seq ends it as well.
         let c = spin_cmd(3, 1, 50, 10_000_000);
         assert_eq!(exchange(&mut esc, 2_000_000, c), Some((1, 50)));
         assert_eq!(
@@ -884,7 +829,6 @@ mod tests {
             s.test_ended,
             ending(3, 1, 50, TestCause::Stop, Some(2_000_000), 2_001_000)
         );
-        // Replace: the new line from the next exchange, the earlier line Stop in it.
         let d = spin_cmd(4, 3, 100, 20_000_000);
         let b = spin_cmd(5, 0, 80, 20_000_000);
         assert_eq!(exchange(&mut esc, 3_000_000, d), Some((3, 100)));
@@ -920,7 +864,6 @@ mod tests {
         );
         assert_eq!(hold(0, MotorCommand::STOP, 0), MotorCommand::STOP);
         assert_eq!(hold(0, MotorCommand::STOP, 50_000_000), MotorCommand::STOP);
-        // `stale_spin` is true only for a spinning command older than FLIGHT_GAP_DISARM_US, not MOTOR_HOLD_MAX_US.
         assert!(!stale_spin(5_000, spin, 5_000));
         assert!(!stale_spin(5_000, spin, 5_001 + MOTOR_HOLD_MAX_US));
         assert!(!stale_spin(5_000, spin, 5_000 + FLIGHT_GAP_DISARM_US));
@@ -928,8 +871,7 @@ mod tests {
         assert!(!stale_spin(0, MotorCommand::STOP, 50_000_000));
     }
 
-    /// a spinning flight command gives its throttles on all four lines, cuts the EDT burst and
-    /// ends a running motor test as `Replaced`, not resumed; a stale one gives Stop.
+    /// a spinning flight command gives its throttles on all four lines, cuts the EDT burst and.
     #[test]
     fn a_spinning_flight_command_takes_all_four_lines() {
         let mut esc = Esc::new();
@@ -939,7 +881,6 @@ mod tests {
         let caps = [stopped(), stopped(), silent, silent];
         let mut edt: [Vec<u64>; LINES] = Default::default();
         let mut thr = Vec::new();
-        // Lines 0 and 1 are 3 frames into their burst (1000..1010) when the flight command spins.
         run_cmd(
             &mut esc,
             0,
@@ -966,7 +907,6 @@ mod tests {
         }
         assert_eq!(esc.status().flight_frames, 97);
         assert_eq!(esc.status().lines[0].edt_bursts, 1);
-        // Stale from 1110 (stamped 1099.5 ms): Stop, and the cut lines' next burst 1 s after the cut.
         let stale = (1_099_500, spin);
         for t in 1100..2100u64 {
             let frames = esc.frames(t * 1000, TestCmd::INITIAL, stale);
@@ -984,7 +924,6 @@ mod tests {
         let expect: Vec<u64> = [1000, 1001, 1002].into_iter().chain(2003..2013).collect();
         assert_eq!(edt[0], expect);
         assert_eq!(esc.status().flight_frames, 107);
-        // A motor test runs while the command is Stop; the spinning command replaces it for good.
         let test = spin_cmd(1, 2, 50, u64::MAX);
         let frames = esc.frames(3_000_000, test, stale);
         assert_eq!(throttle_of(&frames), Some((2, 50)));
@@ -998,8 +937,7 @@ mod tests {
         assert_eq!(throttle_of(&esc.frames(3_002_000, test, stale)), None);
     }
 
-    /// a 50 ms clock jump: the next frame is throttle if the spin still holds, Stop if it
-    /// expired meanwhile; one frame per exchange, no catch-up.
+    /// a 50 ms clock jump: the next frame is throttle if the spin still holds, Stop if it.
     #[test]
     fn a_clock_jump_gives_stop_if_expired_and_no_catch_up() {
         let mut esc = Esc::new();
@@ -1017,7 +955,6 @@ mod tests {
             ending(1, 2, 100, TestCause::Expiry, Some(0), 1_039_000)
         );
         assert_eq!(s.throttle_frames, 903);
-        // Across the 3 s limit.
         let cmd = spin_cmd(2, 2, 100, u64::MAX);
         assert_eq!(exchange(&mut esc, 10_000_000, cmd), Some((2, 100)));
         assert_eq!(exchange(&mut esc, 12_980_000, cmd), Some((2, 100)));

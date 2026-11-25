@@ -34,8 +34,7 @@ pub mod step;
 pub mod tuning;
 
 /// The flight core's liveness answer (`fbeat`): waits on `kick`, then copies `ping` into `pong`,
-/// forever. Core 0 bumps `ping` and kicks; a `pong` that stops following `ping` means the flight
-/// core makes no progress. Any kick bits wake it. No timer, no lock, no log.
+/// forever. Core 0 bumps `ping` and kicks; a `pong` that stops following `ping` means the flight.
 pub async fn liveness(kick: &Kick, ping: &AtomicU32, pong: &AtomicU32) -> ! {
     loop {
         kick.wait().await;
@@ -44,8 +43,7 @@ pub async fn liveness(kick: &Kick, ping: &AtomicU32, pong: &AtomicU32) -> ! {
 }
 
 /// Runs `fut`, storing `id` into `running` each time the executor polls it, that is each time the
-/// task resumes after an await: the watchdog's record of the task that ran last. A plain atomic
-/// store; no timer, no lock, no log.
+/// task resumes after an await: the watchdog's record of the task that ran last. A plain atomic.
 pub async fn tagged<F: Future>(running: &AtomicU8, id: u8, fut: F) -> F::Output {
     let mut fut = pin!(fut);
     poll_fn(|cx| {
@@ -85,7 +83,6 @@ mod tests {
     }
 }
 
-// Last in the file, so that no line of the flight code moves (panic locations carry line numbers).
 pub mod eskf_n0;
 pub mod mahony_baro;
 pub mod eskf;

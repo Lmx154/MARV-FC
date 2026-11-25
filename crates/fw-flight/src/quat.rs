@@ -38,7 +38,6 @@ pub(crate) fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
 }
 
 /// NED down seen in the body frame (FRD, unit vector) for a body-to-NED q:
-/// third row of R(q).
 pub(crate) fn down_in_body(q: [f32; 4]) -> [f32; 3] {
     let [w, x, y, z] = q;
     [
@@ -49,7 +48,6 @@ pub(crate) fn down_in_body(q: [f32; 4]) -> [f32; 3] {
 }
 
 /// One step of a first-order low-pass (PT1): y' = y + a (x - y) with a = dt / (dt + 1 / (2 pi f_c)).
-/// `dt_s` in s (0 keeps y), `cutoff_hz` in Hz.
 pub(crate) fn pt1(y: f32, x: f32, dt_s: f32, cutoff_hz: f32) -> f32 {
     let rc = 1.0 / (2.0 * PI * cutoff_hz);
     y + dt_s / (dt_s + rc) * (x - y)

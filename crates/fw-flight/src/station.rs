@@ -123,7 +123,6 @@ mod tests {
 
     #[test]
     fn mode_codes_of_the_contract_for_all_nine_values() {
-        // 0 is "not reported" (no step has run); 1 to 8 are the states.
         let states = [
             (State::Pilot, 1),
             (State::Takeover, 2),

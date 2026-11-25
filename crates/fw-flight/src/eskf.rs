@@ -1,56 +1,21 @@
 //! The navigation filter: a 15-state error-state Kalman filter on IMU1, barometer, compass and GNSS at a delayed time
-//! horizon, t_now - nav_gps_delay_us, so that every measurement is fused at its own time.
+//! horizon, t_now - nav_gps_delay_us, so that every measurement is fused at its own time. [`NavState::t_us`] is the
+//! horizon time. Arithmetic is [`crate::eskf_n0`]'s; pure, no lock, timer or log. NKI log records are returned by
+//! [`Eskf::events`].
 //!
-//! For `ImuBaro` and `Imu`, [`NavState::rates_rads`] is the PT1 of the raw gyro (`Tuning::ins_gyro_lpf_hz`, Mahony's
-//! form: dt from successive sample times capped at `DT_MAX_US`, started at the first sample with its value) minus the
-//! gyro-bias estimates x and y, so with those at 0 it equals `Mahony`'s rates bit for bit. The z gyro bias is NOT
-//! subtracted from the rate output (the yaw rate hold reads it: with the stick centred the vehicle turns at the raw
-//! gyro's z offset, not at the estimated bias minus the true one); the attitude still integrates the gyro minus the full
-//! bias. `Full` keeps the raw gyro of its horizon sample minus the full bias.
+//! Each step integrates the nominal state and does at most ONE heavy job (covariance propagation, scalar fusion,
+//! alignment or reset), taken from a queue of one GNSS epoch (4 jobs), one barometer set (3) and one compass sample (1);
+//! a newer set of the same kind replaces an unprocessed one.
 //!
-//! For `ImuBaro` and `Imu`, one tilt re-alignment at the arming edge. Each covariance propagation closing an interval
-//! that was disarmed throughout keeps its mean bias-corrected specific force (the first one after a disarm is skipped,
-//! and the disarm clears it). In the first `update` after the armed state went false to true, when the tilt is aligned
-//! and that force is inside the alignment window, roll and pitch are set from it as in the first alignment with the yaw
-//! (the Euler yaw, atan2(R10, R00), of the attitude before the step) kept; v_N and v_E go to 0, the hold position to the
-//! current N and E, and the cross terms of the three attitude and the N/E velocity rows and columns of P are zeroed with
-//! every variance kept. It is that step's one heavy job; the queued jobs run later. Outside the window, or with no
-//! stored interval, nothing changes. `Full` never does it.
+//! Variants ([`Aiding`]): `Full` (ESKF3); `ImuBaro` (ESKF2): no compass, no horizon delay, never aligns the yaw, holds
+//! N and E with each barometer set, GNSS only with the VelD option ([`EskfN::with_gps_vd`]: one scalar on v_D, time
+//! aligned through a ring of [`VD_RING`] entries); `Imu` (ESKF1): also no barometer, holds N, E and D.
 //!
-//! For `ImuBaro` the barometer scalar's Kalman gain has support on position D, velocity D and accelerometer-bias z only
-//! (a 3-state vertical filter beside the attitude filter): every other entry is set to zero and P is updated in Joseph
-//! form with that gain for every entry (as the no-aid scalars do for the bias entries), so in `ImuBaro` and `Imu`
-//! b_a,x and b_a,y are exactly 0.0 on every step, and the barometer does not move the attitude, the gyro bias or the
-//! horizontal velocity and position; b_a,z is still learned through its covariance with D. `Full` and `Imu` are
-//! untouched. Without GPS the horizontal accelerometer bias is not estimated: the real one remains as a tilt offset of
-//! up to about 1 deg, as with Mahony. The mask is constant in production; test-only fields restore the full gain or also
-//! mask b_a,z for a test's negative control.
-//!
-//! The arithmetic is [`crate::eskf_n0`]'s: nominal integration on every IMU1 sample (at the horizon), the structured
-//! F P F^T + Q every nav_predict_us, sequential scalar fusions. Each step integrates the nominal state and does at
-//! most ONE heavy job (one covariance propagation, one scalar fusion, an alignment or a reset), taken from a queue of one
-//! GNSS epoch (4 jobs), one barometer set (3) and one compass sample (1); a newer set of the same kind replaces an
-//! unprocessed one. Pure arithmetic: no lock, timer or log. The NKI log codes are returned by [`Eskf::events`] for the
-//! caller to write.
-//!
-//! Three variants, chosen at construction ([`Aiding`]): `Full` (ESKF3) is the filter described here; `ImuBaro` (ESKF2)
-//! ignores GNSS (unless built with the VelD option below) and compass, has no horizon delay (every IMU1 sample is
-//! integrated in the step it arrives, so the state refers to the current sample), never aligns the yaw and holds N and E
-//! with each barometer set; `Imu` (ESKF1) also ignores the barometer and holds N, E and D at the tilt alignment's values,
-//! one set per barometer period of horizon time (no-aid source code 5 for all three axes).
-//!
-//! `ImuBaro` built with the VelD option ([`EskfN::with_gps_vd`]; [`EskfN::with_aiding`] builds it without) also fuses
-//! the GNSS vertical velocity as one scalar, z = vel_ned_mm_s[2] x 1e-3 m/s (down positive), sigma
-//! `Tuning::nav_gps_vd_sigma_ms`, gated at nav_gate_sigma, with the barometer's masked gain (support on D, v_D and b_a,z;
-//! Joseph form). Time alignment: every nav_predict_us the time and S, the running sum of the IMU-only change of the
-//! nominal v_D, go into a ring of [`VD_RING`] entries; an epoch is predicted as v_D(now) - (S_now - S(t_m)), t_m = arrival -
-//! nav_gps_delay_us, S(t_m) the newest entry at or before t_m (none: stale, counted, skipped). Acceptance: tilt aligned,
-//! fix type >= 3 with a position, the interval rule as `Full`'s, armed, not an exact repeat of the previous fix (screened,
-//! NKI Src 12 Ok 3), a velocity, not stale. Gated: counted only. A re-initialisation empties the ring and sets S to 0. The
-//! GNSS job runs after the propagation and before the barometer; the vertical flags, the aiding timeout and the height
-//! reset stay the barometer's.
-//!
-//! [`NavState::t_us`] of this estimator is the horizon time, the time the state refers to.
+//! For `ImuBaro` and `Imu`: `rates_rads` is the PT1 of the raw gyro (Mahony's form) minus the x and y bias estimates, so
+//! with those at 0 it equals `Mahony`'s bit for bit; the z bias is NOT subtracted (the yaw rate hold reads it). The
+//! barometer scalar's gain has support on D, v_D and b_a,z only (Joseph form), so b_a,x and b_a,y stay exactly 0. One
+//! tilt re-alignment at the arming edge from the mean specific force of the last disarmed interval, if inside the
+//! alignment window: roll and pitch set (yaw kept), v_N and v_E to 0, attitude and N/E velocity cross terms of P zeroed.
 //!
 //! Behaviour notes:
 //! - The Src 9 reset fires at the first accepted, aligned, non-repeated epoch after EVERY arming; any change of the
@@ -114,7 +79,6 @@ pub const WGS84_A_M: f32 = 6_378_137.0;
 pub const WGS84_F: f32 = 1.0 / 298.257_23;
 /// The span of the data the near-zero-speed screen was validated on, N0c/N0e at 1 Hz, us: the
 /// position-difference speed is taken between the current epoch and the newest earlier epoch at least this much older.
-/// A derived rule, for the owner's approval.
 pub const SPD_SPAN_US: u64 = 1_000_000;
 /// Fixes kept for that span: 1 s at the receiver's highest rate, 10 Hz, the current one, and one for jitter.
 const FIX_HIST: usize = 12;
@@ -126,9 +90,7 @@ const MAG_RATE_HZ: u64 = 100;
 /// rate, 25.
 pub const BARO_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * BARO_RATE_HZ).div_ceil(1_000_000) as usize;
 /// Compass samples that can wait: the same window times the rate, 50. The once-per-second fusion does not shrink the
-/// worst case: which sample is used is decided at the horizon (the health test needs the horizon tilt, and a refused
-/// sample does not use the slot), so any sample of the window may be the one; samples that arrive before the next
-/// fusion slot while the yaw is aligned are not kept.
+/// worst case: which sample is used is decided at the horizon (the health test needs the horizon tilt, and a refused.
 pub const MAG_WAIT: usize = (Tuning::DEFAULT.nav_buffer_us * MAG_RATE_HZ).div_ceil(1_000_000) as usize;
 /// Entries of the VelD option's S ring: nav_buffer_us / nav_predict_us + 1, 51.
 pub const VD_RING: usize = (Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_predict_us + 1) as usize;
@@ -136,8 +98,7 @@ pub const VD_RING: usize = (Tuning::DEFAULT.nav_buffer_us / Tuning::DEFAULT.nav_
 const E7_TURN: i64 = 3_600_000_000;
 
 /// North, east and down (m) of `point` from `origin`: i64 differences first, the longitude
-/// difference wrapped to [-180, 180) degrees, scaled on the tangent plane at the origin with the WGS 84 meridian and
-/// prime-vertical radii (the simulator's form); down = -(alt difference) / 1000.
+/// difference wrapped to [-180, 180) degrees, scaled on the tangent plane at the origin with the WGS 84 meridian and.
 pub fn ned_from_geo(origin: &GeoPoint, point: &GeoPoint) -> [f32; 3] {
     let e2 = WGS84_F * (2.0 - WGS84_F);
     let lat0 = origin.lat_e7 as f32 * 1e-7 * PI / 180.0;
@@ -478,8 +439,7 @@ pub struct EskfN<const R: usize> {
     /// Test control: the same scalar also leaves b_a,z alone.
     #[cfg(test)]
     baro_abias_z_mask: bool,
-    /// Test switch for a `Flight` test that must stay armed: the compass reset after the timeout also while armed (the rule
-    /// before the latch), through the same `mag_job` -> `yaw_set` path.
+    /// Test switch for a `Flight` test that must stay armed: the compass reset after the timeout also while armed (the rule.
     #[cfg(test)]
     pub(crate) armed_yaw_reset: bool,
     /// Test control: horizontal aiding stopping at the timeout leaves `started` set.
@@ -567,11 +527,7 @@ pub fn yaw_innov(q: &[f32; 4], m_b: &[f32; 3], dec: f32) -> f32 {
     wrap(dec - atan2f(m[1], m[0]))
 }
 
-/// The yaw row on the NED attitude error: the exact Jacobian of
-/// the predicted azimuth atan2(m_E, m_N) of m = R(q) m_b, the error composed on the left (q <- [1, dθ/2] q, so
-/// m <- m + dθ x m): [-m_N m_D / c, -m_E m_D / c, 1], c = m_N^2 + m_E^2. None when c <= f32::EPSILON |m|^2: a
-/// horizontal component below sqrt(f32::EPSILON) (3.5e-4) of the field, where its direction is set by the rounding
-/// of m (one ulp of |m| per component) to worse than 3.5e-4 rad and the row's entries exceed 1/sqrt(f32::EPSILON).
+/// The yaw row on the NED attitude error: the exact Jacobian of.
 pub fn yaw_h(q: &[f32; 4], m_b: &[f32; 3]) -> Option<[f32; 3]> {
     let m = mag_ned(q, m_b);
     let c = m[0] * m[0] + m[1] * m[1];
@@ -588,15 +544,12 @@ impl<const R: usize> EskfN<R> {
         Self::with_aiding(tuning, Aiding::Full)
     }
 
-    /// As [`EskfN::new`] with the aiding set `aiding`. Err with [`EskfError::RingTooSmall`] when `R` is 0, or the horizon delay
-    /// (`Full` with nav_gps_delay_us > 0) meets a ring shorter than [`RING`]; with no delay any ring of one or more is
-    /// the same filter (the sample pushed is integrated in the same step).
+    /// As [`EskfN::new`] with the aiding set `aiding`. Err with [`EskfError::RingTooSmall`] when `R` is 0, or the horizon delay.
     pub fn with_aiding(tuning: &Tuning, aiding: Aiding) -> Result<Self, EskfError> {
         Self::build(tuning, aiding, false)
     }
 
-    /// `ImuBaro` with the VelD option. Err as [`EskfN::with_aiding`], and with [`EskfError::RingTooSmall`] when
-    /// nav_predict_us is 0 or the S ring is shorter than nav_buffer_us / nav_predict_us + 1 entries.
+    /// `ImuBaro` with the VelD option. Err as [`EskfN::with_aiding`], and with [`EskfError::RingTooSmall`] when.
     pub fn with_gps_vd(tuning: &Tuning) -> Result<Self, EskfError> {
         if tuning.nav_predict_us == 0 || tuning.nav_buffer_us / tuning.nav_predict_us + 1 > VD_RING as u64 {
             return Err(EskfError::RingTooSmall);
@@ -745,13 +698,11 @@ impl<const R: usize> EskfN<R> {
     }
 
     /// The requested sample's time and nominal q, v, p right after its nominal step, in the `update` that integrated it;
-    /// none in every other step (with a repeated timestamp, the last integrated in the step).
     pub fn snapshot(&self) -> Option<(u64, [f32; 4], [f32; 3], [f32; 3])> {
         self.snap
     }
 
-    /// The reset of the nominal state the job of the last `update` was, if it was one; none after a fusion or a
-    /// re-initialisation.
+    /// The reset of the nominal state the job of the last `update` was, if it was one; none after a fusion or a.
     pub fn last_reset(&self) -> Option<Reset> {
         self.reset
     }
@@ -867,7 +818,6 @@ impl<const R: usize> EskfN<R> {
             }
             self.interval_armed = false;
             n0::covariance_predict(&mut self.p, &self.nom.q, &dvel, dt, &self.noise);
-            // The diagonal held at or above 0, as after a fusion.
             for i in 0..N {
                 self.p[i][i] = self.p[i][i].max(0.0);
             }
@@ -919,8 +869,7 @@ impl<const R: usize> EskfN<R> {
         self.aiding_prev = false;
     }
 
-    /// The tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step. True
-    /// when it ran, which is the step's one heavy job.
+    /// The tilt re-alignment of the first `update` after arming (never `Full`), given the attitude before the step. True.
     fn realign_at_arming(&mut self, q_pre: &[f32; 4]) -> bool {
         let edge = self.arm_edge;
         self.arm_edge = false;
@@ -990,8 +939,7 @@ impl<const R: usize> EskfN<R> {
         (ok, s)
     }
 
-    /// A no-aid scalar on position `axis`: not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is
-    /// P - K ph^T - ph K^T + K K^T s.
+    /// A no-aid scalar on position `axis`: not gated; with the inhibit, K's accelerometer-bias entries are zeroed and P is updated in Joseph form, (I - K H) P (I - K H)^T + K R K^T, which with H = e_k and P H^T = ph is.
     fn fuse_noaid(&mut self, axis: usize, innov: f32, var: f32) {
         let k = POS + axis;
         let ph = self.p[k];
@@ -1026,10 +974,7 @@ impl<const R: usize> EskfN<R> {
         self.fuse_vertical_masked(POS + 2, innov, var)
     }
 
-    /// An `ImuBaro` scalar on state `k` (H a single 1: D for the barometer, v_D for the VelD option), gated as
-    /// [`n0::fuse_position`] gates (innovation^2 <= gate^2 s, s = P_kk + var): K has support on D, v_D and b_a,z only (every
-    /// other entry zeroed) and P is updated in Joseph form with that K for every entry, as `fuse_noaid` does, then mirrored
-    /// and the diagonal held at or above 0. Returns (accepted, innovation variance); nothing changes when gated out.
+    /// An `ImuBaro` scalar on state `k` (H a single 1: D for the barometer, v_D for the VelD option), gated as.
     fn fuse_vertical_masked(&mut self, k: usize, innov: f32, var: f32) -> (bool, f32) {
         let ph = self.p[k];
         let s = ph[k] + var;
@@ -1077,8 +1022,6 @@ impl<const R: usize> EskfN<R> {
         let horizon = self.horizon();
         match job.stage {
             0 if self.baro_reinit => {
-                // After a re-initialisation the height is initialised at once (D = -h_b, its row and column
-                // re-initialised), as `MahonyBaro` re-initialises; logged and counted as a height reset.
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
                 let change = -job.h_b - self.nom.p[2];
                 self.nom.p[2] = -job.h_b;
@@ -1091,7 +1034,6 @@ impl<const R: usize> EskfN<R> {
             }
             0 => {
                 let r = self.t.nav_baro_sigma_m * self.t.nav_baro_sigma_m;
-                // h = -D: fused as D = -h_b on the position's down error.
                 let innov = -job.h_b - self.nom.p[2];
                 let (ok, s) = if self.aiding_set == Aiding::ImuBaro {
                     self.fuse_baro_masked(innov, r)
@@ -1106,8 +1048,6 @@ impl<const R: usize> EskfN<R> {
                     self.stats.baro_gated = self.stats.baro_gated.wrapping_add(1);
                     let since = self.last_baro_aid_us.unwrap_or(horizon);
                     if horizon.saturating_sub(since) >= self.t.nav_aid_timeout_us {
-                        // As EKF3 ResetHeight: D to the barometer, its row and column re-initialised; vD to 0
-                        // disarmed, kept armed.
                         let change = -job.h_b - self.nom.p[2];
                         self.nom.p[2] = -job.h_b;
                         self.reset_job = true;
@@ -1124,9 +1064,6 @@ impl<const R: usize> EskfN<R> {
                 }
             }
             axis => {
-                // The no-aid scalars are for the time horizontal aiding is not running: a GNSS reset may have started it
-                // since stage 0 (the reset job runs between a barometer set's stages), and the hold position would then
-                // pull the position back toward the old fix by the whole offset. The rest of the job is dropped.
                 if self.horizontal_aiding() {
                     self.stats.noaid_dropped = self.stats.noaid_dropped.wrapping_add(1);
                     self.baro_job = None;
@@ -1140,13 +1077,11 @@ impl<const R: usize> EskfN<R> {
             }
         }
         job.stage += 1;
-        // The no-aid pair only while horizontal aiding is not running.
         let last = if self.aiding_set == Aiding::Imu { 4 } else { 3 };
         self.baro_job = (job.stage < last && !self.horizontal_aiding()).then_some(job);
     }
 
     /// Yaw := yaw + dpsi (a rotation about NED down); the yaw row and column of P re-initialised to the compass noise;
-    /// b_g,z, b_a,x, b_a,y to 0 with their initial variances and cross terms zeroed.
     fn yaw_set(&mut self, dpsi: f32) {
         let dq = [cosf(0.5 * dpsi), 0.0, 0.0, sinf(0.5 * dpsi)];
         self.nom.q = normalized(qmul(&dq, &self.nom.q));
@@ -1169,7 +1104,6 @@ impl<const R: usize> EskfN<R> {
     fn mag_job(&mut self, m_b: [f32; 3]) {
         let q = self.nom.q;
         let Some(hy) = yaw_h(&q, &m_b) else {
-            // The horizontal field vanishes: no heading in it.
             self.mag_refuse(self.horizon());
             return;
         };
@@ -1213,8 +1147,6 @@ impl<const R: usize> EskfN<R> {
                     self.yaw_set(y);
                     self.stats.yaw_resets = self.stats.yaw_resets.wrapping_add(1);
                 } else if !self.global_off {
-                    // Armed, a compass that disagrees for the timeout is not trusted over the filter and the filter
-                    // is not trusted over the compass: no yaw reset, GNSS off until the disarm edge.
                     self.global_off = true;
                     self.started = false;
                     self.event(code::YAW_RESET, y, s, code::GATED);
@@ -1235,8 +1167,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A compass sample at the horizon: skipped inside the fusion period once aligned; the health test (cheap); a
-    /// healthy one queues the compass job.
+    /// A compass sample at the horizon: skipped inside the fusion period once aligned; the health test (cheap); a.
     fn mag_due(&mut self, w: MagWait) {
         if !self.tilt_aligned {
             return;
@@ -1245,7 +1176,6 @@ impl<const R: usize> EskfN<R> {
             return;
         }
         let Some(e) = self.mag_expected.filter(|_| w.expected) else {
-            // No expected field: the compass is never used.
             return;
         };
         let r = rotation(&self.nom.q);
@@ -1261,8 +1191,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A GNSS epoch on arrival (its time is the horizon's): acceptance, the origin, the arming rules,
-    /// the frozen-fix and near-zero-speed screens, and the plan: the Src 9 reset or the scalars.
+    /// A GNSS epoch on arrival (its time is the horizon's): acceptance, the origin, the arming rules.
     fn gnss_arrival(&mut self, g: &GnssSample) {
         self.stats.gps_epochs = self.stats.gps_epochs.wrapping_add(1);
         let r = &g.reading;
@@ -1291,8 +1220,6 @@ impl<const R: usize> EskfN<R> {
         let here = GeoPoint { lat_e7: lat, lon_e7: lon, alt_mm: origin.alt_mm };
         let ne3 = ned_from_geo(&origin, &here);
         let ne = [ne3[0], ne3[1]];
-        // The exact repeat of the previous fix, and the receiver's position-difference speed over at least SPD_SPAN_US
-        // (from the newest fix since arming that is that much older; none yet: no screen decision).
         let repeat = prev.is_some_and(|(_, la, lo)| la == lat && lo == lon);
         let pd_speed = (0..self.fix_hist.len)
             .rev()
@@ -1432,8 +1359,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// A GNSS epoch on arrival for the VelD option: acceptance as `Full`'s where it applies (a position with
-    /// fix type >= 3, the interval rule, armed, the exact-repeat screen), a velocity, and an S entry at or before t_m.
+    /// A GNSS epoch on arrival for the VelD option: acceptance as `Full`'s where it applies (a position with.
     fn vd_arrival(&mut self, g: &GnssSample) {
         let r = &g.reading;
         let (Some(lat), Some(lon)) = (r.lat_e7, r.lon_e7) else {
@@ -1466,8 +1392,7 @@ impl<const R: usize> EskfN<R> {
         }
     }
 
-    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only. A non-finite
-    /// measurement or innovation is counted as screened, with no record, and changes nothing.
+    /// The VelD scalar: innovation z - (v_D(now) - (S_now - S(t_m))), the masked gain; gated: counted only. A non-finite.
     fn vd_job(&mut self, (z, s_m): (f32, f32)) {
         #[cfg(test)]
         let s_m = if self.vd_align_off { self.vd_s } else { s_m };
@@ -1535,7 +1460,6 @@ impl<const R: usize> EskfN<R> {
             && horizon.saturating_sub(self.last_pos_us) < aid_to
             && self.latest_ok;
         let q = if n.q[0] < 0.0 { n.q.map(|x| -x) } else { n.q };
-        // Variances from the diagonal floored at 0.
         let v = |i: usize| self.p[i][i].max(0.0);
         let sigma = if al {
             NavSigma {
@@ -1589,8 +1513,6 @@ impl<const R: usize> Estimator for EskfN<R> {
         let q_pre = self.nom.q;
         let now = sensors.imu1.t_us;
         let r = &sensors.imu1.reading;
-        // The ring: the sample in (a full ring first gives its oldest sample to the horizon), then the horizon advanced
-        // to now - nav_gps_delay_us.
         if r.gyro_rads.iter().chain(&r.accel_ms2).all(|v| v.is_finite()) {
             let e = ImuEntry { t_us: now, gyro: r.gyro_rads, accel: r.accel_ms2 };
             if let Some(old) = self.ring.push(e) {
@@ -1604,8 +1526,6 @@ impl<const R: usize> Estimator for EskfN<R> {
             self.ring.pop();
             self.integrate(e);
         }
-        // New slow samples: barometer and compass wait for the horizon; a GNSS epoch is due on arrival. A sample whose
-        // time is older than the ring's span is dropped and counted.
         let buffer_us = self.t.nav_buffer_us;
         let stale = |t_us: u64| t_us.saturating_add(buffer_us) < now;
         let full = self.aiding_set == Aiding::Full;
@@ -1629,7 +1549,6 @@ impl<const R: usize> Estimator for EskfN<R> {
                 self.mag_expected = m.expected;
             }
             let w = MagWait { t_us: m.t_us, field_ut: m.reading.field_ut, expected: m.expected.is_some() };
-            // Aligned, a sample before the next fusion slot is skipped at the horizon anyway (the slot only moves later).
             let skipped = self.yaw_aligned && m.t_us < self.next_mag_us;
             if !skipped && self.mag_wait.push(w).is_some() {
                 self.stats.dropped = self.stats.dropped.wrapping_add(1);
@@ -1673,11 +1592,9 @@ impl<const R: usize> Estimator for EskfN<R> {
                 self.stats.replaced = self.stats.replaced.wrapping_add(1);
             }
         }
-        // The no-aid hold position: where the filter is when horizontal aiding stops.
         let aiding = self.horizontal_aiding();
         if self.aiding_prev && !aiding {
             self.hold_ne = [self.nom.p[0], self.nom.p[1]];
-            // The next accepted, non-repeated epoch after a timeout restarts aiding with a reset (Src 9).
             #[cfg(test)]
             let keep = self.keep_started_at_timeout;
             #[cfg(not(test))]
@@ -1710,7 +1627,6 @@ impl<const R: usize> Estimator for EskfN<R> {
 
     fn set_armed(&mut self, armed: bool) {
         if armed != self.armed {
-            // GNSS only while armed; the first accepted epoch after arming resets the horizontal state.
             self.started = false;
             self.gps_job = None;
             self.vd_job = None;
@@ -1878,8 +1794,6 @@ pub(crate) mod tests {
                     }
                 }
                 let (lat, lon) = geo(p);
-                // One unit (about 1 cm) of dither on every other epoch: a perfect receiver at rest would repeat its fix
-                // exactly, which the frozen-fix screen screens while armed.
                 let lat = lat + (self.k / self.gps_every % 2) as i32;
                 let speed = v[0].hypot(v[1]);
                 let course = (v[1].atan2(v[0]).to_degrees().rem_euclid(360.0) * 100.0) as u16;
@@ -1968,11 +1882,9 @@ pub(crate) mod tests {
 
     #[test]
     fn o1_ned_from_geo_across_the_wrap_and_by_hand() {
-        // On the equator at the 180 deg meridian: 0.0002 deg of longitude across the wrap and 0.001 deg of latitude.
         let o = GeoPoint { lat_e7: 0, lon_e7: 1_799_999_000, alt_mm: 0 };
         let p = GeoPoint { lat_e7: 10_000, lon_e7: -1_799_999_000, alt_mm: -2_500 };
         let ned = ned_from_geo(&o, &p);
-        // By hand: east = a * 0.0002 deg in rad; north = a (1 - e2) * 0.001 deg in rad; down 2.5 m.
         let a = 6_378_137.0_f64;
         let e2 = (1.0 / 298.257_223_563) * (2.0 - 1.0 / 298.257_223_563);
         let east = a * 0.0002_f64.to_radians();
@@ -1997,11 +1909,6 @@ pub(crate) mod tests {
         assert!(healthy(&field(1.0, inc + e.tol_inclination_rad - d), &e));
         assert!(!healthy(&field(1.0, inc + e.tol_inclination_rad + d), &e));
         assert!(!healthy(&field(1.0, inc - e.tol_inclination_rad - d), &e));
-        // H: against central differences of the innovation actually used, yaw_innov, under the error
-        // composed on the left (q <- [1, dθ/2] q): H_j = -(y(+eps e_j) - y(-eps e_j)) / (2 eps). Inclinations 0, 60 and
-        // 75 deg; tilts 0 and 30 deg (roll, pitch and both); eight yaws; a 3 deg attitude error about a generic axis so
-        // that the innovation is not zero. eps 1e-3 rad: the f32 rounding of y (about 2e-7) gives about 2e-4 of noise,
-        // the truncation (eps^2 / 6 times the third derivative) below 1e-4 at 75 deg; tolerance 2e-3 max(1, |H_j|).
         let dec = Tuning::DEFAULT.nav_mag_declination_rad;
         let axis_q = |ax: usize, ang: f32| {
             let mut q = [cosf(0.5 * ang), 0.0, 0.0, 0.0];
@@ -2040,9 +1947,7 @@ pub(crate) mod tests {
         }
         println!("c11: H against finite differences of the innovation, {n} entries, worst relative difference {worst:e}; H at 60 deg, level {h60:?}");
         assert!(worst < 2e-3, "H differs by {worst}");
-        // The guard: a vertical field has no heading.
         assert_eq!(yaw_h(&[1.0, 0.0, 0.0, 0.0], &[0.0, 0.0, 50.0]), None);
-        // Known yaw: a vehicle at 40 deg aligns to it.
         let t = Tuning::DEFAULT;
         let mut f = Eskf::new(&t).unwrap();
         let mut w = World::new(&t);
@@ -2066,7 +1971,6 @@ pub(crate) mod tests {
         run(&mut f, &mut w, 10.0, |_| true, |_, _, _| {});
         assert!(f.stats().gps_pos_fused > 0 && f.stats().mag_fused > 0 && f.stats().baro_fused > 0, "{:?}", f.stats());
         let before = *f.stats();
-        // Every slow sensor on every step for 2 s.
         let mut max_queue = 0;
         for _ in 0..2_000_000 / PERIOD_US {
             let mut s = w.step();
@@ -2091,7 +1995,6 @@ pub(crate) mod tests {
             max_queue = max_queue.max(q);
         }
         assert_eq!(f.stats().max_jobs_per_step, 1, "I2: more than one heavy job in a step");
-        // Quiet: the queue and the waiting samples (up to nav_gps_delay_us of them) drain.
         let mut drained = None;
         let limit = (t.nav_gps_delay_us / PERIOD_US) as usize + 16;
         for i in 0..limit + 16 {
@@ -2151,7 +2054,6 @@ pub(crate) mod tests {
         let mut w = World::new(&t);
         w.expected = None;
         w.v = [1.0, 0.0, 0.0];
-        // Armed from 2 s, no healthy compass until 10 s.
         run(&mut f, &mut w, 10.0, |s| s > 2.0, |_, _, _| {});
         let s0 = *f.stats();
         assert!(s0.gps_prealign > 0 && s0.gps_pos_fused == 0 && s0.gps_resets == 0, "{s0:?}");
@@ -2164,7 +2066,6 @@ pub(crate) mod tests {
         });
         println!("c5: before alignment {s0:?}; first GNSS event after it {first_gps_event:?}");
         assert_eq!(first_gps_event.map(|e| e.src), Some(code::GPS_RESET));
-        // Disarmed: nothing fused, and the next arming resets again.
         let s1 = *f.stats();
         run(&mut f, &mut w, 3.0, |_| false, |_, nav, _| assert!(!nav.valid.position_ne && !nav.valid.heading));
         let s2 = *f.stats();
@@ -2192,7 +2093,6 @@ pub(crate) mod tests {
 
     #[test]
     fn g4_a_stream_alternating_178_and_219_ms_is_accepted_on_every_epoch_and_the_old_bound_refuses_the_long_half() {
-        // 142 and 175 IMU periods: 177.5 and 218.75 ms, this receiver's alternation.
         let run_stream = |t: &Tuning| {
             let mut f = Eskf::new(t).unwrap();
             let mut w = World::new(t);
@@ -2221,15 +2121,12 @@ pub(crate) mod tests {
             "g4: {} epochs: default {} unaccepted ({} fused, {} resets); the old 1000/215: {} unaccepted ({} fused)",
             new.gps_epochs, new.gps_unaccepted, new.gps_pos_fused, new.gps_resets, old.gps_unaccepted, old.gps_pos_fused
         );
-        // Only the first fix is not accepted (it starts the interval rule).
         assert_eq!(new.gps_unaccepted, 1);
         assert!(new.gps_pos_fused > 100 && new.gps_resets == 1);
         assert!(old.gps_unaccepted > new.gps_epochs / 3, "the control: the 219 ms half is refused at 215");
     }
 
-    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`) every 200 ms: a 3D fix whose
-    /// `lat_std_mm` and `lon_std_mm` are both the receiver's hAcc, `alt_std_mm` its vAcc, no HDOP or VDOP, no UTC time.
-    /// `without_std` is the control: the latitude deviation not given.
+    /// The SAM-M10Q's epochs (`fw_settings::gnss::reading`) every 200 ms: a 3D fix whose.
     fn m10_stream(without_std: bool) -> EskfStats {
         let t = Tuning::DEFAULT;
         let mut f = Eskf::new(&t).unwrap();
@@ -2264,11 +2161,9 @@ pub(crate) mod tests {
             "m10: {} epochs: {} unaccepted ({} fused, {} resets); control without lat_std: {} unaccepted ({} fused)",
             m10.gps_epochs, m10.gps_unaccepted, m10.gps_pos_fused, m10.gps_resets, control.gps_unaccepted, control.gps_pos_fused
         );
-        // 200 epochs in 40 s. Only the first is not accepted: it starts the interval rule, as in g4.
         assert_eq!(m10.gps_epochs, 200);
         assert_eq!(m10.gps_unaccepted, 1);
         assert!(m10.gps_pos_fused > 100 && m10.gps_resets == 1);
-        // The control: every epoch is refused, nothing is fused.
         assert_eq!(control.gps_unaccepted, control.gps_epochs);
         assert_eq!((control.gps_pos_fused, control.gps_resets), (0, 0));
     }
@@ -2299,10 +2194,6 @@ pub(crate) mod tests {
             }
         });
         let s1 = *f.stats();
-        // After the hold the next fresh epoch is fused if it passes the gate; if it is
-        // gated, the position reset follows after the timeout. Either way the flags return only after an accepted position
-        // fusion or a reset.
-        // The first changed fix after the hold is a reset, and it can fall in the hold's own 10 s window.
         let early_reset = s1.gps_resets > s0.gps_resets;
         let (mut fused_or_reset, mut outcome, mut back) = (early_reset, early_reset.then_some("reset"), None);
         run(&mut f, &mut w, 8.0, |_| true, |f, nav, _| {
@@ -2341,7 +2232,6 @@ pub(crate) mod tests {
 
     #[test]
     fn c6_disarmed_repeats_are_not_screened() {
-        // C-1 adaptation: disarmed GNSS is never fused, so a repeat at rest disarmed is neither screened nor fused.
         let t = Tuning::DEFAULT;
         let mut f = Eskf::new(&t).unwrap();
         let mut w = World::new(&t);
@@ -2380,9 +2270,6 @@ pub(crate) mod tests {
     #[test]
     fn c8_a_compass_turned_90_deg_after_alignment_while_armed_latches_gnss_off_instead_of_resetting_the_yaw() {
         let t = Tuning::DEFAULT;
-        // 10 s after the alignment the yaw sigma still grows by the re-initialised z gyro bias sigma (P0_bg) between the
-        // 1 Hz fusions, and the 5-sigma gate reopens after 4 gated samples (measured: 4 gated, then fused). After 60 s
-        // the bias has converged.
         let mut out = std::string::String::new();
         for secs in [10.0, 60.0] {
             let (mut f, mut w) = flying(&t, secs, [0.0; 3]);
@@ -2392,7 +2279,6 @@ pub(crate) mod tests {
             out += &std::format!(" after {secs} s: yaw sigma {:.3} rad, bg_z sigma {:.4} rad/s, gated {}, resets {};", sig.0, sig.1, f.stats().mag_gated, f.stats().yaw_resets);
         }
         println!("c8:{out}");
-        // the compass turned 90 deg 10 s after the alignment, followed for 40 s.
         let (mut f, mut w) = flying(&t, 10.0, [0.0; 3]);
         w.mag_rot = 90.0_f64.to_radians();
         let t0 = f.horizon();
@@ -2423,8 +2309,6 @@ pub(crate) mod tests {
             f.stats().mag_gated,
             f.stats().mag_fused
         );
-        // Armed, a compass turned 90 deg and gated for the timeout does not reset the yaw: Src 8 with Ok 0, `global_off`,
-        // GNSS not fused, heading and NE flags false, until the disarm edge.
         let (mut f, mut w) = flying(&t, 60.0, [0.0; 3]);
         assert!(f.stats().gps_pos_fused > 0 && f.nav().valid.position_ne && f.nav().valid.heading);
         w.mag_rot = 90.0_f64.to_radians();
@@ -2470,11 +2354,9 @@ pub(crate) mod tests {
         assert_eq!((s_end.gps_pos_fused, s_end.gps_vel_fused, s_end.gps_resets), (s_latch.gps_pos_fused, s_latch.gps_vel_fused, s_latch.gps_resets));
         assert!(s_end.gps_disarmed > s_latch.gps_disarmed, "the epochs after the latch are counted");
         assert_eq!((flags_true_after, fused_events_after), (0, 0));
-        // The latch holds while armed, whatever the compass does next: turn it back, still no heading and no GNSS.
         w.mag_rot = 0.0;
         run(&mut f, &mut w, 8.0, |_| true, |_, nav, _| assert!(!nav.valid.heading && !nav.valid.position_ne && !nav.valid.velocity_ne));
         assert!(f.global_off && f.stats().yaw_resets == 0 && f.stats().gps_resets == s_end.gps_resets);
-        // The disarm edge clears the latch; the disarmed rule applies (the compass has been gated for more than the timeout).
         w.mag_rot = 90.0_f64.to_radians();
         run(&mut f, &mut w, 6.0, |_| true, |_, _, _| {});
         let before = f.stats().yaw_resets;
@@ -2482,7 +2364,6 @@ pub(crate) mod tests {
         assert!(!f.global_off);
         println!("c8: after the disarm edge, yaw resets {before} -> {}", f.stats().yaw_resets);
         assert_eq!(f.stats().yaw_resets, before + 1);
-        // Armed again: the first epoch resets the position (Src 9) and GNSS is fused again.
         let gr = f.stats().gps_resets;
         run(&mut f, &mut w, 10.0, |_| true, |_, _, _| {});
         assert!(f.stats().gps_resets > gr && !f.global_off && f.started && f.nav().valid.position_ne);
@@ -2525,7 +2406,6 @@ pub(crate) mod tests {
         let mut w = World::new(&t);
         w.v = [2.0, 0.0, 0.0];
         let (mut formula_rows, mut before_rows, mut differ_rows) = (0u32, 0u32, 0u32);
-        // The GST sigma below the floor (0.3 m), above it, and above it again.
         for std_mm in [100u32, 500, 800] {
             w.std_mm = std_mm;
             let floored = (std_mm as f32 * 1e-3).max(t.nav_gps_pos_sigma_min_m);
@@ -2535,8 +2415,6 @@ pub(crate) mod tests {
                 b.set_armed(true);
                 let na = a.update(&s);
                 let nb = b.update(&s);
-                // B's stored GST sigmas are corrupted after every step: if the filter read them anywhere else than in
-                // the report, A and B would part.
                 b.last_sigma_ne = Some([100.0, 100.0]);
                 let v = |f: &Eskf, i: usize| f.p[i][i].max(0.0);
                 let (sa, sb) = (na.sigma.unwrap(), nb.sigma.unwrap());
@@ -2563,7 +2441,6 @@ pub(crate) mod tests {
                     [sb.tilt_rad, sb.heading_rad, sb.velocity_ne_ms, sb.velocity_d_ms, sb.position_d_m].map(f32::to_bits)
                 );
             }
-            // The latest accepted epoch's floored sigmas (a job runs within a few steps of the arrival; 10 s later it has).
             assert_eq!(a.last_sigma_ne, Some([floored, floored]), "GST {std_mm} mm");
         }
         println!("g5: {before_rows} rows before the first accepted epoch (as before), {formula_rows} rows on the formula; {differ_rows} rows where the corrupted copy reports another position sigma; the rest bit-identical");
@@ -2595,8 +2472,6 @@ pub(crate) mod tests {
     }
 
     /// What the first epochs after a GNSS outage or hold do, with `keep` the test control.
-    /// Returns (steps with NE valid false from the timeout to the first Src 9 after the fault, first Src 9 time after the
-    /// fault ended or None, first epoch event time after the fault ended, NE-valid-lost time, NE flags over the window).
     fn p2_run(fault: impl Fn(u64) -> Fault, keep: bool) -> (Option<u64>, Option<u64>, Option<u64>, Option<u64>, bool) {
         let t = Tuning::DEFAULT;
         let (mut f, mut w) = flying(&t, 20.0, [2.0, 0.0, 0.0]);
@@ -2633,7 +2508,6 @@ pub(crate) mod tests {
         let (lost, reset, first) = (lost.expect("NE lost at the timeout"), reset.expect("a Src 9 reset after the outage"), first.expect("an epoch"));
         assert_eq!(reset, first, "the first epoch back is the reset");
         assert!(lost < reset && flags_false, "NE flags false from the timeout to the reset");
-        // The control: the old sequence, no reset at the first epoch back (the position reset follows only after the timeout, if at all).
         assert!(c_lost.is_some());
         assert!(c_reset.is_none_or(|r| r > c_first.unwrap() + 1_000_000), "control resets at its first epoch back");
     }
@@ -2679,8 +2553,6 @@ pub(crate) mod tests {
             w.expected = None;
             run(&mut f, &mut w, 2.0, |_| true, |_, _, _| {});
             let ba0 = f.biases().1;
-            // A horizontal manoeuvre: 1 m/s^2 north then south, 2 s each, then 1 s still. The change of b_a x and y, and
-            // of b_a z, in the steps whose job was a no-aid scalar (the nominal integration never changes a bias).
             let (mut by_noaid, mut by_noaid_z) = (0.0f32, 0.0f32);
             let mut prev = f.biases().1;
             for a in [1.0, -1.0, 0.0] {
@@ -2695,7 +2567,6 @@ pub(crate) mod tests {
                 });
             }
             let ba = f.biases().1;
-            // b_a z directly: one no-aid scalar on north with P holding a north/b_a z correlation of 0.5.
             let c = 0.5 * sqrtf(f.p[POS][POS] * f.p[ACCEL_BIAS + 2][ACCEL_BIAS + 2]);
             f.p[POS][ACCEL_BIAS + 2] = c;
             f.p[ACCEL_BIAS + 2][POS] = c;
@@ -2765,7 +2636,6 @@ pub(crate) mod tests {
         let t = Tuning::DEFAULT;
         let mut f = Eskf::new(&t).unwrap();
         let mut w = World::new(&t);
-        // At the first start the barometer initialises the height at once: the time from the first horizon to the flags.
         let (mut h0, mut first) = (None, None);
         run(&mut f, &mut w, 10.0, |_| false, |_, nav, _| {
             let h0 = *h0.get_or_insert(nav.t_us);
@@ -2774,8 +2644,6 @@ pub(crate) mod tests {
             }
         });
         assert!(f.nav().valid.position_d);
-        // 10 m above the datum; once the horizon has passed the move (1 s, inside the timeout), a re-initialisation, as a
-        // non-finite state causes.
         w.p[2] = -10.0;
         run(&mut f, &mut w, 1.0, |_| false, |_, _, _| {});
         f.reinitialise();
@@ -2791,7 +2659,6 @@ pub(crate) mod tests {
              resets) {back:?}"
         );
         let (dt, d, sd, _) = back.expect("the vertical flags never returned");
-        // As at the first start, within one barometer period.
         assert!(dt <= first.unwrap() + 1_000_000 / BARO_RATE_HZ, "returned after {dt} us");
         assert!((d + 10.0).abs() <= SIGMAS * sd, "D {d} m");
     }
@@ -2824,7 +2691,6 @@ pub(crate) mod tests {
             s.gnss = None;
             s
         };
-        // Each sample stamped 0.6 s ago (older than now - nav_buffer_us, 0.5 s), on a step with no other slow sample.
         let old = |w: &World| w.t_us() + PERIOD_US - 600_000;
         let s0 = *f.stats();
         let mut s = quiet(&mut w);
@@ -2858,8 +2724,6 @@ pub(crate) mod tests {
     fn n1_a_tiny_negative_variance_gives_finite_sigmas_and_stays_finite_through_a_propagation_and_a_fusion() {
         let t = Tuning::DEFAULT;
         let (mut f, _) = flying(&t, 10.0, [0.0; 3]);
-        // Down velocity and position uncorrelated with everything and -1e-9 (rounding below 0): the propagation adds
-        // nothing to the position variance (no position process noise, no velocity variance).
         f.reset_state_var(VEL + 2, -1e-9);
         f.reset_state_var(POS + 2, -1e-9);
         let all = |f: &Eskf| {
@@ -2996,8 +2860,6 @@ pub(crate) mod tests {
             }
             let nav = nav.unwrap();
             assert!(nav.valid.tilt);
-            // Truth: the body-frame down axis of a vehicle rolled by `roll` is (0, sin, cos); the estimate's is the third
-            // row of R(q).
             let r = rotation(&nav.attitude);
             let dot = f64::from(r[2][1]) * roll.sin() + f64::from(r[2][2]) * roll.cos();
             let err_deg = dot.clamp(-1.0, 1.0).acos().to_degrees();
@@ -3006,7 +2868,6 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- Rates and the arming-edge re-alignment ----
 
     use crate::mahony::Mahony;
 
@@ -3040,7 +2901,6 @@ pub(crate) mod tests {
 
     #[test]
     fn r1_zero_delay_rates_equal_mahonys_bit_for_bit_with_bias_learning_off() {
-        // Bias learning off: no initial bias variance and no bias random walk, so K's bias rows stay 0.
         let t = Tuning { nav_p0_bg_rads: 0.0, nav_bg_rw: 0.0, ..Tuning::DEFAULT };
         for aiding in [Aiding::ImuBaro, Aiding::Imu] {
             let mut f = Eskf::with_aiding(&t, aiding).unwrap();
@@ -3076,11 +2936,8 @@ pub(crate) mod tests {
             s.imu1.reading.gyro_rads = off;
             let (nf, nm) = (f.update(&s), m.update(&s));
             bg = f.biases().0;
-            // The z rate is Mahony's PT1 value bit for bit, whatever the z bias estimate.
             assert_eq!(nf.rates_rads[2].to_bits(), nm.rates_rads[2].to_bits(), "z rate differs from Mahony's");
             for i in 0..2 {
-                // nf = fl(x - b) with x Mahony's filtered gyro: |x - nf - b| <= u |x - b|, u = EPSILON / 2; the bound used
-                // is twice that, EPSILON max(|x|, |b|).
                 let d = f64::from(nm.rates_rads[i]) - f64::from(nf.rates_rads[i]) - f64::from(bg[i]);
                 let tol = f64::from(f32::EPSILON) * f64::from(nm.rates_rads[i].abs().max(bg[i].abs()));
                 assert!(d.abs() <= tol, "axis {i}: difference minus bias {d:e}, tolerance {tol:e}");
@@ -3091,10 +2948,7 @@ pub(crate) mod tests {
         assert!(bg[0] != 0.0 && bg[1] != 0.0, "the bias did not move: {bg:?}");
     }
 
-    /// The disarmed handling scenario: level at rest, tilt and yaw driven into the filter by a gyro pulse the vehicle did
-    /// not make (0.5 s at [0.2, -0.1, 0.3] rad/s from 1 s: about 5.7 deg of roll, 2.9 deg of pitch, 8.6 deg of yaw),
-    /// then at rest until 4 s. Returns the filter after that, 80 further samples (at rest, or with `accelerate` a
-    /// forward acceleration of 0.6 g on the accelerometer), and whether the tilt flag stayed true from its first step.
+    /// The disarmed handling scenario: level at rest, tilt and yaw driven into the filter by a gyro pulse the vehicle did.
     fn handled(t: &Tuning, aiding: Aiding, accelerate: bool) -> (Eskf, Vec<Sensors>, bool) {
         let mut f = Eskf::with_aiding(t, aiding).unwrap();
         let mut w = World::new(t);
@@ -3178,27 +3032,21 @@ pub(crate) mod tests {
                 assert!(after < before, "{aiding:?} j {j}: error {before} deg before, {after} deg after");
                 before_min = before_min.min(before);
                 after_max = after_max.max(after);
-                // Yaw (atan2(R10, R00)) unchanged to round-off, and not trivially 0.
                 let (y0, y1) = (yaw_of(&e.pre.nom.q), yaw_of(&e.na.attitude));
                 assert!(y0.abs() > 0.05, "yaw {y0}");
                 yaw_worst = yaw_worst.max((y1 - y0).abs());
                 assert!((y1 - y0).abs() < 1e-6, "{aiding:?} j {j}: yaw {y0} -> {y1}");
-                // Roll and pitch are the first alignment's of the stored interval.
                 let f = e.pre.arm_f.expect("a stored interval").map(f64::from);
                 let roll = (-f[1]).atan2(-f[2]);
                 let pitch = f[0].atan2(f[1].hypot(f[2]));
                 let (r1, p1) = roll_pitch(&e.na.attitude);
                 rp_worst = rp_worst.max((r1 - roll).abs()).max((p1 - pitch).abs());
                 assert!((r1 - roll).abs() < 1e-6 && (p1 - pitch).abs() < 1e-6, "{aiding:?} j {j}: roll {r1} vs {roll}, pitch {p1} vs {pitch}");
-                // v_N = v_E = 0, hold at the current N/E.
                 assert_eq!((e.na.velocity_ms[0], e.na.velocity_ms[1]), (0.0, 0.0));
                 assert_eq!(e.a.hold_ne, [e.a.nom.p[0], e.a.nom.p[1]]);
-                // Biases and the 15 variances are bit-identical to the filter before the step: the re-alignment is the step's
-                // job and the integration does not touch them.
                 let diag = |f: &Eskf| (0..N).map(|i| f.p[i][i].to_bits()).collect::<Vec<_>>();
                 assert_eq!((e.a.nom.bg, e.a.nom.ba), (e.pre.nom.bg, e.pre.nom.ba));
                 assert_eq!(diag(&e.a), diag(&e.pre));
-                // The cross terms of the five rows and columns are gone, nothing else of P moved.
                 for i in 0..N {
                     for k in 0..N {
                         let five = |x: usize| (ATT..ATT + 3).contains(&x) || x == VEL || x == VEL + 1;
@@ -3209,19 +3057,16 @@ pub(crate) mod tests {
                         }
                     }
                 }
-                // One heavy job at most; a queued job is not consumed by it.
                 assert_eq!(e.a.stats().max_jobs_per_step, 1);
                 assert_eq!(e.jobs_a, 0, "the re-alignment replaced a counted job's slot, it ran one too");
                 assert!(e.jobs_b <= 1);
                 if e.jobs_b == 0 {
                     without_job += 1;
-                    // The clone without the re-alignment ran no job: D, vD, the biases and the variances agree with it.
                     assert_eq!((e.a.nom.p[2].to_bits(), e.a.nom.v[2].to_bits()), (e.b.nom.p[2].to_bits(), e.b.nom.v[2].to_bits()));
                     assert_eq!((e.a.nom.bg, e.a.nom.ba), (e.b.nom.bg, e.b.nom.ba));
                     assert_eq!(diag(&e.a), diag(&e.b));
                 } else {
                     with_job += 1;
-                    // The job the clone ran is still queued in the re-aligned filter: it runs in a later step.
                     assert!(e.a.predict_due || e.a.baro_job.is_some() || e.a.gps_job.is_some());
                 }
             }
@@ -3241,7 +3086,6 @@ pub(crate) mod tests {
             for j in 0..16 {
                 let e = edge_at(&base, &next, j);
                 let (before, after) = (tilt_err_deg(&e.nav_pre.attitude), tilt_err_deg(&e.nb.attitude));
-                // The gyro is 0 at rest, so one step turns the attitude by at most |bias| dt (plus the f32 rounding).
                 let bg = e.b.nom.bg.iter().fold(0.0f32, |m, v| m.max(fabsf(*v)));
                 let bound = (f64::from(bg) * PERIOD_US as f64 * 1e-6 * 3.0_f64.sqrt()).to_degrees() + 1e-4;
                 assert!((after - before).abs() <= bound, "{aiding:?} j {j}: {before} -> {after}, bound {bound:e}");
@@ -3334,7 +3178,6 @@ pub(crate) mod tests {
             assert!(nav.valid.tilt == seen && !nav.valid.heading && !nav.valid.velocity_ne && !nav.valid.position_ne);
             let finite = nav.attitude.iter().chain(&nav.rates_rads).chain(&nav.velocity_ms).chain(&nav.position_m).all(|v| v.is_finite());
             let sg = nav.sigma.unwrap();
-            // The sigmas are infinite by design before the tilt alignment.
             assert!(finite && (!nav.valid.tilt || [sg.tilt_rad, sg.heading_rad, sg.velocity_ne_ms, sg.velocity_d_ms, sg.position_ne_m, sg.position_d_m].iter().all(|v| v.is_finite())));
             let vert = nav.valid.velocity_d || nav.valid.position_d;
             assert_eq!(nav.valid.velocity_d, nav.valid.position_d);
@@ -3352,9 +3195,7 @@ pub(crate) mod tests {
         assert!(after * PERIOD_US >= 30_000_000, "{after}");
     }
 
-    /// `base` armed after `first` of the `next` samples (re-alignment per `realign_first`), armed for 20 steps, disarmed for
-    /// `k` steps (the disarm edge is the first of them; at most 8 is inside one propagation, nav_predict_us / PERIOD_US).
-    /// Returns the filter before the next step, which is index 24 + k, and that index.
+    /// `base` armed after `first` of the `next` samples (re-alignment per `realign_first`), armed for 20 steps, disarmed for.
     fn disarmed_again(base: &Eskf, next: &[Sensors], first: usize, realign_first: bool, k: usize) -> (Eskf, usize) {
         let mut f = base.clone();
         f.arm_realign = realign_first;
@@ -3398,7 +3239,6 @@ pub(crate) mod tests {
         let t = Tuning::DEFAULT;
         for aiding in [Aiding::ImuBaro, Aiding::Imu] {
             let (base, next, _) = handled(&t, aiding, false);
-            // Armed without the first re-alignment, so the handling error is still there.
             let mut f = base.clone();
             f.arm_realign = false;
             let mut nav = f.nav();
@@ -3413,7 +3253,6 @@ pub(crate) mod tests {
             a.set_armed(false);
             c.set_armed(false);
             assert!(a.arm_f.is_none());
-            // A force inside the window forced in after the edge: only an edge flag set by the disarm could use it.
             let level = Some([0.0, 0.0, -GRAVITY_MSS]);
             a.arm_f = level;
             c.arm_f = level;
@@ -3442,12 +3281,10 @@ pub(crate) mod tests {
                 a.set_armed(true);
                 a.update(&next[j]);
                 assert!(a.arm_f.is_none(), "{aiding:?} accelerate {accelerate}: the force was not consumed");
-                // No second re-alignment without a new edge.
                 let mut c = a.clone();
                 c.arm_realign = false;
                 assert!(agree(&mut a, &mut c, &next[j + 1..j + 41], true));
             }
-            // After a re-alignment, a re-arm with no complete disarmed interval in between does nothing.
             let (base, next, _) = handled(&t, aiding, false);
             for k in 1..=3 {
                 let (mut a, idx) = disarmed_again(&base, &next, 4, true, k);
@@ -3471,7 +3308,6 @@ pub(crate) mod tests {
     fn al7_large_tilt_and_large_yaw_are_realigned_with_the_yaw_kept() {
         let t = Tuning::DEFAULT;
         let (roll, pitch) = (35.0_f64.to_radians(), 20.0_f64.to_radians());
-        // Truth at rest, tilted: the body-frame down axis d and the specific force -g d.
         let d = [-pitch.sin(), roll.sin() * pitch.cos(), roll.cos() * pitch.cos()];
         let g = f64::from(GRAVITY_MSS);
         let force = d.map(|x| (-g * x) as f32);
@@ -3485,8 +3321,6 @@ pub(crate) mod tests {
                     s.imu1.reading.gyro_rads = gyro.map(|x| x as f32);
                     s
                 };
-                // A true turn about the vertical at `rate` rad/s: the body rates are rate * d; 3.05 s gives 174.7 deg.
-                // Then a 0.5 s pulse the vehicle did not make, and rest until 5 s.
                 while w.t_us() < 5_000_000 {
                     let gyro = if w.t_us() < 3_050_000 {
                         d.map(|x| rate * x)
@@ -3509,8 +3343,6 @@ pub(crate) mod tests {
                     let dy = yaw_of(&e.na.attitude) - yaw_of(&e.pre.nom.q);
                     assert!(e.tilt_true);
                     assert!(before > 1.0_f64.to_radians(), "j {j}: error before {before}");
-                    // The input is the bias-corrected force: the truth differs from it by the learned accelerometer bias, at
-                    // most |ba| / |f| rad (|ba| the norm of the three), and the alignment of the stored force is exact.
                     let ba = e.pre.nom.ba.map(f64::from);
                     let bound = (ba[0] * ba[0] + ba[1] * ba[1] + ba[2] * ba[2]).sqrt() / g + 1e-6;
                     assert!(after <= bound, "{aiding:?} rate {rate} j {j}: down-axis error after {after} rad, bound {bound:e}");
@@ -3533,19 +3365,15 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- the ImuBaro barometer scalar does not update b_a,x and b_a,y ----
 
-    /// Specific force, body frame, of a vehicle at rest rolled by `roll` and pitched by `pitch` (the inverse of the first
-    /// alignment's formulas), plus the constant accelerometer offset `off`.
+    /// Specific force, body frame, of a vehicle at rest rolled by `roll` and pitched by `pitch` (the inverse of the first.
     fn rest_force(roll: f64, pitch: f64, off: [f32; 3]) -> [f32; 3] {
         let g = f64::from(GRAVITY_MSS);
         let f = [g * pitch.sin(), -g * pitch.cos() * roll.sin(), -g * pitch.cos() * roll.cos()];
         core::array::from_fn(|i| f[i] as f32 + off[i])
     }
 
-    /// `secs` of an `ImuBaro` filter held tilted (`tilt` = roll, pitch, rad) at the World's constant barometer height with the
-    /// accelerometer offset `off`, disarmed until `arm_s` s and armed after. Returns the filter, the largest |b_a,x| and |b_a,y|
-    /// seen, whether b_a,x and b_a,y were bit-exact 0.0 after every step, and the largest |v_D| over the last half.
+    /// `secs` of an `ImuBaro` filter held tilted (`tilt` = roll, pitch, rad) at the World's constant barometer height with the.
     fn held_tilted(t: &Tuning, tilt: (f64, f64), off: [f32; 3], secs: f64, arm_s: f64, masked: bool) -> (Eskf, [f32; 2], bool, f32) {
         let mut f = Eskf::with_aiding(t, Aiding::ImuBaro).unwrap();
         f.baro_full_gain = !masked;
@@ -3569,15 +3397,12 @@ pub(crate) mod tests {
     #[test]
     fn e1_t1_imu_baro_tilted_with_a_horizontal_accelerometer_offset_keeps_b_a_x_and_y_at_exactly_zero() {
         let t = Tuning::DEFAULT;
-        // 10 deg roll and 20 deg pitch: the tilt is inside angle_max_rad (30 deg) and both horizontal body axes have a
-        // vertical component, which is what lets the barometer's height error reach b_a,x and b_a,y.
         let tilt = (10.0_f64.to_radians(), 20.0_f64.to_radians());
         assert!(tilt.0.hypot(tilt.1) < f64::from(t.angle_max_rad));
         let off = [0.15f32, -0.1, 0.0];
         let (f, _, exact, _) = held_tilted(&t, tilt, off, 70.0, 25.0, true);
         assert!(exact, "b_a,x or b_a,y left 0.0");
         assert!(f.stats().baro_fused > 1000 && f.stats().predicts > 1000);
-        // Control: the mask off, the same input.
         let (c, worst, exact_c, _) = held_tilted(&t, tilt, off, 70.0, 25.0, false);
         println!("e1 t1: offset {off:?}; masked ba {:?} (bit-exact zero every step); mask off: ba {:?}, largest |ba_x| {:e}, |ba_y| {:e}", f.biases().1, c.biases().1, worst[0], worst[1]);
         assert!(!exact_c && worst[0] > 0.0 && worst[1] > 0.0, "the control did not move: {worst:?}");
@@ -3598,7 +3423,6 @@ pub(crate) mod tests {
                 f.set_armed(w.t_us() >= 20_000_000);
                 let nav = f.update(&s);
                 if w.t_us() >= 30_000_000 {
-                    // Truth: at rest, v_D = 0.
                     let e = f64::from(nav.velocity_ms[2]);
                     sq += e * e;
                     vmax = vmax.max(e.abs());
@@ -3621,9 +3445,6 @@ pub(crate) mod tests {
         let t = Tuning::DEFAULT;
         let off = [0.15f32, -0.1, 0.0];
         let g = f64::from(GRAVITY_MSS);
-        // The AL1 fixture with the offset on every sample, with the handling made physical: held tilted (10 deg roll, 20 deg
-        // pitch, inside angle_max_rad) for 60 s, where the barometer's height error reaches b_a,x and b_a,y when the mask is
-        // off; set down level in 0.5 s (a gyro pulse of the same angles); rest to 64 s; then 80 samples at rest.
         let tilt = (10.0_f64.to_radians(), 20.0_f64.to_radians());
         let fixture = |masked: bool| {
             let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
@@ -3655,19 +3476,14 @@ pub(crate) mod tests {
             for j in 0..16 {
                 let e = edge_at(&base, &next, j);
                 let f = e.pre.arm_f.expect("a stored interval").map(f64::from);
-                // The raw mean force of the interval: the samples are constant, so it is the sample, with the z of the sample.
                 let raw = [f64::from(off[0]), f64::from(off[1]), -g];
                 if masked {
-                    // x and y of the stored force are the raw ones up to the f32 mean of constant samples.
                     assert!((f[0] - raw[0]).abs() <= 1e-6 * raw[0].abs() && (f[1] - raw[1]).abs() <= 1e-6 * raw[1].abs(), "j {j}: stored {f:?} raw {raw:?}");
                 }
                 let roll = (-raw[1]).atan2(-raw[2]);
                 let pitch = raw[0].atan2(raw[1].hypot(raw[2]));
                 let (r1, p1) = roll_pitch(&e.na.attitude);
                 let d = (r1 - roll).abs().max((p1 - pitch).abs());
-                // The stored z is the raw z minus b_a,z; roll = atan2(-f_y, -f_z) changes by at most |f_y| d / (f_y^2 + f_z^2) and
-                // pitch = atan2(f_x, hypot(f_y, f_z)) by at most |f_x| d / hypot(f_y, f_z)^2 for a change d of f_z, with
-                // d = |b_a,z| and hypot >= g - d; the bound adds 1e-6 rad for the f32 rounding of the alignment.
                 let dz = f64::from(e.pre.nom.ba[2]).abs();
                 let bound = raw[0].abs().max(raw[1].abs()) * dz / ((g - dz) * (g - dz)) + 1e-6;
                 if masked {
@@ -3678,7 +3494,6 @@ pub(crate) mod tests {
                 } else {
                     ba_x = ba_x.max(fabsf(e.pre.nom.ba[0]));
                     assert!(d > 100.0 * bound, "j {j}: the mask-off tilt differs by only {d:e}, bound {bound:e}");
-                    // About the learned bias over g: the pitch departure is b_a,x / g to the bound, the roll's b_a,y / g.
                     let (ba, ratio) = (f64::from(e.pre.nom.ba[0]), (p1 - pitch).abs() * g);
                     assert!((ratio - ba.abs()).abs() <= 0.05 * ba.abs() + bound * g, "j {j}: pitch departure * g {ratio:e}, |b_a,x| {}", ba.abs());
                 }
@@ -3694,7 +3509,6 @@ pub(crate) mod tests {
     #[test]
     fn e1_t4_a_rejected_barometer_changes_nothing_resets_the_height_in_time_and_p_stays_a_covariance() {
         let t = Tuning::DEFAULT;
-        // (a) Warm filter, then a direct call beyond the gate: bit-identical, rejected.
         let (f, _, _, _) = held_tilted(&t, (0.2, 0.3), [0.15, -0.1, 0.1], 20.0, 5.0, true);
         let r = t.nav_baro_sigma_m * t.nav_baro_sigma_m;
         let s = f.p[POS + 2][POS + 2] + r;
@@ -3705,11 +3519,8 @@ pub(crate) mod tests {
         assert_eq!(a.fuse_baro_masked(-innov, r), (false, s));
         assert_eq!(bits(&a), before);
         assert!(a.fuse_baro_masked(0.999 * t.nav_gate_sigma * sqrtf(s), r).0, "just inside the gate was rejected");
-        // The unmasked path gates on the same test.
         let mut u = f.clone();
         assert!(!u.fuse_unit(POS + 2, innov, r).0 && bits(&u) == before);
-        // (b) End to end: the barometer 100 m high from 20 s on, armed; counted as gated, nothing fused, and the height reset
-        // at the timeout after the last accepted sample.
         let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
         let mut w = World::new(&t);
         let (mut last_aid, mut reset_at) = (0u64, None);
@@ -3733,7 +3544,6 @@ pub(crate) mod tests {
         println!("e1 t4: last accepted barometer aid at {last_aid} us, height reset at {at} us ({} us later, timeout {}), gated samples {gated}", at - last_aid, t.nav_aid_timeout_us);
         assert!(gated > 0 && at - last_aid >= t.nav_aid_timeout_us && at - last_aid < t.nav_aid_timeout_us + 100_000, "{}", at - last_aid);
         assert!(f.stats().baro_fused > 1000);
-        // (c) 120 s of mixed motion with arm changes and a barometer dropout and a bad stretch: P a covariance throughout.
         let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
         let mut w = World::new(&t);
         let mut bad = 0u32;
@@ -3779,7 +3589,6 @@ pub(crate) mod tests {
         let k = POS + 2;
         let p: Vec<Vec<f64>> = f.p.iter().map(|row| row.iter().map(|&x| f64::from(x)).collect()).collect();
         let s = p[k][k] + r;
-        // K = P H^T / s with every entry but D, v_D and b_a,z zeroed; (I - K H) P (I - K H)^T + K R K^T.
         let mut kg: Vec<f64> = (0..N).map(|i| p[i][k] / s).collect();
         for (i, v) in kg.iter_mut().enumerate() {
             if i != POS + 2 && i != VEL + 2 && i != ACCEL_BIAS + 2 {
@@ -3811,14 +3620,12 @@ pub(crate) mod tests {
                 worst = worst.max((f64::from(g.p[i][j]) - reference[i][j]).abs() / scale);
             }
         }
-        // The state: dx = K innovation, so b_a,x and b_a,y stay 0 and b_a,z moves by K_z innovation.
         let dz = kg[ACCEL_BIAS + 2] * f64::from(innov);
         let moved = f64::from(g.nom.ba[2] - f.nom.ba[2]);
         println!("e1 t5: worst |P - reference| / sqrt(P_ii P_jj) {worst:e}; b_a,z step {moved:e} vs reference {dz:e}; unmasked K of b_a,x {:e}", p[ACCEL_BIAS][k] / s);
         assert!(worst < 1e-5, "{worst:e}");
         assert!(p[ACCEL_BIAS][k].abs() > 0.0 && p[ACCEL_BIAS + 1][k].abs() > 0.0, "the masked entries were already 0");
         assert_eq!((g.nom.ba[0].to_bits(), g.nom.ba[1].to_bits()), (f.nom.ba[0].to_bits(), f.nom.ba[1].to_bits()));
-        // The difference of two f32 values near |b_a,z|: rounding of 4 ulp of it, plus the 1e-6 of dz of the f32 K.
         assert!((moved - dz).abs() <= 4.0 * f64::from(f32::EPSILON) * f64::from(g.nom.ba[2].abs()) + 1e-6 * dz.abs(), "{moved:e} vs {dz:e}");
     }
 
@@ -3851,10 +3658,8 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- the ImuBaro barometer scalar has support on D, v_D and b_a,z only; the z rate is the PT1 ----
 
-    /// One sample of the warm-up and gusty runs: the World moving (accelerations changing every 7 s, a yaw rate), the body
-    /// tilted by slow rolls and pitches, a constant accelerometer offset and a gyro x and y wobble.
+    /// One sample of the warm-up and gusty runs: the World moving (accelerations changing every 7 s, a yaw rate), the body.
     fn moving_sample(w: &mut World, sec: f64) -> Sensors {
         let phase = (sec / 7.0) as u32;
         w.a = [[0.0, 1.5, -1.0, 0.5][phase as usize % 4], [0.5, 0.0, 1.0, -2.0][phase as usize % 4], [0.3, -0.4, 0.0, 0.8][phase as usize % 4]];
@@ -3884,12 +3689,10 @@ pub(crate) mod tests {
 
     #[test]
     fn h_t1_one_imu_baro_barometer_fusion_changes_only_d_vd_and_ba_z() {
-        // Scenario dimensioned at nav_baro_sigma_m 0.5; kept whatever the default.
         let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
         let f = warm_imu_baro(&t, 40);
         let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
         let outside = |i: usize| i != d && i != vd && i != bz;
-        // Precondition: P has non-zero cross terms between D / v_D and the attitude, the horizontal velocity and the gyro bias.
         for k in [d, vd] {
             for j in (ATT..ATT + 3).chain(VEL..VEL + 2).chain(GYRO_BIAS..GYRO_BIAS + 3) {
                 assert!(f.p[k][j] != 0.0 && f.p[k][j].is_finite(), "P[{k}][{j}] = {}", f.p[k][j]);
@@ -3915,8 +3718,6 @@ pub(crate) mod tests {
         assert!(moved.iter().all(|m| *m), "D, v_D, b_a,z moved: {moved:?}");
         let inside_changed = (0..N).filter(|&i| !outside(i)).any(|i| (0..N).any(|j| a.p[i][j].to_bits() != f.p[i][j].to_bits()));
         assert!(inside_changed, "P did not change inside the vertical rows");
-        // Control: the full gain (the test-only switch) on the same filter and innovation moves the attitude and the gyro bias.
-        // Tolerance: 100 x f32 round-off (EPSILON) of the magnitude of the quantity (the largest |component|).
         let mut c = f.clone();
         c.baro_full_gain = true;
         assert!(c.fuse_baro_masked(innov, r).0);
@@ -3933,9 +3734,7 @@ pub(crate) mod tests {
 
     #[test]
     fn h_t2_a_long_gusty_run_keeps_p_a_covariance() {
-        // Scenario dimensioned at nav_baro_sigma_m 0.5; kept whatever the default.
         let t = Tuning { nav_baro_sigma_m: 0.5, ..Tuning::DEFAULT };
-        // The checker: symmetric (bit-equal [i][j] and [j][i]), finite, a non-negative diagonal.
         let covariance = |f: &Eskf| (0..N).all(|i| (0..N).all(|j| f.p[i][j].to_bits() == f.p[j][i].to_bits())) && f.finite() && (0..N).all(|i| f.p[i][i] >= 0.0);
         let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
         let mut w = World::new(&t);
@@ -3944,7 +3743,6 @@ pub(crate) mod tests {
         for _ in 0..120_000_000 / PERIOD_US {
             let sec = w.t_us() as f64 * 1e-6;
             let mut s = moving_sample(&mut w, sec);
-            // Barometer steps of 1 to 2 m (gusts), held for several seconds.
             baro_off = if (20.0..28.0).contains(&sec) {
                 1.5
             } else if (40.0..46.0).contains(&sec) {
@@ -3971,7 +3769,6 @@ pub(crate) mod tests {
         println!("h t2: 120 s gusty, steps with P not symmetric/finite/non-negative {bad}, baro fused {} gated {} resets {} reinits {} (last offset {baro_off})", st.baro_fused, st.baro_gated, st.height_resets, st.reinits);
         assert_eq!(bad, 0);
         assert!(st.baro_fused > 1000 && st.baro_gated + st.height_resets > 0, "the gusts did not reach the gate or the reset");
-        // Control: the checker flags an asymmetry of one ulp, a negative diagonal and a NaN.
         let mut c = f.clone();
         c.p[3][7] = f32::from_bits(c.p[3][7].to_bits() ^ 1);
         assert!(!covariance(&c));
@@ -3987,7 +3784,6 @@ pub(crate) mod tests {
     fn h_t3_ba_z_still_converges_while_held_tilted_about_20_deg() {
         let t = Tuning::DEFAULT;
         let off = [0.0f32, 0.0, 0.2];
-        // 20 deg of pitch (inside angle_max_rad): the offset on the body z axis has a vertical component cos 20 deg.
         let tilt = (0.0_f64, 20.0_f64.to_radians());
         let run = |z_masked: bool| {
             let mut f = Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap();
@@ -4000,7 +3796,6 @@ pub(crate) mod tests {
                 f.set_armed(w.t_us() >= 20_000_000);
                 let nav = f.update(&s);
                 if w.t_us() >= 30_000_000 {
-                    // Truth: at rest, v_D = 0.
                     let e = f64::from(nav.velocity_ms[2]);
                     sq += e * e;
                     vmax = vmax.max(e.abs());
@@ -4033,11 +3828,8 @@ pub(crate) mod tests {
                 let armed = w.t_us() >= 4_000_000;
                 f.set_armed(armed);
                 m.set_armed(armed);
-                // The z bias estimate is set directly before every step (the alignment and the filter's own learning would
-                // otherwise leave it at or near 0 here).
                 f.nom.bg[2] = 0.05;
                 let (nf, nm) = (f.update(&s), m.update(&s));
-                // The step that aligns the tilt resets the bias; the next one is the first checked.
                 let checked = aligned;
                 aligned = nf.valid.tilt;
                 if !checked {
@@ -4046,9 +3838,7 @@ pub(crate) mod tests {
                 let bg = f.biases().0;
                 bg_min = bg_min.min(fabsf(bg[2]));
                 if aiding == Aiding::Full {
-                    // The compass alignment resets b_g,z once; the identity is checked on every step, the bias non-zero on most.
                     nonzero += u32::from(bg[2] != 0.0);
-                    // Unchanged: the raw gyro of the horizon sample minus the full bias.
                     for i in 0..3 {
                         assert_eq!(nf.rates_rads[i].to_bits(), (f.horizon_gyro[i] - bg[i]).to_bits(), "Full step {k} axis {i}");
                     }
@@ -4059,8 +3849,6 @@ pub(crate) mod tests {
                 for i in 0..2 {
                     assert_eq!(nf.rates_rads[i].to_bits(), (nm.rates_rads[i] - bg[i]).to_bits(), "{aiding:?} step {k} axis {i}");
                 }
-                // Control: the D1 form for z, PT1 - bg_z (in f64, the difference of two f32 values is exact up to its own
-                // rounding, 2 EPSILON_64 |bg_z|), differs from the output by bg_z.
                 let d1 = f64::from(nm.rates_rads[2]) - f64::from(bg[2]);
                 let diff = f64::from(nf.rates_rads[2]) - d1;
                 worst_ctl = worst_ctl.max((diff - f64::from(bg[2])).abs() / f64::from(bg[2]).abs());
@@ -4077,10 +3865,8 @@ pub(crate) mod tests {
         }
     }
 
-    // ---- the ring length as a const generic, the snapshot and the reset hooks ----
 
-    /// The 60 s stream of the ring tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite IMU
-    /// sample (index 20 000), a repeated timestamp (24 000) and one 20 ms gap before index 30 000.
+    /// The 60 s stream of the ring tests: yawed, moving at constant velocity, barometer, compass and GNSS; a non-finite IMU.
     fn g1_stream(t: &Tuning, secs: u64) -> Vec<Sensors> {
         let mut w = World::new(t);
         w.yaw = 0.4;
@@ -4174,10 +3960,8 @@ pub(crate) mod tests {
         let zero = Tuning { nav_gps_delay_us: 0, ..Tuning::DEFAULT };
         assert!(EskfN::<1>::with_aiding(&zero, Aiding::Full).is_ok());
         assert!(EskfN::<7>::with_aiding(&zero, Aiding::Full).is_ok());
-        // No delay without GNSS: a ring of one for the zero-delay variants at the default tuning.
         assert!(EskfN::<1>::with_aiding(&Tuning::DEFAULT, Aiding::ImuBaro).is_ok());
         assert!(EskfN::<1>::with_aiding(&Tuning::DEFAULT, Aiding::Imu).is_ok());
-        // A delay beyond the buffer is still refused first.
         let far = Tuning { nav_gps_delay_us: Tuning::DEFAULT.nav_buffer_us + 1, ..Tuning::DEFAULT };
         assert_eq!(EskfN::<1>::new(&far).err(), Some(EskfError::DelayBeyondBuffer));
     }
@@ -4191,16 +3975,12 @@ pub(crate) mod tests {
             }
         }
         assert_eq!(EskfN::<0>::new(&Tuning::DEFAULT).err(), Some(EskfError::RingTooSmall));
-        // Beyond-buffer delay with R = 0: either refusal is a refusal.
         let far = Tuning { nav_gps_delay_us: Tuning::DEFAULT.nav_buffer_us + 1, ..Tuning::DEFAULT };
         assert!(EskfN::<0>::new(&far).is_err());
     }
 
     #[test]
     fn g1_g_a_reset_and_a_reinitialisation_in_one_update_report_no_reset() {
-        // The step of the first GNSS reset (at arming) is found on a dry run; in the real run the gyro-bias x of the
-        // state is made NaN just before that step. The step's job is still the reset (it does not read the bias), and
-        // the state is non-finite afterwards, so the filter re-initialises in the same `update`.
         let t = Tuning::DEFAULT;
         let mut w = World::new(&t);
         w.v = [2.0, 0.5, 0.0];
@@ -4243,9 +4023,7 @@ pub(crate) mod tests {
         assert_eq!(big - small, (RING - 1) * entry);
     }
 
-    /// What `update` does to the nominal state before its job, rebuilt from the filter as it was before the step with
-    /// N0's nominal step only: the state just before the job, the state right after the integration of the sample at `req`
-    /// (the last one in the step with that time), and the number of samples integrated.
+    /// What `update` does to the nominal state before its job, rebuilt from the filter as it was before the step with.
     #[allow(clippy::type_complexity)]
     fn g1_after_integration<const R: usize>(pre: &EskfN<R>, s: &Sensors, req: Option<u64>) -> (([f32; 4], [f32; 3], [f32; 3]), Option<(u64, [f32; 4], [f32; 3], [f32; 3])>, usize) {
         let now = s.imu1.t_us;
@@ -4292,7 +4070,6 @@ pub(crate) mod tests {
         let snap = f.snapshot();
         assert_eq!(g1_snap_bits(snap), g1_snap_bits(expected), "step {k}: request {req:?}, {integrated} integrated");
         if let Some((_, q, v, p)) = snap {
-            // One sample integrated and no fusion or reset after it: nominal() is the snapshot.
             if integrated == 1 && f.events().count() == 0 && f.last_reset().is_none() {
                 assert_eq!(g1_snap_bits(Some((0, q, v, p))), g1_snap_bits(Some((0, f.nominal().0, f.nominal().1, f.nominal().2))), "step {k}");
             }
@@ -4316,7 +4093,6 @@ pub(crate) mod tests {
                 f.set_armed(armed);
             }
             let np = plain.update(s);
-            // Held until the sample is integrated: a sample 10 steps back, still in the ring (the delay is 344 steps).
             if req.is_none() && k >= 10_000 && k % 503 == 0 && regular(k - 10) {
                 req = Some(stream[k - 10].imu1.t_us);
                 assert!(sticky.ring.len > 10);
@@ -4329,13 +4105,11 @@ pub(crate) mod tests {
                 same_as_nominal += usize::from(sticky.events().count() == 0 && sticky.nominal().0.map(f32::to_bits) == sticky.snapshot().unwrap().1.map(f32::to_bits));
                 req = None;
             }
-            // The wrapper's own policy: the oldest sample of the ring, every step.
             let req_f = front.ring.front().map(|e| e.t_us);
             let pre = front.clone();
             front.set_snap_request(req_f);
             let nf = front.update(s);
             seen_front += usize::from(g1_check_snap(&front, &pre, s, req_f, k));
-            // Times that are never integrated: the non-finite sample, a time before every sample, one after.
             never.set_snap_request([Some(nan_time), Some(1), Some(u64::MAX)][k % 3]);
             let nn = never.update(s);
             assert!(never.snapshot().is_none(), "step {k}: a snapshot for a time never integrated");
@@ -4351,10 +4125,7 @@ pub(crate) mod tests {
         assert!(seen_front > 40_000);
     }
 
-    /// Rebuilds every step of `f` over `stream` with `g1_after_integration` and checks `last_reset` against it. `each` runs
-    /// before every step (poking or re-initialising the filter). Returns the steps of each reset kind and the number of
-    /// non-reset steps with a fusion. Tolerances: the quaternion product to 2e-6 per component, v and p to 8 f32 epsilon of
-    /// the larger of the two values and 1.
+    /// Rebuilds every step of `f` over `stream` with `g1_after_integration` and checks `last_reset` against it. `each` runs.
     fn g1_run_resets<const R: usize>(f: &mut EskfN<R>, stream: &[Sensors], armed: impl Fn(&Sensors) -> bool, mut each: impl FnMut(usize, &mut EskfN<R>)) -> ([Vec<usize>; 4], usize) {
         let (mut kinds, mut fusion_steps) = ([Vec::new(), Vec::new(), Vec::new(), Vec::new()], 0);
         for (k, s) in stream.iter().enumerate() {
@@ -4389,7 +4160,6 @@ pub(crate) mod tests {
                 }
             }
             let kind = if yaw > 0 {
-                // A rotation about NED down, nothing else moved.
                 assert!(fabsf(r.dq[1]) <= 1e-6 && fabsf(r.dq[2]) <= 1e-6, "step {k}: yaw dq {:?}", r.dq);
                 assert!(r.dq[3] != 0.0 && r.dv == [0.0; 3] && r.dp == [0.0; 3], "step {k}: {r:?}");
                 0
@@ -4400,7 +4170,6 @@ pub(crate) mod tests {
             } else if height > 0 {
                 assert!(fabsf(r.dq[1]) + fabsf(r.dq[2]) + fabsf(r.dq[3]) <= 3e-6 && r.dp[0] == 0.0 && r.dp[1] == 0.0 && r.dv[0] == 0.0 && r.dv[1] == 0.0, "step {k}: {r:?}");
                 assert!(r.dp[2] != 0.0, "step {k}: a height reset that moved nothing");
-                // Disarmed, the timeout branch also sets v_D to 0; armed, v_D is kept.
                 if !pre.armed {
                     assert!(after.1[2] == 0.0, "step {k}: v_D {} after a disarmed height reset", after.1[2]);
                 } else if pre.armed {
@@ -4408,7 +4177,6 @@ pub(crate) mod tests {
                 }
                 2
             } else {
-                // The arming-edge re-alignment: the tilt moves, the horizontal velocity goes to 0, nothing else.
                 assert!(r.dq[0] < 0.9999 || r.dq[0] > 1.0001 || fabsf(r.dq[1]) + fabsf(r.dq[2]) > 1e-4, "step {k}: the realignment moved no tilt {:?}", r.dq);
                 assert!(after.1[0] == 0.0 && after.1[1] == 0.0 && r.dv[2] == 0.0 && r.dp == [0.0; 3], "step {k}: {r:?}");
                 3
@@ -4418,8 +4186,7 @@ pub(crate) mod tests {
         (kinds, fusion_steps)
     }
 
-    /// Level at rest with a gyro pulse the vehicle did not make (as `handled`) from 1 to 1.5 s, the barometer `baro_off_m`
-    /// too high from `baro_from_s`; `secs` long.
+    /// Level at rest with a gyro pulse the vehicle did not make (as `handled`) from 1 to 1.5 s, the barometer `baro_off_m`.
     fn g1_zero_delay_stream(t: &Tuning, secs: u64, baro_from_s: u64, baro_off_m: f64) -> Vec<Sensors> {
         let mut w = World::new(t);
         let mut out = Vec::new();
@@ -4439,10 +4206,6 @@ pub(crate) mod tests {
     #[test]
     fn g1_e_resets_are_reported_exactly_and_ordinary_fusions_are_not() {
         let t = Tuning::DEFAULT;
-        // Full: yaw alignment (first compass), GPS reset at arming (5 s), position reset (a 10-sigma north fault from 20 s), a
-        // disarmed yaw reset (compass turned 90 deg from 60 s, disarmed from 61 s to 70 s: while armed the latch GNSS off
-        // instead of resetting; the re-arming at 70 s is a further GPS reset), the height reset after the timeout (barometer
-        // 40 m too high from 85 s, armed) and the height initialisation after a re-initialisation (at 100 s).
         let mut w = World::new(&t);
         w.yaw = 0.4;
         w.v = [2.0, 0.5, 0.0];
@@ -4477,8 +4240,6 @@ pub(crate) mod tests {
         assert!(kinds[2].iter().any(|&k| k > reinit_at) && kinds[2].iter().any(|&k| k < reinit_at), "both height-reset branches");
         assert!(fused > 5_000, "{fused}");
 
-        // The zero-delay variants: the arming-edge re-alignment at 4 s and the height reset 5 s after the barometer's
-        // jump at 12 s (armed), for `ImuBaro` and `Imu` (no barometer, so no height reset).
         for aiding in [Aiding::ImuBaro, Aiding::Imu] {
             let stream = g1_zero_delay_stream(&t, 25, 12, 40.0);
             let mut f = EskfZ::with_aiding(&t, aiding).unwrap();
@@ -4491,7 +4252,6 @@ pub(crate) mod tests {
             assert_eq!(kinds[2].is_empty(), aiding == Aiding::Imu);
             assert!(fused > 1_000);
         }
-        // The disarmed branch of the height reset zeroes v_D: a v_D of 1.5 m/s put in at 14.9 s (the barometer jumps at 15 s).
         let stream = g1_zero_delay_stream(&t, 25, 15, 40.0);
         let mut f = EskfZ::with_aiding(&t, Aiding::ImuBaro).unwrap();
         let poke = stream.iter().position(|s| s.imu1.t_us >= 14_900_000).unwrap();
@@ -4505,7 +4265,6 @@ pub(crate) mod tests {
         assert!(kinds[3].is_empty() && !kinds[2].is_empty());
     }
 
-    // ---- the GNSS vertical velocity in `ImuBaro` (the VelD option) ----
 
     /// The VelD records of the last step.
     fn vd_events(e: &Eskf) -> Vec<Nki> {
@@ -4537,14 +4296,12 @@ pub(crate) mod tests {
         }
         let (d, vd, bz) = (POS + 2, VEL + 2, ACCEL_BIAS + 2);
         let outside = |i: usize| i != d && i != vd && i != bz;
-        // Precondition: P has non-zero cross terms between v_D and the attitude, the horizontal velocity and the gyro bias.
         for j in (ATT..ATT + 3).chain(VEL..VEL + 2).chain(GYRO_BIAS..GYRO_BIAS + 3) {
             assert!(f.p[vd][j] != 0.0 && f.p[vd][j].is_finite(), "P[{vd}][{j}] = {}", f.p[vd][j]);
         }
         let r = t.nav_gps_vd_sigma_ms * t.nav_gps_vd_sigma_ms;
         let innov = 0.3f32;
         assert!(innov * innov <= t.nav_gate_sigma * t.nav_gate_sigma * (f.p[vd][vd] + r), "the innovation is outside the gate");
-        // The VelD job itself, with S(t_m) = S_now (no motion since t_m): innovation z - v_D.
         let job = |e: &Eskf| (e.nom.v[2] + innov, e.vd_s);
         let mut a = f.clone();
         a.events = [None; EVENTS];
@@ -4565,7 +4322,6 @@ pub(crate) mod tests {
         assert!(moved.iter().all(|m| *m), "D, v_D, b_a,z moved: {moved:?}");
         let sym = (0..N).all(|i| (0..N).all(|j| a.p[i][j].to_bits() == a.p[j][i].to_bits())) && (0..N).all(|i| a.p[i][i] >= 0.0);
         assert!(sym && a.finite());
-        // Control: the full gain (the test-only switch) on the same filter and job moves the attitude and the gyro bias.
         let mut c = f.clone();
         c.baro_full_gain = true;
         c.vd_job(job(&f));
@@ -4584,7 +4340,6 @@ pub(crate) mod tests {
     fn v2_the_option_off_ignores_gnss_bit_for_bit_and_the_option_on_does_not() {
         let t = Tuning::DEFAULT;
         assert!(!Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap().gps_vd() && !Eskf::new(&t).unwrap().gps_vd());
-        // The same samples with and without GNSS, 30 s, a climb and descent, armed from 5 s.
         let run = |on: bool| {
             let mk = || if on { Eskf::with_gps_vd(&t).unwrap() } else { Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap() };
             let (mut a, mut b) = (mk(), mk());
@@ -4620,8 +4375,6 @@ pub(crate) mod tests {
         let mut w = World::new(&t);
         w.gps_vel = true;
         w.v = [1.0, 0.5, 0.0];
-        // Every epoch until 70 s fails one acceptance rule: disarmed (0-10 s), fix type 2, no velocity, an exact repeat (the
-        // receiver's hold), 1 Hz, no position, stale (the arrival time 600 ms old). From 70 s (the control) the epochs are clean.
         w.fault = Fault::Freeze(30_000_000, 40_000_000);
         let (mut first_diff, mut stale_seen) = (None, 0u32);
         for _ in 0..80_000_000 / PERIOD_US {
@@ -4664,8 +4417,6 @@ pub(crate) mod tests {
     #[test]
     fn v4_the_time_alignment_takes_out_the_gps_delay_and_without_it_the_innovation_follows_minus_t_times_a_d() {
         let t = Tuning::DEFAULT;
-        // A 0.3 Hz vertical sinusoid, 2 m amplitude (a_D up to 7.1 m/s^2, v_D up to 3.8 m/s), VelD delayed nav_gps_delay_us
-        // (the World's GNSS), armed from 5 s; the VelD innovations regressed on the true a_D at the arrival time.
         let (amp, w0) = (2.0f64, 2.0 * core::f64::consts::PI * 0.3);
         let run = |aligned: bool| {
             let mut f = Eskf::with_gps_vd(&t).unwrap();
@@ -4696,18 +4447,13 @@ pub(crate) mod tests {
         let (slope_c, n_c, st_c) = run(false);
         println!("v4: slope of the VelD innovation on a_D: aligned {slope:.5} s ({n} epochs, gated {}), control without alignment {slope_c:.5} s ({n_c} epochs, gated {}); -T = {:.3} s", st.gps_vd_gated, st_c.gps_vd_gated, -tt);
         assert!(n > 200 && n_c > 200);
-        // Aligned: within the S ring's spacing (S(t_m) is the newest entry at or before t_m, up to nav_predict_us older).
         assert!(slope.abs() <= t.nav_predict_us as f64 * 1e-6, "{slope}");
-        // Control: about -T (the filter, pulled by the misaligned VelD, takes up part of it).
         assert!(slope_c < -0.5 * tt && slope_c > -1.2 * tt, "{slope_c}");
     }
 
     #[test]
     fn v5_the_vertical_flags_stay_the_barometers_while_veld_fuses() {
         let t = Tuning::DEFAULT;
-        // The barometer cut from 15 s to 35 s while armed (beyond nav_aid_timeout_us), VelD fused throughout. A VelD job delays
-        // a barometer job by one step (one heavy job per step, GNSS first), so the two filters' barometer aid times may differ
-        // by one step; the rule checked is that only a barometer job moves the aid time, and the flags drop at its timeout.
         let run = |on: bool| {
             let mut f = if on { Eskf::with_gps_vd(&t).unwrap() } else { Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap() };
             let mut w = World::new(&t);
@@ -4753,7 +4499,6 @@ pub(crate) mod tests {
     #[test]
     fn v6_gated_veld_is_counted_only_and_veld_never_resets_or_moves_a_flag() {
         let t = Tuning::DEFAULT;
-        // (a) A warm filter, then the VelD job just beyond the gate: bit-identical, counted, recorded as gated; just inside: fused.
         let mut f = Eskf::with_gps_vd(&t).unwrap();
         let mut w = World::new(&t);
         w.gps_vel = true;
@@ -4772,8 +4517,6 @@ pub(crate) mod tests {
         let mut a = f.clone();
         a.vd_job((a.nom.v[2] + 0.999 * edge, a.vd_s));
         assert!(bits(&a) != before && a.stats().gps_vd_fused == f.stats().gps_vd_fused + 1, "just inside the gate was rejected");
-        // (b) VelD off by `bias` m/s from 10 s to 30 s armed (longer than nav_aid_timeout_us). 5 m/s: every one gated; 0.3 m/s
-        // (the control): fused.
         let run = |bias: f64| {
             let (mut on, mut off) = (Eskf::with_gps_vd(&t).unwrap(), Eskf::with_aiding(&t, Aiding::ImuBaro).unwrap());
             let mut w = World::new(&t);
@@ -4797,7 +4540,6 @@ pub(crate) mod tests {
                 let (a, b) = (on.update(&s), off.update(&s));
                 worst = worst.max(fabsf(a.position_m[2] - b.position_m[2])).max(fabsf(a.velocity_ms[2] - b.velocity_ms[2]));
                 bad += usize::from((a.valid.velocity_d, a.valid.position_d) != (b.valid.velocity_d, b.valid.position_d));
-                // A step whose job was the VelD scalar: no reset reported, no barometer aid, no height reset.
                 if vd_events(&on).iter().any(|e| e.ok != code::SCREENED) {
                     bad += usize::from(on.last_reset().is_some() || on.last_baro_aid_us != aid || on.baro_reinit != reinit || on.stats().height_resets != resets);
                 }
@@ -4809,8 +4551,6 @@ pub(crate) mod tests {
         println!("v6: (a) gate edge {edge:e} m/s: beyond it bit-identical; (b) VelD 5 m/s off: gated {} fused {}, largest |dD|, |dvD| from the off filter {worst:e} (the barometer job one step later); 0.3 m/s off (control): fused {} gated {}, largest {worst_c:e}; steps with a flag difference or a VelD step with a reset/aid {bad} / {bad_c}", st.gps_vd_gated, st.gps_vd_fused, st_c.gps_vd_fused, st_c.gps_vd_gated);
         assert!(st.gps_vd_gated > 90 && st.gps_vd_fused == 0, "{st:?}");
         assert!(resets_eq && resets_eq_c && bad == 0 && bad_c == 0);
-        // Gated VelD jobs only take job slots (each delays the barometer set by one step): the vertical state stays within
-        // a hundredth of what the accepted control moves.
         assert!(worst < 0.01 * worst_c, "a gated VelD moved the vertical state by {worst}");
         assert!(st_c.gps_vd_fused > 90 && worst_c > 0.1, "the control: an accepted VelD must change the filter: {worst_c}");
     }
@@ -4824,7 +4564,6 @@ pub(crate) mod tests {
         w.v = [1.0, 0.5, 0.0];
         run(&mut f, &mut w, 10.0, |s| s >= 5.0, |_, _, _| {});
         assert!(f.stats().gps_vd_fused > 0 && f.stats().baro_fused > 0, "{:?}", f.stats());
-        // 4 s of a burst: the barometer on every step, a new GNSS epoch (a changed fix) on two steps of every three.
         let (mut exercised, mut wrong) = (0usize, 0usize);
         let base = w.last_fix.unwrap();
         for i in 0..4_000_000 / PERIOD_US {
@@ -4838,7 +4577,6 @@ pub(crate) mod tests {
                 r.vel_ned_mm_s = Some(v.map(|x| (x * 1e3) as i32));
                 GnssSample { reading: r, t_us: w.t_us(), seq: k as u32 }
             });
-            // Queued at the end of the previous step.
             let (pred, vd, baro) = (f.predict_due, f.vd_job.is_some(), f.baro_job.is_some());
             let before = *f.stats();
             f.set_armed(true);
@@ -4864,8 +4602,6 @@ pub(crate) mod tests {
         let mut w = World::new(&t);
         w.gps_vel = true;
         w.v = [1.0, 0.5, 0.0];
-        // 5 s segments: disarmed, clean, fix type 2, clean, no position, clean, 1 Hz, clean, repeats, clean, then the two
-        // documented differences: no GST (Full refuses, VelD needs none), clean, no velocity (Full fuses the position), clean.
         let seg = |ts: f64| (ts / 5.0) as usize;
         let mut tally = [[0u32; 2]; 14];
         let mut mismatch = [0u32; 14];
@@ -4908,20 +4644,17 @@ pub(crate) mod tests {
         for k in [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 13] {
             assert_eq!(mismatch[k], 0, "segment {k}");
         }
-        // Each refusal rule refused every epoch of its segment, and the clean segments accepted all but the first one or two.
         for k in [0, 2, 4, 6, 8] {
             assert!(tally[k][1] == 0 && tally[k][0] >= 4, "segment {k}: {:?}", tally[k]);
         }
         for k in [1, 3, 5, 7, 9, 11, 13] {
             assert!(tally[k][1] >= 23, "segment {k}: {:?}", tally[k]);
         }
-        // The documented differences: without GST VelD accepts what Full refuses; without a velocity Full accepts what VelD refuses.
         assert!(tally[10][1] >= 23 && mismatch[10] == tally[10][1], "{:?} {}", tally[10], mismatch[10]);
         assert!(tally[12][0] == 25 && mismatch[12] >= 23, "{:?} {}", tally[12], mismatch[12]);
     }
 
-    /// The VelD filter armed from 5 s, moving, VelD fused; `keep` the test control that keeps the S ring and S at a
-    /// re-initialisation. Runs to just before `secs` s.
+    /// The VelD filter armed from 5 s, moving, VelD fused; `keep` the test control that keeps the S ring and S at a.
     fn vd_warm(t: &Tuning, secs: u64, keep: bool) -> (Eskf, World) {
         let mut f = Eskf::with_gps_vd(t).unwrap();
         f.vd_keep_on_reinit = keep;
@@ -4939,8 +4672,6 @@ pub(crate) mod tests {
     #[test]
     fn vr1_a_reinitialisation_empties_the_s_ring_so_an_epoch_measured_before_it_is_stale() {
         let t = Tuning::DEFAULT;
-        // A forced re-initialisation (a non-finite v_N) 40 ms before a GNSS epoch: that epoch's t_m is 30 ms before the
-        // re-initialisation. The tilt re-aligns at the first propagation after it, before the epoch.
         let epoch_us = 20_000_000;
         let run = |keep: bool| {
             let (mut f, mut w) = vd_warm(&t, 0, keep);
@@ -4978,8 +4709,6 @@ pub(crate) mod tests {
     #[test]
     fn vr2_a_non_finite_veld_or_s_never_reaches_the_state() {
         let t = Tuning::DEFAULT;
-        // (a) Direct: a NaN S or a NaN measurement is counted as screened, writes no record and changes nothing; the control
-        // (no finite check) puts the NaN into the state.
         let (f, _) = vd_warm(&t, 20, false);
         assert!(f.stats().gps_vd_fused > 0);
         let before = bits(&f);
@@ -4997,9 +4726,6 @@ pub(crate) mod tests {
             c.vd_job((z, f.vd_s));
             assert!(!c.finite(), "the control must inject the non-finite value");
         }
-        // (b) End to end: a NaN v_D at 20 s makes S NaN in that step and re-initialises; VelD fuses again after it and no
-        // further re-initialisation follows. Control (ring and S kept, no finite check): a
-        // re-initialisation at every accepted epoch.
         let run = |old: bool| {
             let (mut f, mut w) = vd_warm(&t, 20, old);
             f.vd_no_finite_check = old;

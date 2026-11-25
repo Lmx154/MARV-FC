@@ -75,9 +75,7 @@ impl Bank {
     };
 
     /// `x` through the first `harmonics` rows of stages. `seed`: the first sample after a reset, each stage's memory
-    /// starts at its own input. A stage of weight 0 passes its
-    /// input on untouched (a true bypass: `x + 0 (n - x)` would turn -0.0 into 0.0 and a NaN into NaN) but still
-    /// runs, so its memory is current when its weight rises.
+    /// starts at its own input. A stage of weight 0 passes its.
     fn apply(
         &mut self,
         x: f32,
@@ -169,8 +167,6 @@ impl Notch {
 
     /// The rotor frequencies f1, Hz, by DShot line, for the next `apply`. Harmonic h of a line has the centre
     /// clamp(h f1, `notch_min_hz`, `notch_max_fs` fs) and the weight clamp((h f1 - `notch_min_hz`) / `notch_fade_hz`, 0, 1).
-    /// A line without a usable value (`usable`) gets weight 0 and keeps its centre. One sine and cosine per line; the
-    /// second and third harmonic come from the multiple-angle identities, a clamped centre from the two precomputed pairs.
     pub fn set_rotor_hz(&mut self, f1_hz: [Option<f32>; LINES]) {
         let mut line = [(None, (0.0, 0.0)); LINES];
         for (l, f) in line.iter_mut().zip(f1_hz) {
@@ -227,8 +223,7 @@ mod tests {
         Notch::new(&Tuning::DEFAULT, FS)
     }
 
-    /// The RBJ notch's magnitude from its definition, in f64: with c = cos w - cos w0,
-    /// |H| = |c| / sqrt(c^2 + (alpha sin w)^2).
+    /// The RBJ notch's magnitude from its definition, in f64: with c = cos w - cos w0.
     fn rbj_magnitude(f_hz: f64, centre_hz: f64, q: f64) -> f64 {
         let (w, w0) = (
             core::f64::consts::TAU * f_hz / f64::from(FS),
@@ -260,13 +255,11 @@ mod tests {
             let got = coef_magnitude(&c, f);
             assert!((got - want).abs() <= 1e-4 * want + 1e-6, "{f} Hz: {got} vs {want}");
         }
-        // The notch is deep at the centre and has unit gain at DC.
         assert!(coef_magnitude(&c, 120.0) < 1e-4);
         assert!((coef_magnitude(&c, 0.0) - 1.0).abs() < 1e-6);
     }
 
-    /// Steady-state amplitude of a unit sine of `f_hz` (a multiple of 0.5 Hz) through the filter, measured in the time
-    /// domain: the rms over the last 1600 samples, a whole number of cycles, times sqrt 2.
+    /// Steady-state amplitude of a unit sine of `f_hz` (a multiple of 0.5 Hz) through the filter, measured in the time.
     fn gain(n: &mut Notch, f_hz: f32) -> f32 {
         let mut sum = 0.0_f64;
         for i in 0..3200 {
@@ -281,7 +274,6 @@ mod tests {
 
     #[test]
     fn the_bank_filters_a_sine_by_the_product_of_its_stages_magnitudes() {
-        // Line 0 at 100 Hz, full weight on all three harmonics (100, 200, 300 Hz); the other lines have no value.
         let mut want_f = [(20.0_f32, 0.0), (100.0, 0.0), (150.0, 0.0), (200.0, 0.0), (300.0, 0.0), (350.0, 0.0)];
         for (f, want) in want_f.iter_mut() {
             *want = [100.0_f64, 200.0, 300.0]
@@ -320,7 +312,6 @@ mod tests {
         let mut n = notch();
         n.set_rotor_hz([Some(16.0), Some(20.0), Some(27.5), None]);
         let w = |n: &Notch, h: usize| n.coefs[h].map(|c| c.w);
-        // h1: 16, 20, 27.5 Hz are below 50; h2: 32, 40, 55; h3: 48, 60, 82.5.
         assert_eq!(w(&n, 0), [0.0, 0.0, 0.0, 0.0]);
         assert_eq!(w(&n, 1), [0.0, 0.0, 0.5, 0.0]);
         assert_eq!(w(&n, 2), [0.0, 1.0, 1.0, 0.0]);

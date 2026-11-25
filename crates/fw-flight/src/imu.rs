@@ -25,7 +25,6 @@ pub const REQ_RESTART: u8 = 2;
 /// Kick bit: apply a new configuration. Reserved: taken and ignored (not built).
 pub const REQ_APPLY: u8 = 4;
 /// Kick bit: self-test the device, then restart it as for [`REQ_RESTART`] under the same number;
-/// the request's number is in [`ImuCells`].
 pub const REQ_SELF_TEST: u8 = 8;
 /// Transitions kept in [`ImuStatus::ring`].
 pub const TRANSITIONS: usize = 4;
@@ -107,13 +106,7 @@ pub enum VerifyError {
 }
 
 /// The flight-core side of one IMU, driven by [`ImuTask`]. The contract of the core-0
-/// `DeviceAdapter`: every method except [`data_ready`](Self::data_ready) may use the bus and is
-/// always awaited to completion; `Ok` from [`start`](Self::start), [`recover`](Self::recover) or
-/// [`restart`](Self::restart) only says the bus and the device answer: the loop then waits for one
-/// fresh sample (a data-ready edge and one good [`acquire`](Self::acquire)) before it reports
-/// success; no edge within T (seen at a kick) or a failed `acquire` counts as a failure.
-/// The `delay` passed in is the task's [`CountingDelay`]; [`verify_step`](Self::verify_step) runs
-/// between samples and gets none: it must not wait on a timer.
+/// `DeviceAdapter`: every method except [`data_ready`](Self::data_ready) may use the bus and is.
 #[allow(async_fn_in_trait)]
 pub trait ImuAdapter {
     /// Waits for the data-ready edge. No bus traffic: it may be dropped at any await.
@@ -126,8 +119,7 @@ pub trait ImuAdapter {
     /// The one status read after a late CHECK.
     async fn status(&mut self) -> Result<Pending, ErrorKind>;
     /// One step of the incremental configuration check, changing nothing: at most one register (one
-    /// or two bus transactions, a short busy wait at most); [`VerifyStep::PassComplete`] after the
-    /// last register of a pass.
+    /// or two bus transactions, a short busy wait at most); [`VerifyStep::PassComplete`] after the.
     async fn verify_step(&mut self) -> Result<VerifyStep, VerifyError>;
     /// K: one verify step after every K-th sample (at least 1).
     fn verify_every(&self) -> u32;
@@ -500,8 +492,6 @@ impl<'a, A: ImuAdapter, D: DelayNs, S: SampleSink> ImuTask<'a, A, D, S> {
     pub async fn once(&mut self) {
         let seq = self.seq;
         self.pending |= self.cells.kick.take();
-        // A self-test request: the test, then the operator restart under the test's number, in
-        // this step, so no sample or CHECK is taken between the two.
         let mut restart = None;
         if self.take(REQ_SELF_TEST) {
             let number = self.cells.self_test_number();
@@ -586,8 +576,6 @@ impl<'a, A: ImuAdapter, D: DelayNs, S: SampleSink> ImuTask<'a, A, D, S> {
                     self.sample().await
                 }
             }
-            // Park, and (not reached) None outside Ok and Degraded: no bus traffic; a request
-            // or core 0's next CHECK wakes the task.
             Action::Park | Action::None => {
                 if !self.take(REQ_CHECK) {
                     self.pending |= self.cells.kick.wait().await & !REQ_CHECK;
@@ -882,8 +870,7 @@ mod tests {
         calls: u32,
         starts: u32,
         restarts: u32,
-        /// What the self-test answers and how long it takes (us); like the ICM-45686's test it
-        /// leaves the device stopped (no data-ready) until a start or a restart.
+        /// What the self-test answers and how long it takes (us); like the ICM-45686's test it.
         self_test_verdict: Verdict,
         self_test_us: u64,
         self_tests: u32,
@@ -1138,7 +1125,6 @@ mod tests {
         }
         let s = status(cells);
         assert_eq!(s.latest.map(|l| l.seq + 1), Some(s.samples));
-        // Every loop step is one sample or one verify step.
         assert!(s.samples + s.verifies >= 2999);
         assert!(s.verifies > 500);
         assert_eq!(s.health.errors, 0);
@@ -1319,7 +1305,6 @@ mod tests {
     fn recovery_succeeds_only_after_a_fresh_sample() {
         let (cells, mut task, fake) = started();
         missed_three(cells, &mut task, &fake);
-        // `recover` and `restart` answer Ok, but no sample can be read: no success.
         fake.borrow_mut().producing = true;
         fake.borrow_mut().acquire_fails = true;
         for _ in 0..4 {
@@ -1328,7 +1313,6 @@ mod tests {
         let s = status(cells);
         assert_eq!(s.state, State::Recovering);
         assert_eq!(s.health.recoveries, 0);
-        // Samples can be read again: the next attempt succeeds on its fresh sample.
         fake.borrow_mut().acquire_fails = false;
         let samples = s.samples;
         for _ in 0..8 {
@@ -1369,7 +1353,6 @@ mod tests {
     fn exactly_four_failed_attempts_end_failed() {
         let (cells, mut task, fake) = started();
         failed_after_four(cells, &mut task, &fake);
-        // Parked: no bus traffic on a kick.
         let calls = status(cells).calls;
         cells.request_check();
         assert!(step(&mut task));
@@ -1438,9 +1421,7 @@ mod tests {
 
     use fw_core::selftest::axes;
 
-    /// The action's final result is FAILED (as for a pass whose device did not come back) and the
-    /// device came back Ok. fw-flight does not name the dialect's result type; fw-core's tests pin
-    /// `Outcome::result` and the texts for the same verdicts.
+    /// The action's final result is FAILED (as for a pass whose device did not come back) and the.
     fn ends_failed_with_the_device_ok(done: &ImuStatus, number: u32) {
         let outcome = done.self_test.expect("the test's outcome");
         assert_eq!(
@@ -1456,9 +1437,7 @@ mod tests {
         assert_ne!(outcome.result(true), pass.result(true));
     }
 
-    /// Self-test request `number` on a running device, stepped (bounded) until the restart that
-    /// follows it has published its outcome; then 20 more steps. Returns the status after the
-    /// outcome and the status at the end.
+    /// Self-test request `number` on a running device, stepped (bounded) until the restart that.
     fn self_test_run(
         cells: &ImuCells,
         task: &mut Task,
@@ -1512,7 +1491,6 @@ mod tests {
     #[test]
     fn a_failed_self_test_still_restarts_the_device_and_ends_failed_with_its_axes() {
         let (cells, mut task, fake) = started();
-        // fw-core's text for this mask: "IMU2 self-test FAIL: lowg X gyro YZ".
         let mask = axes(0, true, false, false) | axes(1, false, true, true);
         fake.borrow_mut().self_test_verdict = Verdict::Fail(mask);
         let (done, _) = self_test_run(cells, &mut task, &fake, 2);
@@ -1535,8 +1513,6 @@ mod tests {
     #[test]
     fn a_check_kicked_during_the_self_test_does_not_score() {
         let (cells, mut task, fake) = started();
-        // The test lasts far longer than T and core 0 kicks CHECK meanwhile, and once more just
-        // before the request is taken.
         fake.borrow_mut().check_during_test = Some(cells);
         cells.request_check();
         let (done, end) = self_test_run(cells, &mut task, &fake, 4);
