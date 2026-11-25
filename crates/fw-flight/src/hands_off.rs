@@ -1,58 +1,43 @@
-//! The hands-off state machine (decision-mavlink-mode-20261123, section 9 Amendment A as amended by section 10: A1,
-//! A2', A3, A6, A7, A9, A10, A10' and the state table; by section 11 Amendment B, B1-B9; and by section 13 Amendment C,
-//! C1-C3; and by section 14 Amendment D, WR1, WR2 and `return_built`). Pure: no clock, no log, no statics, no allocation; every time
-//! comes in as an argument. Each flight step the caller hands it the facts ([`Inputs`]) and gets the state and what the
-//! flight code must do ([`Output`]). Not called by the flight step yet (packets H2b, H2c wire it).
+//! The hands-off state machine. Pure: no clock, no log, no statics, no allocation; every time comes in as an argument. Each flight step the caller hands it the facts ([`Inputs`]) and gets the state and what the flight code must do ([`Output`]).
 
 use crate::tuning::Tuning;
 use fw_core::rc::{RcSample, RcSource, Switch3};
 
-/// Link loss: link age above this in HOLD gives RETURN (home and T3) or LAND, us. Decision section 9, A1 (line 158):
-/// "link age > 10 s in HOLD -> RETURN"; Numbers "link loss 10 s", owner.
+/// Link loss: link age above this in HOLD gives RETURN (home and T3') or LAND, us.
 pub const LINK_LOSS_US: u64 = 10_000_000;
 
-/// Station lost: no station HEARTBEAT on the radio link for longer than this pauses AUTO into HOLD with the place kept,
-/// us; Start needs one within it. 10 s: the laptop <-> WiFi backpack path drops both ways for 6-7 s at a time (field logs
-/// 2026-11-25, 13 events); owner: "yes raise the laptop silence" (was 5 s).
+/// Station lost: no station HEARTBEAT on the radio link for longer than this pauses AUTO into HOLD with the place kept, us; Start needs one within it. Covers 6-7 s WiFi-backpack dropouts.
 pub const STATION_LOST_US: u64 = 10_000_000;
 
 /// The largest horizontal distance from home of the vehicle and of every waypoint at Start, m; more is DENIED.
-/// Decision section 9, A9 (line 213): "within 1000 m horizontally of home"; owner, section 8 Q9 "1km".
 pub const HOME_RANGE_M: f32 = 1000.0;
 
-/// A tier drop (position, heading or height) takes effect on state exits and the stick-loss entry only after it has
-/// lasted this long without a break, us; an upgrade takes effect at once. Decision section 11, B5: ArduPilot
-/// EKF_CHECK_ITERATIONS_MAX, "1 second ... of bad variances", ekf_check.cpp:10-11 (owner's approval pending, Q-B1).
+/// A tier drop (position, heading or height) takes effect on state exits and the stick-loss entry only after it has lasted this long without a break, us; an upgrade takes effect at once. ArduPilot EKF_CHECK_ITERATIONS_MAX (1 s).
 pub const TIER_DEBOUNCE_US: u64 = 1_000_000;
 
-/// D_max, m: the largest horizontal excursion at which LAND must have started (decision-heading-monitor-20261123, Q-H1;
-/// H12 item 4, H13 (2)).
+/// D_max, m: the largest horizontal excursion at which LAND must have started.
 pub const D_MAX_M: f32 = 10.0;
 
-/// The cap on the horizontal speed limit of every hands-off state, m/s: the owner-approved default of `PILOT_SPEED_XY`
-/// (`Tuning::pilot_speed_xy_ms`; H13 (2)).
+/// The cap on the horizontal speed limit of every hands-off state, m/s: the default `PILOT_SPEED_XY` (`Tuning::pilot_speed_xy_ms`).
 pub const SPEED_XY_CAP_MS: f32 = Tuning::DEFAULT.pilot_speed_xy_ms;
 
 /// The horizontal speed limit of the hands-off states for `PILOT_SPEED_XY` in force `in_force_ms`, m/s: v_ho =
-/// min(`in_force_ms`, `SPEED_XY_CAP_MS`) (H13 (2)).
+/// min(`in_force_ms`, `SPEED_XY_CAP_MS`).
 pub fn speed_limit_xy_ms(in_force_ms: f32) -> f32 {
     in_force_ms.min(SPEED_XY_CAP_MS)
 }
 
-/// The hold-integrity bound X for `PILOT_SPEED_XY` in force `in_force_ms`, m: a horizontal distance between the
-/// navigation position and the target the position controller tracks above this sets the track fault, and so does a
-/// distance from the anchor above X + b (H12 item 4, H13 (1), (2)). X = D_max - v_ho t_B5: `D_MAX_M`, v_ho
-/// [`speed_limit_xy_ms`], t_B5 the 1.0 s debounce (`TIER_DEBOUNCE_US`); 7 m at 3 m/s, 5 m at 5 m/s and above.
+/// The hold-integrity bound X for `PILOT_SPEED_XY` in force `in_force_ms`, m: a horizontal distance between the navigation position and the tracked target above this sets the track fault, and so does a distance from the anchor above X + b. X = D_max - v_ho x 1.0 s debounce (`TIER_DEBOUNCE_US`); 7 m at 3 m/s, 5 m at 5 m/s and above.
 pub fn track_fault_m(in_force_ms: f32) -> f32 {
     D_MAX_M - speed_limit_xy_ms(in_force_ms) * (TIER_DEBOUNCE_US as f32 / 1e6)
 }
 
-/// The effective mode (link-contract section 10 codes 1 to 7; BLIND 8, not yet in the contract).
+/// The effective mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
-    /// A fresh CRSF report and the pilot latch set: today's modes.
+    /// A fresh CRSF report and the pilot latch set.
     Pilot,
-    /// A fresh CRSF report in a hands-off state: the ladder at High with centred synthetic sticks until A2' hands over.
+    /// A fresh CRSF report in a hands-off state: the ladder at High with centred synthetic sticks until the pilot hands over.
     Takeover,
     /// Hands-off Position hold, centred sticks.
     Hold,
@@ -64,12 +49,12 @@ pub enum State {
     Land,
     /// Disarmed, motors stopped (or sticks lost on the ground: the gate disarms).
     Stop,
-    /// LAND flown on the debounced T1 (tilt and rates only; B6). Control law UNKNOWN (decision U-1): reported only.
+    /// LAND flown on the debounced T1 (tilt and rates only). Control law unknown: reported only.
     Blind,
 }
 
 impl State {
-    /// The HEARTBEAT `custom_mode` code: link-contract section 10 (1 to 7); BLIND 8 (lead's ruling, contract later).
+    /// The HEARTBEAT `custom_mode` code (BLIND is 8).
     pub fn code(self) -> u8 {
         match self {
             State::Pilot => 1,
@@ -89,8 +74,7 @@ impl State {
     }
 }
 
-/// The validity tier (A3), evaluated by the caller every step from the flags. Inside the module T3 is B4's T3':
-/// position covered and `heading_ok`; T3 without `heading_ok` counts as T2.
+/// The validity tier, evaluated by the caller every step from the flags. Inside the module T3 is T3': position covered and `heading_ok`; T3 without `heading_ok` counts as T2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tier {
     /// The position is covered (`Setpoint::Position`'s needs; includes the height).
@@ -101,7 +85,7 @@ pub enum Tier {
     T1,
 }
 
-/// A station flight command (link-contract section 10), its parameters already checked by the caller.
+/// A station flight command, its parameters already checked by the caller.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     /// MAV_CMD_MISSION_START.
@@ -112,7 +96,7 @@ pub enum Command {
     Abort,
     /// MAV_CMD_DO_SET_MODE, custom mode LAND.
     Land,
-    /// MAV_CMD_NAV_RETURN_TO_LAUNCH (C3).
+    /// MAV_CMD_NAV_RETURN_TO_LAUNCH.
     Return,
 }
 
@@ -125,7 +109,7 @@ pub enum Link {
     Usb,
 }
 
-/// The highest setpoint level this step's flags cover (B5, I12): the flight code must never demand more.
+/// The highest setpoint level this step's flags cover: the flight code must never demand more.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Demand {
     /// T3': the position is covered and `heading_ok`.
@@ -136,10 +120,10 @@ pub enum Demand {
     Angle,
 }
 
-/// LAND's horizontal law, chosen every step from this step's facts (decision-heading-monitor-20261123, H14 (1)).
+/// LAND's horizontal law, chosen every step from this step's facts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LandLaw {
-    /// No track fault and this step's T3' (so also the debounced one): hold the horizontal position (B4).
+    /// No track fault and this step's T3' (so also the debounced one): hold the horizontal position.
     Hold,
     /// The track fault and this step's T3': `Setpoint::Position` at this step's position with no velocity feed-forward,
     /// on every step, never captured.
@@ -183,22 +167,19 @@ pub struct MissionFacts {
 pub struct Inputs {
     /// Board time, us.
     pub now_us: u64,
-    /// FS_HOLD_EN's present value. Taken into force on disarmed steps only (B9); in force false: no HOLD and no mission
-    /// (stick loss on T3' gives LAND, Amendment N, N2; commands DENIED `HandsOffDisabled`).
+    /// FS_HOLD_EN's present value. Taken into force on disarmed steps only; in force false: no HOLD and no mission (stick loss on T3' gives LAND; commands DENIED `HandsOffDisabled`).
     pub fs_hold_en: bool,
-    /// The newest stick report of the flight's source (N19 1(3); disarmed, the newest the gate accepts), not necessarily
-    /// new this step; `None` before the first. Its sticks are never read here.
+    /// The newest stick report of the flight's source (disarmed, the newest the gate accepts), not necessarily new this step; `None` before the first. Its sticks are never read here.
     pub crsf: Option<RcSample>,
-    /// When the newest station HEARTBEAT was received on the radio link, us. USB heartbeats are never given (A1).
+    /// When the newest station HEARTBEAT was received on the radio link, us. USB heartbeats are never given.
     pub last_radio_heartbeat_us: Option<u64>,
-    /// When the newest RADIO_STATUS was received, us. Sets M (N12) when newer than the entry into the present hands-off
-    /// run; no other rule reads it (A1).
+    /// When the newest RADIO_STATUS was received, us. Sets M when newer than the entry into the present hands-off run; no other rule reads it.
     pub last_radio_status_us: Option<u64>,
     /// The gate's armed state.
     pub armed: bool,
     /// The airborne latch.
     pub airborne: bool,
-    /// The low mark (N14 (1)): the collective has reached `EVER_AIRBORNE_G` x m g at an armed step since arming.
+    /// The low mark: the collective has reached `EVER_AIRBORNE_G` x m g at an armed step since arming.
     pub lifted: bool,
     /// The validity tier.
     pub tier: Tier,
@@ -222,26 +203,23 @@ pub struct Inputs {
     pub last_waypoint_reached: bool,
     /// The guidance is within GDN_RADIUS of home (RETURN arrival).
     pub home_reached: bool,
-    /// The heading is OK: the estimate's `Valid.heading` (H12 item 4 as amended by H14).
+    /// The heading is OK: the estimate's `Valid.heading`.
     pub heading_ok: bool,
     /// The battery is known not to be critical.
     pub battery_ok: bool,
     /// The battery is critical.
     pub battery_critical: bool,
-    /// The RETURN law exists (Amendment D). False: RETURN cannot be reached, link loss lands in place and Return is
-    /// denied (`NoHome`); home still latches (N10 (v)). Start does not read it (H3b: AUTO is built).
+    /// The RETURN law exists. False: RETURN cannot be reached, link loss lands in place and Return is denied (`NoHome`); home still latches.
     pub return_built: bool,
     /// The horizontal distance between the navigation position and the Position target the controller tracked at the
     /// previous step, both of that step, m; `None` when the previous step tracked no Position target. Over X
-    /// ([`track_fault_m`]), or not a number, it sets the track fault when that step's state was covered (H12).
+    /// ([`track_fault_m`]), or not a number, it sets the track fault when that step's state was covered.
     pub track_error_m: Option<f32>,
-    /// `PILOT_SPEED_XY` in force (latched at arming), m/s: gives v_ho and X (H13 (2)).
+    /// `PILOT_SPEED_XY` in force (latched at arming), m/s: gives v_ho and X.
     pub speed_xy_ms: f32,
-    /// The touchdown rule TD had held at the previous step: N4's three conditions together for 1.0 s, counted on every
-    /// armed step in every state (Amendment N, N10). Guards WR1's ground exit (N10 (i)) and the stick-loss STOP after
-    /// take-off (N10 (iii)).
+    /// The touchdown rule TD held at the previous step: the touchdown conditions together for 1.0 s, counted on every armed step in every state. Guards the ground exit and the stick-loss STOP after take-off.
     pub td_held: bool,
-    /// The gate armed this arming through the in-air restart (decision-inair-restart-20261125): home never latches.
+    /// The gate armed this arming through the in-air restart: home never latches.
     pub restart: bool,
 }
 
@@ -256,12 +234,11 @@ pub enum DenyReason {
     HandsOffDisabled,
     /// The state does not take this command.
     NotInThisState,
-    /// A command into HOLD or RETURN (and Abort in BLIND): the debounced tier is not T3' (B2, B6, C3), or the track
-    /// fault is latched (H14). Start: this step's tier is not T3 (checked after `HeadingNotOk`, B4).
+    /// A command into HOLD or RETURN (and Abort in BLIND): the debounced tier is not T3', or the track fault is latched. Start: this step's tier is not T3 (checked after `HeadingNotOk`).
     NotT3,
-    /// A command into HOLD or RETURN: the battery is critical, so the state would land at once (B2, C3).
+    /// A command into HOLD or RETURN: the battery is critical, so the state would land at once.
     BatteryCritical,
-    /// A command into HOLD: the link is lost (`LINK_LOSS_US`), so HOLD would leave at once (B2).
+    /// A command into HOLD: the link is lost (`LINK_LOSS_US`), so HOLD would leave at once.
     LinkLost,
     /// Start: no station HEARTBEAT on the radio link within `STATION_LOST_US`.
     StationAbsent,
@@ -269,7 +246,7 @@ pub enum DenyReason {
     NoWaypoints,
     /// Start: a stored z is outside the height limits in force.
     HeightOutsideLimits,
-    /// Start or Return: home is not set; Return also when the RETURN law is not built (`return_built` false, N10 (v)).
+    /// Start or Return: home is not set; Return also when the RETURN law is not built (`return_built` false).
     NoHome,
     /// Start: the vehicle is more than `HOME_RANGE_M` from home, or its position is not valid.
     VehicleBeyondRange,
@@ -277,16 +254,15 @@ pub enum DenyReason {
     WaypointDistanceUnknown,
     /// Start: a waypoint is more than `HOME_RANGE_M` from home.
     WaypointBeyondRange,
-    /// Start: the heading monitor is not OK, or the track fault is latched (H14).
+    /// Start: the heading monitor is not OK, or the track fault is latched.
     HeadingNotOk,
     /// Start: the battery is not known to be non-critical.
     BatteryNotOk,
-    /// Start: the last CRSF report before the sticks were lost did not have arm ON (C2).
+    /// Start: the last CRSF report before the sticks were lost did not have arm ON.
     ArmSwitchOff,
-    /// Start: the last CRSF report before the sticks were lost did not have switch6 High (A10'). On a MAVLink flight
-    /// (N19 section 5): the live receiver report does not have the mode switch in Position.
+    /// Start: the last CRSF report before the sticks were lost did not have switch6 High. On a MAVLink flight: the live receiver report does not have the mode switch in Position.
     SwitchNotHigh,
-    /// Start on a MAVLink flight (N19 section 5): no receiver report younger than 1.0 s with the mission switch ON.
+    /// Start on a MAVLink flight: no receiver report younger than 1.0 s with the mission switch ON.
     MissionSwitchOff,
     /// Start: a list with a waypoint is stored but it is not the set in force (`GDN_SRC` is not 1). Answered where
     /// `NoWaypoints` is.
@@ -294,8 +270,7 @@ pub enum DenyReason {
 }
 
 impl DenyReason {
-    /// The reason code for COMMAND_ACK.result_param2 (C3; link-contract section 10 reason table, MARV-GCS 58103a4);
-    /// 0 is reserved for unknown.
+    /// The reason code for COMMAND_ACK.result_param2; 0 is reserved for unknown.
     pub fn code(self) -> u8 {
         match self {
             DenyReason::NotRadioLink => 1,
@@ -360,19 +335,18 @@ impl Events {
     };
 }
 
-/// Why the present state was entered: one per rule of the state table that changes the state (the same rule of the
-/// MAVLink-flight table and of the other has the same reason). Logged only (the HO MSG); nothing acts on it.
+/// Why the present state was entered: one per state-table rule that changes the state. Logged only (the HO MSG); nothing acts on it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reason {
-    /// N19 columns 4 and 5: an arm-OFF report with the mission switch OFF: STOP.
+    /// An arm-OFF report with the mission switch OFF: STOP.
     ArmMsOff,
-    /// N19 columns 4 and 5: an arm-OFF report in PILOT on the ground: STOP.
+    /// An arm-OFF report in PILOT on the ground: STOP.
     ArmOffGround,
-    /// An arm-OFF report: STOP (the disarm not withheld, C1) or, on a MAVLink flight in the air, LAND (N19).
+    /// An arm-OFF report: STOP (the disarm not withheld) or, on a MAVLink flight in the air, LAND.
     ArmOff,
     /// The gate is disarmed: STOP.
     Disarmed,
-    /// WR1: a hands-off state on the ground with TD held: STOP.
+    /// A hands-off state on the ground with TD held: STOP.
     Landed,
     /// A fresh report in STOP with the pilot latch set (arming): PILOT.
     Armed,
@@ -380,17 +354,17 @@ pub enum Reason {
     RcLost,
     /// A fresh report in a hands-off state (not a MAVLink flight): TAKEOVER.
     RcBack,
-    /// TAKEOVER's hand-over (the pilot latch, A2'): PILOT.
+    /// TAKEOVER's hand-over (the pilot latch set): PILOT.
     Handover,
-    /// N19 columns 2 and 3: a live report with the mission switch OFF: PILOT (switch6 High) or TAKEOVER.
+    /// A live report with the mission switch OFF: PILOT (switch6 High) or TAKEOVER.
     MsOff,
-    /// N19 column 1: the mission switch ON with switch6 High in PILOT in the air: HOLD.
+    /// The mission switch ON with switch6 High in PILOT in the air: HOLD.
     MsOn,
     /// The debounced tier: a drop below T3' (LAND or BLIND), or BLIND's tier change (LAND, BLIND).
     Tier,
     /// The battery is critical: LAND or BLIND.
     BattCrit,
-    /// The H12 track fault: LAND or BLIND.
+    /// The track fault: LAND or BLIND.
     Track,
     /// Link age above `LINK_LOSS_US` in HOLD: RETURN or LAND.
     LinkLost,
@@ -446,7 +420,7 @@ impl Reason {
     }
 }
 
-/// Home (A6): set when both its height and its position were latched this arming.
+/// Home: set when both its height and its position were latched this arming.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Home {
     /// North and east from the origin, m.
@@ -472,24 +446,23 @@ pub struct Output {
     pub return_height_m: Option<f32>,
     /// Events.
     pub events: Events,
-    /// LAND: selects the LAND law (A8) only; it triggers no disarm (WR1: the ground exit is the state machine's).
+    /// LAND: selects the LAND law only; it triggers no disarm (the ground exit is the state machine's).
     pub landing: bool,
     /// LAND flying [`LandLaw::Hold`].
     pub land_holds_position: bool,
-    /// LAND and TAKEOVER's descent: the horizontal law (H14 (1)); `None` otherwise.
+    /// LAND and TAKEOVER's descent: the horizontal law; `None` otherwise.
     pub land_law: Option<LandLaw>,
-    /// The highest level the flight code may demand this step, from this step's flags (B5, I12).
+    /// The highest level the flight code may demand this step, from this step's flags.
     pub demand: Demand,
-    /// TAKEOVER after the battery was critical in it (C1), or with the track fault (H14): fly the LAND law (A8) with
+    /// TAKEOVER after the battery was critical in it, or with the track fault: fly the LAND law with
     /// the synthetic sticks and `land_law`; hand-over stays possible.
     pub takeover_descent: bool,
-    /// For the gate: a report with arm OFF must not disarm. Hands-off state, K clear and M set (C1 as amended by N12),
-    /// after this step's report.
+    /// For the gate: a report with arm OFF must not disarm. Hands-off state, K clear and M set, after this step's report.
     pub arm_off_holds: bool,
-    /// For the gate: disarm in this step. STOP entered this step with `armed` true (WR2).
+    /// For the gate: disarm in this step. STOP entered this step with `armed` true.
     pub disarm: bool,
     /// The horizontal speed limit for the position controller, m/s: v_ho ([`speed_limit_xy_ms`]) in a hands-off state,
-    /// `PILOT_SPEED_XY` in force otherwise (H13 (2)).
+    /// `PILOT_SPEED_XY` in force otherwise.
     pub speed_limit_xy_ms: f32,
     /// Why the present state was entered; `None` before the first change (the initial STOP).
     pub reason: Option<Reason>,
@@ -502,22 +475,19 @@ pub struct Output {
 #[derive(Clone, Debug)]
 pub struct HandsOff {
     state: State,
-    /// Stick loss, us: the gate's RC_FS_TIMEOUT (`Tuning::rc_fs_timeout_us`, decision Numbers "hands-off entry 1.0 s").
+    /// Stick loss, us: the gate's RC_FS_TIMEOUT (`Tuning::rc_fs_timeout_us`).
     stick_loss_us: u64,
-    /// A2': set when the pilot flies; cleared on entry to any hands-off state.
+    /// Pilot latch: set when the pilot flies; cleared on entry to any hands-off state.
     pilot_latch: bool,
-    /// C1 K, "arm seen ON": a counting report had arm ON. Cleared on entry to any hands-off state. A counting report
-    /// is a fresh one in TAKEOVER: a report fresh in a hands-off state arrived after its entry, because every entry
-    /// other than TAKEOVER's leaves the newest report stale.
+    /// K, "arm seen ON": a counting report had arm ON. Cleared on entry to any hands-off state. A counting report is a fresh one in TAKEOVER: one that arrived after its entry.
     arm_seen: bool,
-    /// C1 P, "lock open": a counting report had arm ON and switch6 High. Cleared with K.
+    /// P, "lock open": a counting report had arm ON and switch6 High. Cleared with K.
     lock_open: bool,
-    /// N12 M, "RADIO_STATUS seen": a RADIO_STATUS newer than `entry_us` arrived. Cleared with K at an entry into a
-    /// hands-off state from PILOT or STOP; kept through the changes between hands-off states.
+    /// M, "RADIO_STATUS seen": a RADIO_STATUS newer than `entry_us` arrived. Cleared with K at an entry into a hands-off state from PILOT or STOP; kept through changes between hands-off states.
     radio_seen: bool,
-    /// The step time of the latest entry into a hands-off state from PILOT or STOP, us (N12).
+    /// The step time of the latest entry into a hands-off state from PILOT or STOP, us.
     entry_us: u64,
-    /// C1: the battery was critical in this TAKEOVER; cleared on any state change.
+    /// The battery was critical in this TAKEOVER; cleared on any state change.
     descent: bool,
     /// A mission place exists (AUTO, or HOLD after a pause that kept it).
     place: bool,
@@ -527,30 +497,25 @@ pub struct HandsOff {
     was_armed: bool,
     home_d: Option<f32>,
     home_ne: Option<[f32; 2]>,
-    /// This arming may still latch home (armed, before take-off; B8).
+    /// This arming may still latch home (armed, before take-off).
     home_window: bool,
-    /// FS_HOLD_EN in force, taken on disarmed steps (B9).
+    /// FS_HOLD_EN in force, taken on disarmed steps.
     fs_in_force: bool,
-    /// The flight's source (N19 1(3)): the newest report's at the first armed step, which is the gate's arming report's
-    /// source; `None` on disarmed steps.
+    /// The flight's source: the newest report's at the first armed step (the gate's arming report's source); `None` on disarmed steps.
     source: Option<RcSource>,
-    /// "Ever airborne" (Amendment N, N1 and N10 (iii); N14 (1)): the low mark (`Inputs::lifted`) or the airborne latch has
-    /// been set at an armed step since arming; cleared on a disarmed step.
+    /// "Ever airborne": the low mark (`Inputs::lifted`) or the airborne latch has been set at an armed step since arming; cleared on a disarmed step.
     ever_airborne: bool,
-    /// The tier for exits and the stick-loss entry (B5).
+    /// The tier for exits and the stick-loss entry.
     debounced: Tier,
     /// The first step of the present run of steps below T3'.
     below_t3_since: Option<u64>,
     /// The first step of the present run of T1 steps.
     below_t2_since: Option<u64>,
-    /// H12 track_fault, a landing cause of its own (H14 (1)); set by `track_error_m` or by the distance from the anchor
-    /// (H13), cleared on a disarmed step only.
+    /// The track fault, a landing cause of its own; set by `track_error_m` or by the distance from the anchor, cleared on a disarmed step only.
     track_fault: bool,
-    /// The previous step's state is one the check covers (H12 item 4 with H13 (3)): HOLD, AUTO, RETURN, TAKEOVER, or
-    /// LAND holding position.
+    /// The previous step's state is one the track check covers: HOLD, AUTO, RETURN, TAKEOVER, or LAND holding position.
     track_covered: bool,
-    /// H13 (1): the anchor A (NE, m) and the braking allowance b (m) of the present fixed-target segment; `None` outside
-    /// one and until a step of it has a valid, finite NE position and velocity.
+    /// The anchor A (NE, m) and the braking allowance b (m) of the present fixed-target segment; `None` outside one and until a step of it has a valid, finite NE position and velocity.
     anchor: Option<([f32; 2], f32)>,
     /// A fixed-target segment has begun and its anchor is not set yet.
     anchor_pending: bool,
@@ -559,7 +524,7 @@ pub struct HandsOff {
 }
 
 impl HandsOff {
-    /// STOP, disarmed, no home. The stick-loss time is the gate's (`tuning.rc_fs_timeout_us`).
+    /// STOP, disarmed, no home.
     pub fn new(tuning: &Tuning) -> Self {
         Self {
             state: State::Stop,
@@ -609,27 +574,27 @@ impl HandsOff {
         }
     }
 
-    /// The H12 track fault is latched (until a disarmed step).
+    /// The track fault is latched (until a disarmed step).
     pub fn track_fault(&self) -> bool {
         self.track_fault
     }
 
-    /// H13 (1): the anchor A (NE, m) and the braking allowance b (m) in force, when set.
+    /// The anchor A (NE, m) and the braking allowance b (m) in force, when set.
     pub fn anchor(&self) -> Option<([f32; 2], f32)> {
         self.anchor
     }
 
-    /// FS_HOLD_EN in force (B9): the value of the latest disarmed step.
+    /// FS_HOLD_EN in force: the value of the latest disarmed step.
     pub fn fs_hold_in_force(&self) -> bool {
         self.fs_in_force
     }
 
-    /// "Ever airborne" in force (N1, N10 (iii)): the latch set at an armed step since arming, as of the latest step.
+    /// "Ever airborne" in force: the latch set at an armed step since arming, as of the latest step.
     pub fn ever_airborne(&self) -> bool {
         self.ever_airborne
     }
 
-    /// N12's M in force: a hands-off state, and a RADIO_STATUS arrived after its entry (the log's M bit).
+    /// M in force: a hands-off state, and a RADIO_STATUS arrived after its entry (the log's M bit).
     pub fn radio_status_seen(&self) -> bool {
         self.state.is_hands_off() && self.radio_seen
     }
@@ -649,16 +614,14 @@ impl HandsOff {
             self.source = i.crsf.map(|r| r.source);
         }
         self.ever_airborne = i.armed && (self.ever_airborne || i.airborne || i.lifted);
-        // H12: the previous step's distance against X, in the state that step flew; latched until disarmed.
+        // The previous step's distance against X, in the state that step flew; latched until disarmed.
         let x = track_fault_m(i.speed_xy_ms);
         if !i.armed {
             self.track_fault = false;
         } else if self.track_covered && i.airborne && i.track_error_m.is_some_and(|d| d.is_nan() || d > x) {
             self.track_fault = true;
         }
-        // H13 (1): this step's distance from the anchor against X + b on every step with a valid NE velocity (and
-        // position); not a number trips. H14 (2): in HOLD and TAKEOVER whatever the setpoint; in LAND only on a step
-        // that flies the hold (no fault, this step's T3'), never in a level or braking descent (nor BLIND).
+        // This step's distance from the anchor against X + b on every step with a valid NE velocity (and position); not a number trips. In HOLD and TAKEOVER whatever the setpoint; in LAND only on a step that flies the hold, never in a level or braking descent (nor BLIND).
         let instant = self.instant_tier(i);
         let anchor_read = match self.state {
             State::Hold | State::Takeover => true,
@@ -679,7 +642,7 @@ impl HandsOff {
             }
         }
         self.update_tier(i.now_us, instant);
-        // N12: M from a RADIO_STATUS newer than the entry, before this step's arm-OFF rule reads it.
+        // M from a RADIO_STATUS newer than the entry, before this step's arm-OFF rule reads it.
         if self.state.is_hands_off() && i.last_radio_status_us.is_some_and(|t| t > self.entry_us) {
             self.radio_seen = true;
         }
@@ -735,10 +698,7 @@ impl HandsOff {
         }
     }
 
-    /// H13 (1): a fixed-target segment begins on entry to HOLD, TAKEOVER or LAND holding position (`land_hold`) from
-    /// PILOT, AUTO or RETURN; its anchor is set at its first step with a valid, finite NE position and velocity: A that
-    /// position, b = |v_NE|^2 / (2 `GUIDANCE_ACC_MS2`). Kept through any other change inside the segment (never re-set
-    /// inside LAND, H14 (2)); cleared in PILOT, STOP, AUTO and RETURN (so at disarm, which is STOP).
+    /// A fixed-target segment begins on entry to HOLD, TAKEOVER or LAND holding position (`land_hold`) from PILOT, AUTO or RETURN; its anchor is set at its first step with a valid, finite NE position and velocity: A that position, b = |v_NE|^2 / (2 `GUIDANCE_ACC_MS2`). Kept through any other change inside the segment (never re-set inside LAND); cleared in PILOT, STOP, AUTO and RETURN.
     fn update_anchor(&mut self, was: State, land_hold: bool, i: &Inputs) {
         let entry = was != self.state
             && matches!(was, State::Pilot | State::Auto | State::Return)
@@ -759,12 +719,12 @@ impl HandsOff {
         }
     }
 
-    /// H14 (1): heading_ok = the input only (the track fault is a landing cause of its own).
+    /// heading_ok = the input only (the track fault is a landing cause of its own).
     fn heading_ok(&self, i: &Inputs) -> bool {
         i.heading_ok
     }
 
-    /// This step's tier with B4's T3' (T3 needs `heading_ok`).
+    /// This step's tier with T3' (T3 needs `heading_ok`).
     fn instant_tier(&self, i: &Inputs) -> Tier {
         match i.tier {
             Tier::T3 if self.heading_ok(i) => Tier::T3,
@@ -773,7 +733,7 @@ impl HandsOff {
         }
     }
 
-    /// B5: a drop below a level counts once it has lasted `TIER_DEBOUNCE_US` without a break; a rise at once.
+    /// A drop below a level counts once it has lasted `TIER_DEBOUNCE_US` without a break; a rise at once.
     fn update_tier(&mut self, now: u64, instant: Tier) {
         if instant == Tier::T3 {
             self.below_t3_since = None;
@@ -795,7 +755,7 @@ impl HandsOff {
         };
     }
 
-    /// LAND, or BLIND when the debounced tier is T1 (B6: BLIND is LAND flown on T1).
+    /// LAND, or BLIND when the debounced tier is T1.
     fn land_state(&self) -> State {
         if self.debounced == Tier::T1 {
             State::Blind
@@ -804,8 +764,7 @@ impl HandsOff {
         }
     }
 
-    /// A6 with B8: D and NE each at the first armed step where they are valid while not airborne; the window closes on
-    /// airborne; home is both or nothing; cleared at disarm. A restart arming (`Inputs::restart`) never opens the window.
+    /// Home: D and NE each at the first armed step where they are valid while not airborne; the window closes on airborne; home is both or nothing; cleared at disarm. A restart arming (`Inputs::restart`) never opens the window.
     fn update_home(&mut self, i: &Inputs) {
         if !i.armed {
             self.home_d = None;
@@ -831,24 +790,22 @@ impl HandsOff {
         self.was_armed = i.armed;
     }
 
-    /// On the ground: neither the airborne latch nor (since arming) ever airborne, or TD held (N19's arm columns).
+    /// On the ground: neither the airborne latch nor (since arming) ever airborne, or TD held.
     fn ground(&self, i: &Inputs) -> bool {
         !i.airborne && (!self.ever_airborne || i.td_held)
     }
 
-    /// N19 1(5): ho_allowed, "this is a MAVLink flight" where it replaces FS_HOLD_EN in force; disarmed, FS_HOLD_EN in
-    /// force as before.
+    /// ho_allowed, "this is a MAVLink flight" where it replaces FS_HOLD_EN in force; disarmed, FS_HOLD_EN in force.
     fn ho_allowed(&self) -> bool {
         self.fs_in_force && self.source != Some(RcSource::Crsf)
     }
 
-    /// N19: armed on a receiver report with FS_HOLD_EN 1 in force.
+    /// Armed on a receiver report with FS_HOLD_EN 1 in force.
     fn mavlink_flight(&self) -> bool {
         self.fs_in_force && self.source == Some(RcSource::Receiver)
     }
 
-    /// N19 section 2, the transition table of a MAVLink flight, in its priority order: the arm columns 4 and 5 (the newest
-    /// report, stale or not), WR1, columns 2 and 3, each state's own exits (column 6 among them), column 1.
+    /// The transition table of a MAVLink flight, in priority order: the arm-OFF rules (newest report, stale or not), the ground exit, the live-report rules, each state's own exits, then the mission-switch-ON HOLD entry.
     fn mission_switch(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
         if let Some(r) = i.crsf.filter(|r| !r.arm) {
             let ground = self.ground(i);
@@ -943,7 +900,7 @@ impl HandsOff {
         }
     }
 
-    /// The state table's exits that are not commands (FS_HOLD_EN 0 or 1; Amendment N, N2).
+    /// The state table's exits that are not commands (FS_HOLD_EN 0 or 1).
     fn automatic(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
         if self.mavlink_flight() {
             self.mission_switch(i, fresh, ev);
@@ -953,7 +910,7 @@ impl HandsOff {
             self.go(State::Stop, if i.armed { Reason::ArmOff } else { Reason::Disarmed }, i, ev);
             return;
         }
-        // WR1, guarded by the touchdown rule TD (N10 (i); ArduPilot land_complete).
+        // The ground exit, guarded by the touchdown rule TD (ArduPilot land_complete).
         if self.state.is_hands_off() && !i.airborne && i.td_held {
             self.go(State::Stop, Reason::Landed, i, ev);
             return;
@@ -1027,13 +984,12 @@ impl HandsOff {
         }
     }
 
-    /// C1 as amended by N12: arm OFF withholds the disarm in a hands-off state while K is clear and M is set (at both
-    /// FS_HOLD_EN values; no airborne term).
+    /// Arm OFF withholds the disarm in a hands-off state while K is clear and M is set (at both FS_HOLD_EN values; no airborne term).
     fn arm_off_holds(&self) -> bool {
         self.state.is_hands_off() && !self.arm_seen && self.radio_seen
     }
 
-    /// C1 with A2': this step's counting report sets K and P; after P, arm ON and switch6 not High sets the pilot latch.
+    /// This step's counting report sets K and P; after P, arm ON and switch6 not High sets the pilot latch.
     fn lock(&mut self, i: &Inputs) {
         let Some(r) = i.crsf.filter(|r| r.arm) else {
             return;
@@ -1046,10 +1002,7 @@ impl HandsOff {
         self.lock_open |= high;
     }
 
-    /// Sticks lost in PILOT or TAKEOVER: with the latch false, STOP if never airborne since arming (N14 (1): the low mark
-    /// or the latch) or TD has held, else
-    /// LAND (or BLIND) (N10 (iii)); LAND (or BLIND) with the track fault (H14); else by the debounced tier, T3' giving
-    /// LAND instead of HOLD while FS_HOLD_EN in force is 0 (Amendment N, N2).
+    /// Sticks lost in PILOT or TAKEOVER: with the latch false, STOP if never airborne since arming (the low mark or the latch) or TD has held, else LAND (or BLIND); LAND (or BLIND) with the track fault; else by the debounced tier, T3' giving LAND instead of HOLD while FS_HOLD_EN in force is 0.
     fn lost(&self, i: &Inputs) -> State {
         if !i.airborne {
             if !self.ever_airborne || i.td_held {
@@ -1069,7 +1022,7 @@ impl HandsOff {
         }
     }
 
-    /// A1: now minus the newer of the last CRSF report and the last radio HEARTBEAT.
+    /// Now minus the newer of the last CRSF report and the last radio HEARTBEAT.
     fn link_age(&self, i: &Inputs) -> u64 {
         let newest = match (i.crsf.map(|r| r.t_us), i.last_radio_heartbeat_us) {
             (Some(a), Some(b)) => Some(a.max(b)),
@@ -1150,7 +1103,7 @@ impl HandsOff {
             );
         }
         if next == State::Stop {
-            // Disarmed: only a CRSF report arms (A2), so the next arming is the pilot's.
+            // Disarmed: only a CRSF report arms, so the next arming is the pilot's.
             self.flown_plan = None;
             self.pilot_latch = true;
         }
@@ -1158,7 +1111,7 @@ impl HandsOff {
         self.reason = Some(reason);
     }
 
-    /// A10, A10', A9, C2, C3 and the lead's rulings: the answer, and the change at this step when ACCEPTED.
+    /// The answer to a command, and the change at this step when ACCEPTED.
     fn command(&mut self, c: StationCommand, i: &Inputs, fresh: bool, ev: &mut Events) -> CommandResult {
         use CommandResult::{Accepted, Denied};
         if c.link != Link::Radio {
@@ -1224,8 +1177,8 @@ impl HandsOff {
         }
     }
 
-    /// B2: a command into HOLD is DENIED when one of HOLD's automatic exits would fire on this step's facts; the track
-    /// fault (H14) answers NotT3.
+    /// A command into HOLD is DENIED when one of HOLD's automatic exits would fire on this step's facts; the track
+    /// fault answers NotT3.
     fn hold_entry_check(&self, i: &Inputs) -> Option<DenyReason> {
         if self.debounced != Tier::T3 || self.track_fault {
             Some(DenyReason::NotT3)
@@ -1240,8 +1193,7 @@ impl HandsOff {
         }
     }
 
-    /// C3: Return needs home and `return_built`; then B2's no-bounce rule for RETURN's automatic exits (arrival excepted); the track fault
-    /// (H14) answers NotT3.
+    /// Return needs home and `return_built`; then the no-bounce rule for RETURN's automatic exits (arrival excepted); the track fault answers NotT3.
     fn return_check(&self, i: &Inputs) -> Option<DenyReason> {
         if !i.return_built || self.home().is_none() {
             Some(DenyReason::NoHome)
@@ -1254,8 +1206,7 @@ impl HandsOff {
         }
     }
 
-    /// Start's conditions in the contract's order (section 10), the lead's height ruling after the list's;
-    /// the first that fails.
+    /// Start's conditions in the contract's order; the first that fails.
     fn start_check(&self, i: &Inputs) -> Option<DenyReason> {
         if !Self::station_present(i) {
             return Some(DenyReason::StationAbsent);
@@ -1364,7 +1315,7 @@ mod tests {
 
     impl Rig {
         /// Disarmed on the ground at home, a fresh receiver report (High, arm on, mission switch OFF), the station present:
-        /// the rigs below fly MAVLink flights (N19).
+        /// the rigs below fly MAVLink flights.
         fn new() -> Rig {
             let i = Inputs {
                 now_us: T0,
@@ -1444,12 +1395,12 @@ mod tests {
             self.at(t)
         }
 
-        /// A new report at `t` with full sticks and the mission switch ON (N19 1(2)).
+        /// A new report at `t` with full sticks and the mission switch ON.
         fn report_ms(&mut self, t: u64, switch6: Switch3, arm: bool) -> Output {
             self.report_full(t, FULL, switch6, arm, true)
         }
 
-        /// As `new`, the report from CRSF: the rigs built on it fly CRSF flights (N19 section 3).
+        /// As `new`, the report from CRSF: the rigs built on it fly CRSF flights.
         fn crsf() -> Rig {
             let mut r = Rig::new();
             r.i.crsf = r.i.crsf.map(|s| RcSample { source: RcSource::Crsf, ..s });
@@ -1469,7 +1420,7 @@ mod tests {
             r
         }
 
-        /// Sticks lost on T3 in the air on a CRSF flight at FS_HOLD_EN 1: LAND (N19 1(5)), with the station's heartbeat.
+        /// Sticks lost on T3 in the air on a CRSF flight at FS_HOLD_EN 1: LAND, with the station's heartbeat.
         fn crsf_land() -> Rig {
             let mut r = Rig::crsf_pilot();
             let t = r.last_report() + LOSS + 1;
@@ -1486,7 +1437,7 @@ mod tests {
             r
         }
 
-        /// `crsf_land`, then a fresh CRSF report with switch6 Low: TAKEOVER (the code kept for CRSF flights, N19 4).
+        /// `crsf_land`, then a fresh CRSF report with switch6 Low: TAKEOVER.
         fn crsf_takeover() -> Rig {
             let mut r = Rig::crsf_land();
             let t = r.now() + 1_000;
@@ -1539,8 +1490,7 @@ mod tests {
             r
         }
 
-        /// HOLD, then the station's heartbeat and a report with the mission switch ON, arm ON and High: HOLD stays (N19
-        /// column 1) and Start may be given.
+        /// HOLD, then the station's heartbeat and a report with the mission switch ON, arm ON and High: HOLD stays and Start may be given.
         fn ms_hold() -> Rig {
             let mut r = Rig::hold();
             let t = r.now() + 1_000;
@@ -1704,7 +1654,7 @@ mod tests {
         assert_eq!(r.at(t).state, State::Stop);
     }
 
-    // ---- I3 (as amended by A2') ----
+    // ---- TAKEOVER hand-over ----
 
     #[test]
     fn hands_off_i3_full_sticks_low_or_middle_before_high_keep_synthetic_sticks() {
@@ -1802,7 +1752,7 @@ mod tests {
     fn hands_off_hold_exits() {
         // CRSF: TAKEOVER (covered above). Start: AUTO (Rig::auto). Land command:
         assert_eq!(Rig::land().h.state(), State::Land);
-        // T3 lost for 1.0 s: LAND, or BLIND on T1 (B6); latched (T3 back gives no HOLD).
+        // T3 lost for 1.0 s: LAND, or BLIND on T1; latched (T3 back gives no HOLD).
         for (tier, want) in [(Tier::T2, State::Land), (Tier::T1, State::Blind)] {
             let mut r = Rig::hold();
             assert_eq!(r.drop_tier(tier).state, State::Hold);
@@ -1816,7 +1766,7 @@ mod tests {
         assert_eq!(r.step().state, State::Land);
     }
 
-    // ---- I4 ----
+    // ---- Link and heartbeat ----
 
     #[test]
     fn hands_off_i4_return_at_10_1_s_not_at_9_9_s_with_radio_status_present() {
@@ -1853,7 +1803,7 @@ mod tests {
 
     #[test]
     fn hands_off_i4_a_usb_heartbeat_cannot_prevent_it() {
-        // `Inputs` has no USB heartbeat (A1): the struct literal in `Rig::new` names every field, so one added there
+        // `Inputs` has no USB heartbeat: the struct literal in `Rig::new` names every field, so one added there
         // would have to be written into this test's rig. Commands over USB do not refresh the link either.
         let mut r = Rig::hold();
         let hb = r.now();
@@ -1889,7 +1839,7 @@ mod tests {
         assert_eq!(r.at(t).state, State::Return);
     }
 
-    // ---- AUTO and I5 ----
+    // ---- AUTO ----
 
     #[test]
     fn hands_off_i5_auto_pauses_at_5_s_without_the_radio_heartbeat_place_kept() {
@@ -1900,7 +1850,7 @@ mod tests {
         let out = r.at(hb + STATION_LOST_US + 1);
         assert_eq!(out.state, State::Hold);
         assert!(out.events.place_kept && !out.events.place_dropped);
-        // The station back and the mission switch ON (N19): Start resumes the kept place.
+        // The station back and the mission switch ON: Start resumes the kept place.
         r.i.last_radio_heartbeat_us = Some(hb + STATION_LOST_US + 1_000);
         r.report_ms(hb + STATION_LOST_US + 1_000, Switch3::High, true);
         let out = r.cmd(Command::Start);
@@ -1922,7 +1872,7 @@ mod tests {
         assert!(out.landing);
     }
 
-    // ---- I6 ----
+    // ---- Plan changes ----
 
     #[test]
     fn hands_off_i6_new_plan_in_auto_holds_with_the_place_dropped() {
@@ -1993,8 +1943,7 @@ mod tests {
         assert_eq!(r.at(t).return_height_m, Some(10.0));
     }
 
-    /// FX-3 item 1: H_r = max(present, min(stored return height, GDN_ALT_MAX in force)); a non-finite or non-positive
-    /// limit is the default 50 m; no mission: the present height.
+    /// Return height: max(present, min(stored return height, GDN_ALT_MAX in force)); a non-finite or non-positive limit is the default 50 m; no mission: the present height.
     #[test]
     fn fx3_return_height_is_capped_at_gdn_alt_max() {
         let enter = |ret: Option<f32>, alt_max: f32, present: f32| {
@@ -2084,8 +2033,7 @@ mod tests {
         assert_eq!(out.home, None);
     }
 
-    /// Amendment N, N10 (i): WR1's ground exit needs TD held (`td_held`): a hands-off state that reads the latch false
-    /// stays, hands-off and not disarming, while `td_held` is false, and stops with the disarm at the first step it is true.
+    /// The ground exit needs TD held (`td_held`): a hands-off state that reads the latch false stays, hands-off and not disarming, while `td_held` is false, and stops with the disarm at the first step it is true.
     #[test]
     fn hands_off_wr1_ground_exit_is_guarded_by_td() {
         let rigs: [(&str, fn() -> Rig); 4] = [("hold", Rig::hold), ("land", Rig::land), ("blind", Rig::blind), ("takeover", Rig::takeover)];
@@ -2106,10 +2054,7 @@ mod tests {
         }
     }
 
-    /// Amendment N, N10 (iii): sticks lost in PILOT or TAKEOVER with the latch false after take-off give LAND (BLIND on
-    /// T1, by the debounced tier) while TD has not held, at FS_HOLD_EN 0 and 1, then STOP through WR1 at the first step
-    /// TD has held; STOP at once when TD has held at the loss; STOP at once when never airborne since arming, TD or not
-    /// ("ever airborne" clears at disarm).
+    /// Sticks lost in PILOT or TAKEOVER with the latch false after take-off give LAND (BLIND on T1, by the debounced tier) while TD has not held, at FS_HOLD_EN 0 and 1, then STOP at the first step TD has held; STOP at once when TD has held at the loss, or when never airborne since arming.
     #[test]
     fn hands_off_n10_stick_loss_with_the_latch_false_after_take_off_lands_until_td() {
         for fs in [false, true] {
@@ -2226,7 +2171,7 @@ mod tests {
         }
     }
 
-    // ---- I8 ----
+    // ---- Home latch ----
 
     #[test]
     fn hands_off_i8_home_latches_once_per_arming_on_the_ground() {
@@ -2283,8 +2228,7 @@ mod tests {
         assert_eq!(r.at(t).state, State::Land);
     }
 
-    /// Seeded walk: RETURN and Start never happen without home; disarmed is STOP; `hands_off` follows the state;
-    /// I12: the level the flight code may demand never exceeds this step's flags.
+    /// Seeded walk: RETURN and Start never happen without home; disarmed is STOP; `hands_off` follows the state; the level the flight code may demand never exceeds this step's flags.
     #[test]
     fn hands_off_i8_i12_walk_never_returns_or_starts_without_home_and_never_demands_uncovered() {
         let mut rng = Lcg(0x5eed_0001);
@@ -2292,10 +2236,10 @@ mod tests {
         let mut i = Rig::new().i;
         let mut seen = [false; 8];
         let (mut prev, mut high_seen) = (State::Stop, false);
-        // C1, tracked here from the reports: K (arm ON) and P (arm ON and High in one report) since TAKEOVER's entry.
+        // Tracked here from the reports: K (arm ON) and P (arm ON and High in one report) since TAKEOVER's entry.
         let (mut k, mut p) = (false, false);
         let (mut hand_overs, mut held) = (0u32, 0u32);
-        // N12, tracked here: M set by a RADIO_STATUS newer than the entry from PILOT or STOP, cleared at that entry.
+        // Tracked here: M set by a RADIO_STATUS newer than the entry from PILOT or STOP, cleared at that entry.
         let (mut m, mut entry) = (false, 0u64);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
@@ -2307,11 +2251,10 @@ mod tests {
             if !prev_ho && out.hands_off {
                 (m, entry) = (false, i.now_us);
             }
-            // A2': TAKEOVER hands over only after a High report since its entry, on a report that is not High.
+            // TAKEOVER hands over only after a High report since its entry, on a report that is not High.
             let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
             let arm_now = i.crsf.is_some_and(|r| r.arm);
-            // N19: the walk's reports are receiver reports, so its armed flights are MAVLink flights: the hand-over is
-            // column 2 (a live report, arm ON, the mission switch OFF, Position) and arm OFF holds only with it ON.
+            // The walk's reports are receiver reports, so its armed flights are MAVLink flights: the hand-over needs a live report, arm ON, the mission switch OFF, Position; arm OFF holds only with it ON.
             let mav = h.mavlink_flight();
             let ms_now = i.crsf.is_some_and(|r| r.mission);
             let live = i.crsf.is_some_and(|r| i.now_us.saturating_sub(r.t_us) <= LOSS);
@@ -2320,7 +2263,7 @@ mod tests {
                 hand_overs += 1;
             } else if prev == State::Takeover && out.state == State::Pilot {
                 assert!(high_seen && !high_now, "hand-over: seen {high_seen}, now High {high_now}");
-                // C1: only after P, on a report with switch6 not High and arm ON.
+                // Only after P, on a report with switch6 not High and arm ON.
                 assert!(p && !high_now && arm_now, "hand-over: P {p}, now High {high_now}, arm {arm_now}");
                 hand_overs += 1;
             }
@@ -2404,7 +2347,7 @@ mod tests {
         assert_eq!(r.step().home, None);
     }
 
-    // ---- B1: exit priority, pairs in the same step ----
+    // ---- Exit priority: pairs in the same step ----
 
     #[test]
     fn hands_off_b1_each_pair_of_exits_gives_the_higher_one() {
@@ -2470,7 +2413,7 @@ mod tests {
         assert_eq!(r.report(t, Switch3::Low).state, State::Takeover, "return: CRSF over arrival");
     }
 
-    // ---- B2: no one-step HOLD ----
+    // ---- No one-step HOLD ----
 
     #[test]
     fn hands_off_b2_commands_into_hold_denied_when_hold_would_leave_at_once() {
@@ -2516,7 +2459,7 @@ mod tests {
         assert_eq!(r.cmd(Command::Abort).command, denied(DenyReason::LinkLost));
     }
 
-    // ---- B4: T3' ----
+    // ---- T3' ----
 
     #[test]
     fn hands_off_b4_heading_not_ok_at_stick_loss_on_t3_lands() {
@@ -2551,7 +2494,7 @@ mod tests {
         assert_eq!((out.state, out.land_holds_position, out.demand), (State::Land, false, Demand::Altitude));
     }
 
-    // ---- B5: debounced downgrades ----
+    // ---- Debounced downgrades ----
 
     #[test]
     fn hands_off_b5_one_step_vertical_flag_drop_changes_no_state() {
@@ -2592,7 +2535,7 @@ mod tests {
         assert_eq!(r.at(t1 + TIER_DEBOUNCE_US).state, State::Land);
     }
 
-    // ---- B7: a kept place survives only Start ----
+    // ---- A kept place survives only Start ----
 
     #[test]
     fn hands_off_b7_every_exit_from_hold_drops_a_kept_place() {
@@ -2621,7 +2564,7 @@ mod tests {
         assert_eq!(r.cmd(Command::Start).events.start, Some(StartAt::KeptPlace));
     }
 
-    // ---- B9: FS_HOLD_EN in force from disarmed steps ----
+    // ---- FS_HOLD_EN in force from disarmed steps ----
 
     #[test]
     fn hands_off_b9_fs_hold_en_takes_effect_at_the_next_arming() {
@@ -2635,7 +2578,7 @@ mod tests {
         r.i.armed = false;
         r.i.airborne = false;
         assert_eq!(r.step().state, State::Stop);
-        // Re-armed with 0 in force: stick loss in the air on T3' is LAND, not HOLD (Amendment N, N2), and commands answer
+        // Re-armed with 0 in force: stick loss in the air on T3' is LAND, not HOLD, and commands answer
         // HandsOffDisabled.
         r.i.armed = true;
         let t = r.now() + 1_000;
@@ -2661,10 +2604,9 @@ mod tests {
         assert_eq!(r.at(t).state, State::Hold);
     }
 
-    // ---- I9 ----
+    // ---- Start rig ----
 
-    /// HOLD with the station present, entered with the vehicle `vehicle_m` north of home (there, not moved inside the
-    /// hold: H13's anchor), the farthest waypoint at `waypoint_m`.
+    /// HOLD with the station present, entered with the vehicle `vehicle_m` north of home (not moved inside the hold: the anchor), the farthest waypoint at `waypoint_m`.
     fn start_at(vehicle_m: f32, waypoint_m: f32) -> Output {
         let mut r = Rig::pilot();
         r.i.position_ne_m = [HOME_NE[0] + vehicle_m, HOME_NE[1]];
@@ -2701,7 +2643,7 @@ mod tests {
             (DenyReason::MissionNotSelected, |r| r.i.mission.has_waypoints = false),
             (DenyReason::HeightOutsideLimits, |r| r.i.mission.z_within_limits = false),
             (DenyReason::NoHome, |r| r.h.home_ne = None),
-            // A move inside HOLD with the NE velocity valid would trip H13's anchor and land at once (H14).
+            // A move inside HOLD with the NE velocity valid would trip the anchor and land at once.
             (DenyReason::VehicleBeyondRange, |r| {
                 r.i.position_ne_m = [2000.0, 0.0];
                 r.i.velocity_ne_valid = false;
@@ -2720,7 +2662,7 @@ mod tests {
             (DenyReason::HeadingNotOk, |r| r.i.heading_ok = false),
             (DenyReason::NotT3, |r| r.i.tier = Tier::T2),
             (DenyReason::BatteryNotOk, |r| r.i.battery_ok = false),
-            // N19 section 5: the live receiver report's mode switch (HOLD ignores it, column 1), then no live report.
+            // The live receiver report's mode switch (HOLD ignores it), then no live report.
             (DenyReason::SwitchNotHigh, |r| {
                 r.i.crsf = r.i.crsf.map(|c| RcSample { switch6: Switch3::Middle, ..c })
             }),
@@ -2735,7 +2677,7 @@ mod tests {
             assert_eq!((out.state, out.command), (State::Hold, denied(reason)), "{reason:?}");
             assert_eq!(out.events, Events::NONE);
         }
-        // After T3 was lost for 1.0 s HOLD has left: Start answers NotInThisState (B2).
+        // After T3 was lost for 1.0 s HOLD has left: Start answers NotInThisState.
         let mut r = Rig::hold();
         r.drop_tier(Tier::T2);
         r.i.last_radio_heartbeat_us = Some(r.now() + TIER_DEBOUNCE_US);
@@ -2745,7 +2687,7 @@ mod tests {
         // All met: accepted (Rig::auto).
         let mut r = Rig::ms_hold();
         assert_eq!(r.h.start_check(&r.i), None);
-        // Arm OFF in the live report: only the check itself sees it (column 4 lands such a HOLD first, N19 section 5).
+        // Arm OFF in the live report: only the check itself sees it (column 4 lands such a HOLD first).
         r.i.crsf = r.i.crsf.map(|c| RcSample { arm: false, ..c });
         assert_eq!(r.h.start_check(&r.i), Some(DenyReason::ArmSwitchOff));
     }
@@ -2757,7 +2699,7 @@ mod tests {
         r.report(t, Switch3::Middle);
         let t = r.last_report() + LOSS + 1;
         assert_eq!(r.heartbeat(t).state, State::Hold);
-        // N19: no live report with the mission switch ON, then one with the mode switch in Middle.
+        // No live report with the mission switch ON, then one with the mode switch in Middle.
         assert_eq!(r.cmd(Command::Start).command, denied(DenyReason::MissionSwitchOff));
         let t = r.now() + 1_000;
         assert_eq!(r.report_ms(t, Switch3::Middle, true).state, State::Hold);
@@ -2768,7 +2710,7 @@ mod tests {
 
     #[test]
     fn hands_off_commands_denied_while_crsf_is_fresh() {
-        // N19: CRSF flights (the refusal is not read on a MAVLink flight).
+        // CRSF flights (the refusal is not read on a MAVLink flight).
         for c in [Command::Start, Command::Pause, Command::Abort, Command::Land] {
             let mut r = Rig::crsf_pilot();
             assert_eq!(r.cmd(c).command, denied(DenyReason::CrsfFresh), "pilot {c:?}");
@@ -2844,8 +2786,7 @@ mod tests {
 
     // ---- FS_HOLD_EN 0 ----
 
-    /// Amendment N, N2: with FS_HOLD_EN 0 a stick loss is handled as with 1 except that T3' gives LAND: never HOLD, AUTO
-    /// or RETURN, no mission event, no command accepted, and never STOP from a stick loss in the air.
+    /// With FS_HOLD_EN 0 a stick loss is handled as with 1 except that T3' gives LAND: never HOLD, AUTO or RETURN, no mission event, no command accepted, and never STOP from a stick loss in the air.
     #[test]
     fn hands_off_fs_hold_en_0_walk_gives_no_hold_and_no_mission() {
         let mut rng = Lcg(0x5eed_0000);
@@ -2871,14 +2812,12 @@ mod tests {
         }
     }
 
-    // ---- Review follow-up ----
+    // ---- Arm OFF and mission start ----
 
-    /// Amended by C1: arm OFF in a hands-off state in the air holds (K is clear there); on the ground, and in PILOT,
-    /// it is STOP in the same step.
+    /// Arm OFF in a hands-off state in the air holds (K is clear there); on the ground, and in PILOT, it is STOP in the same step.
     #[test]
     fn hands_off_arm_switch_off_in_the_same_step_from_every_state() {
-        // N19: on a MAVLink flight arm OFF with the mission switch OFF is STOP in every state (column 5); the CRSF flights
-        // keep C1 with N12.
+        // On a MAVLink flight arm OFF with the mission switch OFF is STOP in every state; the CRSF flights keep the K/M hold.
         let rigs: [(&str, fn() -> Rig, State); 9] = [
             ("pilot", Rig::pilot, State::Pilot),
             ("hold", Rig::hold, State::Hold),
@@ -2895,7 +2834,7 @@ mod tests {
                 let mut r = make();
                 assert_eq!(r.h.state(), from, "{name}");
                 r.i.airborne = airborne;
-                // N12: a RADIO_STATUS after the entry (M) holds the arm-OFF report; on the ground TD stops (WR1).
+                // A RADIO_STATUS after the entry (M) holds the arm-OFF report; on the ground TD stops.
                 r.i.td_held = false;
                 if radio {
                     r.i.last_radio_status_us = Some(r.now() + 500);
@@ -2984,7 +2923,7 @@ mod tests {
             (DenyReason::HeadingNotOk, |r| r.i.heading_ok = true),
             (DenyReason::NotT3, |r| r.i.tier = Tier::T3),
             (DenyReason::BatteryNotOk, |r| r.i.battery_ok = true),
-            // N19 section 5: 19, 15, 16 after 14.
+            // 19, 15, 16 after 14.
             (DenyReason::MissionSwitchOff, |r| r.i.crsf = r.i.crsf.map(|c| RcSample { mission: true, ..c })),
             (DenyReason::ArmSwitchOff, |r| r.i.crsf = r.i.crsf.map(|c| RcSample { arm: true, ..c })),
             (DenyReason::SwitchNotHigh, |r| r.i.crsf = r.i.crsf.map(|c| RcSample { switch6: Switch3::High, ..c })),
@@ -3034,10 +2973,9 @@ mod tests {
         }
     }
 
-    // ---- C1: the take-over lock ----
+    // ---- The take-over lock ----
 
-    /// LAND on a CRSF flight (N19: C1 is kept for those), a RADIO_STATUS after its entry (N12's M), then CRSF returns
-    /// with this arm switch and switch6.
+    /// LAND on a CRSF flight (the lock is kept for those), a RADIO_STATUS after its entry (M), then CRSF returns with this arm switch and switch6.
     fn returns_with(switch6: Switch3, arm: bool) -> (Rig, Output) {
         let mut r = Rig::crsf_land();
         r.i.last_radio_status_us = Some(r.now() + 500);
@@ -3098,7 +3036,7 @@ mod tests {
         assert_eq!((out.state, out.arm_off_holds), (State::Stop, false));
     }
 
-    /// Armed and airborne in PILOT with FS_HOLD_EN `fs` on a CRSF flight, then sticks lost on T3: LAND (N2, N19 1(5)).
+    /// Armed and airborne in PILOT with FS_HOLD_EN `fs` on a CRSF flight, then sticks lost on T3: LAND.
     fn lost_with(fs: bool) -> Rig {
         let mut r = Rig::crsf();
         r.i.fs_hold_en = fs;
@@ -3113,8 +3051,7 @@ mod tests {
         r
     }
 
-    /// N12 (replaces N10 (ii) and the airborne term): with no RADIO_STATUS after the entry (a plain dropout, M clear) an
-    /// arm-OFF report on return stops in that step, at FS_HOLD_EN 0 and 1, in the air and on the ground (no TD).
+    /// With no RADIO_STATUS after the entry (a plain dropout, M clear) an arm-OFF report on return stops in that step, at FS_HOLD_EN 0 and 1, in the air and on the ground (no TD).
     #[test]
     fn hands_off_c1_a3_arm_off_without_radio_status_after_the_entry_is_stop_at_once() {
         for fs in [false, true] {
@@ -3129,7 +3066,7 @@ mod tests {
         }
     }
 
-    /// N12: with a RADIO_STATUS after the entry (M) an arm-OFF return is held at FS_HOLD_EN 0 and 1, in the air and on
+    /// With a RADIO_STATUS after the entry (M) an arm-OFF return is held at FS_HOLD_EN 0 and 1, in the air and on
     /// the ground; ON then OFF stops (P); on the ground TD stops (T). A RADIO_STATUS before the entry only is not M; M is
     /// cleared on a re-entry after a hand-back, and kept through changes between hands-off states.
     #[test]
@@ -3246,7 +3183,7 @@ mod tests {
         let t = r.now() + 20_000;
         let out = r.report(t, Switch3::Middle);
         assert_eq!((out.state, out.landing, out.takeover_descent), (State::Pilot, false, false));
-        // Touchdown: the latch clears, STOP and disarm in that step (WR1, WR2).
+        // Touchdown: the latch clears, STOP and disarm in that step.
         let mut r = Rig::crsf_takeover();
         r.i.battery_critical = true;
         assert!(r.step().takeover_descent);
@@ -3268,12 +3205,11 @@ mod tests {
         assert_eq!(r.step().state, State::Land);
     }
 
-    // ---- C2 ----
+    // ---- Start/Return code for CRSF flights ----
 
     #[test]
     fn hands_off_c2_start_denied_arm_switch_off_when_the_last_report_had_arm_off() {
-        // N19: C2 is the code kept for CRSF flights, which never reach HOLD, so the check is driven directly; the
-        // command itself is HandsOffDisabled there.
+        // The refusal code is kept for CRSF flights, which never reach HOLD, so the check is driven directly; the command itself is HandsOffDisabled there.
         let (mut r, _) = returns_with(Switch3::High, false);
         let t = r.last_report() + LOSS + 1;
         assert_eq!(r.heartbeat(t).state, State::Land);
@@ -3299,7 +3235,7 @@ mod tests {
         assert_eq!(r.h.start_check(&r.i), Some(DenyReason::SwitchNotHigh));
     }
 
-    // ---- C3: Return ----
+    // ---- Return ----
 
     #[test]
     fn hands_off_c3_return_from_hold_and_auto_drops_the_place_and_latches_the_height() {
@@ -3385,7 +3321,7 @@ mod tests {
         assert_eq!(r.heartbeat(t).state, State::Hold);
         let out = r.cmd(Command::Return);
         assert_eq!((out.state, out.command), (State::Hold, denied(DenyReason::NoHome)));
-        // NotT3 and BatteryCritical (B2): HOLD's and AUTO's own exits take these facts first at step(), so the check
+        // NotT3 and BatteryCritical: HOLD's and AUTO's own exits take these facts first at step(), so the check
         // is driven directly; then NoHome before NotT3 before BatteryCritical.
         let rigs: [(&str, fn() -> Rig); 2] = [("hold", Rig::hold), ("auto", Rig::auto)];
         for (name, make) in rigs {
@@ -3408,8 +3344,7 @@ mod tests {
         }
     }
 
-    /// B2 for Return: DENIED leaves the state, at this step and the next. Control: without the check, RETURN appears
-    /// for one step and then lands.
+    /// DENIED leaves the state, at this step and the next. Control: without the check, RETURN appears for one step and then lands.
     #[test]
     fn hands_off_c3_return_no_bounce() {
         let ret = StationCommand {
@@ -3476,7 +3411,7 @@ mod tests {
         }
     }
 
-    // ---- Amendment D: WR1 ground exit, WR2 disarm, return_built ----
+    // ---- Ground exit, disarm, return_built ----
 
     #[test]
     fn hands_off_wr1_every_hands_off_state_with_the_latch_false_is_stop_in_that_step() {
@@ -3533,7 +3468,7 @@ mod tests {
         r.i.armed = false;
         let out = r.step();
         assert_eq!((out.state, out.disarm), (State::Stop, false));
-        // Disarm reported by the gate first (old path): STOP, no second disarm.
+        // Disarm reported by the gate first: STOP, no second disarm.
         let mut r = Rig::land();
         r.i.armed = false;
         r.i.airborne = false;
@@ -3542,8 +3477,7 @@ mod tests {
 
     #[test]
     fn hands_off_wr2_disarm_is_stop_entered_while_armed() {
-        // The review's case: a held arm-OFF report still the newest when the latch clears: held until TD (N12, the
-        // airborne term dropped), then STOP and disarm through WR1 (T).
+        // A held arm-OFF report still the newest when the latch clears: held until TD, then STOP and disarm through the ground exit.
         let (mut r, out) = returns_with(Switch3::High, false);
         assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Takeover, true, false));
         r.i.airborne = false;
@@ -3596,8 +3530,7 @@ mod tests {
         }
     }
 
-    /// N10 (v): with `return_built` false home latches at the arming (B8), and still link loss lands, Return is denied
-    /// (`NoHome`) and RETURN is never entered.
+    /// With `return_built` false home latches at the arming, and still link loss lands, Return is denied (`NoHome`) and RETURN is never entered.
     #[test]
     fn hands_off_return_built_false_latches_home_and_link_loss_lands() {
         let mut r = Rig::new();
@@ -3641,7 +3574,7 @@ mod tests {
             }
             hold += u32::from(out.state == State::Hold);
         }
-        // H14: a track fault (the random positions trip the anchor) leaves HOLD at that step, not 1.0 s later.
+        // A track fault (the random positions trip the anchor) leaves HOLD at that step, not 1.0 s later.
         assert!(hold > 500 && start_denied > 10 && homed > 1_000, "{hold} {start_denied} {homed}");
     }
 
@@ -3732,11 +3665,9 @@ mod tests {
         i.battery_critical = rng.chance(3);
     }
 
-    // ---- H12: the hold-integrity distance check ----
+    // ---- Hold-integrity distance check ----
 
-    /// One step over X, then back below: set at the step that receives the distance, kept until the disarm edge; LAND
-    /// at that step (a landing cause of its own, H14 (1): no debounce), T3' kept (the demand stays Position), the braking
-    /// law at that step and every later one (I-H2).
+    /// One step over X, then back below: set at the step that receives the distance, kept until the disarm edge; LAND at that step (a landing cause of its own: no debounce), T3' kept (the demand stays Position), the braking law at that step and every later one.
     #[test]
     fn h12_one_step_over_x_latches_until_the_disarm_edge_and_lands_braking_at_that_step() {
         let mut r = Rig::hold();
@@ -3784,7 +3715,7 @@ mod tests {
         }
     }
 
-    /// The states the check covers (HOLD, AUTO, RETURN, LAND on T3', and TAKEOVER: H13 (3), it flies HOLD's law);
+    /// The states the check covers (HOLD, AUTO, RETURN, LAND on T3', and TAKEOVER, which flies HOLD's law);
     /// never LAND without T3', BLIND, PILOT, STOP, a disarmed step or a step with the airborne latch false.
     #[test]
     fn h12_only_the_covered_states_armed_and_airborne_set_it() {
@@ -3856,7 +3787,7 @@ mod tests {
         assert!(r.h.track_fault());
     }
 
-    /// H14 (1): heading_ok = the input only: T3' (the demand) follows the input whatever the fault; the fault lands at
+    /// Heading_ok = the input only: T3' (the demand) follows the input whatever the fault; the fault lands at
     /// once, so Start meets LAND (NotInThisState); Start's own check denies a latched fault as HeadingNotOk.
     #[test]
     fn h14_heading_ok_is_the_input_only_and_start_is_denied_with_the_fault() {
@@ -3883,7 +3814,7 @@ mod tests {
         assert_eq!(r.h.start_check(&r.i), Some(DenyReason::HeadingNotOk));
     }
 
-    // ---- H13: the anchor, the braking allowance, the speed cap and X ----
+    // ---- Anchor, braking allowance, speed cap and X ----
 
     /// PILOT, then sticks lost at `ne` moving `v`: HOLD.
     fn hold_from(ne: [f32; 2], v: [f32; 2]) -> Rig {
@@ -3895,7 +3826,7 @@ mod tests {
         r
     }
 
-    /// H13 (1): none in PILOT; at the entry step A = the position and b = |v|^2 / (2 x 3.0 m/s^2).
+    /// None in PILOT; at the entry step A = the position and b = |v|^2 / (2 x 3.0 m/s^2).
     #[test]
     fn h13_the_anchor_and_the_braking_allowance_are_set_at_the_entry_step() {
         assert_eq!(Rig::pilot().h.anchor(), None);
@@ -3939,7 +3870,7 @@ mod tests {
         assert_eq!(r.h.anchor(), None);
     }
 
-    /// H13 (1): a 0.5 s tier dip (Altitude) with the vehicle 2 m away, then HOLD -> TAKEOVER -> HOLD moved and moving:
+    /// A 0.5 s tier dip (Altitude) with the vehicle 2 m away, then HOLD -> TAKEOVER -> HOLD moved and moving:
     /// A and b kept. A take-over and hand-back: PILOT clears it, and the next entry sets it at the new place.
     #[test]
     fn h13_the_anchor_is_kept_through_a_tier_dip_and_hold_takeover_hold_and_re_set_after_a_hand_back() {
@@ -3965,7 +3896,7 @@ mod tests {
         assert_eq!(r.heartbeat(t).state, State::Hold);
         assert_eq!(r.h.anchor(), a);
         assert!(!r.h.track_fault());
-        // N19 column 2: the mission switch OFF with arm ON and Position hands back at once.
+        // The mission switch OFF with arm ON and Position hands back at once.
         let t = r.now() + 1_000;
         assert_eq!(r.report(t, Switch3::High).state, State::Pilot, "hand-back");
         assert_eq!(r.h.anchor(), None);
@@ -3976,7 +3907,7 @@ mod tests {
         assert_eq!(r.h.anchor(), Some(([30.0, 10.0], 0.0)));
     }
 
-    /// H13 (1), v0 3 m/s (b 1.5 m): exactly X + b does not trip; one ULP over, infinity and not a number do.
+    /// v0 3 m/s (b 1.5 m): exactly X + b does not trip; one ULP over, infinity and not a number do.
     #[test]
     fn h13_exactly_x_plus_b_does_not_trip_one_ulp_over_and_not_a_number_do() {
         let bound = track_fault_m(Tuning::DEFAULT.pilot_speed_xy_ms) + 1.5;
@@ -3992,7 +3923,7 @@ mod tests {
         }
     }
 
-    /// H13 (1): the anchor distance is read on a T2 step (Altitude: no target distance); not on a step with the NE
+    /// The anchor distance is read on a T2 step (Altitude: no target distance); not on a step with the NE
     /// velocity or position not valid, nor with the airborne latch false.
     #[test]
     fn h13_the_anchor_distance_is_read_on_a_tier_dip_step_and_only_with_the_ne_valid() {
@@ -4012,9 +3943,7 @@ mod tests {
         }
     }
 
-    /// H13 (1): entry with the NE position or velocity not valid or not finite (the caller's tier then T2; the drop
-    /// younger than B5's debounce, so HOLD): no anchor, stale or zero; the first later step of the segment with both
-    /// valid and finite sets it, with b from that step's speed.
+    /// Entry with the NE position or velocity not valid or not finite (the caller's tier then T2; the drop younger than the debounce, so HOLD): no anchor, stale or zero; the first later step of the segment with both valid and finite sets it, with b from that step's speed.
     #[test]
     fn h13_an_entry_without_a_valid_ne_sets_the_anchor_at_the_first_valid_step() {
         let cases: [fn(&mut Rig); 4] = [
@@ -4048,7 +3977,7 @@ mod tests {
         }
     }
 
-    /// H13 (2): X for PILOT_SPEED_XY 3, 5 and 20 (capped to 5) is 7, 5 and 5 m; the speed limit is v_ho in every
+    /// X for PILOT_SPEED_XY 3, 5 and 20 (capped to 5) is 7, 5 and 5 m; the speed limit is v_ho in every
     /// hands-off state and the speed in force in PILOT and STOP; the target distance and the anchor distance trip one
     /// ULP over that X and not at it.
     #[test]
@@ -4087,12 +4016,9 @@ mod tests {
         }
     }
 
-    // ---- H14: what happens after a track fault ----
+    // ---- After a track fault ----
 
-    /// H14 (1): the track fault is a landing cause ranked with battery critical (B1): with each other automatic exit of
-    /// HOLD, AUTO and RETURN in the same step it gives LAND, as battery critical does (with the braking law, where battery
-    /// critical holds); a fresh report still gives TAKEOVER, which flies its descent (C1), braking; disarm gives STOP and
-    /// clears it.
+    /// The track fault is a landing cause ranked with battery critical: with each other automatic exit of HOLD, AUTO and RETURN in the same step it gives LAND, as battery critical does (with the braking law, where battery critical holds); a fresh report still gives TAKEOVER, which flies its descent, braking; disarm gives STOP and clears it.
     #[test]
     fn h14_the_track_fault_lands_like_battery_critical_over_every_other_exit() {
         let cases: [(&str, fn() -> Rig, fn(&mut Rig) -> u64); 5] = [
@@ -4137,7 +4063,7 @@ mod tests {
         assert!(!r.h.track_fault());
     }
 
-    /// H14 (2): d_A is read in TAKEOVER on a T2 step (an Altitude setpoint; TAKEOVER then flies its descent, level); in
+    /// D_A is read in TAKEOVER on a T2 step (an Altitude setpoint; TAKEOVER then flies its descent, level); in
     /// LAND only on a step that holds (no fault, this step's T3'), where a trip gives braking at that step; never in a level
     /// LAND (this step's T2, the drop fresh or held 3 s) nor once braking; the anchor is never re-set in LAND.
     #[test]
@@ -4184,7 +4110,7 @@ mod tests {
         }
     }
 
-    /// H14 with H12 item 4: once latched, no hands-off state holds a point again until disarm. Abort from LAND is DENIED
+    /// Once latched, no hands-off state holds a point again until disarm. Abort from LAND is DENIED
     /// NotT3 (LAND at this step and the next); Start meets LAND; a report gives TAKEOVER flying its descent, braking; the
     /// hand-over through the lock gives PILOT with the normal laws; a later stick loss on T3' gives LAND, braking, with no
     /// anchor, never HOLD. Into HOLD or RETURN by command: NotT3; Start's check: HeadingNotOk. After the disarm edge the
@@ -4233,9 +4159,7 @@ mod tests {
         assert_eq!(r.heartbeat(t).state, State::Hold);
     }
 
-    /// H14 with H12 item 4 over random inputs (the random positions trip the anchor): with the fault latched the state is
-    /// never HOLD, AUTO or RETURN, TAKEOVER flies its descent, LAND never holds, and the law is Brake exactly when the
-    /// demand is Position; the fault clears only on a disarmed step.
+    /// Over random inputs (the random positions trip the anchor): with the fault latched the state is never HOLD, AUTO or RETURN, TAKEOVER flies its descent, LAND never holds, and the law is Brake exactly when the demand is Position; the fault clears only on a disarmed step.
     #[test]
     fn h14_walk_a_latched_fault_never_holds_a_point() {
         let mut rng = Lcg(0x5eed_0014);
@@ -4267,9 +4191,9 @@ mod tests {
         assert!(faulted > 1_000 && land > 100 && brake > 100 && takeover > 10, "{faulted} {land} {brake} {takeover}");
     }
 
-    // ---- N19: the mission switch (decision-mavlink-mode-20261123, section 67) ----
+    // ---- The mission switch ----
 
-    /// One report at `t` of N19's column `col` (1 to 5; 6: no report, the step past the stick-loss time).
+    /// One report at `t` of the MAVLink table's column `col` (1 to 5; 6: no report, the step past the stick-loss time).
     fn column(r: &mut Rig, col: u8) -> Output {
         let t = r.now() + 1_000;
         match col {
@@ -4285,7 +4209,7 @@ mod tests {
         }
     }
 
-    /// N19 section 2: each of the six columns in each state of a MAVLink flight (airborne, T3', home set, the station
+    /// Each of the six columns in each state of a MAVLink flight (airborne, T3', home set, the station
     /// heard): the state after that step.
     #[test]
     fn n19_each_column_in_each_state() {
@@ -4313,23 +4237,21 @@ mod tests {
         }
     }
 
-    /// N19 section 2, the priority order: disarmed, the arm columns, WR1, columns 2 and 3, each state's own exits,
-    /// column 1, commands.
+    /// The priority order: disarmed, the arm columns, the ground exit, columns 2 and 3, each state's own exits, column 1, commands.
     #[test]
     fn n19_the_priority_order() {
         // Disarmed before everything.
         let mut r = Rig::hold();
         r.i.armed = false;
         assert_eq!(column(&mut r, 1).state, State::Stop);
-        // The arm column before WR1, then WR1 in that step: column 4 on the ground with TD held is STOP (from PILOT: its
-        // "ground"; from HOLD: LAND, then WR1).
+        // The arm column before the ground exit, then the ground exit in that step: column 4 on the ground with TD held is STOP (from PILOT: its "ground"; from HOLD: LAND, then the ground exit).
         for make in [Rig::pilot as fn() -> Rig, Rig::hold] {
             let mut r = make();
             r.i.airborne = false;
             let out = column(&mut r, 4);
             assert_eq!((out.state, out.disarm), (State::Stop, true));
         }
-        // WR1 before columns 2 and 3.
+        // The ground exit before columns 2 and 3.
         for col in [2, 3] {
             let mut r = Rig::hold();
             r.i.airborne = false;
@@ -4358,7 +4280,7 @@ mod tests {
         assert_eq!((out.state, out.command), (State::Auto, Some(CommandResult::Accepted)));
     }
 
-    /// N19 section 2: every conjunct of column 1's entry from PILOT false gives PILOT (Position, the airborne latch,
+    /// Every conjunct of column 1's entry from PILOT false gives PILOT (Position, the airborne latch,
     /// hold_entry_check's tier, track fault and battery; and the mission switch itself). The link-age conjunct cannot be
     /// false with a live report (the report itself is the link).
     #[test]
@@ -4392,7 +4314,7 @@ mod tests {
         assert_eq!(column(&mut r, 1).state, State::Hold, "control: all met");
     }
 
-    /// N19 section 2: columns 4 and 5 read the newest report even when it is stale.
+    /// Columns 4 and 5 read the newest report even when it is stale.
     #[test]
     fn n19_the_arm_columns_read_a_stale_report() {
         for (make, name) in [(Rig::pilot as fn() -> Rig, "pilot"), (Rig::hold, "hold"), (Rig::auto, "auto"), (Rig::ret, "return")] {
@@ -4408,9 +4330,7 @@ mod tests {
         }
     }
 
-    /// N19 section 2 (LAND from arm OFF with the mission switch ON) and section 4 (B2): Abort is refused with code 15
-    /// while the newest report has arm OFF; arm ON again changes nothing (Q1) and Abort is taken; the mission switch OFF
-    /// with arm OFF stops, with arm ON and Position hands back.
+    /// Abort is refused with code 15 while the newest report has arm OFF; arm ON again changes nothing and Abort is taken; the mission switch OFF with arm OFF stops, with arm ON and Position hands back.
     #[test]
     fn n19_abort_from_an_arm_off_land_is_refused_with_code_15() {
         let mut r = Rig::hold();
@@ -4429,8 +4349,7 @@ mod tests {
         assert_eq!(column(&mut r, 2).state, State::Pilot);
     }
 
-    /// N19 1(5) and section 3: a CRSF flight at FS_HOLD_EN 1 never enters HOLD, AUTO or RETURN: a stick loss on T3' lands,
-    /// a radio command is refused with code 2 while its report is fresh and 3 after, a USB command with 1.
+    /// A CRSF flight at FS_HOLD_EN 1 never enters HOLD, AUTO or RETURN: a stick loss on T3' lands, a radio command is refused with code 2 while its report is fresh and 3 after, a USB command with 1.
     #[test]
     fn n19_a_crsf_flight_at_fs_hold_en_1_has_no_hands_off_path() {
         let mut r = Rig::crsf_pilot();
@@ -4444,10 +4363,7 @@ mod tests {
         assert_eq!(r.h.state(), State::Land);
     }
 
-    /// Review of N19, item 1: the walk of `hands_off_i8_i12_walk_...` on a CRSF flight at FS_HOLD_EN 1 (every report
-    /// from CRSF, the mission switch never read): never a MAVLink flight, never HOLD, AUTO or RETURN, and the old C1
-    /// formula of 4552d4f holds: A2' and C1's hand-over only after P on a report not High with arm ON, and arm_off_holds =
-    /// hands-off, K clear, M set. Counted so it cannot pass vacuously.
+    /// The walk of `hands_off_i8_i12_walk_...` on a CRSF flight at FS_HOLD_EN 1 (every report from CRSF, the mission switch never read): never a MAVLink flight, never HOLD, AUTO or RETURN; the hand-over only after P on a report not High with arm ON, and arm_off_holds = hands-off, K clear, M set. Counted so it cannot pass vacuously.
     #[test]
     fn n19_crsf_walk_at_fs_hold_en_1_keeps_the_c1_lock() {
         let mut rng = Lcg(0x5eed_0001);
@@ -4507,9 +4423,7 @@ mod tests {
         assert!(hand_overs > 20 && held > 20 && armed_steps > 10_000, "lock exercised: {hand_overs} hand-overs, {held} held, {armed_steps} armed steps");
     }
 
-    /// Review of N19, items 2 and 3: on a MAVLink flight never airborne since arming, PILOT with arm OFF and the mission
-    /// switch ON is STOP (the "never airborne" half of column 4's ground), and so is a stick loss (`lost()`); ever
-    /// airborne with the latch false and TD not held it is LAND, then STOP at the step TD holds.
+    /// On a MAVLink flight never airborne since arming, PILOT with arm OFF and the mission switch ON is STOP, and so is a stick loss (`lost()`); ever airborne with the latch false and TD not held it is LAND, then STOP at the step TD holds.
     #[test]
     fn n19_pilot_arm_off_with_the_mission_switch_on_on_the_ground() {
         for loss in [false, true] {
@@ -4535,8 +4449,7 @@ mod tests {
         assert_eq!((out.state, out.disarm), (State::Stop, true), "TD held");
     }
 
-    /// Every rule that changes the state carries its reason (logged only): each reason on its path, on a MAVLink flight
-    /// (the N19 table) and on a CRSF flight (the other table); the initial STOP has none.
+    /// Every rule that changes the state carries its reason (logged only): each reason on its path, on a MAVLink flight and on a CRSF flight; the initial STOP has none.
     #[test]
     fn every_state_change_carries_its_reason() {
         let check = |out: Output, state: State, reason: Reason, what: &str| {
@@ -4675,8 +4588,7 @@ mod tests {
         }
     }
 
-    /// The in-air restart (decision-inair-restart-20261125): a restart arming (`Inputs::restart`) never opens the home
-    /// window, on the ground or in the air; the same arming without it latches home at its first armed step (the control).
+    /// A restart arming (`Inputs::restart`) never opens the home window, on the ground or in the air; the same arming without it latches home at its first armed step (the control).
     #[test]
     fn a_restart_arming_never_latches_home() {
         for restart in [false, true] {
