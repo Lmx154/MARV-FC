@@ -2,10 +2,16 @@
 
 Firmware for the MARV V2 flight controller (RP2350B). Version 0.1.0.
 
-Today the binary is the two-core skeleton of the firmware (design: the two-core amendment of
-`~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`) with the device layer and its first
-devices on core 0, the BMP581 barometer (BARO), the BMM350 magnetometer (MAG), the LC76G GNSS receiver (GNSS) and the battery monitor on the ADC (BATT), the SD card (SD: an ArduPilot-format `.BIN` log from boot; see SD card and Logging) and the radio receiver (RC, report only; see Radio), and IMU1, IMU2 and the four ESCs' DShot stream (telemetry, and the props-off motor test; see ESC telemetry) on core 1; the foundation's hardware-free logic is in `crates/fw-core` (see Workspace).
-It has no flight functionality.
+It is a quadcopter flight controller: a two-core Rust/embassy firmware (design: the two-core amendment of
+`~/Documents/MARV-V2-drivers/_plan/decision-foundation-20261113.md`). Core 0 runs the I/O: the device layer with the BMP581 barometer (BARO),
+the BMM350 magnetometer (MAG), the u-blox SAM-M10Q GNSS receiver (GNSS), the battery monitor on the ADC (BATT), the SD card (SD: an
+ArduPilot-format `.BIN` log from boot; see SD card and Logging), the radio receiver (RC; see Radio), the USB and radio MAVLink links and the
+waypoint mission store. Core 1, the flight core, runs IMU1, IMU2, the estimator, the controllers and the four ESCs' DShot stream (see ESC
+telemetry). The hardware-free logic is in `crates/fw-core`, `crates/fw-flight` and `crates/fw-settings` (see Workspace).
+
+**Start with `docs/overview.md`**: what the firmware does today (flight modes, the mission switch, failsafes, waypoint missions, key
+parameters, what has and has not flown). This README is the detailed reference for each subsystem; where a section is dated, it describes
+that date's bench work.
 
 - Core 0, the I/O core (`embassy_rp::init`, thread-mode executor): `usb_link`, a MAVLink node (system 1,
   component 1) on the USB port: HEARTBEAT at 1 Hz (status from the device rows through
@@ -16,7 +22,7 @@ It has no flight functionality.
   `supervisor`, a 10 ms tick: at 10 Hz it bumps `PING` and kicks the flight core, it tracks the age of
   `PONG`, gives the start-up verdicts, runs the devices' stuck check and transition texts, ends the running
   action (`actions::tick`), and writes `[STAT]` lines every 10 s. `beat0` bumps `BEAT0` every 50 ms (read by nobody yet). `baro`, `mag`, `gnss` and `batt`, the four core-0 device tasks (see
-  Device layer), and `sd`, the SD card's device task with its own loop (see SD card). `rc_link`, the radio's task (UART0, report only; see Radio). `led`, the status LED's task (PIO1, GPIO43; see Status LED).
+  Device layer), and `sd`, the SD card's device task with its own loop (see SD card). `rc_link`, the radio's task (UART0; its stick reports go to the flight core; see Radio). `led`, the status LED's task (PIO1, GPIO43; see Status LED).
 - Core 1, the flight core (started with `embassy_rp::multicore::spawn_core1`, 16 KB static stack, its own
   thread-mode executor): `fw_flight::liveness`, which copies `PING` into `PONG` on each kick, IMU1
   (`src/imu1.rs`): the ICM-45686 on SPI0 with DMA channels 0 and 1 and its INT1 on GPIO15, and IMU2
@@ -48,9 +54,7 @@ It has no flight functionality.
   enabled on core 0 after core 1 started; `PIO2_IRQ_0` enabled on core 1 after the ESC driver was built there
   (with `esc-off`: not enabled) and not enabled on core 0.
 
-Not in it yet: IMU2's
-high-g accelerometer (off; nothing of it on the link), any use of the receiver's sticks (no arming, no failsafe, no rule about which link has authority; see Radio), GNSS's PPS and time synchronisation (the pin is not read), the six-position accelerometer calibration and an on-board fit of the compass's soft-iron matrix (the station fits it and writes it as parameters; see Calibrations).
-
+Not in it yet, or never flown: see `docs/overview.md` section 9.
 ## Flight-core device loop
 
 `crates/fw-flight/src/imu.rs` (design: two-core amendment): `ImuTask` runs one IMU over an `ImuAdapter`
@@ -90,7 +94,7 @@ newest CRSF stick report and the newest barometer, compass and GNSS samples go i
 The slow sensors (`decision-nav-eskf-20261120.md` section 4, packet F1): core 0's device loop, when it publishes a good
 sample to the row's `Watch` (`device::read`), hands it to the adapter's `DeviceAdapter::to_flight` hook; BARO, MAG and
 GNSS turn the reading into its `fw_core::sample` sample (`BaroSample`, `MagSample` with the calibrated field m, `GnssSample`
-with everything `Reading::Gnss` has, deviations included; its `vel_ned_mm_s` (north, east, down, mm/s) is the epoch's `$PQTMPVT` velocity when it came, see GNSS below; nothing in the flight step uses it yet and the sign of "down" is unverified), each with the core-0 board time and `seq` of the publish, and
+with everything `Reading::Gnss` has, deviations included; its `vel_ned_mm_s` (north, east, down, mm/s) is the NAV-PVT velocity when there is a 3D fix, see GNSS below), each with the core-0 board time and `seq` of the publish, and
 write it to the triple buffer `flight::FLIGHT_BARO`, `FLIGHT_MAG` or `FLIGHT_GNSS` (the stick path's primitive, wait-free
 on both sides). `Stepper::sample` reads the three once per step and gives `Sensors.baro`, `.mag`, `.gnss` only the
 sample that is new since the previous step (newest only; a gap shows in `seq`). The read copies the three slots every
@@ -209,7 +213,7 @@ wrapper such as fault injection passes it on; BATT does nothing).
 |---|---|---|---|---|---|---|
 | BARO | BMP581 (`src/baro.rs`) | I2C1 at 400 kHz, SDA GPIO22, SCL GPIO23, data-ready GPIO21 (rising edge), no DMA | from the parameters (below); the defaults are the driver's default: pressure 16x, temperature 2x, normal mode, 50.056 Hz output data rate, no filter; always no FIFO, data-ready pulsed | 19 978 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 59.9 ms at the default | max(1 s, 20 P) |
 | MAG | BMM350 (`src/mag.rs`) | I2C0 at 400 kHz, SDA GPIO12, SCL GPIO13, data-ready GPIO4 (rising edge), no DMA | from `MAG_ODR_HZ` and `MAG_AVG`; defaults = the driver's bench config: 100 Hz, averaging 2, all axes, normal mode, data-ready pulsed, active high, push-pull | 10 000 us at the default; 1 / rate afterwards | max(3 P, 10 ms): 30 ms at the default | max(1 s, 20 P) |
-| GNSS | LC76G (`src/gnss.rs`) | UART1 (`BufferedUart`, interrupt driven on core 0, no DMA) 115200 8N1, board TX GPIO24, RX GPIO25, RX buffer 4096 B; PPS GPIO5 not read | from `GPS_RATE_MS` (default 200 ms, 5 fixes per second): fix interval and message set (GGA, RMC and GST every fix, GSA at most once per second, the rest off, EPE off) sent at every start, restart and apply; volatile, never saved in the receiver | 1 000 000 us (1 Hz) whatever the rate | 2.5 s (own deadline, not 3 P) | 20 s |
+| GNSS | SAM-M10Q (`src/gnss.rs`) | UART1 (`BufferedUart`, interrupt driven on core 0, no DMA), board TX GPIO24, RX GPIO25, 115200 8N1 after the configure, RX buffer 4096 B; PPS GPIO5 timed (measure only) | UBX only, from `GPS_RATE_MS` (default 200 ms) and `GPS_GNSS` (default 0), sent to RAM at every start, restart and apply; never saved in the receiver | 1 000 000 us (whatever the rate) | 2.5 s (`DEADLINE_US`) | 20 s |
 | BATT | the RP2350 ADC (`src/batt.rs`) | ADC on core 0 without DMA: GPIO42 (ADC2, battery voltage, 100k / 10k), GPIO41 (ADC1, ESC current output, no pad pull); `ADC_IRQ_FIFO`; no bus, no chip | `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`, read for every sample | 100 000 us (10 Hz) | 300 ms (3 P) | 2 s |
 | SD | microSD card (`src/sd.rs`, own loop over the same `Health` machine; see SD card) | PIO0 SM0 (`pio-sdmmc`), CLK GPIO32, CMD 33, DAT0-3 28-31, DMA channel 4 completing on `DMA_IRQ_1` on core 0, `PIO0_IRQ_0` | `LOG_BACKEND_TYPE` (read at boot) | 1 000 000 us (the writer's 1 s: flush, longest wait) | none (no data-ready) | 20 s |
 | RC | ELRS receiver (`src/rc.rs`, task `rc_link`; see Radio) | UART0 (`BufferedUart`, interrupt driven, `UART0_IRQ`), TX GPIO14, RX GPIO17, no DMA | none: report only, the port follows CRSF and MAVLink by itself | none | none | none (not a supervised row: not in `DEVICES`) |
@@ -223,111 +227,31 @@ temperature (what the flight core gets, as `MagSample` through `flight::FLIGHT_M
 rebuilds the I2C0 bus. Sample rate: the chip's own oscillator, measured 0.7 % fast on the bench unit (100.7 Hz at the 100 Hz setting).
 The field at rest on the driver's bench was about 66 to 67 uT.
 
-**GNSS.** A row for the receiver, `src/gnss.rs`, the `lc76g` driver as it is (rev 9fbd8be), UART1 read in thread mode through the driver's
-`read`. **The firmware configures the receiver's rate and messages at every start and never saves in the receiver**: at every start (after the
-first valid sentence), restart (after the flush) and apply (a `GPS_RATE_MS` write) it sends exactly `fw_settings::gnss::commands`: the version
-query, fix interval 1000 ms, the ten sentence rates, EPE off, `$PQTMPVT` every fix (`$PQTMCFGMSGRATE,W,PQTMPVT,1,1`, answered `OK`), then the
-interval of `GPS_RATE_MS` last if it is not 1000 ms (15 commands, 14 at 1000 ms; at most 15 x 93 ms + the 500 ms hold = 1.9 s); each is acknowledged,
-the list stops at the first failure and runs under one deadline T (2.5 s). The last interval is held until `FIX_INTERVAL_SETTLE_MS` (500 ms)
-after the first interval's acknowledgement (`fw_settings::gnss::not_before_ms`, host-tested with a scripted receiver): on the bench
-(2026-11-20) a `$PAIR050` sent 18 to 170 ms after one that changed the rate was answered `$PAIR001,050,1` (being processed) and the receiver
-then restarted by itself about 1.8 s later at its stored settings (8 of 8: every change between two rates other than 1000 ms, and a warm
-reset of the board while the receiver ran faster than 1 Hz); from 207 ms on it was accepted (7 of 7). A configuration now takes about 0.55 s. Never `init` (it writes the navigation mode), PPS, a baud change, a
-restart or a save: the settings are volatile, the receiver's stored configuration does not change, and a receiver that resets on its own comes
-back at its stored settings until the next start, restart or apply. The row then sees GGA, RMC, GST and `$PQTMPVT` every fix and GSA at most once per second.
-Success: `[INFO] GNSS: configured: <ms> ms, GSA every <n>, GST every fix, PQTMPVT every 1, other sentences off, EPE off, volatile (not saved), <version>, <t> ms, try <n>`.
-A failure is a WARNING `GNSS: rate not applied (<reason>)` (STATUSTEXT and defmt), never a start or restart failure; `apply` returns one bus
-error. **A failed configuration is tried again** (start, restart or apply): the whole list, `CONFIGURE_RETRY_MS` (5000 ms, for the owner's
-approval) after each failure, until a try succeeds; the adapter raises its row's APPLY request, so a try runs in the task's loop, never under
-the data-ready deadline, and the row keeps publishing fixes between tries. Only the first try's failure is the WARNING; a retry that succeeds
-is the INFO text `GNSS: rate applied on try <n>`; a failed retry is a defmt line only (`fw_settings::gnss::Retry`, host-tested with a
-scripted cold receiver). Why: at three cold power-ons (2026-11-20, off 22, 23 and 47 s) the receiver came up at the fix interval it had
-before (200 ms, kept without power) with its default sentence set (about 80 to 100 sentences/s), answered the version query in 11 ms, and
-answered `$PAIR050,1000` 0.1 s after its first sentence only with `$PAIR001,050,1` (being processed), then `$PAIR001,124,0` and
-`$PAIR011,001` at about 240 ms and never the result: the try ended after the driver's 100 sentences (1.48 s) with no acknowledgement and the
-receiver stayed at 200 ms with its default set. The same list passes after a warm reset (the receiver up for a while). PPS (GPIO5) is not configured or read: neither the driver
-nor its bench program does anything with it beyond counting edges, and there is no time synchronisation here.
-- **Cancel answer (the design's "GNSS only after the `lc76g` cancel check").** Dropping the driver's `read`, `read_fix` or `read_sentence` future is
-  SAFE: nothing is lost, no sentence is corrupted, and `recover` is not needed afterwards. Evidence: the driver README, "Dropped reads"
-  (`lc76g/README.md:111`, "dropping a `read*` or `command` future loses nothing the driver already read"), the host test
-  `dropping_a_read_future_loses_nothing` (`src/tests.rs:1013`: a fix cut in the middle, the future dropped, the rest fed, the next `read_fix`
-  returns the right fix and 6 sentences are counted), the code (`Lc76g::next_sentence`, `src/lib.rs`: the driver's own buffer, position and
-  framer hold everything; the only await is one `uart.read`, and `BufferedUart::read` copies its bytes in the poll that completes it, so a drop
-  can only come before bytes were taken), and the board (`lc76g_resync`, README line 172: 10 Hz fixes read under 20 ms timeouts, 100 of 100 fixes
-  kept over 444 dropped calls). A half sentence stays in the framer and is finished by the next read. Only a `command` write is not droppable
-  (a partial line on the wire; the module discards it by its checksum); only the configuration's deadline can drop one, and the driver
-  resynchronises at its next command. **Shape that follows**: the data-ready wait
-  IS the read of the next fix (`data_ready` reads sentences, counts them, and returns when the driver has completed a fix, that is a GGA and an RMC
-  of one epoch; the fix waits in the adapter; it takes the deviations of its epoch's GST, see below), so the loop's `select(with_timeout(T, data_ready()), wake)` may drop it at any await; `acquire`
-  turns the waiting fix into the reading and never blocks.
-- **Ok means**: valid sentences keep arriving, WITH OR WITHOUT a position. One sample is one complete fix epoch (GGA + RMC of the same UTC time);
-  the position fields can be empty. 2.5 s without one is ONE error event (TIMEOUT; the row's own deadline T = 2.5 s, Betaflight's figure, instead of
-  3 P = 3 s): the score is 3 per event and 9 enters Recovering, so Degraded after 2.5 s, Recovering after 7.5 s of silence (measured from the last
-  good sample, see the injection run), as the design says. A checksum error, a malformed sentence, a sentence over the length limit and a UART
-  error (overrun, framing, break, parity) are counted (`[STAT] GNSS:`) and are NOT error events: the driver has no "stream broken" signal, and a
-  stream that is broken shows as silence. `status` answers "nothing pending" (a deadline miss); `verify` reads nothing back (a query every
-  second would discard fixes); `apply` sends the configuration.
-- **`start`** waits up to 5 s for the first valid sentence of any type (bench: 367 to 424 ms after the start of the task), then sends the
-  configuration (at most T more); no identity query before the first sentence. The README of the driver gives no start time of the module, so 5 s is this firmware's own bound. **How the long
-  start fits the health machine**: the machine's start retries wait 100, 300 and 1000 ms, too short for a receiver that is still booting, so the
-  waiting is INSIDE `start` (it is awaited to completion, and its 5 s are below the stuck threshold of 20 s); with three retries a receiver that
-  never talks is Absent after 4 x 5 s + 1.4 s. `fw-core` is unchanged. The loop then waits for one fresh fix (at most T) as after any start.
-- **`recover`** = flush and resynchronise: the UART's receive buffer is read empty (reads until one finds nothing for 5 ms, at most 128), and the driver
-  is rebuilt over the same UART (`release` then `new`: no half sentence, no held fix). **`restart`** (the first attempt after an operator request, and
-  the automatic recovery's second step) is the flush followed by the configuration: a UART has no bus clear
-  (noticed: the UART block is not re-initialised). The driver's counts restart at 0 with the new driver; the row's totals add them up.
-- `Reading::Gnss(GnssReading { fix_type, lat_e7, lon_e7, alt_mm, speed_mm_s, course_cdeg, sats_used, hdop_x100, vdop_x100, time, date, lat_std_mm,
-  lon_std_mm, alt_std_mm, vel_ned_mm_s })` (`fw_core::sample`; `vel_ned_mm_s` see below; `time` and `date` are the driver's UTC time and date copied once into `UtcTime` and `UtcDate`), the driver's integer
-  units (1e-7 degree, mm, mm/s, 0.01 degree, DOP x 100; no `f64` anywhere: the build has 0 `__aeabi_d` symbols). `fix_type` is MAVLink's
-  `GPS_FIX_TYPE`: 1 (NO_FIX) unless the RMC status, the GGA quality and the GSA fix mode all say there is a position, then 2 (2D), 3 (3D) or 4
-  (the GGA quality says differential or SBAS-aided, 3D). Position, altitude, speed and course are `None` while `fix_type` is 1.
-  `lat_std_mm`, `lon_std_mm`, `alt_std_mm` (mm, 1 sigma) come from the GST of the same epoch only (its UTC time equals the fix's,
-  `fw_core::sample::same_epoch_sigmas`): a GST that came before the GGA + RMC pair goes with the fix at once; otherwise the fix waits for the one
-  sentence after the pair and goes without deviations (`None`) if that is not its GST. A deviation never goes to another epoch.
-- `vel_ned_mm_s` (north, east, down, mm/s) comes from the `$PQTMPVT` of the same epoch only (its UTC time equals the fix's;
-  `fw_core::sample::{EpochAssembly, PvtOrder}`, host-tested on scripted streams), learnt like GST's order: a fix goes out at once without a
-  velocity until a PVT of a fix's own epoch came after that fix went out; from then on a fix waits for its PVT through the rest of its burst
-  (its GST may come first; the PVT of the epoch is not the sentence GST's rule waits for) and goes without a velocity at the first sentence
-  that is neither its GST nor its PVT, which also forgets the order. A PVT of another time is ignored and counted. On the receiver the PVT
-  comes about 16 ms after the RMC (bench 2026-11-21, 200 ms: PVT wait from the pair to the publication mean 15.4 ms, max 17.1 ms over 300 readings), so a reading
-  with a velocity goes about 16 ms after its RMC instead of about 5 ms (GST); without PVT in the stream nothing changes. `None` also without a
-  position or with an empty velocity field. **Nothing in the flight step uses the velocity yet, and the sign of "down" is not verified**
-  (only a board at rest was measured). The `[STAT] GNSS` line adds `PVT seen / paired / ignored`, `published without velocity` and the
-  PVT wait (mean, max, us); `seen - paired - ignored` are the PVTs that taught the order (one after each start, configuration or flush).
-- **GPS_RAW_INT (id 24), default 1 Hz** (the slot's minimum interval is 100 ms). With a fix: `lat`, `lon` in 1e-7 degree, `alt` the altitude above
-  mean sea level in mm, `eph`/`epv` HDOP/VDOP x 100, `vel` in cm/s, `cog` in 0.01 degree, `satellites_visible` the satellites USED (the GGA's count;
-  the GSV's count of visible satellites is not read), `time_usec` the board time of the sample (not UTC; UTC is in the reading and the `[STAT]` line),
-  `h_acc` sqrt(lat_std^2 + lon_std^2) and `v_acc` alt_std, mm, 0 when not available.
-  Without a fix: `fix_type` NO_FIX, `lat`, `lon` and `alt` 0 (the dialect defines no other convention: it says nothing about a missing position),
-  `vel` and `cog` UINT16_MAX, `eph`/`epv` whatever the receiver says about its DOP or UINT16_MAX, `satellites_visible` its count or 255. The
-  1 s age rule of the other values is replaced by a 3 s rule: no message is sent while the latest sample is older than 3 s (3 fix periods; at
-  1 Hz a sample is up to 1 s old when it is read, so 1 s would drop every message). The same sample can go out twice when the stream's tick comes
-  before the next fix.
-- **Parameter: `GPS_RATE_MS`** (index 80, see Parameters). P stays 1 s, T 2.5 s and the stuck window 20 s whatever the rate.
-- A settings save (`param save`) runs with all interrupts off for about 40 ms (rule 1 of `docs/resources.md`); the UART's 32-byte FIFO holds 2.8 ms
-  of line, so a save loses a piece of the stream (counted as a UART overrun and a checksum error, not an error event, and well under T). Not
-  exercised on the board in this packet (no save was run).
-- With nobody reading (the row Failed, or between recovery attempts) the 4096-byte buffer fills in about 3 s and the UART overruns; the first read
-  afterwards reports it (counted) and `recover`/`restart` throw the old bytes away (4128 bytes in the injection run).
-- `[STAT] GNSS:` (after the row's generic line): sentences and sentences per second, fixes, checksum errors, malformed, overflows, epochs dropped,
-  the four UART error counters, resyncs and the bytes they threw away, the fix type, satellites used, HDOP x 100, the UTC time of the latest fix and
-  the age of the last valid sentence.
+**GNSS.** A row for the u-blox SAM-M10Q receiver, `src/gnss.rs`, through the `sam-m10q` driver (UBX protocol only;
+decision `_plan/decision-gnss-m10-20261122.md`). UART1 is read in thread mode on core 0 (`BufferedUart`, no DMA, RX buffer 4096 B).
 
-**GNSS on the board** (2026-11-15). The receiver is not indoors-without-sky on this bench: it reported a fix at every sample (fix type 4, DGPS/SBAS,
-28 to 29 satellites used, HDOP 0.5), so the NO_FIX branch of `fix_type` and of GPS_RAW_INT was NOT seen on the board. Clean run (330 s, log
-`marv-v2-firmware-20261115-130145.log`): six rows Ok throughout, 0 transitions after the start, all 7 `[PASS]` start-up lines, no `[FAIL]`,
-no reset, watchdog stalls begun 0. GNSS: the first valid sentence 367 ms after the start of its task (424 and 847 ms in two other runs), Ok at 467 ms;
-1.0000 fixes/s (nominal 1 Hz) and 19.0 sentences/s, 300 fixes and 5698 sentences at 300 s, 0 errors, 0 timeouts, 0 recoveries, 0 checksum errors,
-0 malformed, 0 overflows, 0 epochs dropped, UART1 errors 0 (overrun, framing, break, parity), largest gap between fixes 1.033 s. The other rows at 300 s:
-IMU1 803.6/s, IMU2 800.7/s, BARO 49.80/s, MAG 100.1/s, BATT 10.00/s, all 0 errors (the earlier clean run: IMU1 803.52, IMU2 800.48). `marv-cli devices`:
-six rows OK; `marv-cli status`: the health word lists GPS and `devices 6`; `marv-link-test` 20 s: GPS_RAW_INT 21 (both ends of the 20 s counted), SYS_STATUS 21,
-SCALED_PRESSURE 501, HIGHRES_IMU 502, SCALED_IMU2 501, MARV_DEVICE_STATUS 164, 0 lost, 0 checksum failures. `device restart GNSS` on the healthy
-row: ACCEPTED, `Ok -> Starting` at 40 710 ms and `Starting -> Ok` at 40 946 ms (the UART flushed, 0 bytes). Injection `inject-gnss-silent`
-(log of the 100 s run): Ok at 522 ms, sentences swallowed from 10 524 ms (the last good sample was at about 9.5 s); error events (TIMEOUT) at 12.02 s
-(Degraded), 14.5 s and 17.02 s (Degraded -> Recovering, WARNING text): 7.5 s after the last good sample, 6.5 s after the swallowing began; recovery
-attempts 1 to 4 start at 17.12, 22.43, 28.53 and 36.54 s (100, 300, 1000 and 3000 ms after the previous failure), each takes 5.0 s (`recover` then
-`restart`, each waiting 2.5 s for a fix); Failed at 41.55 s after exactly 4 attempts with ONE ERROR text; the other five rows undisturbed, no reset; at
-79.0 s `device restart GNSS`: ACCEPTED, `Failed -> Starting`, Ok at 80.53 s (the swallowing ends with the request).
+- **Configure.** Every start, restart, recovery and apply (a `GPS_RATE_MS` or `GPS_GNSS` write) runs the driver's whole `configure`: a baud
+  scan (115200, 9600, 38400, a UBX-MON-VER poll at each), the switch to 115200, one CFG-VALSET to RAM only (UBX only, NMEA off, the
+  measurement period of `GPS_RATE_MS`, one NAV-PVT per epoch, dynamic model 8, the constellation set of `GPS_GNSS`) whose ACK is required,
+  then 500 ms of settling. Nothing is saved in the receiver. It takes up to 5.6 s. The receiver's MON-VER strings are logged once per
+  successful configure.
+- **Failure.** A configure that fails (no receiver, a refused or unacknowledged VALSET, a baud switch not followed) is a device error: the
+  first try gives the WARNING `GNSS: configure failed (<reason>)`, and a failed apply is tried again every
+  `fw_settings::gnss::CONFIGURE_RETRY_MS` (5 s); a retry that succeeds gives the INFO `GNSS: configured on try <n>`.
+- **Health.** "Ok" means NAV-PVT frames keep arriving, with or without a 3D fix (indoors there is none). 2.5 s without one (`DEADLINE_US`)
+  is one error event (timeout); checksum errors, oversize or unknown frames and UART errors are counted only. The row's nominal period is
+  1 s whatever `GPS_RATE_MS`, so it is stuck after 20 s.
+- **Sample.** One NAV-PVT is one `Reading::Gnss` (`fw_settings::gnss::reading`): with a 3D fix (`is_3d_fix_ok`) `fix_type` 3 and the
+  position (`lat`, `lon`, `hMSL`), ground speed, heading of motion, `vel_ned_mm_s` (`velN`, `velE`, `velD`) and the deviations
+  (`lat_std_mm` = `lon_std_mm` = hAcc, `alt_std_mm` = vAcc); without one `fix_type` 1 and those fields `None`. Satellites, UTC time and
+  date come from the frame either way; HDOP and VDOP are not given.
+- **PPS.** `pps_task` stamps every rising edge of GPIO5 and pairs it with whole-second fixes: a latency measurement only (the `[STAT]` line
+  and the log's PPS record); nothing synchronises to it.
+- **Link and status.** GPS_RAW_INT (`gnss::raw_int`) from the latest sample: fix type 1, 2, 3 or 4 as MAVLink's NO_FIX, 2D, 3D, DGPS;
+  hAcc/vAcc from the deviations. The `[STAT] GNSS:` line: frames, NAV-PVT rate, error counts, configures and failures, fix type,
+  satellites, hAcc, UTC, PPS pairing and latency, age of the last PVT.
+- **Injection.** `FEATURES=inject-gnss-silent`: 10 s after the first good sample the adapter stops seeing frames until `device restart GNSS`
+  (the long path of a silent device: Degraded, Recovering, Failed, then Ok after the restart).
 
 **BATT.** One sample every 100 ms from a period timer (the "data ready" of this device; a period wait is no bus call). `acquire`
 converts the voltage and the current channel with interrupt-driven single conversions, each awaited (one discarded after the channel
@@ -547,11 +471,10 @@ resets them), default 0, devices IMU1 and IMU2. The flight core's adapter subtra
 `LED_BRIGHT` (`crates/fw-settings/src/led.rs`, index 79), `I32`, device 0 (the system: there is no LED device row), default 1, range 0 to 3, `Live`: the status LED's brightness, 0 off, 1 dim (20 of 255), 2 medium (80), 3 bright (255). The LED task reads it every 260 ms (13 ticks of 20 ms), so a write shows within about a quarter of a second; it is saved only on the user's Save, like every parameter. See Status LED.
 
 `GPS_RATE_MS` (`crates/fw-settings/src/gnss.rs`, index 80), `I32`, ms, device GNSS (5), default 200, range 100 to 1000, `Configure`: the
-receiver's fix interval. The validator accepts only 100, 200, 500 or 1000 (text `GPS_RATE_MS: not 100, 200, 500 or 1000`). The message set
-follows from it (`fw_settings::gnss::config`): GGA, RMC and GST every fix, GSA every ceil(1000 / ms) fixes, GLL, VTG, GSV, ZDA, GRS and GNS off,
-EPE off, `$PQTMPVT` every fix. A write is sent to the receiver at once (apply; also while armed, as BARO and MAG), and again at every start and restart; it is never
-saved in the receiver. A stored record from before this parameter loads it at its default (the record holds values by name; host test
-`a_record_of_the_first_80_parameters_loads_gps_rate_ms_at_its_default`). See GNSS.
+receiver's measurement period. The validator accepts only 100, 200, 500 or 1000, and refuses 100 ms for any constellation set
+(`100 ms too fast for GPS_GNSS <n>`). `GPS_GNSS` (same file, appended after the first 81 indices), `I32`, default 0, range 0 to 2, `Configure`:
+the constellation set, 0 = GPS + Galileo + BeiDou B1C + QZSS, 1 = GPS + Galileo, 2 = GPS + Galileo + GLONASS. A write of either is sent to the
+receiver at once (apply), and again at every start and restart; it is never saved in the receiver. See GNSS.
 
 ### SD parameter
 
@@ -709,11 +632,10 @@ written.
   same as its GPS record (they join on `TimeUS`); `I` 0; `VDop` VDOP x 100, encoded as the GPS record's HDop (`u16::MAX`, which reads as
   32 767, when unknown); `HAcc` m, sqrt(lat_std^2 + lon_std^2) of the epoch's GST; `VAcc` m, its altitude deviation; HAcc and VAcc NaN when
   not available; `Delta` ms since the previous GNSS sample's `t_us` in this log, 0 for the first, saturating at 65 535.
-- GPV (id 152, format `QBiiiIIH`, 34 B, our name; no coordinate), one with every GPS record whose sample has a velocity (the fix rate once
-  `$PQTMPVT` pairs): `TimeUS` the GNSS sample's `t_us`, as its GPS record; `I` 0; `VelN`, `VelE`, `VelD` mm/s (`i32`; the sign of
-  `VelD` is not verified); `GMS` the PVT's GPS time of week, ms; `Spd` the PVT's ground speed, mm/s; `Hdg` the PVT's heading, 0.01 degree
-  (`Spd`/`Hdg` 4 294 967 295 / 65 535 when the PVT left them empty; `GMS` 0 if the PVT values were not found), to compare with the GPS
-  record's RMC speed and course offline. Format character `i` (`i32`) is new in `dflog`.
+- GPV (id 152, format `QBiiiIIH`, 34 B, our name; no coordinate), one with every GPS record whose sample has a velocity (every NAV-PVT with a
+  3D fix): `TimeUS` the GNSS sample's `t_us`, as its GPS record; `I` 0; `VelN`, `VelE`, `VelD` mm/s (`i32`, NAV-PVT's `velN`, `velE`, `velD`);
+  `GMS` the NAV-PVT's iTOW (GPS time of week, ms; `gnss::pvt_tow_ms`); `Spd` ground speed, mm/s; `Hdg` heading, 0.01 degree. Format character
+  `i` (`i32`) is new in `dflog`.
 - MODE (id 150, format `QBB`, 13 B, columns `TimeUS,Sel,Eff`; decision-nav-eskf-20261120 8c, F6): the selected and the effective flight mode, written by `Stepper` at the first step and at every change of either, armed or not (codes as MOT's `Mode`: 0 Acro, 1 Angle, 2 Altitude, 3 Position; a record the ring dropped is offered again at the next step).
 - SPN (id 151, format `Qfffffff`, 39 B, columns `TimeUS,PN,PE,PD,VN,VE,VD,Hdg`; 8c, F1): the altitude setpoint, only while the setpoint is Altitude, with the step block's cadence (armed every step, disarmed every 8th): `PD` the target height (m, down positive), `VD` the climb-rate feed-forward (m/s, down positive); `PN`, `PE`, `VN`, `VE`, `Hdg` are 0 (Position will fill them). About 31 kB/s more at 800 Hz armed in Altitude, none in Angle; the flight ring's free space in Altitude is not measured yet.
 - BFS (id 157, format `QBBfB`, 18 B, columns `TimeUS,Level,Act,Volt,Cells`; Amendment BATT): one record each time the low-battery monitor reaches a level, on its own (not in the per-step block): `Level` 1 LOW or 2 CRITICAL, `Act` `BATT_FS_CRT_ACT`, `Volt` the pack voltage in V, `Cells` `BATT_CELLS`.
@@ -1227,7 +1149,7 @@ local path (the comment in `Cargo.toml` shows it) instead of editing the depende
 | bmp581 | <https://github.com/Lmx154/bmp581-rs> | BMP581 barometer (I2C) |
 | adc-battery | <https://github.com/Lmx154/adc-battery> | battery voltage and current from ADC sums (pinned at 3d8ad8e, its `main`) |
 | bmm350 | <https://github.com/Lmx154/bmm350-rs> | BMM350 magnetometer (I2C) |
-| lc76g | <https://github.com/Lmx154/lc76g-rs> | LC76G GNSS receiver (UART) |
+| sam-m10q | <https://github.com/Lmx154/sam-m10q> | u-blox SAM-M10Q GNSS receiver (UART, UBX) |
 | pio-sdmmc | <https://github.com/Lmx154/pio-sdmmc-rs> | SD card on the RP2350 PIO, 4-bit SD bus |
 | usb-cdc | <https://github.com/Lmx154/usb-cdc> | bytes over the board's USB port (CDC-ACM), the link to the ground station |
 | mavlink-device | <https://github.com/Lmx154/mavlink-device> | the board's MAVLink layer on any byte stream (with the `marv` dialect) |
