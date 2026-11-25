@@ -1999,6 +1999,55 @@ fn hands_off_msg_names_every_state_with_its_code() {
     assert!(!hands_off_msg(State::Auto).contains("HOLD's law") && !hands_off_msg(State::Return).contains("HOLD's law"));
 }
 
+/// The MSG bytes up to the first NUL, as the log's reader takes them.
+fn text(m: &[u8]) -> &str {
+    let n = m.iter().position(|&b| b == 0).unwrap_or(m.len());
+    core::str::from_utf8(&m[..n]).unwrap()
+}
+
+#[test]
+fn hands_off_reason_msg_keeps_the_prefix_and_appends_the_token() {
+    use crate::hands_off::Reason;
+    assert_eq!(text(&hands_off_reason_msg(State::Hold, Some(Reason::StationLost))), "HO 3 HOLD stn-lost");
+    assert_eq!(text(&hands_off_reason_msg(State::Hold, Some(Reason::Pause))), "HO 3 HOLD pause");
+    assert_eq!(text(&hands_off_reason_msg(State::Hold, Some(Reason::Abort))), "HO 3 HOLD abort");
+    assert_eq!(text(&hands_off_reason_msg(State::Hold, Some(Reason::Plan))), "HO 3 HOLD plan");
+    assert_eq!(text(&hands_off_reason_msg(State::Hold, Some(Reason::LastWp))), "HO 3 HOLD last-wp");
+    assert_eq!(text(&hands_off_reason_msg(State::Pilot, Some(Reason::MsOff))), "HO 1 PILOT ms-off");
+    assert_eq!(text(&hands_off_reason_msg(State::Return, Some(Reason::LinkLost))), "HO 5 RETURN link10s");
+    assert_eq!(text(&hands_off_reason_msg(State::Land, Some(Reason::BattCrit))), "HO 6 LAND batt-crit");
+    assert_eq!(text(&hands_off_reason_msg(State::Takeover, Some(Reason::ArmMsOff))), "HO 2 TAKEOVER arm-ms-off");
+    for s in [State::Pilot, State::Takeover, State::Hold, State::Auto, State::Return, State::Land, State::Stop, State::Blind] {
+        assert_eq!(text(&hands_off_reason_msg(s, None)), hands_off_msg(s), "no reason: the text as before");
+    }
+}
+
+#[test]
+fn command_msg_names_the_command_and_its_answer() {
+    use crate::hands_off::{CommandResult, DenyReason};
+    assert_eq!(text(&command_msg(Command::Start, Some(CommandResult::Accepted))), "CMD START ok");
+    assert_eq!(text(&command_msg(Command::Pause, Some(CommandResult::Denied(DenyReason::StationAbsent)))), "CMD PAUSE den 5");
+    assert_eq!(text(&command_msg(Command::Abort, Some(CommandResult::Denied(DenyReason::NotT3)))), "CMD ABORT den 13");
+    assert_eq!(text(&command_msg(Command::Land, Some(CommandResult::Accepted))), "CMD LAND ok");
+    assert_eq!(
+        text(&command_msg(Command::Return, Some(CommandResult::Denied(DenyReason::MissionNotSelected)))),
+        "CMD RETURN den 20"
+    );
+    assert_eq!(text(&command_msg(Command::Start, None)), "CMD START den 0", "no answer: the mailbox's code 0");
+}
+
+#[test]
+fn plan_msg_and_station_lost_msg_formats() {
+    assert_eq!(text(&plan_msg(Some(0x1862_F4A2), 4)), "PLAN 0x1862F4A2 n=4");
+    assert_eq!(text(&plan_msg(None, 0)), "PLAN 0x00000000 n=0");
+    assert_eq!(text(&plan_msg(Some(u32::MAX), 255)), "PLAN 0xFFFFFFFF n=255");
+    assert_eq!(text(&plan_msg(Some(0x0000_00A0), 16)), "PLAN 0x000000A0 n=16");
+    assert_eq!(text(&station_lost_msg(Some(5_012), Some((255, 190)))), "STN age 5012 ms gcs 255,190");
+    assert_eq!(text(&station_lost_msg(Some(0), Some((0, 0)))), "STN age 0 ms gcs 0,0");
+    assert_eq!(text(&station_lost_msg(Some(u32::MAX), Some((255, 255)))), "STN age 4294967295 ms gcs 255,255");
+    assert_eq!(text(&station_lost_msg(None, None)), "STN age none gcs none");
+}
+
 // ---- Amendment N: no motor stop in the air (N2, N4, E2, the NS walk of N1) ----
 
 impl Fly {

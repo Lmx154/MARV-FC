@@ -982,6 +982,24 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.hands_off.state()
     }
 
+    /// Why the hands-off state after the latest step was entered (`None` before the first change): the board's HO MSG
+    /// ([`hands_off_reason_msg`]).
+    pub fn hands_off_reason(&self) -> Option<hands_off::Reason> {
+        self.hands_off.reason()
+    }
+
+    /// When the newest station HEARTBEAT arrived on the radio link, as given (`set_last_radio_heartbeat_us`), us.
+    pub fn last_radio_heartbeat_us(&self) -> Option<u64> {
+        self.last_radio_heartbeat_us
+    }
+
+    /// The plan id the state machine is given at every step (from the set in force or from `set_plan_id`, as
+    /// `mission_facts` chooses) and the waypoints it sees (0 unless the set is the mission): the board's PLAN MSG.
+    pub fn plan_seen(&self) -> (Option<u32>, u8) {
+        let facts = mission_facts(&self.mission, self.plan_id, None, None, false);
+        (facts.plan_id, if self.mission.from_mission { self.mission.count } else { 0 })
+    }
+
     /// FS_HOLD_EN in force after the latest step (B9: taken on disarmed steps). The board logs every change of the
     /// hands-off state while it is true, and only the entries into and exits from a hands-off state while it is false
     /// ([`hands_off_msg_due`], N10 (iv)), so the log of an image flown with 0 changes only after a stick loss.
@@ -1835,6 +1853,112 @@ pub fn card_msg(pct: u16) -> [u8; 19] {
     let t = if p >= 10 { digit(p / 10) } else { b' ' };
     let mut m = *b"HOVER  00 % of card";
     (m[6], m[7], m[8]) = (h, t, digit(p));
+    m
+}
+
+/// Copies `s` into `m` from `at` (cut at the end of `m`); the index after it.
+fn put(m: &mut [u8], at: usize, s: &[u8]) -> usize {
+    for (d, &c) in m.iter_mut().skip(at).zip(s) {
+        *d = c;
+    }
+    (at + s.len()).min(m.len())
+}
+
+/// Writes `v` in decimal, no leading zeros, into `m` from `at`; the index after it.
+fn put_dec(m: &mut [u8], at: usize, v: u32) -> usize {
+    let mut digits = [0u8; 10];
+    let (mut v, mut n) = (v, 0);
+    loop {
+        if let Some(d) = digits.get_mut(9 - n) {
+            *d = b'0' + (v % 10) as u8;
+        }
+        n += 1;
+        v /= 10;
+        if v == 0 || n == 10 {
+            break;
+        }
+    }
+    put(m, at, digits.get(10 - n..).unwrap_or_default())
+}
+
+/// The HO MSG the board writes: [`hands_off_msg`] of `state`, then a space and the reason's token when there is one
+/// ("HO 3 HOLD stn-lost"); NUL padded.
+pub fn hands_off_reason_msg(state: State, reason: Option<hands_off::Reason>) -> [u8; 32] {
+    let mut m = [0u8; 32];
+    let n = put(&mut m, 0, hands_off_msg(state).as_bytes());
+    if let Some(r) = reason {
+        let n = put(&mut m, n, b" ");
+        put(&mut m, n, r.token().as_bytes());
+    }
+    m
+}
+
+/// A station command and the step's answer: "CMD <NAME> ok", or "CMD <NAME> den <code>" with `DenyReason::code` (0 when
+/// the step gave no answer, as the mailbox's answer byte); NUL padded.
+pub fn command_msg(command: hands_off::Command, result: Option<hands_off::CommandResult>) -> [u8; 20] {
+    use hands_off::{Command, CommandResult};
+    let mut m = [0u8; 20];
+    let name: &[u8] = match command {
+        Command::Start => b"CMD START",
+        Command::Pause => b"CMD PAUSE",
+        Command::Abort => b"CMD ABORT",
+        Command::Land => b"CMD LAND",
+        Command::Return => b"CMD RETURN",
+    };
+    let n = put(&mut m, 0, name);
+    match result {
+        Some(CommandResult::Accepted) => {
+            put(&mut m, n, b" ok");
+        }
+        Some(CommandResult::Denied(r)) => {
+            let n = put(&mut m, n, b" den ");
+            put_dec(&mut m, n, r.code().into());
+        }
+        None => {
+            put(&mut m, n, b" den 0");
+        }
+    }
+    m
+}
+
+/// The plan id the state machine sees and its waypoints ([`Flight::plan_seen`]): "PLAN 0x1862F4A2 n=4", no plan id as
+/// 0x00000000 (the empty list's); NUL padded.
+pub fn plan_msg(plan_id: Option<u32>, waypoints: u8) -> [u8; 24] {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut m = *b"PLAN 0x00000000 n=\0\0\0\0\0\0";
+    let id = plan_id.unwrap_or(0);
+    for k in 0..8 {
+        if let (Some(d), Some(&h)) = (m.get_mut(7 + k), HEX.get(((id >> (28 - 4 * k)) & 0xF) as usize)) {
+            *d = h;
+        }
+    }
+    put_dec(&mut m, 18, waypoints.into());
+    m
+}
+
+/// At AUTO's exit on station loss: the station HEARTBEAT's age, ms, and the sender of the RC port's latest
+/// ground-station HEARTBEAT (any sender of type GCS): "STN age 5012 ms gcs 255,190", "none" for either when unknown; NUL
+/// padded.
+pub fn station_lost_msg(age_ms: Option<u32>, gcs: Option<(u8, u8)>) -> [u8; 40] {
+    let mut m = [0u8; 40];
+    let mut n = put(&mut m, 0, b"STN age ");
+    n = match age_ms {
+        Some(a) => {
+            let n = put_dec(&mut m, n, a);
+            put(&mut m, n, b" ms gcs ")
+        }
+        None => put(&mut m, n, b"none gcs "),
+    };
+    match gcs {
+        Some((sys, comp)) => {
+            let n = put_dec(&mut m, n, sys.into());
+            let n = put(&mut m, n, b",");
+            put_dec(&mut m, n, comp.into());
+        }
+        None => {
+            put(&mut m, n, b"none");
+        }
+    }
     m
 }
 

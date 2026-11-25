@@ -685,6 +685,8 @@ pub struct Stepper {
     k_logged: bool,
     /// N14 (3): the card check's MSG was written in this arming (cleared on a disarmed step).
     card_logged: bool,
+    /// The plan id and waypoints of the last "PLAN" MSG written (`None` before the first; `Flight::plan_seen`).
+    plan_logged: Option<(Option<u32>, u8)>,
     /// The shadow guidance (decision-guidance-shadow-20261123): owned here, not by `Flight`, which never sees it.
     guidance: Guidance<GDN_TARGETS>,
     /// The targets in force (taken on a disarmed step), the newest pushed ones, whether a push is waiting to be taken, and
@@ -739,6 +741,7 @@ impl Stepper {
             m_logged: false,
             k_logged: false,
             card_logged: false,
+            plan_logged: None,
             guidance: Guidance::new(),
             gdn_in_force: GDN_OFF,
             gdn_pushed: GDN_OFF,
@@ -933,7 +936,7 @@ impl SampleSink for Stepper {
             rc: fresh.then_some(report),
             erpm,
         });
-        crate::station::after_step(&mut self.flight, command);
+        let answered = crate::station::after_step(&mut self.flight, command);
         self.out.write(FlightOut {
             t_us: out.t_us,
             motors: out.motors,
@@ -968,13 +971,40 @@ impl SampleSink for Stepper {
         // The hands-off state (decision-mavlink-mode-20261123, Amendment D): a MSG when `hands_off_msg_due` says so (every
         // change while FS_HOLD_EN in force is 1; with 0 only entries into and exits from a hands-off state, N10 (iv)), a
         // push of its own (MODE's record format is unchanged); a dropped one is offered again.
+        // The text carries why the state was entered ("HO 3 HOLD stn-lost"); at AUTO's exit on station loss a second MSG
+        // gives the station HEARTBEAT's age and the RC port's latest ground-station sender (one push, dropped if full).
         let ho = self.flight.hands_off_state();
+        let reason = self.flight.hands_off_reason();
         if fw_flight::step::hands_off_msg_due(self.flight.fs_hold_in_force(), self.ho_logged, ho)
             && self.log.push_with(dflog::MSG.length.into(), |b| {
-                dflog::encode_msg(b, out.t_us, fw_flight::step::hands_off_msg(ho).as_bytes())
+                dflog::encode_msg(b, out.t_us, &fw_flight::step::hands_off_reason_msg(ho, reason))
             })
         {
             self.ho_logged = Some(ho);
+            if reason == Some(fw_flight::hands_off::Reason::StationLost) {
+                let age_ms = self
+                    .flight
+                    .last_radio_heartbeat_us()
+                    .map(|t| (out.t_us.saturating_sub(t) / 1000).min(u64::from(u32::MAX)) as u32);
+                let text = fw_flight::step::station_lost_msg(age_ms, crate::station::gcs_sender());
+                self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text));
+            }
+        }
+        // The station's flight command of this step and its answer: "CMD START ok", "CMD PAUSE den 5" (one push, dropped
+        // if full).
+        if let Some((command, result)) = answered {
+            let text = fw_flight::step::command_msg(command, result);
+            self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, out.t_us, &text));
+        }
+        // The plan id the state machine is given and its waypoints, at the first step and at each change: "PLAN 0x1862F4A2
+        // n=4"; a dropped one is offered again.
+        let plan = self.flight.plan_seen();
+        if self.plan_logged != Some(plan)
+            && self.log.push_with(dflog::MSG.length.into(), |b| {
+                dflog::encode_msg(b, out.t_us, &fw_flight::step::plan_msg(plan.0, plan.1))
+            })
+        {
+            self.plan_logged = Some(plan);
         }
         // AUTO's active waypoint (H3b): "HO WP <k>" at each change while the guidance runs (Start, every Arrived); a dropped
         // one is offered again.

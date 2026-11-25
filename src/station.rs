@@ -18,13 +18,14 @@
 //! 0 for no list); core 1 gives them to `Flight::set_last_radio_heartbeat_us` and `Flight::set_plan_id`.
 
 use core::cell::{Cell, RefCell};
-use core::sync::atomic::{AtomicU8, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::flight_cmd::{Decoded, Exchange, Mailbox, Pending, decode, request_byte, station_heartbeat_us};
 use fw_core::xcore::{TripleBuffer, TripleReader, TripleWriter};
 use fw_flight::gnc::{Allocator, Controller, Estimator};
+use fw_flight::hands_off::{Command, CommandResult};
 use fw_flight::step::Flight;
 use mavlink_device::marv::{MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
@@ -46,6 +47,16 @@ pub static FLIGHT_STATION_HB: TripleBuffer<u64> = TripleBuffer::new(0);
 
 /// Core 0 -> flight step: the plan id of the committed list; 0 when none is stored (the empty list's plan id).
 pub static FLIGHT_PLAN: TripleBuffer<u32> = TripleBuffer::new(0);
+
+/// Core 0 -> flight step's log: the sender of the RC port's latest ground-station HEARTBEAT (any sender of type GCS) as
+/// `0x1_0000 | system << 8 | component`; 0 before the first. Logged only ([`gcs_sender`]); nothing decides on it.
+pub static GCS_SENDER: AtomicU32 = AtomicU32::new(0);
+
+/// The sender in [`GCS_SENDER`]; `None` before the first.
+pub fn gcs_sender() -> Option<(u8, u8)> {
+    let v = GCS_SENDER.load(Ordering::Relaxed);
+    (v != 0).then_some(((v >> 8) as u8, v as u8))
+}
 
 /// Core 0: the flight command outstanding, its link and its COMMAND_ACK's command number and target.
 #[derive(Clone, Copy)]
@@ -164,6 +175,9 @@ pub fn custom_mode() -> u32 {
 /// the first); the time counts only from the station's sender (`station_heartbeat_us`) and is written to the flight step
 /// when it is new.
 pub fn station_heartbeat(t_us: Option<u64>, sender: Option<(u8, u8)>) {
+    if let Some((sys, comp)) = sender {
+        GCS_SENDER.store(0x1_0000 | u32::from(sys) << 8 | u32::from(comp), Ordering::Relaxed);
+    }
     WRITERS.lock(|w| {
         let mut w = w.borrow_mut();
         if w.hb.is_none() {
@@ -210,8 +224,11 @@ impl Core1 {
 }
 
 /// Core 1, before `Flight::step`: the station heartbeat time and the plan id when new, and the waiting command, given to
-/// the flight for that step; the command's number.
-pub fn before_step<E: Estimator, C: Controller, A: Allocator>(io: &mut Core1, flight: &mut Flight<E, C, A>) -> Option<u32> {
+/// the flight for that step; the command's number and the command.
+pub fn before_step<E: Estimator, C: Controller, A: Allocator>(
+    io: &mut Core1,
+    flight: &mut Flight<E, C, A>,
+) -> Option<(u32, Command)> {
     let (hb, hb_fresh) = io.hb.read();
     if hb_fresh {
         flight.set_last_radio_heartbeat_us(Some(hb));
@@ -222,13 +239,19 @@ pub fn before_step<E: Estimator, C: Controller, A: Allocator>(io: &mut Core1, fl
     }
     let (seq, c) = fw_flight::station::take(&FLIGHT_CMD)?;
     flight.set_command(c);
-    Some(seq)
+    Some((seq, c.command))
 }
 
-/// Core 1, after that step: its answer to request `seq`, and the mode code.
-pub fn after_step<E: Estimator, C: Controller, A: Allocator>(flight: &mut Flight<E, C, A>, seq: Option<u32>) {
-    if let Some(seq) = seq {
-        fw_flight::station::answer(&FLIGHT_CMD, seq, flight.take_command_result());
-    }
+/// Core 1, after that step: its answer to request `seq`, and the mode code; the command and the answer, for the log.
+pub fn after_step<E: Estimator, C: Controller, A: Allocator>(
+    flight: &mut Flight<E, C, A>,
+    request: Option<(u32, Command)>,
+) -> Option<(Command, Option<CommandResult>)> {
+    let answered = request.map(|(seq, command)| {
+        let result = flight.take_command_result();
+        fw_flight::station::answer(&FLIGHT_CMD, seq, result);
+        (command, result)
+    });
     MODE.store(flight.hands_off_state().code(), Ordering::Relaxed);
+    answered
 }

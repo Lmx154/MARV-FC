@@ -69,6 +69,39 @@ pub fn station_heartbeat_us(kept: Option<u64>, last_gcs_us: Option<u64>, sender:
     }
 }
 
+/// How many distinct ground-station HEARTBEAT senders [`SendersSeen`] reports.
+pub const SENDERS_SEEN_MAX: usize = 8;
+
+/// The distinct senders of ground-station HEARTBEATs seen since boot, for the log only (nothing reads it to decide).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SendersSeen {
+    seen: [(u8, u8); SENDERS_SEEN_MAX],
+    n: usize,
+}
+
+impl SendersSeen {
+    /// None seen.
+    pub const fn new() -> Self {
+        Self { seen: [(0, 0); SENDERS_SEEN_MAX], n: 0 }
+    }
+
+    /// True the first time `sender` is given, while fewer than [`SENDERS_SEEN_MAX`] are kept; false after that.
+    pub fn first(&mut self, sender: (u8, u8)) -> bool {
+        let kept = self.seen.get(..self.n).unwrap_or_default();
+        if kept.contains(&sender) {
+            return false;
+        }
+        match self.seen.get_mut(self.n) {
+            Some(slot) => {
+                *slot = sender;
+                self.n += 1;
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 /// The request payload's radio-link bit (clear: USB).
 const RADIO: u8 = 0x10;
 
@@ -309,6 +342,20 @@ mod tests {
         for b in [0u8, 6, 0x10, 0x16, 0x20, 0xFF] {
             assert_eq!(request_of(b), None, "{b:#x}");
         }
+    }
+
+    #[test]
+    fn senders_seen_reports_each_sender_once_up_to_the_cap() {
+        let mut s = SendersSeen::new();
+        assert!(s.first(STATION));
+        assert!(!s.first(STATION), "seen already");
+        assert!(s.first((1, 1)));
+        assert!(!s.first((1, 1)));
+        for k in 2..SENDERS_SEEN_MAX as u8 {
+            assert!(s.first((k, 0)), "{k}");
+        }
+        assert!(!s.first((200, 0)), "the cap: no ninth");
+        assert!(!s.first(STATION));
     }
 
     #[test]

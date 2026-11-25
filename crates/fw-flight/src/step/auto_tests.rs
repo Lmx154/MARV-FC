@@ -499,6 +499,49 @@ fn d_station_lost_5_s_in_auto_holds_with_the_place_kept() {
     assert_eq!(r.f.leg_active(), Some(0), "the kept place: still waypoint 0");
 }
 
+/// The log's facts on the real step (logged only): the reason of each AUTO exit as the board's HO MSG writes it, the
+/// station HEARTBEAT time it was given, and the plan id and waypoints the state machine sees.
+#[test]
+fn auto_exits_give_their_reason_and_the_plan_seen_follows_the_set() {
+    let ho = |r: &Run| {
+        let m = hands_off_reason_msg(r.state(), r.f.hands_off_reason());
+        let n = m.iter().position(|&b| b == 0).unwrap_or(m.len());
+        std::string::String::from_utf8(m[..n].to_vec()).unwrap()
+    };
+    let mut r = in_auto();
+    assert_eq!(ho(&r), "HO 4 AUTO start");
+    assert_eq!(r.f.plan_seen(), (Some(0x5157_0001), 4));
+    let heard = r.f.last_radio_heartbeat_us();
+    assert!(heard.is_some());
+    r.station = false;
+    while r.state() == State::Auto {
+        r.fly();
+    }
+    assert_eq!(ho(&r), "HO 3 HOLD stn-lost");
+    assert_eq!(r.f.last_radio_heartbeat_us(), heard, "no heartbeat since");
+
+    let mut r = in_auto();
+    let mut next = square();
+    next.plan_id = 0x5157_00ff;
+    r.f.set_mission(next);
+    assert_eq!(r.f.plan_seen(), (Some(0x5157_00ff), 4), "seen as soon as it is set");
+    r.fly();
+    assert_eq!(ho(&r), "HO 3 HOLD plan");
+
+    let mut r = in_auto();
+    assert_eq!(r.command(Command::Pause), CommandResult::Accepted);
+    assert_eq!(ho(&r), "HO 3 HOLD pause");
+    let mut r = in_auto();
+    assert_eq!(r.command(Command::Abort), CommandResult::Accepted);
+    assert_eq!(ho(&r), "HO 3 HOLD abort");
+
+    // Not the mission set (GDN_SRC 0): the station's plan id, no waypoints.
+    let mut r = Run::new(3.0, None);
+    assert_eq!(r.f.plan_seen(), (None, 0));
+    r.f.set_plan_id(Some(0x1862_F4A2));
+    assert_eq!(r.f.plan_seen(), (Some(0x1862_F4A2), 0));
+}
+
 /// (e) A plant that cannot follow (a steady push of 15 m/s^2 south, more than the tilt limit gives): e grows to E_MAX
 /// and the carrot stops; the vehicle is pushed on, and at the step after e passes X the track fault lands with the
 /// braking law, armed with the motors running; never STOP.

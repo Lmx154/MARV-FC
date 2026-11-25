@@ -53,6 +53,20 @@ after core-0 records of the same time, so `TimeUS` is not in order across types.
 
 Encoders are in `crates/fw-core/src/dflog.rs`. Hands-off events appear as MSG text "HO ...".
 
+MSG texts of the station and hands-off path (logged only; a full ring drops them, never blocks):
+
+| Text | When | Written by |
+|---|---|---|
+| `HO <code> <NAME> <reason>` | each hands-off state change, e.g. `HO 3 HOLD stn-lost`; the reason is `hands_off::Reason::token` (the initial `HO 7 STOP` has none) | flight core |
+| `STN age <ms> ms gcs <sys>,<comp>` | after `HO 3 HOLD stn-lost`: the station HEARTBEAT's age and the RC port's latest ground-station sender (`none` when unknown) | flight core |
+| `CMD <NAME> ok` / `CMD <NAME> den <code>` | each station flight command the step takes, its answer (`DenyReason::code`, 0 no answer) | flight core |
+| `PLAN 0x<id> n=<k>` | first step and each change of the plan id the state machine sees (0x00000000 none) and its waypoints | flight core |
+| `GCS HB <sys>,<comp>` | first time each ground-station HEARTBEAT sender is seen on the radio link since boot (at most 8); also sent as STATUSTEXT | core 0 (`rc`) |
+
+Reason tokens: `armed`, `arm-off`, `arm-gnd`, `arm-ms-off`, `disarmed`, `landed`, `rc-lost`, `rc-back`, `handover`, `ms-off`,
+`ms-on`, `tier`, `batt-crit`, `track`, `link10s`, `plan`, `last-wp`, `stn-lost`, `home`, `start`, `pause`, `abort`, `rtl`,
+`cmd-land`.
+
 ## SD card (device row)
 
 `src/sd.rs`, task `sd`, drives the SD row through the same health machine as every device ([device-layer](device-layer.md)). It owns PIO0 SM0

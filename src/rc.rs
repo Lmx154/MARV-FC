@@ -27,6 +27,7 @@ use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_time::{Delay, Duration, Instant, Timer};
 use embedded_io_async::{ErrorType, Read, Write};
+use fw_core::flight_cmd::SendersSeen;
 use fw_core::health::Counters;
 use fw_core::rc::{
     PortMode, RcInput, RcSample, RcSource, RcVerdict, crsf_gps, crsf_sticks, gps_frame_due, receiver_report,
@@ -315,6 +316,8 @@ struct RcHooks {
     arm_on: bool,
     /// Channel 9 edge tracking of the receiver reports (the waypoint mark).
     marks: MarkTracker,
+    /// The ground-station HEARTBEAT senders already logged ("GCS HB"), at most `SENDERS_SEEN_MAX`.
+    gcs_seen: SendersSeen,
 }
 
 impl Hooks for RcHooks {
@@ -483,6 +486,16 @@ impl Hooks for RcHooks {
 
     fn stats(&mut self, stats: &Stats) {
         crate::station::station_heartbeat(stats.last_gcs_heartbeat_us, stats.last_gcs_heartbeat_sender);
+        // The first time each sender of a ground-station HEARTBEAT is seen since boot: one text "GCS HB <sys>,<comp>"
+        // (formatting and queueing only then, at most `SENDERS_SEEN_MAX` times). Log only: which one counts is unchanged.
+        if let Some((sys, comp)) = stats.last_gcs_heartbeat_sender
+            && self.gcs_seen.first((sys, comp))
+        {
+            crate::text_fmt(
+                mavlink_device::dialect::MavSeverity::MAV_SEVERITY_INFO,
+                format_args!("GCS HB {},{}", sys, comp),
+            );
+        }
         let before = SHARED.lock(|s| {
             let mut s = s.borrow_mut();
             let before = s.mode();
@@ -726,6 +739,7 @@ async fn rc_link(
         crsf_reports: 0,
         arm_on: false,
         marks: MarkTracker::new(),
+        gcs_seen: SendersSeen::new(),
     };
     loop {
         let end = port

@@ -357,6 +357,92 @@ impl Events {
     };
 }
 
+/// Why the present state was entered: one per rule of the state table that changes the state (the same rule of the
+/// MAVLink-flight table and of the other has the same reason). Logged only (the HO MSG); nothing acts on it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reason {
+    /// N19 columns 4 and 5: an arm-OFF report with the mission switch OFF: STOP.
+    ArmMsOff,
+    /// N19 columns 4 and 5: an arm-OFF report in PILOT on the ground: STOP.
+    ArmOffGround,
+    /// An arm-OFF report: STOP (the disarm not withheld, C1) or, on a MAVLink flight in the air, LAND (N19).
+    ArmOff,
+    /// The gate is disarmed: STOP.
+    Disarmed,
+    /// WR1: a hands-off state on the ground with TD held: STOP.
+    Landed,
+    /// A fresh report in STOP with the pilot latch set (arming): PILOT.
+    Armed,
+    /// Sticks lost in PILOT or TAKEOVER (`lost`).
+    RcLost,
+    /// A fresh report in a hands-off state (not a MAVLink flight): TAKEOVER.
+    RcBack,
+    /// TAKEOVER's hand-over (the pilot latch, A2'): PILOT.
+    Handover,
+    /// N19 columns 2 and 3: a live report with the mission switch OFF: PILOT (switch6 High) or TAKEOVER.
+    MsOff,
+    /// N19 column 1: the mission switch ON with switch6 High in PILOT in the air: HOLD.
+    MsOn,
+    /// The debounced tier: a drop below T3' (LAND or BLIND), or BLIND's tier change (LAND, BLIND).
+    Tier,
+    /// The battery is critical: LAND or BLIND.
+    BattCrit,
+    /// The H12 track fault: LAND or BLIND.
+    Track,
+    /// Link age above `LINK_LOSS_US` in HOLD: RETURN or LAND.
+    LinkLost,
+    /// AUTO: the plan id is not the one flown: HOLD.
+    Plan,
+    /// AUTO: the last waypoint reached: HOLD.
+    LastWp,
+    /// AUTO: no station HEARTBEAT within `STATION_LOST_US`: HOLD with the place kept.
+    StationLost,
+    /// RETURN: home reached: LAND or BLIND.
+    Home,
+    /// Command Start: AUTO.
+    Start,
+    /// Command Pause: HOLD.
+    Pause,
+    /// Command Abort: HOLD.
+    Abort,
+    /// Command Return: RETURN.
+    Return,
+    /// Command Land: LAND or BLIND.
+    Land,
+}
+
+impl Reason {
+    /// The short token the HO MSG appends to "HO <code> <NAME>".
+    pub fn token(self) -> &'static str {
+        match self {
+            Reason::ArmMsOff => "arm-ms-off",
+            Reason::ArmOffGround => "arm-gnd",
+            Reason::ArmOff => "arm-off",
+            Reason::Disarmed => "disarmed",
+            Reason::Landed => "landed",
+            Reason::Armed => "armed",
+            Reason::RcLost => "rc-lost",
+            Reason::RcBack => "rc-back",
+            Reason::Handover => "handover",
+            Reason::MsOff => "ms-off",
+            Reason::MsOn => "ms-on",
+            Reason::Tier => "tier",
+            Reason::BattCrit => "batt-crit",
+            Reason::Track => "track",
+            Reason::LinkLost => "link10s",
+            Reason::Plan => "plan",
+            Reason::LastWp => "last-wp",
+            Reason::StationLost => "stn-lost",
+            Reason::Home => "home",
+            Reason::Start => "start",
+            Reason::Pause => "pause",
+            Reason::Abort => "abort",
+            Reason::Return => "rtl",
+            Reason::Land => "cmd-land",
+        }
+    }
+}
+
 /// Home (A6): set when both its height and its position were latched this arming.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Home {
@@ -402,6 +488,8 @@ pub struct Output {
     /// The horizontal speed limit for the position controller, m/s: v_ho ([`speed_limit_xy_ms`]) in a hands-off state,
     /// `PILOT_SPEED_XY` in force otherwise (H13 (2)).
     pub speed_limit_xy_ms: f32,
+    /// Why the present state was entered; `None` before the first change (the initial STOP).
+    pub reason: Option<Reason>,
 }
 
 /// The hands-off state machine.
@@ -460,6 +548,8 @@ pub struct HandsOff {
     anchor: Option<([f32; 2], f32)>,
     /// A fixed-target segment has begun and its anchor is not set yet.
     anchor_pending: bool,
+    /// Why the present state was entered (`None` before the first change).
+    reason: Option<Reason>,
 }
 
 impl HandsOff {
@@ -491,7 +581,13 @@ impl HandsOff {
             track_covered: false,
             anchor: None,
             anchor_pending: false,
+            reason: None,
         }
+    }
+
+    /// Why the present state was entered; `None` before the first change.
+    pub fn reason(&self) -> Option<Reason> {
+        self.reason
     }
 
     /// The present state.
@@ -624,6 +720,7 @@ impl HandsOff {
             } else {
                 i.speed_xy_ms
             },
+            reason: self.reason,
         }
     }
 
@@ -741,20 +838,20 @@ impl HandsOff {
             let ground = !i.airborne && (!self.ever_airborne || i.td_held);
             match self.state {
                 _ if !r.mission => {
-                    self.go(State::Stop, i, ev);
+                    self.go(State::Stop, Reason::ArmMsOff, i, ev);
                     return;
                 }
                 State::Stop => return,
                 State::Pilot if ground => {
-                    self.go(State::Stop, i, ev);
+                    self.go(State::Stop, Reason::ArmOffGround, i, ev);
                     return;
                 }
                 State::Land | State::Blind => {}
-                _ => self.go(self.land_state(), i, ev),
+                _ => self.go(self.land_state(), Reason::ArmOff, i, ev),
             }
         }
         if self.state.is_hands_off() && !i.airborne && i.td_held {
-            self.go(State::Stop, i, ev);
+            self.go(State::Stop, Reason::Landed, i, ev);
             return;
         }
         let live = i.crsf.filter(|r| fresh && r.arm);
@@ -762,58 +859,58 @@ impl HandsOff {
             && self.state != State::Stop
         {
             if r.switch6 == Switch3::High {
-                self.go(State::Pilot, i, ev);
+                self.go(State::Pilot, Reason::MsOff, i, ev);
             } else if self.state != State::Pilot {
-                self.go(State::Takeover, i, ev);
+                self.go(State::Takeover, Reason::MsOff, i, ev);
             }
         } else {
             match self.state {
                 State::Stop => {
                     if fresh && self.pilot_latch {
-                        self.go(State::Pilot, i, ev);
+                        self.go(State::Pilot, Reason::Armed, i, ev);
                     }
                 }
                 State::Pilot | State::Takeover => {
                     if !fresh {
-                        self.go(self.lost(i), i, ev);
+                        self.go(self.lost(i), Reason::RcLost, i, ev);
                     }
                 }
                 State::Hold => {
                     if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
-                        self.go(self.land_state(), i, ev);
+                        self.go(self.land_state(), self.land_reason(i), i, ev);
                     } else if self.link_age(i) > LINK_LOSS_US {
                         let next = if i.return_built && self.home().is_some() {
                             State::Return
                         } else {
                             State::Land
                         };
-                        self.go(next, i, ev);
+                        self.go(next, Reason::LinkLost, i, ev);
                     } else if self.place && i.mission.plan_id != self.flown_plan {
                         self.drop_place(ev);
                     }
                 }
                 State::Auto => {
                     if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
-                        self.go(self.land_state(), i, ev);
+                        self.go(self.land_state(), self.land_reason(i), i, ev);
                     } else if i.mission.plan_id != self.flown_plan || i.last_waypoint_reached {
-                        self.go(State::Hold, i, ev);
+                        self.go(State::Hold, if i.last_waypoint_reached { Reason::LastWp } else { Reason::Plan }, i, ev);
                     } else if !Self::station_present(i) {
-                        self.pause(i, ev);
+                        self.pause(Reason::StationLost, i, ev);
                     }
                 }
                 State::Return => {
                     if self.debounced != Tier::T3 || i.battery_critical || self.track_fault || i.home_reached {
-                        self.go(self.land_state(), i, ev);
+                        self.go(self.land_state(), self.return_reason(i), i, ev);
                     }
                 }
                 State::Land => {
                     if self.debounced == Tier::T1 {
-                        self.go(State::Blind, i, ev);
+                        self.go(State::Blind, Reason::Tier, i, ev);
                     }
                 }
                 State::Blind => {
                     if self.debounced != Tier::T1 {
-                        self.go(State::Land, i, ev);
+                        self.go(State::Land, Reason::Tier, i, ev);
                     }
                 }
             }
@@ -822,7 +919,7 @@ impl HandsOff {
                 && i.airborne
                 && self.hold_entry_check(i).is_none()
             {
-                self.go(State::Hold, i, ev);
+                self.go(State::Hold, Reason::MsOn, i, ev);
             }
         }
         if self.state == State::Takeover && (i.battery_critical || self.track_fault) {
@@ -837,75 +934,75 @@ impl HandsOff {
             return;
         }
         if !i.armed || (i.crsf.is_some_and(|r| !r.arm) && !self.arm_off_holds()) {
-            self.go(State::Stop, i, ev);
+            self.go(State::Stop, if i.armed { Reason::ArmOff } else { Reason::Disarmed }, i, ev);
             return;
         }
         // WR1, guarded by the touchdown rule TD (N10 (i); ArduPilot land_complete).
         if self.state.is_hands_off() && !i.airborne && i.td_held {
-            self.go(State::Stop, i, ev);
+            self.go(State::Stop, Reason::Landed, i, ev);
             return;
         }
         match self.state {
             State::Stop => {
                 if fresh && self.pilot_latch {
-                    self.go(State::Pilot, i, ev);
+                    self.go(State::Pilot, Reason::Armed, i, ev);
                 }
             }
             State::Pilot => {
                 if !fresh {
-                    self.go(self.lost(i), i, ev);
+                    self.go(self.lost(i), Reason::RcLost, i, ev);
                 }
             }
             State::Takeover => {
                 if !fresh {
-                    self.go(self.lost(i), i, ev);
+                    self.go(self.lost(i), Reason::RcLost, i, ev);
                 } else {
                     self.lock(i);
                     if self.pilot_latch {
-                        self.go(State::Pilot, i, ev);
+                        self.go(State::Pilot, Reason::Handover, i, ev);
                     }
                 }
             }
             State::Hold | State::Auto | State::Return | State::Land | State::Blind if fresh => {
-                self.go(State::Takeover, i, ev);
+                self.go(State::Takeover, Reason::RcBack, i, ev);
                 self.lock(i);
             }
             State::Hold => {
                 if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
-                    self.go(self.land_state(), i, ev);
+                    self.go(self.land_state(), self.land_reason(i), i, ev);
                 } else if self.link_age(i) > LINK_LOSS_US {
                     let next = if i.return_built && self.home().is_some() {
                         State::Return
                     } else {
                         State::Land
                     };
-                    self.go(next, i, ev);
+                    self.go(next, Reason::LinkLost, i, ev);
                 } else if self.place && i.mission.plan_id != self.flown_plan {
                     self.drop_place(ev);
                 }
             }
             State::Auto => {
                 if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
-                    self.go(self.land_state(), i, ev);
+                    self.go(self.land_state(), self.land_reason(i), i, ev);
                 } else if i.mission.plan_id != self.flown_plan || i.last_waypoint_reached {
-                    self.go(State::Hold, i, ev);
+                    self.go(State::Hold, if i.last_waypoint_reached { Reason::LastWp } else { Reason::Plan }, i, ev);
                 } else if !Self::station_present(i) {
-                    self.pause(i, ev);
+                    self.pause(Reason::StationLost, i, ev);
                 }
             }
             State::Return => {
                 if self.debounced != Tier::T3 || i.battery_critical || self.track_fault || i.home_reached {
-                    self.go(self.land_state(), i, ev);
+                    self.go(self.land_state(), self.return_reason(i), i, ev);
                 }
             }
             State::Land => {
                 if self.debounced == Tier::T1 {
-                    self.go(State::Blind, i, ev);
+                    self.go(State::Blind, Reason::Tier, i, ev);
                 }
             }
             State::Blind => {
                 if self.debounced != Tier::T1 {
-                    self.go(State::Land, i, ev);
+                    self.go(State::Land, Reason::Tier, i, ev);
                 }
             }
         }
@@ -971,14 +1068,34 @@ impl HandsOff {
             .is_some_and(|t| i.now_us.saturating_sub(t) <= STATION_LOST_US)
     }
 
+    /// The reason of the landing exits of HOLD and AUTO: the first of their three conditions that holds.
+    fn land_reason(&self, i: &Inputs) -> Reason {
+        if self.debounced != Tier::T3 {
+            Reason::Tier
+        } else if i.battery_critical {
+            Reason::BattCrit
+        } else {
+            Reason::Track
+        }
+    }
+
+    /// The reason of RETURN's exit: the landing conditions first, then home reached.
+    fn return_reason(&self, i: &Inputs) -> Reason {
+        if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
+            self.land_reason(i)
+        } else {
+            Reason::Home
+        }
+    }
+
     fn drop_place(&mut self, ev: &mut Events) {
         self.place = false;
         ev.place_dropped = true;
     }
 
     /// AUTO to HOLD with the place kept.
-    fn pause(&mut self, i: &Inputs, ev: &mut Events) {
-        self.go(State::Hold, i, ev);
+    fn pause(&mut self, reason: Reason, i: &Inputs, ev: &mut Events) {
+        self.go(State::Hold, reason, i, ev);
         self.place = true;
         ev.place_dropped = false;
         ev.place_kept = true;
@@ -986,7 +1103,7 @@ impl HandsOff {
 
     /// Enters `next` (no effect when it is the present state). Any change other than to AUTO drops a place; the
     /// callers that keep it (`pause`) restore it.
-    fn go(&mut self, next: State, i: &Inputs, ev: &mut Events) {
+    fn go(&mut self, next: State, reason: Reason, i: &Inputs, ev: &mut Events) {
         if next == self.state {
             return;
         }
@@ -1022,6 +1139,7 @@ impl HandsOff {
             self.pilot_latch = true;
         }
         self.state = next;
+        self.reason = Some(reason);
     }
 
     /// A10, A10', A9, C2, C3 and the lead's rulings: the answer, and the change at this step when ACCEPTED.
@@ -1055,18 +1173,18 @@ impl HandsOff {
                     } else {
                         StartAt::First
                     });
-                    self.go(State::Auto, i, ev);
+                    self.go(State::Auto, Reason::Start, i, ev);
                     self.place = true;
                     self.flown_plan = i.mission.plan_id;
                     Accepted
                 }
             },
             (Command::Pause, State::Auto) => {
-                self.pause(i, ev);
+                self.pause(Reason::Pause, i, ev);
                 Accepted
             }
             (Command::Pause, State::Return) | (Command::Abort, State::Auto | State::Return | State::Land) => {
-                self.go(State::Hold, i, ev);
+                self.go(State::Hold, if c.command == Command::Pause { Reason::Pause } else { Reason::Abort }, i, ev);
                 Accepted
             }
             (Command::Abort, State::Hold) => {
@@ -1078,12 +1196,12 @@ impl HandsOff {
             (Command::Return, State::Hold | State::Auto) => match self.return_check(i) {
                 Some(reason) => Denied(reason),
                 None => {
-                    self.go(State::Return, i, ev);
+                    self.go(State::Return, Reason::Return, i, ev);
                     Accepted
                 }
             },
             (Command::Land, State::Hold | State::Auto | State::Return) => {
-                self.go(self.land_state(), i, ev);
+                self.go(self.land_state(), Reason::Land, i, ev);
                 Accepted
             }
             _ => Denied(DenyReason::NotInThisState),
@@ -4398,5 +4516,145 @@ mod tests {
         r.i.td_held = true;
         let out = r.step();
         assert_eq!((out.state, out.disarm), (State::Stop, true), "TD held");
+    }
+
+    /// Every rule that changes the state carries its reason (logged only): each reason on its path, on a MAVLink flight
+    /// (the N19 table) and on a CRSF flight (the other table); the initial STOP has none.
+    #[test]
+    fn every_state_change_carries_its_reason() {
+        let check = |out: Output, state: State, reason: Reason, what: &str| {
+            assert_eq!((out.state, out.reason), (state, Some(reason)), "{what}");
+        };
+        let mut r = Rig::new();
+        assert_eq!(r.step().reason, None, "the initial STOP");
+        assert_eq!(r.h.reason(), None);
+        r.i.armed = true;
+        check(r.report(T0 + 1_000, Switch3::High), State::Pilot, Reason::Armed, "arming");
+        assert_eq!(r.h.reason(), Some(Reason::Armed));
+        check(r.report_full(T0 + 2_000, FULL, Switch3::High, false, true), State::Stop, Reason::ArmOffGround, "arm-gnd");
+
+        let mut r = Rig::pilot();
+        check(r.report_full(r.now() + 1_000, FULL, Switch3::High, false, true), State::Land, Reason::ArmOff, "arm-off");
+        let mut r = Rig::hold();
+        check(r.report_full(r.now() + 1_000, FULL, Switch3::High, false, false), State::Stop, Reason::ArmMsOff, "ms-off");
+
+        let mut r = Rig::hold();
+        assert_eq!(r.h.reason(), Some(Reason::RcLost), "sticks lost");
+        r.i.airborne = false;
+        check(r.step(), State::Stop, Reason::Landed, "WR1");
+
+        let mut r = Rig::hold();
+        check(r.report(r.now() + 1_000, Switch3::High), State::Pilot, Reason::MsOff, "column 2");
+        let mut r = Rig::hold();
+        check(r.report(r.now() + 1_000, Switch3::Low), State::Takeover, Reason::MsOff, "column 3");
+        let mut r = Rig::pilot();
+        check(r.report_ms(r.now() + 1_000, Switch3::High, true), State::Hold, Reason::MsOn, "column 1");
+
+        let mut r = Rig::hold();
+        r.drop_tier(Tier::T2);
+        check(r.hold_drop(), State::Land, Reason::Tier, "HOLD tier");
+        let mut r = Rig::hold();
+        r.i.battery_critical = true;
+        check(r.step(), State::Land, Reason::BattCrit, "HOLD battery");
+        let mut r = Rig::hold();
+        r.i.track_error_m = Some(100.0);
+        check(r.step(), State::Land, Reason::Track, "HOLD track fault");
+        let mut r = Rig::ret();
+        assert_eq!(r.h.reason(), Some(Reason::LinkLost), "link loss");
+        r.i.home_reached = true;
+        check(r.step(), State::Land, Reason::Home, "RETURN home");
+
+        let mut r = Rig::auto();
+        assert_eq!(r.h.reason(), Some(Reason::Start), "Start");
+        r.i.mission.plan_id = Some(PLAN + 1);
+        check(r.step(), State::Hold, Reason::Plan, "new plan");
+        let mut r = Rig::auto();
+        r.i.last_waypoint_reached = true;
+        check(r.step(), State::Hold, Reason::LastWp, "last waypoint");
+        let mut r = Rig::auto();
+        let t = r.now() + STATION_LOST_US + 1;
+        let out = r.at(t);
+        check(out, State::Hold, Reason::StationLost, "station lost");
+        assert!(out.events.place_kept);
+        let mut r = Rig::auto();
+        r.i.battery_critical = true;
+        check(r.step(), State::Land, Reason::BattCrit, "AUTO battery");
+
+        let mut r = Rig::auto();
+        check(r.cmd(Command::Pause), State::Hold, Reason::Pause, "Pause in AUTO");
+        let mut r = Rig::auto();
+        check(r.cmd(Command::Abort), State::Hold, Reason::Abort, "Abort in AUTO");
+        let mut r = Rig::ret();
+        r.i.last_radio_heartbeat_us = Some(r.now());
+        check(r.cmd(Command::Pause), State::Hold, Reason::Pause, "Pause in RETURN");
+        let mut r = Rig::hold();
+        check(r.cmd(Command::Return), State::Return, Reason::Return, "Return");
+        let mut r = Rig::land();
+        assert_eq!(r.h.reason(), Some(Reason::Land), "Land");
+        r.drop_tier(Tier::T1);
+        check(r.hold_drop(), State::Blind, Reason::Tier, "LAND to BLIND");
+        r.i.tier = Tier::T3;
+        check(r.step(), State::Land, Reason::Tier, "BLIND to LAND");
+
+        // A denied command changes nothing, the reason included.
+        let mut r = Rig::hold();
+        assert_eq!(r.cmd_on(Command::Return, Link::Usb).command, denied(DenyReason::NotRadioLink));
+        assert_eq!(r.h.reason(), Some(Reason::RcLost));
+
+        // The other table (CRSF flights).
+        let mut r = Rig::crsf_pilot();
+        assert_eq!(r.h.reason(), Some(Reason::Armed));
+        r.i.armed = false;
+        check(r.step(), State::Stop, Reason::Disarmed, "disarmed");
+        let mut r = Rig::crsf_pilot();
+        check(r.report_with(r.now() + 1_000, FULL, Switch3::High, false), State::Stop, Reason::ArmOff, "CRSF arm-off");
+        let mut r = Rig::crsf_land();
+        assert_eq!(r.h.reason(), Some(Reason::RcLost), "CRSF sticks lost");
+        r.i.airborne = false;
+        check(r.step(), State::Stop, Reason::Landed, "CRSF WR1");
+        let mut r = Rig::crsf_takeover();
+        assert_eq!(r.h.reason(), Some(Reason::RcBack), "fresh report in LAND");
+        assert_eq!(r.report(r.now() + 1_000, Switch3::High).state, State::Takeover, "the lock opens");
+        check(r.report(r.now() + 1_000, Switch3::Low), State::Pilot, Reason::Handover, "hand-over");
+        let mut r = Rig::crsf_takeover();
+        let t = r.now() + LOSS + 1;
+        check(r.at(t), State::Land, Reason::RcLost, "TAKEOVER sticks lost");
+    }
+
+    #[test]
+    fn reason_tokens_are_short_distinct_words() {
+        let all = [
+            Reason::ArmMsOff,
+            Reason::ArmOffGround,
+            Reason::ArmOff,
+            Reason::Disarmed,
+            Reason::Landed,
+            Reason::Armed,
+            Reason::RcLost,
+            Reason::RcBack,
+            Reason::Handover,
+            Reason::MsOff,
+            Reason::MsOn,
+            Reason::Tier,
+            Reason::BattCrit,
+            Reason::Track,
+            Reason::LinkLost,
+            Reason::Plan,
+            Reason::LastWp,
+            Reason::StationLost,
+            Reason::Home,
+            Reason::Start,
+            Reason::Pause,
+            Reason::Abort,
+            Reason::Return,
+            Reason::Land,
+        ];
+        for (k, a) in all.iter().enumerate() {
+            let t = a.token();
+            assert!(!t.is_empty() && t.len() <= 10 && !t.contains(' '), "{a:?} {t}");
+            for b in all.iter().skip(k + 1) {
+                assert_ne!(t, b.token(), "{a:?} {b:?}");
+            }
+        }
     }
 }
