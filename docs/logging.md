@@ -46,6 +46,7 @@ after core-0 records of the same time, so `TimeUS` is not in order across types.
 | GPS, GPA, GPV | each receiver sample | fix, accuracies (GPA), velocity (GPV) |
 | BAT | 10 Hz | voltage, current |
 | RCIN | 10 Hz while sticks are fresh | RC channels |
+| RCL | 1 Hz while the radio link is up | RC port counters: mode, stick, link and RADIO_STATUS reports, bytes received, CRC errors, garbage bytes, UART errors, ms since the last station HEARTBEAT (`4294967295`: none); a gap in the counters or in RCL itself shows a dropout |
 | DEV | 1 Hz and on state change | the 8 device rows |
 | MSG | each STATUSTEXT | text (boot texts first) |
 | PARM | all 128 at open and after each change | the parameter table |

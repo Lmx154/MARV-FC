@@ -173,6 +173,8 @@ pub const ID_NTCH: u8 = 155;
 // 156 was GDN: retired, never reused.
 /// Type number of BFS (a battery level reached; Amendment BATT).
 pub const ID_BFS: u8 = 157;
+/// Type number of RCL (the RC port's counters).
+pub const ID_RCL: u8 = 158;
 
 /// FMT: describes a type (89 bytes).
 pub const FMT: RecordDef = def(ID_FMT, "FMT", "BBnNZ", "Type,Length,Name,Format,Columns");
@@ -279,6 +281,8 @@ pub const NTCH: RecordDef = def(
 
 /// BFS: the low-battery monitor reached a level (Amendment BATT): the level (1 LOW, 2 CRITICAL), the critical action (`BATT_FS_CRT_ACT`: 0 warn, 1 descend), the pack voltage (V) and `BATT_CELLS`.
 pub const BFS: RecordDef = def(ID_BFS, "BFS", "QBBfB", "TimeUS,Level,Act,Volt,Cells");
+/// RCL: the RC port's counters while its link is up, once per second: mode (1 CRSF, 2 MAVLink), stick, CRSF link and RADIO_STATUS reports, bytes received, CRC errors, garbage bytes, UART errors, ms since the last ground-station HEARTBEAT (u32::MAX: none).
+pub const RCL: RecordDef = def(ID_RCL, "RCL", "QBIIIIIIII", "TimeUS,Mode,Stk,Lnk,Rad,Rx,Crc,Gar,Uer,Hb");
 
 /// NKF1: an estimator's state (decision-nav-eskf-20261120, 8c, B5): instance (0 the steering estimator, 1 the shadow), attitude quaternion, velocity and position NED (m/s, m), valid bits as NAV's.
 pub const NKF1: RecordDef = def(
@@ -308,9 +312,9 @@ pub const SPN: RecordDef = def(
 );
 
 /// Every record type of the file, FMT first, in the order of the header.
-pub const TYPES: [RecordDef; 29] = [
+pub const TYPES: [RecordDef; 30] = [
     FMT, PARM, MSG, IMU, BARO, MAG, GPS, BAT, RCIN, DEV, DSF, NAV, SETP, DMD, MOT, ESC, RCS, FDS,
-    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH, BFS,
+    GPA, GPV, NKF1, NKF2, NKI, MODE, SPN, PPS, PIDT, NTCH, BFS, RCL,
 ];
 
 /// Size of the header sequence: the FMT of FMT and one FMT for each other type.
@@ -868,6 +872,47 @@ pub fn encode_gpv(
     w.pos
 }
 
+/// The values of one RCL record.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rcl {
+    /// 1 CRSF, 2 MAVLink.
+    pub mode: u8,
+    /// Stick reports produced.
+    pub sticks: u32,
+    /// CRSF link statistics reports produced.
+    pub link_reports: u32,
+    /// RADIO_STATUS reports produced.
+    pub radio_reports: u32,
+    /// Bytes received by the UART.
+    pub rx_bytes: u32,
+    /// CRSF CRC plus MAVLink checksum errors.
+    pub crc_errors: u32,
+    /// Bytes thrown away outside any frame.
+    pub garbage_bytes: u32,
+    /// UART errors of every kind.
+    pub uart_errors: u32,
+    /// Ms since the last ground-station HEARTBEAT, `u32::MAX` when none was heard.
+    pub heartbeat_age_ms: u32,
+}
+
+/// RCL: the RC port's counters. 44 bytes.
+pub fn encode_rcl(out: &mut [u8], time_us: u64, d: &Rcl) -> usize {
+    let Some(mut w) = Writer::start(out, &RCL) else {
+        return 0;
+    };
+    w.u64(time_us);
+    w.u8(d.mode);
+    w.u32(d.sticks);
+    w.u32(d.link_reports);
+    w.u32(d.radio_reports);
+    w.u32(d.rx_bytes);
+    w.u32(d.crc_errors);
+    w.u32(d.garbage_bytes);
+    w.u32(d.uart_errors);
+    w.u32(d.heartbeat_age_ms);
+    w.pos
+}
+
 /// PPS: the edge's board time, the latency in us, the edge count and the unpaired count. 31 bytes.
 pub fn encode_pps(out: &mut [u8], time_us: u64, edge_us: u64, latency_us: i32, pulses: u32, unpaired: u32) -> usize {
     let Some(mut w) = Writer::start(out, &PPS) else {
@@ -1126,6 +1171,8 @@ mod tests {
         out.push((ID_NTCH, b[..n].to_vec()));
         let n = encode_bfs(&mut b, 1, 2, 1, 13.5, 4);
         out.push((ID_BFS, b[..n].to_vec()));
+        let n = encode_rcl(&mut b, 1, &Rcl { mode: 1, sticks: 2, ..Rcl::default() });
+        out.push((ID_RCL, b[..n].to_vec()));
         out
     }
 
@@ -1188,12 +1235,12 @@ mod tests {
     }
 
     #[test]
-    fn header_sequence_is_29_fmt_records() {
-        assert_eq!(TYPES.len(), 29);
-        assert_eq!(HEADER_SEQUENCE_LEN, 2581);
+    fn header_sequence_is_30_fmt_records() {
+        assert_eq!(TYPES.len(), 30);
+        assert_eq!(HEADER_SEQUENCE_LEN, 2670);
         let mut buf = [0u8; 2680];
-        assert_eq!(write_header(&mut buf), 2581);
-        assert_eq!(write_header(&mut [0u8; 2580]), 0);
+        assert_eq!(write_header(&mut buf), 2670);
+        assert_eq!(write_header(&mut [0u8; 2669]), 0);
         for (i, def) in TYPES.iter().enumerate() {
             let rec = &buf[i * 89..(i + 1) * 89];
             assert_eq!(rec[..3], [0xA3, 0x95, 0x80]);
@@ -1280,7 +1327,8 @@ mod tests {
                 ("PPS", 31),
                 ("PIDT", 59),
                 ("NTCH", 40),
-                ("BFS", 18)
+                ("BFS", 18),
+                ("RCL", 44)
             ]
         );
     }
@@ -1630,6 +1678,40 @@ mod tests {
         assert_eq!(encode_bfs(&mut [0u8; 17], 7, 2, 1, 13.5, 4), 0);
         assert_eq!((ID_BFS, BFS.format, BFS.length), (157, "QBBfB", 18));
         assert!(!FLIGHT_TYPES.iter().any(|d| d.type_id == ID_BFS), "not part of the per-step block");
+    }
+
+    #[test]
+    fn golden_rcl() {
+        let d = Rcl {
+            mode: 2,
+            sticks: 3,
+            link_reports: 4,
+            radio_reports: 5,
+            rx_bytes: 6,
+            crc_errors: 7,
+            garbage_bytes: 8,
+            uart_errors: 9,
+            heartbeat_age_ms: u32::MAX,
+        };
+        let mut b = [0xEEu8; 46];
+        assert_eq!(encode_rcl(&mut b, 10, &d), 44);
+        let want = cat(&[
+            &[0xA3, 0x95, 0x9E],
+            &10u64.to_le_bytes(),
+            &[2],
+            &3u32.to_le_bytes(),
+            &4u32.to_le_bytes(),
+            &5u32.to_le_bytes(),
+            &6u32.to_le_bytes(),
+            &7u32.to_le_bytes(),
+            &8u32.to_le_bytes(),
+            &9u32.to_le_bytes(),
+            &u32::MAX.to_le_bytes(),
+        ]);
+        assert_eq!(b[..44], want[..]);
+        assert_eq!(b[44..], [0xEE; 2]);
+        assert_eq!(encode_rcl(&mut [0u8; 43], 10, &d), 0);
+        assert_eq!((ID_RCL, RCL.format, RCL.length), (158, "QBIIIIIIII", 44));
     }
 
     #[test]

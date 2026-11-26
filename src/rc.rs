@@ -101,6 +101,7 @@ pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
 /// Bytes the UART took at the CRSF baud and at 460800, baud changes, and returns of `run`.
 static TX_CRSF: AtomicU32 = AtomicU32::new(0);
 static TX_MAV: AtomicU32 = AtomicU32::new(0);
+static RX_BYTES: AtomicU32 = AtomicU32::new(0);
 static BAUD_CHANGES: AtomicU32 = AtomicU32::new(0);
 static RESTARTS: AtomicU32 = AtomicU32::new(0);
 
@@ -178,6 +179,32 @@ pub fn row() -> DeviceRow {
         stuck: false,
         locked: v.link_up,
     }
+}
+
+/// The RCL record's figures while the radio link is up, `None` otherwise.
+pub fn link_counters(now_us: u64) -> Option<fw_core::dflog::Rcl> {
+    let s = shared();
+    if !s.verdict(now_us).link_up {
+        return None;
+    }
+    let st = s.stats?;
+    Some(fw_core::dflog::Rcl {
+        mode: match st.mode {
+            Mode::Crsf => 1,
+            Mode::Mavlink => 2,
+            _ => 0,
+        },
+        sticks: st.sticks,
+        link_reports: st.crsf_links,
+        radio_reports: st.radio_status,
+        rx_bytes: RX_BYTES.load(Ordering::Relaxed),
+        crc_errors: st.crc_errors,
+        garbage_bytes: st.garbage_bytes,
+        uart_errors: s.errors().saturating_sub(st.crc_errors),
+        heartbeat_age_ms: st.last_gcs_heartbeat_us.map_or(u32::MAX, |t| {
+            u32::try_from(now_us.saturating_sub(t) / 1000).unwrap_or(u32::MAX)
+        }),
+    })
 }
 
 /// The RC row's `MARV_DEVICE_STATUS`: samples = stick reports + RADIO_STATUS reports, errors =
@@ -497,7 +524,11 @@ impl ErrorType for CountingUart {
 
 impl Read for CountingUart {
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, uart::Error> {
-        self.uart.read(buf).await
+        let r = self.uart.read(buf).await;
+        if let Ok(n) = r {
+            RX_BYTES.fetch_add(n as u32, Ordering::Relaxed);
+        }
+        r
     }
 }
 

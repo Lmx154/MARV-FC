@@ -27,6 +27,8 @@ flowchart LR
 - The RC row (`MARV_DEVICE_STATUS` device 7, SYS_STATUS RC_RECEIVER) is report only: no health machine, no restart (`device restart RC` is denied).
   It means "the radio link is up" (`fw_core::rc::verdict`):
 
+The SD log carries the port's counters once per second while the link is up (the `RCL` record, [logging](logging.md)): differences between records show frames lost, CRC errors, garbage bytes and UART errors per second.
+
 | Situation | Row |
 |---|---|
 | CRSF lock, stick report younger than 1 s | OK |

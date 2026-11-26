@@ -178,6 +178,11 @@ impl Collector {
                 dflog::encode_rcin(b, now, &channels)
             });
         }
+        if tick.is_multiple_of(DEV_EVERY)
+            && let Some(rcl) = crate::rc::link_counters(now)
+        {
+            p.push_with(dflog::RCL.length.into(), |b| dflog::encode_rcl(b, now, &rcl));
+        }
         self.devs(p, now, tick.is_multiple_of(DEV_EVERY));
         while let Some((_, line)) = crate::take_text(LINK_LOG) {
             p.push_with(dflog::MSG.length.into(), |b| {
