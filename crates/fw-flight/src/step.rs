@@ -445,6 +445,7 @@ impl StickShaper {
             heading_rad: psi,
             heading_rate_rads: self.heading_rate(self.sticks.yaw),
             accel_d_mss: 0.0,
+            accel_ne_mss: [0.0; 2],
         }
     }
 
@@ -1233,6 +1234,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
                     heading_rad: self.leg_heading_rad,
                     heading_rate_rads: 0.0,
                     accel_d_mss: leg.accel_d_mss,
+                    accel_ne_mss: leg.accel_ne,
                 };
             }
         }
@@ -1492,6 +1494,7 @@ fn position_covered(valid: &Valid) -> bool {
         heading_rad: 0.0,
         heading_rate_rads: 0.0,
         accel_d_mss: 0.0,
+        accel_ne_mss: [0.0; 2],
     };
     valid.covers(&probe.requires())
 }

@@ -1014,3 +1014,37 @@ fn n19_the_first_report_after_a_stick_loss_in_auto_is_its_own_column() {
         }
     }
 }
+
+/// M3 B2: the horizontal acceleration feed-forward is the guidance's in AUTO and RETURN and 0 from every other producer
+/// (the hover in PILOT, HOLD, LAND); the square, HOLD, then RETURN and LAND to the stop.
+#[test]
+fn horizontal_accel_feed_forward_only_from_the_legs() {
+    let mut r = Run::new(5.0, Some(square()));
+    assert_eq!(r.command(Command::Start), CommandResult::Accepted);
+    let (mut leg, mut other, mut steps) = (0u32, 0u32, 0u32);
+    let mut returned = false;
+    while r.f.gate.armed() {
+        let o = r.fly();
+        steps += 1;
+        assert!(steps < 600_000);
+        if let Setpoint::Position { accel_ne_mss, .. } = o.setpoint {
+            if matches!(r.state(), State::Auto | State::Return) {
+                leg += u32::from(accel_ne_mss != [0.0; 2]);
+                let n = libm::hypotf(accel_ne_mss[0], accel_ne_mss[1]);
+                assert!(n <= Tuning::GUIDANCE_ACC_MS2 + 1e-4, "{n}");
+            } else {
+                assert_eq!(accel_ne_mss, [0.0; 2], "{:?}", r.state());
+                other += 1;
+            }
+        }
+        if r.state() == State::Hold && !returned {
+            for _ in 0..800 {
+                r.fly();
+            }
+            assert_eq!(r.command(Command::Return), CommandResult::Accepted);
+            returned = true;
+        }
+    }
+    std::println!("non-zero horizontal accel feed-forward on {leg} leg steps; {other} other Position steps at 0");
+    assert!(returned && leg > 1_000 && other > 1_000, "{leg} {other}");
+}

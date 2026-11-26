@@ -443,6 +443,7 @@ fn closed_loop_vertical_lead_while_braking_shrinks_with_the_accel_feed_forward()
                 heading_rad: 0.0,
                 heading_rate_rads: 0.0,
                 accel_d_mss: if ff { o.accel_d_mss } else { 0.0 },
+                accel_ne_mss: [0.0; 2],
             };
             let nav = NavState { t_us: k * 1_250, attitude: [1.0, 0.0, 0.0, 0.0], rates_rads: [0.0; 3], velocity_ms: [0.0, 0.0, vd], position_m: [0.0, 0.0, d], valid: all, sigma: None };
             let thrust = pid.update(&nav, &sp, &none).unwrap().thrust_n;
@@ -529,11 +530,19 @@ fn return_from_above_the_return_height_does_not_climb() {
     assert!(run.outs.iter().all(|x| x.down_m == -30.0));
     let last = run.outs.last().unwrap();
     assert_eq!(last.event, LegEvent::Home);
+    // Home once the carrot is at rest at home (the step after it got there).
+    let prev = run.outs[run.outs.len() - 2];
+    assert_eq!((prev.position_ne, prev.velocity_ne, prev.event), (HOME.ne, [0.0; 2], LegEvent::None));
+    assert!(run.outs[run.outs.len() - 3].position_ne != HOME.ne);
+    assert_eq!(last.position_ne, HOME.ne);
+    assert_eq!(g.step(DT, [0.0, 0.0, -30.0], true, true).event, LegEvent::Home);
+    // Control: arrival at the radius alone fires with the carrot still moving.
+    g.arrive_at_radius = true;
+    assert!(g.enter_return([40.0, 30.0, -30.0], HOME, 20.0, R, 3.0));
+    let run = fly(&mut g, [40.0, 30.0, -30.0], Vehicle::Follow, 20_000);
     let prev = run.outs[run.outs.len() - 2].position_ne;
     let dist = hypotf(prev[0], prev[1]);
     assert!(dist <= R && dist > R - 3.0 * DT - 1e-3, "{dist}");
-    assert_eq!(last.position_ne, HOME.ne);
-    assert_eq!(g.step(DT, [0.0, 0.0, -30.0], true, true).event, LegEvent::Home);
 }
 
 /// Below H_r it climbs in place at up to 3.0 m/s first (ramped at `LEG_ACC_Z_MSS`); the horizontal carrot
@@ -682,4 +691,216 @@ fn vehicle_ahead_of_the_carrot_does_not_stall_it() {
     std::eprintln!("ahead 2.5 m at 4.75 m/s: carrot min {carrot:.2} m/s, vehicle min {veh:.2} m/s; unsigned rule {carrot0:.2}, {veh0:.2}");
     assert!((carrot - 5.0).abs() < 1e-4 && veh > 2.0, "{carrot} {veh}");
     assert!(carrot0 < 0.01 && veh0 <= 0.0, "{carrot0} {veh0}");
+}
+
+/// The field rectangle (29 x 19 m, back to the start), heights 10 m.
+const RECT: [(f64, f64, f32); 4] = [(29.0, 0.0, 10.0), (29.0, 19.0, 10.0), (0.0, 19.0, 10.0), (0.0, 0.0, 10.0)];
+
+fn dv(a: [f32; 2], b: [f32; 2]) -> [f32; 2] {
+    [a[0] - b[0], a[1] - b[1]]
+}
+
+/// The horizontal acceleration against the published velocity's own difference: equal off the snap steps, within the
+/// bound everywhere, 0 at Done and Home. Returns the largest |difference| / dt at a snap step.
+fn check_accel_ne(outs: &[LegOut]) -> f32 {
+    let (mut prev, mut naive_snap, mut snaps) = ([0.0f32; 2], 0.0f32, 0);
+    for (i, o) in outs.iter().enumerate() {
+        let d = dv(o.velocity_ne, prev);
+        let naive = [d[0] / DT, d[1] / DT];
+        assert!(hypotf(o.accel_ne[0], o.accel_ne[1]) <= A + 1e-4, "step {i}: {:?}", o.accel_ne);
+        if matches!(o.event, LegEvent::Done | LegEvent::Home) || o.phase == LegPhase::Climb {
+            assert_eq!(o.accel_ne, [0.0; 2], "step {i}");
+        } else if o.velocity_ne == [0.0; 2] && prev != [0.0; 2] {
+            snaps += 1;
+            naive_snap = naive_snap.max(hypotf(naive[0], naive[1]));
+            assert!(o.accel_ne[0] * naive[0] + o.accel_ne[1] * naive[1] >= 0.0, "step {i}: {:?} {naive:?}", o.accel_ne);
+        } else {
+            let e = dv(o.accel_ne, naive);
+            assert!(hypotf(e[0], e[1]) < 2e-2, "step {i}: {:?} vs {naive:?}", o.accel_ne);
+        }
+        prev = o.velocity_ne;
+    }
+    assert!(snaps > 0);
+    naive_snap
+}
+
+/// M3 B2: the horizontal carrot's acceleration is its speed's change before the snap, within `GUIDANCE_ACC_MS2`, also
+/// on the switch and snap steps, over the rectangle at 5 and 3 m/s and RETURN's leg.
+#[test]
+fn horizontal_accel_is_the_speed_change_before_the_snap_within_the_bound() {
+    let mut naive = std::vec::Vec::new();
+    for cruise in [5.0f32, 3.0] {
+        let mut g = LegGuidance::new();
+        assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &mission(&RECT, R), 0, cruise));
+        let run = fly(&mut g, [0.0, 0.0, -10.0], Vehicle::Follow, 50_000);
+        assert_eq!(run.outs.last().unwrap().event, LegEvent::Done);
+        assert!((run.outs[0].accel_ne[0] - A).abs() < 1e-3, "{:?}", run.outs[0]);
+        naive.push(check_accel_ne(&run.outs));
+    }
+    let home = Home { ne: [-10.0, 5.0], d: -2.0 };
+    let mut g = LegGuidance::new();
+    assert!(g.enter_return([40.0, 30.0, -7.0], home, 20.0, R, 5.0));
+    let run = fly(&mut g, [40.0, 30.0, -7.0], Vehicle::Follow, 20_000);
+    assert_eq!(run.outs.last().unwrap().event, LegEvent::Home);
+    naive.push(check_accel_ne(&run.outs));
+    std::eprintln!("snap steps: published velocity change / dt up to {naive:.2?} m/s^2 (5, 3 m/s, RETURN)");
+    assert!(naive.iter().all(|&x| x > A), "control: {naive:?}");
+}
+
+/// The horizontal acceleration is 0 while held, for a dt of 0 or not usable, at Done and in RETURN's climb.
+#[test]
+fn horizontal_accel_is_zero_when_held_done_climbing_or_dt_unusable() {
+    let mut g = LegGuidance::new();
+    assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &mission(&[(50.0, 0.0, 10.0)], R), 0, 5.0));
+    let mut p = [0.0, 0.0, -10.0];
+    let mut o = g.step(DT, p, true, true);
+    for _ in 0..50 {
+        o = g.step(DT, p, true, true);
+        p = [o.position_ne[0], o.position_ne[1], o.down_m];
+    }
+    assert!((o.accel_ne[0] - A).abs() < 1e-3, "control: {o:?}");
+    for q in [[f32::NAN, 0.0, 0.0], [0.0, f32::INFINITY, 0.0]] {
+        assert_eq!(g.step(DT, q, true, true).accel_ne, [0.0; 2]);
+    }
+    assert_eq!(g.step(DT, p, false, true).accel_ne, [0.0; 2]);
+    for dt in [0.0, f32::NAN, f32::INFINITY, -1.0] {
+        let x = g.step(dt, p, true, true);
+        finite(&x);
+        assert_eq!(x.accel_ne, [0.0; 2], "dt {dt}");
+    }
+    assert!((g.step(DT, p, true, true).accel_ne[0] - A).abs() < 1e-3);
+    let run = fly(&mut g, p, Vehicle::Follow, 20_000);
+    assert_eq!(run.outs.last().unwrap().event, LegEvent::Done);
+    assert_eq!(g.step(DT, [10.0, 3.0, -10.0], true, true).accel_ne, [0.0; 2]);
+    assert!(g.enter_return([40.0, 30.0, -7.0], HOME, 20.0, R, 5.0));
+    for _ in 0..100 {
+        let x = g.step(DT, [40.0, 30.0, -7.0], true, true);
+        assert_eq!((x.phase, x.accel_ne), (LegPhase::Climb, [0.0; 2]));
+    }
+}
+
+/// M3 B1: Arrived, Done and Home only with the carrot at rest at the waypoint (the step before published it there with
+/// velocity 0), so the switch changes the published velocity by at most a dt; the point mass of `fly` at 5 and 3 m/s
+/// over the rectangle and RETURN. Control: arrival at the radius alone switches with the carrot moving.
+#[test]
+fn arrival_needs_the_carrot_at_rest_and_the_switch_keeps_the_velocity_continuous() {
+    let switches = |at_radius: bool| {
+        let mut out = std::vec::Vec::new();
+        for cruise in [5.0f32, 3.0] {
+            let mut g = LegGuidance::new();
+            g.arrive_at_radius = at_radius;
+            assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &mission(&RECT, R), 0, cruise));
+            let ends: Vec<[f32; 2]> = (0..4).map(|k| [wp(&g, k)[0], wp(&g, k)[1]]).collect();
+            let run = fly(&mut g, [0.0, 0.0, -10.0], Vehicle::PointMass(cruise), 50_000);
+            let ev: Vec<LegEvent> = run.arrivals.iter().map(|a| a.0).collect();
+            assert_eq!(ev, [LegEvent::Arrived(0), LegEvent::Arrived(1), LegEvent::Arrived(2), LegEvent::Done]);
+            assert!(run.arrivals.iter().all(|a| a.1 <= R), "{cruise}: {:?}", run.arrivals);
+            for (i, o) in run.outs.iter().enumerate().skip(1) {
+                let k = match o.event {
+                    LegEvent::Arrived(k) => Some(usize::from(k)),
+                    LegEvent::Done => Some(3),
+                    _ => None,
+                };
+                if let Some(k) = k {
+                    let prev = run.outs[i - 1];
+                    out.push((prev.position_ne == ends[k], hypotf(prev.velocity_ne[0], prev.velocity_ne[1]), hypotf(dv(o.velocity_ne, prev.velocity_ne)[0], dv(o.velocity_ne, prev.velocity_ne)[1])));
+                }
+            }
+            let mut g2 = LegGuidance::new();
+            g2.arrive_at_radius = at_radius;
+            assert!(g2.enter_return([25.0, 15.0, -30.0], HOME, 20.0, R, cruise));
+            let run = fly(&mut g2, [25.0, 15.0, -30.0], Vehicle::PointMass(cruise), 50_000);
+            let i = run.outs.len() - 1;
+            assert_eq!(run.outs[i].event, LegEvent::Home);
+            let prev = run.outs[i - 1];
+            out.push((prev.position_ne == HOME.ne, hypotf(prev.velocity_ne[0], prev.velocity_ne[1]), 0.0));
+        }
+        out
+    };
+    let gated = switches(false);
+    for &(at, v, step) in &gated {
+        assert!(at && v == 0.0 && step <= A * DT + 1e-5, "{gated:?}");
+    }
+    let radius = switches(true);
+    std::eprintln!("switches (carrot at the waypoint, its speed, velocity step): gated {gated:.3?}; at the radius {radius:.3?}");
+    assert!(radius.iter().all(|&(at, v, _)| !at && v > 0.5), "control: {radius:?}");
+    assert!(radius.iter().any(|&(_, _, step)| step > 10.0 * A * DT), "control: {radius:?}");
+}
+
+/// Closed loop, M3: the rectangle flown by `CascadedPid`'s horizontal loop on a point mass that holds the attitude
+/// setpoint exactly (a = g tan(tilt), 800 Hz), at 5 and 3 m/s. Per corner: overshoot past the waypoint along the
+/// incoming leg (the last one after Done for 5 s) and the peak tilt. Controls: arrival at the radius without the
+/// acceleration feed-forward (before M3), and the gate alone (B1).
+#[test]
+fn closed_loop_corner_overshoot_drops_with_the_arrival_gate_and_the_accel_feed_forward() {
+    use crate::gnc::{Controller, Saturation, Valid};
+    use crate::pid::CascadedPid;
+    let t = Tuning::DEFAULT;
+    let dt = 1.25e-3;
+    let fly_rect = |cruise: f32, gate: bool, ff: bool| {
+        let mut g = LegGuidance::new();
+        g.arrive_at_radius = !gate;
+        assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &mission(&RECT, R), 0, cruise));
+        let ends: Vec<[f32; 2]> = (0..4).map(|k| [wp(&g, k)[0], wp(&g, k)[1]]).collect();
+        let dirs: Vec<[f32; 2]> = (0..4)
+            .map(|k| {
+                let a = if k == 0 { [0.0, 0.0] } else { ends[k - 1] };
+                let l = hypotf(ends[k][0] - a[0], ends[k][1] - a[1]);
+                [(ends[k][0] - a[0]) / l, (ends[k][1] - a[1]) / l]
+            })
+            .collect();
+        let mut pid = CascadedPid::new(&t, 800.0);
+        pid.set_speed_limit_xy(crate::hands_off::speed_limit_xy_ms(cruise));
+        let all = Valid { tilt: true, heading: true, rates: true, velocity_ne: true, velocity_d: true, position_ne: true, position_d: true };
+        let none = Saturation { roll: false, pitch: false, yaw: false, thrust_low: false, thrust_high: false };
+        let (mut p, mut v) = ([0.0f32; 2], [0.0f32; 2]);
+        let (mut over, mut tilt) = ([f32::MIN; 4], 0.0f32);
+        let mut done_steps = 0;
+        for k in 0..(120.0 / dt) as u64 {
+            let o = g.step(dt, [p[0], p[1], -10.0], true, true);
+            let sp = Setpoint::Position {
+                position_m: [o.position_ne[0], o.position_ne[1], o.down_m],
+                velocity_ms: [o.velocity_ne[0], o.velocity_ne[1], o.velocity_d_ms],
+                heading_rad: 0.0,
+                heading_rate_rads: 0.0,
+                accel_d_mss: 0.0,
+                accel_ne_mss: if ff { o.accel_ne } else { [0.0; 2] },
+            };
+            let nav = NavState { t_us: k * 1_250, attitude: [1.0, 0.0, 0.0, 0.0], rates_rads: [0.0; 3], velocity_ms: [v[0], v[1], 0.0], position_m: [p[0], p[1], -10.0], valid: all, sigma: None };
+            pid.update(&nav, &sp, &none).unwrap();
+            let [w, x, y, z] = pid.attitude_setpoint();
+            let col = [2.0 * (x * z + w * y), 2.0 * (y * z - w * x), w * w - x * x - y * y + z * z];
+            tilt = tilt.max(libm::acosf(col[2].min(1.0)).to_degrees());
+            let a = [-fw_core::calib::GRAVITY_MSS * col[0] / col[2], -fw_core::calib::GRAVITY_MSS * col[1] / col[2]];
+            v = [v[0] + a[0] * dt, v[1] + a[1] * dt];
+            p = [p[0] + v[0] * dt, p[1] + v[1] * dt];
+            let active = usize::from(o.active);
+            for c in 0..4 {
+                if c == active || (c + 1 == active && o.phase == LegPhase::Leg) || (c == 3 && o.phase == LegPhase::Done) {
+                    over[c] = over[c].max((p[0] - ends[c][0]) * dirs[c][0] + (p[1] - ends[c][1]) * dirs[c][1]);
+                }
+            }
+            if o.phase == LegPhase::Done {
+                done_steps += 1;
+                if done_steps as f32 * dt > 5.0 {
+                    break;
+                }
+            }
+        }
+        assert_eq!(g.phase(), LegPhase::Done, "{cruise} {gate} {ff}");
+        (over, tilt)
+    };
+    for cruise in [5.0f32, 3.0] {
+        let (o0, t0) = fly_rect(cruise, false, false);
+        let (o1, t1) = fly_rect(cruise, true, false);
+        let (o2, t2) = fly_rect(cruise, true, true);
+        let worst = |o: [f32; 4]| o.iter().fold(f32::MIN, |m, &x| m.max(x));
+        std::eprintln!(
+            "rectangle at {cruise} m/s, overshoot per waypoint m / peak tilt deg: before M3 {o0:.2?} {t0:.1}; B1 {o1:.2?} {t1:.1}; B1+B2 {o2:.2?} {t2:.1}"
+        );
+        assert!(worst(o0) > 0.1 && worst(o1) > worst(o0), "control: {o0:?} {o1:?}");
+        assert!(worst(o2) < 0.5 * worst(o0), "{o2:?} against {o0:?}");
+        // The feed-forward alone tilts by atan(a / g); at 5 m/s the corners tilted more before M3.
+        assert!(t2 < libm::atanf(A / fw_core::calib::GRAVITY_MSS).to_degrees() + 1.0 && (cruise < 5.0 || t2 < t0), "{t2} against {t0}");
+    }
 }

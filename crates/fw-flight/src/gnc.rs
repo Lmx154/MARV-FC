@@ -210,6 +210,8 @@ pub enum Setpoint {
         heading_rate_rads: f32,
         /// Vertical acceleration feed-forward, m/s^2, down positive (the vertical carrot's; 0 from every other source).
         accel_d_mss: f32,
+        /// Horizontal acceleration feed-forward, m/s^2, NE (the horizontal carrot's; 0 from every other source).
+        accel_ne_mss: [f32; 2],
     },
     /// Declared, not built: every controller refuses it.
     Waypoint {
@@ -441,6 +443,7 @@ mod tests {
             heading_rad: 0.0,
             heading_rate_rads: 0.0,
             accel_d_mss: 0.0,
+            accel_ne_mss: [0.0; 2],
         };
         let waypoint = Setpoint::Waypoint {
             position_m: v,

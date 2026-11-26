@@ -285,12 +285,13 @@ impl CascadedPid {
         self.xy_i
     }
 
-    /// The attitude setpoint of position hold from `target`, `v_ff` (NED position and velocity feed-forward) and `heading_rad`; `entry`: the first `Position` setpoint, the integrator is 0 and does not advance.
+    /// The attitude setpoint of position hold from `target`, `v_ff`, `a_ff` (NED position, velocity and NE acceleration feed-forward) and `heading_rad`; `entry`: the first `Position` setpoint, the integrator is 0 and does not advance.
     fn horizontal(
         &mut self,
         nav: &NavState,
         target: [f32; 3],
         v_ff: [f32; 3],
+        a_ff: [f32; 2],
         heading_rad: f32,
         dt_s: f32,
         entry: bool,
@@ -314,7 +315,7 @@ impl CascadedPid {
         let e_v = [v_sp[0] - vn, v_sp[1] - ve];
         let [i_n, i_e] = self.xy_i;
         let (a, clipped) = limit_length(
-            [self.velxy_p * e_v[0] + i_n, self.velxy_p * e_v[1] + i_e],
+            [self.velxy_p * e_v[0] + i_n + a_ff[0], self.velxy_p * e_v[1] + i_e + a_ff[1]],
             self.a_max,
         );
         #[cfg(test)]
@@ -408,12 +409,13 @@ impl Controller for CascadedPid {
                 heading_rad,
                 heading_rate_rads,
                 accel_d_mss,
+                accel_ne_mss,
             } => {
                 #[cfg(test)]
                 if self.position_clears_alt_active {
                     self.alt_active = false;
                 }
-                let q_sp = self.horizontal(nav, position_m, velocity_ms, heading_rad, dt, entry_xy);
+                let q_sp = self.horizontal(nav, position_m, velocity_ms, accel_ne_mss, heading_rad, dt, entry_xy);
                 self.q_sp_pos = q_sp;
                 (
                     self.attitude_to_rates(nav.attitude, q_sp, heading_rate_rads),
@@ -862,6 +864,7 @@ mod tests {
             heading_rad,
             heading_rate_rads: 0.0,
             accel_d_mss: 0.0,
+            accel_ne_mss: [0.0; 2],
         }
     }
 

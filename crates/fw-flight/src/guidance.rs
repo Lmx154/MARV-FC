@@ -74,6 +74,10 @@ pub struct LegOut {
     pub position_ne: [f32; 2],
     /// The horizontal carrot's velocity (the feed-forward), m/s.
     pub velocity_ne: [f32; 2],
+    /// The horizontal carrot's acceleration (the feed-forward), m/s^2: its speed's change over the step before the snap
+    /// to the waypoint, scaled like the velocity, within `GUIDANCE_ACC_MS2`; 0 while held, at Done, Home and Climb and
+    /// for dt 0.
+    pub accel_ne: [f32; 2],
     /// The vertical carrot, m down.
     pub down_m: f32,
     /// The vertical carrot's rate, m/s down.
@@ -140,6 +144,9 @@ pub struct LegGuidance {
     /// Test control: the lag scale from the unsigned distance also when the vehicle is ahead (the carrot stall).
     #[cfg(test)]
     lag_unsigned: bool,
+    /// Test control: arrival within the radius whether or not the carrot is at rest at the waypoint.
+    #[cfg(test)]
+    arrive_at_radius: bool,
 }
 
 impl Default for LegGuidance {
@@ -168,6 +175,8 @@ impl LegGuidance {
             e_m: 0.0,
             #[cfg(test)]
             lag_unsigned: false,
+            #[cfg(test)]
+            arrive_at_radius: false,
         }
     }
 
@@ -256,13 +265,17 @@ impl LegGuidance {
         let dt = if dt_s.is_finite() && dt_s > 0.0 { dt_s } else { 0.0 };
         let [pn, pe, pd] = position_m;
         if !valid || ![pn, pe, pd].iter().all(|x| x.is_finite()) {
-            return self.out([0.0; 2], 0.0, 0.0, true, self.level_event());
+            return self.out([0.0; 2], [0.0; 2], 0.0, 0.0, true, self.level_event());
         }
         let veh = [pn, pe];
         let mut event = LegEvent::None;
+        // Arrival also needs the carrot at rest at the waypoint.
+        let stopped = self.s >= self.line.len;
+        #[cfg(test)]
+        let stopped = stopped || self.arrive_at_radius;
         match self.phase {
             LegPhase::Leg => {
-                if Self::dist(veh, self.line.end) <= self.radius_m && self.d == self.d_goal {
+                if Self::dist(veh, self.line.end) <= self.radius_m && self.d == self.d_goal && stopped {
                     if self.idx + 1 >= self.count {
                         self.phase = LegPhase::Done;
                         self.s = self.line.len;
@@ -288,7 +301,7 @@ impl LegGuidance {
                 }
             }
             LegPhase::HomeLeg => {
-                if Self::dist(veh, self.line.end) <= self.radius_m {
+                if Self::dist(veh, self.line.end) <= self.radius_m && stopped {
                     self.phase = LegPhase::Home;
                     self.s = self.line.len;
                     self.v = 0.0;
@@ -297,7 +310,7 @@ impl LegGuidance {
             LegPhase::Idle | LegPhase::Done | LegPhase::Home => {}
         }
         if !matches!(self.phase, LegPhase::Leg | LegPhase::Climb | LegPhase::HomeLeg) {
-            return self.out([0.0; 2], 0.0, 0.0, false, self.level_event());
+            return self.out([0.0; 2], [0.0; 2], 0.0, 0.0, false, self.level_event());
         }
         // The advance is scaled by k (the profile runs on k dt); 1 while the vehicle is ahead of the carrot along the leg.
         let c = self.carrot_ne();
@@ -306,18 +319,23 @@ impl LegGuidance {
         let ahead = ahead && !self.lag_unsigned;
         let k = if ahead { 1.0 } else { (1.0 - Self::dist(veh, c) / LAG_E_MAX_M).max(0.0).min(1.0) };
         let dte = k * dt;
+        let mut accel = 0.0;
         if self.s < self.line.len {
             let (a, r) = (Tuning::GUIDANCE_ACC_MS2, self.line.len - self.s);
             let brake = 0.5 * (sqrtf((a * a * dte * dte + 8.0 * a * r - 4.0 * a * dte * self.v).max(0.0)) - a * dte);
             let target_v = self.cruise_ms.min(brake.max(0.0));
             let max_dv = a * dte;
             let v_new = self.v + (target_v - self.v).max(-max_dv).min(max_dv);
+            if dt > 0.0 {
+                accel = (k * (v_new - self.v) / dt).max(-a).min(a);
+            }
             let s_new = self.s + 0.5 * (self.v + v_new) * dte;
             (self.s, self.v) = if s_new >= self.line.len - LEG_SNAP_M { (self.line.len, 0.0) } else { (s_new, v_new) };
         } else {
             self.v = 0.0;
         }
         let vel = [self.line.dir[0] * self.v * k, self.line.dir[1] * self.v * k];
+        let acc = [self.line.dir[0] * accel, self.line.dir[1] * accel];
         let mut accel_d = 0.0;
         if lead_ok {
             let gap = self.d_goal - self.d;
@@ -338,7 +356,7 @@ impl LegGuidance {
             self.vd = 0.0;
         }
         self.e_m = Self::dist(veh, self.carrot_ne());
-        self.out(vel, self.vd, accel_d, false, event)
+        self.out(vel, acc, self.vd, accel_d, false, event)
     }
 
     /// Both carrots at the vehicle (`s` 0 on `line`, which starts there) and at rest; the vertical goal `d_goal`.
@@ -368,10 +386,11 @@ impl LegGuidance {
         }
     }
 
-    fn out(&self, velocity_ne: [f32; 2], velocity_d_ms: f32, accel_d_mss: f32, held: bool, event: LegEvent) -> LegOut {
+    fn out(&self, velocity_ne: [f32; 2], accel_ne: [f32; 2], velocity_d_ms: f32, accel_d_mss: f32, held: bool, event: LegEvent) -> LegOut {
         LegOut {
             position_ne: self.carrot_ne(),
             velocity_ne,
+            accel_ne,
             down_m: self.d,
             velocity_d_ms,
             accel_d_mss,
