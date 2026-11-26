@@ -119,8 +119,6 @@ pub struct Esc {
     status: EscStatus,
     bursts: [Burst; LINES],
     test: Test,
-    /// EDT bursts may start (see [`Esc::set_edt_bursts`]).
-    edt_bursts: bool,
 }
 
 impl Default for Esc {
@@ -139,13 +137,7 @@ impl Esc {
                 holdoff_until_us: 0,
             }; LINES],
             test: Test { seq: 0, done: true },
-            edt_bursts: true,
         }
-    }
-
-    /// `false`: no EDT burst starts from now on (the binary's `esc-no-edt`); nothing else changes.
-    pub fn set_edt_bursts(&mut self, enabled: bool) {
-        self.edt_bursts = enabled;
     }
 
     /// The board's task could not read the flight command for this exchange (counts it, saturating).
@@ -207,13 +199,12 @@ impl Esc {
             }
             return out;
         }
-        let edt_bursts = self.edt_bursts;
         for ((frame, burst), line) in out
             .iter_mut()
             .zip(self.bursts.iter_mut())
             .zip(self.status.lines.iter_mut())
         {
-            if burst.left == 0 && edt_bursts && burst_due(line, burst, now_us) {
+            if burst.left == 0 && burst_due(line, burst, now_us) {
                 burst.left = BURST_FRAMES;
                 line.edt_bursts = line.edt_bursts.saturating_add(1);
             }

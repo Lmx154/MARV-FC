@@ -651,21 +651,9 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// Tests only: the bound on RETURN's home wait is off (the control)
     #[cfg(test)]
     home_wait_off: bool,
-    /// Tests only: the per-step rule: airborne is armed and the collective at or above the threshold, at every step.
-    #[cfg(test)]
-    per_step_rule: bool,
-    /// Tests only: low is a collective below the ground threshold, not the idle floor.
-    #[cfg(test)]
-    threshold_rule: bool,
     /// Tests only: the speed is latched at every step, armed or not.
     #[cfg(test)]
     latch_off: bool,
-    /// Tests only: TD's count does not restart on entry into a descent.
-    #[cfg(test)]
-    td_restart_off: bool,
-    /// Tests only: TD's (a) is the collective below the ground threshold (0.714 x the card's m g)
-    #[cfg(test)]
-    td_card_rule: bool,
     /// The state machine's battery critical: the monitor's CRITICAL level (`set_battery_cell`); false until set.
     battery_critical: bool,
     /// The state machine's `battery_ok` (Start): the monitor knows the battery is not critical.
@@ -794,15 +782,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             #[cfg(test)]
             home_wait_off: false,
             #[cfg(test)]
-            per_step_rule: false,
-            #[cfg(test)]
-            threshold_rule: false,
-            #[cfg(test)]
             latch_off: false,
-            #[cfg(test)]
-            td_restart_off: false,
-            #[cfg(test)]
-            td_card_rule: false,
             battery_critical: false,
             battery_ok: false,
         }
@@ -1330,10 +1310,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         let thrust_ok = demand.is_ok_and(|d| d.thrust_n >= self.ground_thrust_n);
         let low = allocation.map_or(true, |a| a.saturation.thrust_low);
         let floor = low;
-        #[cfg(test)]
-        let floor = if self.td_card_rule { !thrust_ok } else { floor };
-        #[cfg(test)]
-        let low = if self.threshold_rule { !thrust_ok } else { low };
         // The low mark, set by an armed step's collective at `EVER_AIRBORNE_G` x m g, cleared on a disarmed step.
         self.lifted = self.gate.armed()
             && (self.lifted || demand.is_ok_and(|d| d.thrust_n >= EVER_AIRBORNE_G * MASS * GRAVITY_MSS));
@@ -1382,10 +1358,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         // Entering LAND, TAKEOVER's descent or BLIND from a step that flew none of them restarts TD's count, so a
         // Count from PILOT or HOLD never clears the latch on the first descent step (`lost.
         let descent = ho.landing || ho.takeover_descent || blind;
-        #[cfg(not(test))]
         let entry = descent && !self.descent_prev;
-        #[cfg(test)]
-        let entry = descent && !self.descent_prev && !self.td_restart_off;
         self.descent_prev = descent;
         if entry {
             self.still_us = 0;
@@ -1467,13 +1440,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             None => self.quiet_us = 0,
         }
         #[cfg(test)]
-        {
-            if self.per_step_rule {
-                self.airborne = self.gate.armed() && thrust_ok;
-            }
-            if self.airborne_forced {
-                self.airborne = true;
-            }
+        if self.airborne_forced {
+            self.airborne = true;
         }
         // The hover learner (ArduCopter Attitude.cpp:32-67, also in Angle): on an armed step with a finite commanded
         // collective, the low mark set and TD not held (as the state machine read them)

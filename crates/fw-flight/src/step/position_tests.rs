@@ -189,7 +189,7 @@ fn armed_step(f: &mut TestFlight, cell: &Cell<NavState>, t: &mut u64, frac: f32)
 }
 
 /// The latch table on an armed flight in Position.
-fn n1_latch_failures(timer_off: bool, threshold_rule: bool, ignore_cov: bool) -> Vec<&'static str> {
+fn n1_latch_failures(timer_off: bool, ignore_cov: bool) -> Vec<&'static str> {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
@@ -205,7 +205,6 @@ fn n1_latch_failures(timer_off: bool, threshold_rule: bool, ignore_cov: bool) ->
     let cell = Cell::new(pnav(0.0, 0.0, -2.0, [0.0; 3], 0.0, POSITION));
     let mut f = flight(&cell, h, &tuning);
     f.timer_off = timer_off;
-    f.threshold_rule = threshold_rule;
     f.ignore_coverage = ignore_cov;
     let mut t = 1_000;
     check(!f.airborne, "false at construction");
@@ -280,31 +279,22 @@ fn n1_latch_failures(timer_off: bool, threshold_rule: bool, ignore_cov: bool) ->
 
 #[test]
 fn n1_the_airborne_latch_table() {
-    let bad = n1_latch_failures(false, false, false);
+    let bad = n1_latch_failures(false, false);
     assert!(bad.is_empty(), "{bad:?}");
 }
 
 /// Negative control: the timer ignored.
 #[test]
 fn n1_control_ignoring_the_timer_fails() {
-    let bad = n1_latch_failures(true, false, false);
+    let bad = n1_latch_failures(true, false);
     std::println!("timer ignored: {bad:?}");
     assert!(bad.contains(&"false at land_detect_us"));
-}
-
-/// Negative control: the previous rule (low below the ground threshold) fails the 30 s between the floor and the
-/// threshold.
-#[test]
-fn n1_control_the_previous_rule_fails() {
-    let bad = n1_latch_failures(false, true, false);
-    std::println!("previous rule: {bad:?}");
-    assert!(bad.contains(&"once set, 30 s between the floor and the threshold is still true"));
 }
 
 /// Negative control: coverage ignored.
 #[test]
 fn n1_control_ignoring_coverage_fails_the_latch_table() {
-    let bad = n1_latch_failures(false, false, true);
+    let bad = n1_latch_failures(false, true);
     std::println!("coverage ignored: {bad:?}");
     assert!(bad.contains(&"never Position while the estimate does not cover it"));
 }
@@ -313,19 +303,17 @@ fn n1_control_ignoring_coverage_fails_the_latch_table() {
 
 /// Armed in Position with a velocity error that winds the horizontal integrator and a locked target; the collective:
 /// the weight for 0.25 s, a forced 0.5 s dip to the floor, the weight for 0.25 s.
-fn n1b_run(per_step_rule: bool, threshold_rule: bool) -> (bool, u32) {
-    let mk = |per_step: bool, threshold: bool| {
+fn n1b_run() -> (bool, u32) {
+    let mk = || {
         let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
         h.set_permit(true);
         let cell: &'static Cell<NavState> = std::boxed::Box::leak(std::boxed::Box::new(Cell::new(pnav(
             0.0, 0.0, -2.0, [0.3, 0.0, 0.0], 0.0, POSITION,
         ))));
-        let mut f = flight(cell, h, &Tuning::DEFAULT);
-        f.per_step_rule = per_step;
-        f.threshold_rule = threshold;
+        let f = flight(cell, h, &Tuning::DEFAULT);
         (cell, f)
     };
-    let ((ca, mut a), (cb, mut b)) = (mk(per_step_rule, threshold_rule), mk(false, false));
+    let ((ca, mut a), (cb, mut b)) = (mk(), mk());
     let (mut ta, mut tb) = (1_000, 1_000);
     collective(ca, &a, 0.0, [0.0; 2], 0.3, POSITION);
     collective(cb, &b, 0.0, [0.0; 2], 0.3, POSITION);
@@ -364,16 +352,9 @@ fn n1b_run(per_step_rule: bool, threshold_rule: bool) -> (bool, u32) {
 
 #[test]
 fn n1b_a_dip_to_the_floor_and_5_s_at_0_70_mg_keep_position_target_and_integrator() {
-    let (same, in_position) = n1b_run(false, false);
+    let (same, in_position) = n1b_run();
     std::println!("N1b: {in_position} steps in Position, identical to the twin: {same}");
     assert!(same && in_position >= 200 + 400 + 200 + 4_000 - 4);
-}
-
-/// Negative controls: the old per-step rule fails in the dip; the previous latch rule fails in the 5 s at 0.70 m g.
-#[test]
-fn n1b_controls_the_old_per_step_rule_and_the_previous_rule_fail() {
-    assert!(!n1b_run(true, false).0);
-    assert!(!n1b_run(false, true).0);
 }
 
 // ---- Armed in Position on the ground, the landing and the aborted take-off ----
