@@ -110,6 +110,23 @@ pub fn ned_from_geo(origin: &GeoPoint, point: &GeoPoint) -> [f32; 3] {
     [rad(dlat) * rm, rad(dlon) * rn * cosf(lat0), -(dalt as f32) * 1e-3]
 }
 
+/// The point `ned` (m) from `origin`: the inverse of [`ned_from_geo`] (same radii, f32), rounded to 1e-7 degree and mm.
+pub fn geo_from_ned(origin: &GeoPoint, ned: [f32; 3]) -> GeoPoint {
+    let e2 = WGS84_F * (2.0 - WGS84_F);
+    let lat0 = origin.lat_e7 as f32 * 1e-7 * PI / 180.0;
+    let s = sinf(lat0);
+    let w = 1.0 - e2 * s * s;
+    let (rm, rn) = (WGS84_A_M * (1.0 - e2) / (w * sqrtf(w)), WGS84_A_M / sqrtf(w));
+    let e7 = |rad: f32| libm::roundf(rad * 180.0 / PI * 1e7) as i64;
+    let lat = i64::from(origin.lat_e7) + e7(ned[0] / rm);
+    let lon = i64::from(origin.lon_e7) + e7(ned[1] / (rn * cosf(lat0)));
+    GeoPoint {
+        lat_e7: lat as i32,
+        lon_e7: ((lon + E7_TURN / 2).rem_euclid(E7_TURN) - E7_TURN / 2) as i32,
+        alt_mm: (i64::from(origin.alt_mm) - libm::roundf(ned[2] * 1e3) as i64) as i32,
+    }
+}
+
 /// NKI record codes.
 pub mod code {
     /// Src: GNSS position north.
@@ -1895,6 +1912,22 @@ pub(crate) mod tests {
         assert_eq!(ned[2], 2.5);
         let back = ned_from_geo(&p, &o);
         assert!((back[1] + ned[1]).abs() < 0.01, "{back:?}");
+    }
+
+    /// `geo_from_ned` inverts `ned_from_geo`: points within 2 km (and across the antimeridian) come back within 1e-7
+    /// degree and 1 mm; a zero offset is the origin.
+    #[test]
+    fn geo_from_ned_round_trips_ned_from_geo() {
+        let origins = [ORIGIN, GeoPoint { lat_e7: -337_000_000, lon_e7: 1_799_999_000, alt_mm: 12_345 }, GeoPoint { lat_e7: 600_000_000, lon_e7: -1_799_999_500, alt_mm: -50 }];
+        for o in origins {
+            assert_eq!(geo_from_ned(&o, [0.0; 3]), o);
+            for (dn, de, dalt) in [(1, 1, 1), (180_000, -150_000, 30_000), (-170_000, 160_000, -2_500), (5, -300_000, 0)] {
+                let p = GeoPoint { lat_e7: o.lat_e7 + dn, lon_e7: ((i64::from(o.lon_e7) + de + E7_TURN / 2).rem_euclid(E7_TURN) - E7_TURN / 2) as i32, alt_mm: o.alt_mm + dalt };
+                let back = geo_from_ned(&o, ned_from_geo(&o, &p));
+                let dlon = (i64::from(back.lon_e7) - i64::from(p.lon_e7) + E7_TURN / 2).rem_euclid(E7_TURN) - E7_TURN / 2;
+                assert!((back.lat_e7 - p.lat_e7).abs() <= 1 && dlon.abs() <= 1 && (back.alt_mm - p.alt_mm).abs() <= 1, "{o:?} {p:?} {back:?}");
+            }
+        }
     }
 
     #[test]

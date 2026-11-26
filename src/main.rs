@@ -70,7 +70,7 @@ use fw_core::watchdog::task;
 use fw_core::xcore::Kick;
 use fw_flight::tagged;
 use mavlink_device::dialect::{
-    HIGHRES_IMU_DATA, HighresImuUpdatedFlags, MavSeverity, MavState, MavSysStatusSensor,
+    HIGHRES_IMU_DATA, HOME_POSITION_DATA, HighresImuUpdatedFlags, MavSeverity, MavState, MavSysStatusSensor,
     RC_CHANNELS_DATA, SCALED_IMU2_DATA, SCALED_PRESSURE_DATA, SYS_STATUS_DATA,
 };
 use mavlink_device::marv::MARV_DEVICE_STATUS_DATA;
@@ -171,6 +171,8 @@ const SCALED_PRESSURE_ID: u32 = 29;
 const VALUES_INTERVAL_US: i32 = 40_000;
 const GPS_RAW_INT_ID: u32 = 24;
 const GPS_INTERVAL_US: i32 = 1_000_000;
+/// HOME_POSITION while home is set and the state is not STOP.
+const HOME_POSITION_ID: u32 = 242;
 const RC_CHANNELS_ID: u32 = 65;
 const RC_CHANNELS_INTERVAL_US: i32 = 200_000;
 /// MANUAL_CONTROL (the mapped sticks) at 5 Hz while CRSF stick reports are fresh (USB only).
@@ -343,6 +345,28 @@ pub fn push_gps_raw_int(now_us: u64, out: &mut Outgoing<'_>) -> bool {
         return false;
     }
     gnss::raw_int(&sample.reading, sample.t_us).is_some_and(|message| out.push(&message).is_ok())
+}
+
+pub fn push_home_position(out: &mut Outgoing<'_>) -> bool {
+    let Some((home, origin)) = station::home() else {
+        return false;
+    };
+    let [x, y] = home.ne_m;
+    let p = fw_flight::eskf::geo_from_ned(&origin, [x, y, home.d_m]);
+    out.push(&HOME_POSITION_DATA {
+        latitude: p.lat_e7,
+        longitude: p.lon_e7,
+        altitude: p.alt_mm,
+        x,
+        y,
+        z: home.d_m,
+        q: [1.0, 0.0, 0.0, 0.0],
+        approach_x: 0.0,
+        approach_y: 0.0,
+        approach_z: 0.0,
+        time_usec: 0,
+    })
+    .is_ok()
 }
 
 pub fn heartbeat_state(now_us: u64) -> MavState {
@@ -528,6 +552,9 @@ impl Telemetry for Board {
         }
         if message_id == GPS_RAW_INT_ID {
             return push_gps_raw_int(now_us, out);
+        }
+        if message_id == HOME_POSITION_ID {
+            return push_home_position(out);
         }
         if message_id == RC_CHANNELS_ID {
             return rc::rc_channels(now_us).is_some_and(|m: RC_CHANNELS_DATA| out.push(&m).is_ok());
@@ -725,6 +752,11 @@ async fn link_loop(
         }),
         StreamSlot::new(Stream {
             message_id: GPS_RAW_INT_ID,
+            default_interval_us: GPS_INTERVAL_US,
+            min_interval_us: 100_000,
+        }),
+        StreamSlot::new(Stream {
+            message_id: HOME_POSITION_ID,
             default_interval_us: GPS_INTERVAL_US,
             min_interval_us: 100_000,
         }),

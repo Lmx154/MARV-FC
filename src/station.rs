@@ -5,18 +5,20 @@
 //! A command taken is answered only with the flight step's answer, waited for until it comes or the link goes down (then no ACK, see [`link_lost`]).
 //! Core 1 ([`before_step`], [`after_step`], from `flight::Stepper::sample`) takes the request at most once for the step that follows and hands that step's answer back.
 //! Mode: after each step core 1 stores the mode code in [`MODE`] (0 until the first step); both nodes put it in HEARTBEAT `custom_mode` ([`custom_mode`]).
+//! Home: after each step core 1 publishes home and the origin while home is set and the state is not STOP ([`home`]); both nodes stream HOME_POSITION from it.
 //! Heartbeat: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the station's sender only ([`FLIGHT_STATION_HB`]);
 //! core 1 gives it to `Flight::set_last_radio_heartbeat_us`.
 
 use core::cell::{Cell, RefCell};
-use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 
 use embassy_sync::blocking_mutex::Mutex;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use fw_core::flight_cmd::{Decoded, Exchange, Mailbox, Pending, decode, request_byte, station_heartbeat_us};
 use fw_core::xcore::{TripleBuffer, TripleReader, TripleWriter};
 use fw_flight::gnc::{Allocator, Controller, Estimator};
-use fw_flight::hands_off::{Command, CommandResult};
+use fw_flight::gnc::GeoPoint;
+use fw_flight::hands_off::{Command, CommandResult, Home, State};
 use fw_flight::step::Flight;
 use mavlink_device::marv::{MavCmd, MavResult};
 use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
@@ -29,6 +31,22 @@ pub const BOUND_US: u64 = 50_000;
 
 /// Flight step -> core 0: the hands-off state's mode code after the latest step; 0 before the first.
 pub static MODE: AtomicU8 = AtomicU8::new(0);
+
+/// Flight step -> core 0: home (north, east, down from the origin, f32 bits) and the origin, written after each step
+/// while home is set and the state is not STOP; [`HOME_SET`] is stored after them (Release), false otherwise.
+static HOME_NED: [AtomicU32; 3] = [AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0)];
+static HOME_ORIGIN: [AtomicI32; 3] = [AtomicI32::new(0), AtomicI32::new(0), AtomicI32::new(0)];
+static HOME_SET: AtomicBool = AtomicBool::new(false);
+
+/// Core 0: home and the origin after the latest flight step, while home is set and the state is not STOP.
+pub fn home() -> Option<(Home, GeoPoint)> {
+    if !HOME_SET.load(Ordering::Acquire) {
+        return None;
+    }
+    let f = |k: usize| f32::from_bits(HOME_NED[k].load(Ordering::Relaxed));
+    let o = |k: usize| HOME_ORIGIN[k].load(Ordering::Relaxed);
+    Some((Home { ne_m: [f(0), f(1)], d_m: f(2) }, GeoPoint { lat_e7: o(0), lon_e7: o(1), alt_mm: o(2) }))
+}
 
 /// Core 0 -> flight step: the RC port's time of the latest ground-station HEARTBEAT on the radio link, us (written only when new).
 pub static FLIGHT_STATION_HB: TripleBuffer<u64> = TripleBuffer::new(0);
@@ -214,5 +232,17 @@ pub fn after_step<E: Estimator, C: Controller, A: Allocator>(
         (command, result)
     });
     MODE.store(flight.hands_off_state().code(), Ordering::Relaxed);
+    match flight.home_origin().filter(|_| flight.hands_off_state() != State::Stop) {
+        Some((h, o)) => {
+            for (a, v) in HOME_NED.iter().zip([h.ne_m[0], h.ne_m[1], h.d_m]) {
+                a.store(v.to_bits(), Ordering::Relaxed);
+            }
+            for (a, v) in HOME_ORIGIN.iter().zip([o.lat_e7, o.lon_e7, o.alt_mm]) {
+                a.store(v, Ordering::Relaxed);
+            }
+            HOME_SET.store(true, Ordering::Release);
+        }
+        None => HOME_SET.store(false, Ordering::Relaxed),
+    }
     answered
 }

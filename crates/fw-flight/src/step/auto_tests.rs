@@ -955,6 +955,23 @@ fn batt_m_auto_low_returns_home() {
     assert_eq!(core::str::from_utf8(&m[..n]).unwrap(), "HO 5 RETURN batt-low");
 }
 
+/// `home_origin` (the board's HOME_POSITION): home and the origin while home is set; none without home or after
+/// the disarm.
+#[test]
+fn home_origin_while_home_is_set_and_none_after_disarm() {
+    let mut r = in_auto();
+    let (home, origin) = r.f.home_origin().unwrap();
+    assert_eq!((Some(home), origin), (r.f.hands_off.home(), ORIGIN));
+    r.f.battery_critical = true;
+    while r.f.gate.armed() {
+        r.fly();
+    }
+    r.fly();
+    assert_eq!(r.f.home_origin(), None);
+    let r = Run::with(3.0, Some(square()), false, true);
+    assert_eq!(r.f.home_origin(), None);
+}
+
 /// The hand-back (column 2: the mission switch OFF, arm ON, Position, centred sticks) from AUTO at 3 m/s and from
 /// LAND: PILOT at that step; the vehicle brakes and holds.
 #[test]

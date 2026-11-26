@@ -54,7 +54,7 @@ const RX_GPIO: usize = 17;
 const RING_LEN: usize = 256;
 static TX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
 static RX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
-static SLOTS: StaticCell<[StreamSlot; 7]> = StaticCell::new();
+static SLOTS: StaticCell<[StreamSlot; 8]> = StaticCell::new();
 
 /// The radio node's streams (its own HEARTBEAT is 1 Hz); a station cannot ask for more than the default interval.
 const SYS_STATUS_ID: u32 = 1;
@@ -63,13 +63,15 @@ const GPS_RAW_INT_ID: u32 = 24;
 const HIGHRES_IMU_ID: u32 = 105;
 const SCALED_IMU2_ID: u32 = 116;
 const SCALED_PRESSURE_ID: u32 = 29;
-const RADIO_STREAMS: [(u32, i32); 7] = [
+const HOME_POSITION_ID: u32 = 242;
+const RADIO_STREAMS: [(u32, i32); 8] = [
     (SYS_STATUS_ID, 1_000_000),
     (DEVICE_STATUS_ID, 1_000_000),
     (GPS_RAW_INT_ID, 2_000_000),
     (HIGHRES_IMU_ID, 1_000_000),
     (SCALED_IMU2_ID, 1_000_000),
     (SCALED_PRESSURE_ID, 1_000_000),
+    (HOME_POSITION_ID, 2_000_000),
     // The mission service's reply slot (`mission::sample`): idle, it is one load.
     (crate::mission::SLOT_ID, crate::mission::RADIO_INTERVAL_US),
 ];
@@ -581,6 +583,7 @@ impl Telemetry for RadioBoard {
             HIGHRES_IMU_ID => crate::push_highres_imu(now_us, out),
             SCALED_IMU2_ID => crate::push_scaled_imu2(now_us, out),
             SCALED_PRESSURE_ID => crate::push_scaled_pressure(now_us, out),
+            HOME_POSITION_ID => crate::push_home_position(out),
             crate::mission::SLOT_ID => crate::mission::sample(fw_core::mission::Link::Radio, now_us, out),
             DEVICE_STATUS_ID => {
                 let messages: [Option<MARV_DEVICE_STATUS_DATA>; crate::ROWS] =

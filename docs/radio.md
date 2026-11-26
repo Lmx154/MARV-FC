@@ -50,6 +50,7 @@ model cannot arm or fly. Arming and RC loss are decided on core 1: see [flight-m
 | MARV_DEVICE_STATUS | 9 rows, 4 per batch every 333 ms | one row per second, a changed row goes out of turn |
 | GPS_RAW_INT | 1 Hz | every 2 s |
 | HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE | 25 Hz each | 1 Hz each (same builders as USB) |
+| HOME_POSITION (only while home is set and the state is not STOP) | 1 Hz | every 2 s |
 | RC_CHANNELS (65) | 5 Hz while sticks are fresh, 16 channels in us | none |
 | MANUAL_CONTROL (69) | 5 Hz while the latest report is CRSF and fresh | none |
 | ESC_STATUS, ESC_INFO | 10 Hz, 1 Hz (see [esc](esc.md)) | none |

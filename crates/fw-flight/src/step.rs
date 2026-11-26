@@ -877,6 +877,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.hands_off.reason()
     }
 
+    /// Home and the estimator's origin, while home is set and the origin latched.
+    pub fn home_origin(&self) -> Option<(hands_off::Home, GeoPoint)> {
+        Some((self.hands_off.home()?, self.estimator.origin()?))
+    }
+
     /// When the newest station HEARTBEAT arrived on the radio link, as given (`set_last_radio_heartbeat_us`), us.
     pub fn last_radio_heartbeat_us(&self) -> Option<u64> {
         self.last_radio_heartbeat_us
