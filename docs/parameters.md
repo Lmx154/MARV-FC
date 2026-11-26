@@ -55,7 +55,6 @@ Code: `src/settings.rs`; record format `fw_core::record`. See [architecture](arc
 | Name | Default | Range | Meaning |
 |---|---|---|---|
 | `PILOT_SPEED_XY` | 5.0 m/s | 3..20 | Horizontal speed at full stick; caps hands-off and mission cruise speed. Taken at arming |
-| `RPM_NOTCH_EN` | 0 | 0..1 | Gyro RPM notch on/off. Taken at arming |
 
 ### Guidance and mission
 
@@ -105,7 +104,7 @@ Device parameter tables (BARO, MAG offsets and calibration, IMU orientation, SD)
 
 | File | Role |
 |---|---|
-| `crates/fw-settings/src/lib.rs` | `TABLE`: all 117 definitions, in order |
+| `crates/fw-settings/src/lib.rs` | `TABLE`: all 116 definitions, in order |
 | `crates/fw-settings/src/flight.rs` | Flight, guidance and gain parameters |
 | `crates/fw-settings/src/{baro,mag,batt,imu,sd,rc,esc,led,gnss}.rs` | Per-device tables and validators |
 | `crates/fw-core/src/params.rs` | `Params` store, `ParamDef`, `Apply` |

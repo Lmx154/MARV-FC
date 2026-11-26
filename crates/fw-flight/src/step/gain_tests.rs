@@ -265,13 +265,13 @@ fn set_gains_leaves_the_integrators_and_the_filter_memories_alone() {
     assert_eq!(base, every);
 }
 
-/// The digest of `script` (every step's `Debug` text and its step block) on the flight step before the hands-off
-/// wiring (commit c270814)
-const SCRIPT_GOLDEN: u64 = 0x2ed6_7fa3_9e94_9fb8;
+/// The digest of `script` (every step's `Debug` text and its step block); the step before the hands-off wiring gave the
+/// same but for the notch flag (its notch was off).
+const SCRIPT_GOLDEN: u64 = 0x65ad_e085_2fcf_c4b6;
 
-/// The scripted flight is bit-identical to the step before the hands-off wiring.
+/// The scripted flight's digest is the golden.
 #[test]
-fn the_script_is_bit_identical_to_the_step_before_the_hands_off_wiring() {
+fn the_script_digest_is_the_golden() {
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     for (text, bytes, _) in script(|_, _| {}) {
         for &b in text.as_bytes().iter().chain(bytes.iter()) {

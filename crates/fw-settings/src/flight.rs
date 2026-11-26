@@ -1,5 +1,4 @@
-//! The flight code's parameters: the pilot's horizontal speed in position hold, the RPM notch switch,
-//! the guidance's arrival radius and height limits and the 14 gains of the cascaded
+//! The flight code's parameters: the pilot's horizontal speed in position hold, the guidance's arrival radius and height limits and the 14 gains of the cascaded
 //! controller.
 
 use fw_core::params::{Apply, ParamDef};
@@ -7,9 +6,6 @@ use fw_flight::tuning::{GAIN_COUNT, GAIN_NAMES, Gains, Tuning};
 
 /// The horizontal speed at full roll or pitch stick in position hold, and the largest horizontal velocity setpoint, m/s.
 pub const SPEED_XY: &str = "PILOT_SPEED_XY";
-
-/// The RPM notch switch: 1 filters the measured body rates with the rotor-frequency notches, 0 leaves them as they are.
-pub const RPM_NOTCH_EN: &str = "RPM_NOTCH_EN";
 
 /// The arrival radius of a target, m.
 pub const GDN_RADIUS: &str = "GDN_RADIUS";
@@ -21,12 +17,11 @@ pub const GDN_ALT_MIN: &str = "GDN_ALT_MIN";
 pub const GDN_ALT_MAX: &str = "GDN_ALT_MAX";
 
 /// The number of flight parameters.
-pub const COUNT: usize = 5 + GAIN_COUNT;
+pub const COUNT: usize = 4 + GAIN_COUNT;
 
 /// `PILOT_SPEED_XY`: `F32`, default 5.0 m/s (ArduPilot POSCONTROL_SPEED_MS), range 3 to 20 m/s (PX4 MPC_VEL_MANUAL's range), `Live`: core 0 pushes the stored value to the flight core, which takes the value in force at the arming step and keeps it until the next disarm (`fw_flight::step::Flight`).
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(SPEED_XY, 0, 5.0, 3.0, 20.0, Apply::Live),
-    ParamDef::i32(RPM_NOTCH_EN, 0, 0, 0, 1, Apply::Live),
     ParamDef::f32(GDN_RADIUS, 0, 2.0, 0.05, 10.0, Apply::Live),
     gain(0),
     gain(1),

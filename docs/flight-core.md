@@ -36,13 +36,13 @@ flowchart LR
 
 | Stage | What it does | Code |
 |---|---|---|
-| Latch | While disarmed, take the newest `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, the 14 `ATC_*` gains and mission targets; they stay fixed until the next disarm | `step.rs` (`Flight::step`) |
+| Latch | While disarmed, take the newest `PILOT_SPEED_XY`, `MOT_POLES`, the 14 `ATC_*` gains and mission targets; they stay fixed until the next disarm | `step.rs` (`Flight::step`) |
 | Accept report | The gate hands the step only reports of the flight's own link | `gate.rs` (`accepts`) |
 | Estimate | `SteerMix`: an ESKF3-style full-aiding filter behind an output predictor (attitude, rates, horizontal state) plus a zero-delay ESKF2 (`Aiding::ImuBaro`) for height. A non-finite IMU value gives no tilt, so the demand is refused and the gate stops | `eskf.rs`, `eskf_out.rs`, `eskf_n0.rs` |
 | Tier | Validity flags give T3 (position usable), T2 (height only), T1 (tilt and rates only) | `hands_off.rs` (`Tier`) |
 | Mode in effect | Position if selected, covered by the estimate and airborne; else Altitude if covered; else Angle | `step.rs` (`StepOut.mode`) |
 | Shape + hands-off | Sticks (or the state machine's synthetic sticks, or the guidance carrot) become a `Setpoint` | `hands_off.rs`, `guidance.rs`, `gnc.rs` |
-| Control | `CascadedPid`: attitude P into a PID rate loop per axis; vertical loop for Altitude; horizontal position P / velocity PI for Position. RPM notch on the gyro rates (`RPM_NOTCH_EN`) | `pid.rs`, `notch.rs`, `tuning.rs` |
+| Control | `CascadedPid`: attitude P into a PID rate loop per axis; vertical loop for Altitude; horizontal position P / velocity PI for Position. RPM notch on the gyro rates (always on) | `pid.rs`, `notch.rs`, `tuning.rs` |
 | Allocate | `CardAllocator` maps thrust and torques to four rotor thrusts with the vehicle card (`marv-card`: mixer matrix, `K_F`, levels). Yaw is given up first; no airmode | `alloc.rs` |
 | Gate | The only producer of a spinning `MotorCommand` (its field is private) | `gate.rs` |
 | Log | IMU / NAV / SETP / DMD / MOT every step while armed, ESC every 4th | `src/flight.rs`, [logging](logging.md) |

@@ -142,41 +142,40 @@ fn walk_with(seed: u64, steps: usize, source: fw_core::rc::RcSource, setup: impl
     (h, prefix, counts)
 }
 
-/// The digests of `walk` (40 000 steps) on the flight step before the hands-off wiring.
-/// gave the same), by seed: the whole walk, and the steps before its first airborne stick loss.
-const WALK_C270814: [(u64, u64, u64); 3] = [
-    (0x5eed_0b01, 0xc20b_89fd_6881_ff30, 0xe926_b5c2_a522_7ce0),
-    (0x5eed_0b02, 0x80ac_3c4a_1ca4_993f, 0x14c8_305a_51f6_5188),
-    (0x5eed_0b03, 0x73bf_dc63_d210_a3f1, 0x338c_b533_10c0_bd24),
+/// The digests of the steps of `walk` before its first airborne stick loss, by seed: the step before the hands-off
+/// wiring gave the same but for NTCH's notch byte (its notch was off).
+const WALK_PREFIX: [(u64, u64); 3] = [
+    (0x5eed_0b01, 0x0ce8_885c_20c6_9bc2),
+    (0x5eed_0b02, 0xb549_0ab1_54da_8aea),
+    (0x5eed_0b03, 0xc9fa_8427_65d2_198c),
 ];
 
 /// The digests of the whole `walk` by seed, with the heading verdict forced false (`set_heading_ok(false)`).
 const WALK_GOLDEN_HEADING_OFF: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0xe231_1a2f_6ef3_2dc8),
-    (0x5eed_0b02, 0x4bdd_53b4_54c6_6e2a),
-    (0x5eed_0b03, 0xb1d7_1062_446b_80ea),
+    (0x5eed_0b01, 0x0fd4_2016_f8e8_281a),
+    (0x5eed_0b02, 0xb381_933b_acbd_267c),
+    (0x5eed_0b03, 0xf870_4fc9_e3aa_65ba),
 ];
 
 /// The digests of the whole `walk` with the heading verdict `Valid.heading`: after the first airborne stick loss LAND
 /// holds position (or brakes) where the estimate covers it.
 const WALK_GOLDEN: [(u64, u64); 3] = [
-    (0x5eed_0b01, 0x5f0d_d5e8_ac91_93b3),
-    (0x5eed_0b02, 0x488f_2073_8d5f_dfe4),
-    (0x5eed_0b03, 0xa9fd_1312_aa81_3212),
+    (0x5eed_0b01, 0x7b75_8043_b255_95a7),
+    (0x5eed_0b02, 0xc7ee_2daa_e36c_c0ae),
+    (0x5eed_0b03, 0xf575_4610_cff9_73e8),
 ];
 
-/// On a CRSF flight every step's `StepOut` and its step block, SPN and MODE bytes before the first airborne stick
-/// loss equal those of the step before the wiring (the prefix digest)
+/// On a CRSF flight every step's `StepOut` and its step block, SPN and MODE bytes equal the goldens, before the first
+/// airborne stick loss (the prefix digest) and over the whole walk.
 #[test]
-fn i2_crsf_is_bit_identical_to_the_step_before_the_wiring() {
+fn i2_crsf_walk_digests_are_the_goldens() {
     let (mut got, mut want) = (std::vec::Vec::new(), std::vec::Vec::new());
-    for ((seed, old, old_prefix), (seed_new, golden)) in WALK_C270814.into_iter().zip(WALK_GOLDEN) {
+    for ((seed, old_prefix), (seed_new, golden)) in WALK_PREFIX.into_iter().zip(WALK_GOLDEN) {
         assert_eq!(seed, seed_new);
         let (h, prefix, c) = walk(seed, 40_000, |_| {});
-        std::println!("walk {seed:#x}: digest {h:#018x} (c270814 {old:#018x}), prefix {prefix:x?}, counts {c:?}");
+        std::println!("walk {seed:#x}: digest {h:#018x}, prefix {prefix:x?}, counts {c:?}");
         assert!(c[0] > 5_000 && c[2] > 100 && c[3] > 100 && c[4] > 100, "not vacuous: {c:?}");
-        assert_eq!(prefix, Some(old_prefix), "seed {seed:#x}: the steps before the first airborne stick loss are unchanged");
-        assert_ne!(h, old, "seed {seed:#x}: the walk has an airborne stick loss, so it changed");
+        assert_eq!(prefix, Some(old_prefix), "seed {seed:#x}: the steps before the first airborne stick loss");
         got.push((seed, h));
         want.push((seed, golden));
     }

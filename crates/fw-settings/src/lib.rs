@@ -53,7 +53,7 @@ pub const COUNT: usize = baro::COUNT
     + flight::COUNT
     + batt::FS_COUNT;
 
-/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC, then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, `GDN_RADIUS`, the 14 `ATC_*` gains, `GDN_ALT_MIN` and `GDN_ALT_MAX`, then the five low-battery monitor parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` (appended, so the first 81 indices did not change).
+/// The firmware's one parameter table: every device's table in the order BARO, MAG, BATT, IMU, SD, RC, then the IMUs' chip settings, `AHRS_ORIENTATION`, `MAG_ORIENT`, `MOT_POLES`, `LED_BRIGHT`, `GPS_RATE_MS` and the compass's soft-iron matrix and calibration record (`mag::CAL_TABLE`), `GPS_GNSS`, `PILOT_SPEED_XY`, `GDN_RADIUS`, the 14 `ATC_*` gains, `GDN_ALT_MIN` and `GDN_ALT_MAX`, then the five low-battery monitor parameters `BATT_CELLS` to `BATT_FS_CRT_ACT` (appended, so the first 81 indices did not change).
 pub static TABLE: [ParamDef; COUNT] = concat();
 
 /// A device whose stored settings the boot refused: its `Configure`- and `Reboot`-class parameters (settings) go back to their defaults in RAM; its `Live` parameters (the calibration offsets) are kept.

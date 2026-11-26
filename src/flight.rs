@@ -402,50 +402,45 @@ pub fn push_speed(why: &str) {
     );
 }
 
-/// Core 0 -> flight core: the stored `RPM_NOTCH_EN` (true: 1) and `MOT_POLES` (poles, not pole pairs), decision-rpm-notch-20261123
-/// section 1 (one writer, core 0, through [`push_notch`]; one reader, IMU1's [`Stepper`]). The flight code takes the pair at
-/// every disarmed step (`Flight::set_notch`), so the one in force at the arming step stays until the next disarm. No flash
-/// access on core 1: the pair is a copy of the stored values.
-pub static FLIGHT_NOTCH: TripleBuffer<(bool, i32)> = TripleBuffer::new((false, NOTCH_POLES_DEFAULT));
+/// Core 0 -> flight core: the stored `MOT_POLES` (poles, not pole pairs; one writer, core 0, through [`push_notch`]; one
+/// reader, IMU1's [`Stepper`]). The flight code takes it at every disarmed step (`Flight::set_notch`), so the one in force
+/// at the arming step stays until the next disarm. No flash access on core 1: the value is a copy of the stored one.
+pub static FLIGHT_NOTCH: TripleBuffer<i32> = TripleBuffer::new(NOTCH_POLES_DEFAULT);
 
 /// The default of `MOT_POLES` (`fw_settings::esc`), the value of a parameter that cannot be read.
 const NOTCH_POLES_DEFAULT: i32 = 14;
 
 /// Core 0's writer of [`FLIGHT_NOTCH`].
-static NOTCH_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, (bool, i32)>>>> =
+static NOTCH_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, i32>>>> =
     Mutex::new(RefCell::new(None));
 
-/// Takes the writer of [`FLIGHT_NOTCH`] and pushes the stored values. Call once, on core 0, after `settings::boot` and
-/// before core 1 starts, so the flight core's first read has them.
+/// Takes the writer of [`FLIGHT_NOTCH`] and pushes the stored value. Call once, on core 0, after `settings::boot` and
+/// before core 1 starts, so the flight core's first read has it.
 pub fn init_notch() {
     let Some(writer) = FLIGHT_NOTCH.take_writer() else {
-        defmt::panic!("[FAIL] RPM_NOTCH_EN writer taken twice");
+        defmt::panic!("[FAIL] MOT_POLES writer taken twice");
     };
     NOTCH_WRITER.lock(|w| *w.borrow_mut() = Some(writer));
     push_notch("boot");
 }
 
-/// Pushes the stored `RPM_NOTCH_EN` and `MOT_POLES` to the flight core (core 0; call with no store access in progress). A
-/// value that cannot be read or is not an `I32` is the table's default (off, 14).
+/// Pushes the stored `MOT_POLES` to the flight core (core 0; call with no store access in progress). A value that cannot
+/// be read or is not an `I32` is the table's default (14).
 pub fn push_notch(why: &str) {
-    let (on, poles) = crate::store::with(|p| {
-        let get = |name| match p.get_named(name) {
-            Some(mavlink_device::ParamValue::I32(v)) => Some(v),
-            _ => None,
-        };
-        (get(fw_settings::flight::RPM_NOTCH_EN), get(fw_settings::esc::POLES))
+    let poles = crate::store::with(|p| match p.get_named(fw_settings::esc::POLES) {
+        Some(mavlink_device::ParamValue::I32(v)) => Some(v),
+        _ => None,
     })
-    .unwrap_or((None, None));
-    let value = (on.is_some_and(|v| v != 0), poles.unwrap_or(NOTCH_POLES_DEFAULT));
+    .flatten()
+    .unwrap_or(NOTCH_POLES_DEFAULT);
     NOTCH_WRITER.lock(|w| {
         if let Some(writer) = w.borrow_mut().as_mut() {
-            writer.write(value);
+            writer.write(poles);
         }
     });
     defmt::info!(
-        "[INFO] RPM_NOTCH_EN {=bool}, MOT_POLES {=i32} pushed to the flight core ({=str}); they take effect at the next arming",
-        value.0,
-        value.1,
+        "[INFO] MOT_POLES {=i32} pushed to the flight core ({=str}); it takes effect at the next arming",
+        poles,
         why
     );
 }
@@ -598,7 +593,7 @@ pub struct Stepper {
     mag: TripleReader<'static, MagSample>,
     gnss: TripleReader<'static, GnssSample>,
     speed: TripleReader<'static, f32>,
-    notch: TripleReader<'static, (bool, i32)>,
+    notch: TripleReader<'static, i32>,
     gdn: TripleReader<'static, GdnSet>,
     gains: TripleReader<'static, Gains>,
     radio_status: TripleReader<'static, u64>,
@@ -777,7 +772,7 @@ impl SampleSink for Stepper {
         }
         let (notch, notch_fresh) = self.notch.read();
         if notch_fresh {
-            self.flight.set_notch(notch.0, notch.1);
+            self.flight.set_notch(notch);
         }
         // A refused set keeps the previous one; core 1 has no defmt, so it only counts (`stat` prints).
         let (gains, gains_fresh) = self.gains.read();

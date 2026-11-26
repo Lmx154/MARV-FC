@@ -121,17 +121,16 @@ pub fn init(board: Rotation) {
 }
 
 /// The stored offsets of `mask`'s IMUs are pushed at the next supervisor tick (bits of other
-/// devices are ignored, but device 0's: its Live parameters include `PILOT_SPEED_XY`, `RPM_NOTCH_EN`, the `GDN_*` parameters and the 14 `ATC_*` gains, pushed now by
-/// `flight::push_speed`, `flight::push_notch`, `flight::push_gdn` and `flight::push_gains`, and the ESC device's: `MOT_POLES`, pushed by `flight::push_notch`).
+/// devices are ignored, but device 0's: its Live parameters include `PILOT_SPEED_XY`, the `GDN_*` parameters and the 14 `ATC_*` gains, pushed now by
+/// `flight::push_speed`, `flight::push_gdn` and `flight::push_gains`, and the ESC device's: `MOT_POLES`, pushed by `flight::push_notch`).
 pub fn raise_push(mask: u32) {
     PENDING.fetch_or(mask & ALL, Ordering::Relaxed);
     // Device 0's Live parameters: `PILOT_SPEED_XY` goes to the flight core at once (the flight code latches it at arming).
     if mask & 1 != 0 {
         crate::flight::push_speed("parameters changed");
     }
-    // `RPM_NOTCH_EN` (device 0) and `MOT_POLES` (the ESC device) go to the flight core together (the flight code latches
-    // them at arming).
-    if mask & (1 | 1 << MarvDevice::MARV_DEVICE_ESC as u32) != 0 {
+    // `MOT_POLES` (the ESC device) goes to the flight core (the flight code latches it at arming).
+    if mask & (1 << MarvDevice::MARV_DEVICE_ESC as u32) != 0 {
         crate::flight::push_notch("parameters changed");
     }
     // `GDN_RADIUS` and the height limits (device 0) go to the flight core with the committed mission.

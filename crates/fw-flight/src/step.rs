@@ -542,11 +542,10 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The newest value of the parameter `PILOT_SPEED_XY` that `set_pilot_speed_xy` accepted; the shaper and the
     /// controller take it at every disarmed step, so the value at the arming step is the one in force until disarm.
     speed_pending: f32,
-    /// The newest value of the parameter `RPM_NOTCH_EN` and of `MOT_POLES` that `set_notch` accepted; taken at every
-    /// disarmed step like `speed_pending`.
-    notch_pending: (bool, i32),
-    /// The notch switch and the pole count in force: the values of the latest disarmed step.
-    notch: (bool, i32),
+    /// The newest value of `MOT_POLES` that `set_notch` accepted; taken at every disarmed step like `speed_pending`.
+    notch_pending: i32,
+    /// The pole count in force: the value of the latest disarmed step.
+    notch: i32,
     /// The newest set of the 14 gain parameters that `set_gains` accepted; taken at every disarmed step like
     /// `speed_pending`.
     gains_pending: Gains,
@@ -736,8 +735,8 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             floor_n: CardAllocator::new().collective_range().0,
             full_n: CardAllocator::new().collective_range().1,
             speed_pending: tuning.pilot_speed_xy_ms,
-            notch_pending: (false, NOTCH_POLES_DEFAULT),
-            notch: (false, NOTCH_POLES_DEFAULT),
+            notch_pending: NOTCH_POLES_DEFAULT,
+            notch: NOTCH_POLES_DEFAULT,
             gains_pending: Gains::of(tuning),
             gains: Gains::of(tuning),
             notch_hold_us: tuning.notch_hold_us,
@@ -818,12 +817,11 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         ok
     }
 
-    /// The newest value of the runtime parameter `RPM_NOTCH_EN` (`on`) and of `MOT_POLES`.
-    /// pairs)
-    pub fn set_notch(&mut self, on: bool, poles: i32) -> bool {
+    /// The newest value of the runtime parameter `MOT_POLES` (poles, not pole pairs).
+    pub fn set_notch(&mut self, poles: i32) -> bool {
         let ok = NOTCH_POLES_RANGE.contains(&poles);
         if ok {
-            self.notch_pending = (on, poles);
+            self.notch_pending = poles;
         }
         ok
     }
@@ -1287,12 +1285,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         };
         // The rotor frequencies, f1 = eRPM x 2 / (poles x 60) Hz by DShot line, for the controller's notch; an eRPM
         // missing or `notch_hold_us` or more old is `None`.
-        let (notch_on, poles) = self.notch;
+        let poles = self.notch;
         let f1_hz = inputs.erpm.map(|e| {
             e.filter(|&(_, t)| t_us.saturating_sub(t) < self.notch_hold_us)
                 .map(|(erpm, _)| erpm as f32 * 2.0 / (poles as f32 * 60.0))
         });
-        self.controller.set_rotor_hz(f1_hz, notch_on);
+        self.controller.set_rotor_hz(f1_hz, true);
         let demand = if nav.valid.covers(&setpoint.requires()) {
             self.controller.update(&nav, &setpoint, &self.limited)
         } else {

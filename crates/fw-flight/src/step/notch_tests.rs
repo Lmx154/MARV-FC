@@ -1,4 +1,4 @@
-//! Host tests of the RPM notch at the step level: the eRPM age rule, the switch latched on disarmed steps, the
+//! Host tests of the RPM notch at the step level: the eRPM age rule, the poles latched on disarmed steps, the
 //! controller's torques with no usable eRPM, and the P, I, D of the rate log against the demand.
 
 extern crate std;
@@ -55,17 +55,14 @@ fn rates(k: u32, seed: &mut u32, amp: f32) -> [f32; 3] {
     [0.3 * libm::sinf(2.0 * t) + tone + 0.05 * noise(), 0.2 * noise() + tone, 0.1 * noise()]
 }
 
-/// The outputs of 600 armed steps with the switch set to `on` (`None`: `set_notch` never called) and each line's eRPM
-/// `(value, age)`; the rates carry a tone of amplitude `amp` and the roll stick moves.
-fn run(on: Option<bool>, erpm: [Option<(u32, u64)>; LINES], amp: f32) -> Vec<StepOut> {
+/// The outputs of 600 armed steps with each line's eRPM `(value, age)`; the rates carry a tone of amplitude `amp` and the
+/// roll stick moves.
+fn run(erpm: [Option<(u32, u64)>; LINES], amp: f32) -> Vec<StepOut> {
     let h: &'static Handshake = std::boxed::Box::leak(std::boxed::Box::new(Handshake::new()));
     h.set_permit(true);
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(0.0, ANGLE));
     let mut f = flight(&cell, h, &tuning);
-    if let Some(on) = on {
-        assert!(f.set_notch(on, 14));
-    }
     let mut t = 1_000_000;
     for arm in [false, false, true] {
         t += DT_US;
@@ -94,31 +91,28 @@ fn same_torques(a: &[StepOut], b: &[StepOut]) -> bool {
 }
 
 #[test]
-fn the_switch_off_no_erpm_or_low_frequencies_give_the_torques_of_a_controller_without_notch() {
+fn no_erpm_or_low_frequencies_give_the_torques_of_a_controller_without_notch() {
     let live = [Some((ERPM_100_HZ, 0)); LINES];
-    let base = run(None, [None; LINES], 0.4);
+    let base = run([None; LINES], 0.4);
     assert!(base.iter().all(|o| o.armed && o.demand.is_ok()));
-    assert!(same_torques(&base, &run(Some(false), live, 0.4)), "off");
-    assert!(same_torques(&base, &run(Some(true), [None; LINES], 0.4)), "on, no eRPM");
-    assert!(same_torques(&base, &run(Some(true), [Some((6_720, 0)); LINES], 0.4)), "on, every h f1 below 50 Hz");
-    assert!(same_torques(&base, &run(Some(true), [Some((0, 0)); LINES], 0.4)), "on, eRPM 0");
-    let on = run(Some(true), live, 0.4);
+    assert!(same_torques(&base, &run([Some((6_720, 0)); LINES], 0.4)), "every h f1 below 50 Hz");
+    assert!(same_torques(&base, &run([Some((0, 0)); LINES], 0.4)), "eRPM 0");
+    let on = run(live, 0.4);
     assert!(!same_torques(&base, &on), "control");
     assert!(on.iter().any(|o| o.rate.rate_rads != o.nav.rates_rads));
-    assert!(base.iter().all(|o| o.rate.rate_rads == o.nav.rates_rads && !o.rate.on));
+    assert!(base.iter().all(|o| o.rate.rate_rads == o.nav.rates_rads && o.rate.on));
 }
 
 #[test]
 fn an_erpm_of_exactly_100_ms_is_missing_and_one_just_under_is_used() {
-    let base = run(None, [None; LINES], 0.4);
-    let old = run(Some(true), [Some((ERPM_100_HZ, ANSWER_US)); LINES], 0.4);
+    let base = run([None; LINES], 0.4);
+    let old = run([Some((ERPM_100_HZ, ANSWER_US)); LINES], 0.4);
     assert!(same_torques(&base, &old), "exactly ANSWER_US old: bypassed");
     assert!(old.iter().all(|o| o.rate.f1_hz == [0.0; LINES] && o.rate.on));
-    let young = run(Some(true), [Some((ERPM_100_HZ, ANSWER_US - 1)); LINES], 0.4);
+    let young = run([Some((ERPM_100_HZ, ANSWER_US - 1)); LINES], 0.4);
     assert!(!same_torques(&base, &young), "one us under: used");
     assert!(young.iter().all(|o| o.rate.f1_hz == [100.0; LINES]));
     let mixed = run(
-        Some(true),
         [Some((ERPM_100_HZ, ANSWER_US)), Some((ERPM_100_HZ, 0)), None, Some((ERPM_100_HZ + 4_200, ANSWER_US - 1))],
         0.4,
     );
@@ -130,8 +124,8 @@ fn p_i_and_d_of_the_rate_log_sum_to_the_demanded_torque_bit_for_bit() {
     let live = [Some((ERPM_100_HZ, 0)), Some((ERPM_100_HZ + 8_400, 0)), Some((ERPM_100_HZ - 8_400, 10_000)), None];
     let mut checked = 0;
     let mut nonzero = [false; 3];
-    for (on, amp) in [(Some(true), 0.4), (Some(false), 0.4), (None, 0.4), (Some(true), 30.0)] {
-        for o in run(on, live, amp) {
+    for (erpm, amp) in [(live, 0.4), ([None; LINES], 0.4), (live, 30.0)] {
+        for o in run(erpm, amp) {
             let Ok(d) = o.demand else { continue };
             for axis in 0..3 {
                 let sum = (o.rate.p_nm[axis] + o.rate.i_nm[axis]) + o.rate.d_nm[axis];
@@ -143,12 +137,12 @@ fn p_i_and_d_of_the_rate_log_sum_to_the_demanded_torque_bit_for_bit() {
             checked += 1;
         }
     }
-    assert_eq!(checked, 4 * 600);
+    assert_eq!(checked, 3 * 600);
     assert_eq!(nonzero, [true; 3], "the check is not vacuous");
 }
 
 #[test]
-fn the_switch_and_the_poles_are_taken_on_disarmed_steps_only() {
+fn the_poles_are_taken_on_disarmed_steps_only() {
     static H: Handshake = Handshake::new();
     H.set_permit(true);
     let tuning = Tuning::DEFAULT;
@@ -160,22 +154,21 @@ fn the_switch_and_the_poles_are_taken_on_disarmed_steps_only() {
         t += DT_US;
         armed_step(f, t, arm, [0.0; 2], live)
     };
-    assert!(!step(&mut f, false).rate.on, "off until set");
-    assert!(f.set_notch(true, 14));
-    assert!(step(&mut f, false).rate.on, "taken at a disarmed step");
+    let first = step(&mut f, false);
+    assert!(first.rate.on && first.rate.f1_hz == [100.0; LINES], "on, 14 poles before any set");
     let armed = step(&mut f, true);
     assert!(armed.armed && armed.rate.on);
     assert_eq!(armed.rate.f1_hz, [100.0; LINES]);
-    assert!(f.set_notch(false, 28));
+    assert!(f.set_notch(28));
     let still = step(&mut f, true);
     assert!(still.armed && still.rate.on && still.rate.f1_hz == [100.0; LINES]);
     assert!(!step(&mut f, false).armed);
     let after = step(&mut f, false);
-    assert!(!after.rate.on);
+    assert!(after.rate.on);
     assert_eq!(after.rate.f1_hz, [50.0; LINES]);
-    assert!(!f.set_notch(true, 1) && !f.set_notch(true, 65) && !f.set_notch(true, 0) && !f.set_notch(true, -14));
-    assert!(!step(&mut f, false).rate.on);
-    assert!(f.set_notch(true, 2) && f.set_notch(true, 64));
+    assert!(!f.set_notch(1) && !f.set_notch(65) && !f.set_notch(0) && !f.set_notch(-14));
+    assert_eq!(step(&mut f, false).rate.f1_hz, [50.0; LINES]);
+    assert!(f.set_notch(2) && f.set_notch(64));
 }
 
 #[test]
@@ -185,7 +178,6 @@ fn a_refused_demand_logs_the_frequencies_and_the_switch_and_nothing_of_the_loop(
     let tuning = Tuning::DEFAULT;
     let cell = Cell::new(nav_at(0.0, ANGLE));
     let mut f = flight(&cell, &H, &tuning);
-    assert!(f.set_notch(true, 14));
     let live = [Some((ERPM_100_HZ, 0)); LINES];
     let mut t = 0;
     for arm in [false, false, true, true, true] {
