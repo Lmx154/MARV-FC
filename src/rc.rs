@@ -1,18 +1,10 @@
-//! The radio: the ExpressLRS receiver on UART0 through `rc-port`, which follows the receiver
-//! between CRSF (420000 baud) and MAVLink (460800 baud) by itself. This module only REPORTS: the
-//! RC row (no health machine, no recovery), RC_CHANNELS and the mapped sticks (MANUAL_CONTROL) for
-//! USB, the `[STAT] RC:` line, the BATT value as CRSF telemetry, and the radio's MAVLink node (link
-//! 1, active only while the port is locked on MAVLink). It also hands every CRSF stick report and every receiver report
-//! (`fw_core::rc::receiver_report`, N19), mapped, to the flight core through [`FLIGHT_RC`]; arming and link loss are
-//! decided there (`fw_flight::gate`).
-//!
-//! UART0 as the bench (`rc-port/hil/src/bin/rc_link.rs`) set it up: `BufferedUart` (interrupt
-//! driven, no DMA), 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART
-//! is built (embassy-rp 0.10 leaves the pad without a pull). The task runs alone on core 0's
-//! `SWI_IRQ_0` interrupt executor (priority P3 = 0xC0, embassy-rp's lowest: below the hardware
-//! interrupts at P0 and the watchdog monitor's `SWI_IRQ_1` at P1 = 0x40, above thread mode), as the bench did, so that no thread-mode task delays its reads (thread mode gave 5
-//! UART overruns in 300 s). Everything it shares with thread mode is a critical-section mutex or an
-//! atomic, none held across an await. The row's rule is `fw_core::rc`.
+//! The radio: the ExpressLRS receiver on UART0 through `rc-port`, which follows the receiver between CRSF (420000 baud) and MAVLink (460800 baud).
+//! This module only reports: the RC row, RC_CHANNELS and MANUAL_CONTROL for USB, the `[STAT] RC:` line, the BATT value as CRSF telemetry,
+//! and the radio's MAVLink node (link 1, active only while the port is locked on MAVLink). The row's rule is `fw_core::rc`.
+//! Every CRSF stick report and receiver report goes, mapped, to the flight core through [`FLIGHT_RC`]; arming and link loss are decided there (`fw_flight::gate`).
+//! UART0 is a `BufferedUart` (interrupt driven, no DMA, 256-byte rings, TX GPIO14, RX GPIO17 with the pull-up turned on after the UART is built).
+//! The task runs alone on core 0's `SWI_IRQ_0` interrupt executor (P3 = 0xC0: below the hardware interrupts and the watchdog monitor, above thread mode),
+//! so that no thread-mode task delays its reads. Everything it shares with thread mode is a critical-section mutex or an atomic, none held across an await.
 use core::cell::RefCell;
 use core::future::{Future, poll_fn};
 use core::pin::pin;
@@ -64,8 +56,7 @@ static TX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
 static RX_BUF: StaticCell<[u8; RING_LEN]> = StaticCell::new();
 static SLOTS: StaticCell<[StreamSlot; 7]> = StaticCell::new();
 
-/// The radio node's streams (HEARTBEAT 1 Hz is the node's own). The fastest interval a station may
-/// ask for is the default, so the radio's budget cannot be raised from the ground.
+/// The radio node's streams (its own HEARTBEAT is 1 Hz); a station cannot ask for more than the default interval.
 const SYS_STATUS_ID: u32 = 1;
 const DEVICE_STATUS_ID: u32 = 42421;
 const GPS_RAW_INT_ID: u32 = 24;
@@ -92,8 +83,7 @@ const GPS_FRAME_MIN_US: u64 = 1_000_000;
 /// The hook re-reads the stick map from the store at every this many CRSF stick reports (about 4/s).
 const MAP_EVERY: u32 = 64;
 
-/// Core 0 -> flight core: the latest CRSF or receiver stick report, mapped, with its switches and time (one
-/// writer, the port's hooks; one reader, IMU1's [`crate::flight::Stepper`]).
+/// Core 0 -> flight core: the latest CRSF or receiver stick report, mapped, with its switches and time (writer: the port's hooks; reader: IMU1's [`crate::flight::Stepper`]).
 pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
     sticks: fw_core::rc::Sticks {
         roll: 0.0,
@@ -108,8 +98,7 @@ pub static FLIGHT_RC: TripleBuffer<RcSample> = TripleBuffer::new(RcSample {
     t_us: 0,
 });
 
-/// Bytes the UART took at the CRSF baud and at 460800 (the port writes only while locked, in the
-/// locked protocol), baud changes, and returns of `run`.
+/// Bytes the UART took at the CRSF baud and at 460800, baud changes, and returns of `run`.
 static TX_CRSF: AtomicU32 = AtomicU32::new(0);
 static TX_MAV: AtomicU32 = AtomicU32::new(0);
 static BAUD_CHANGES: AtomicU32 = AtomicU32::new(0);
@@ -225,9 +214,7 @@ pub fn message(now_us: u64) -> MARV_DEVICE_STATUS_DATA {
     })
 }
 
-/// RC_CHANNELS for USB while the latest stick report is younger than 1 s. `rssi`: CRSF uplink link
-/// quality 0..100 % scaled to 0..254; in MAVLink mode RADIO_STATUS `rssi` (already 0..254); 255
-/// (unknown) without a fresh link figure.
+/// RC_CHANNELS for USB while the latest stick report is younger than 1 s. `rssi`: CRSF uplink link quality scaled to 0..254, in MAVLink mode RADIO_STATUS `rssi`; 255 without a fresh figure.
 pub fn rc_channels(now_us: u64) -> Option<RC_CHANNELS_DATA> {
     let s = shared();
     let fresh = |t: u64| now_us.saturating_sub(t) < FRESH_US;
@@ -264,10 +251,8 @@ pub fn rc_channels(now_us: u64) -> Option<RC_CHANNELS_DATA> {
     })
 }
 
-/// MANUAL_CONTROL for USB, reported only: the four mapped sticks while the latest stick report is
-/// from CRSF and younger than 1 s (`fw_core::rc::crsf_sticks`). One `SHARED` lock copies the sticks,
-/// then (not nested) one store access copies the 44 RC values by index; the mapping is computed
-/// outside both. The table's defaults if the store is not ready.
+/// MANUAL_CONTROL for USB, reported only: the four mapped sticks while the latest stick report is from CRSF and younger than 1 s (`fw_core::rc::crsf_sticks`).
+/// The mapping is computed outside the `SHARED` lock and the store access; the table's defaults if the store is not ready.
 pub fn manual_control(now_us: u64) -> Option<MANUAL_CONTROL_DATA> {
     let (latest, from_crsf) = SHARED.lock(|s| {
         let s = s.borrow();
@@ -296,17 +281,13 @@ pub fn manual_control(now_us: u64) -> Option<MANUAL_CONTROL_DATA> {
 
 /// The port's hooks: copy into `SHARED`, never block, never format.
 struct RcHooks {
-    /// The GNSS sample (its `t_us`) last sent as a GPS frame.
     last_gps_us: Option<u64>,
-    /// Board time when the last GPS frame was sent.
     last_gps_sent_us: Option<u64>,
     /// The writer of [`FLIGHT_RC`] (`None` if it was taken already: nothing is written).
     flight: Option<TripleWriter<'static, RcSample>>,
     /// The stick map last read from the store; `None` until the store gave one (no sample then).
     map: Option<RcMap>,
-    /// Stick reports handed on (CRSF and receiver).
     crsf_reports: u32,
-    /// The arm switch in the previous stick report handed on.
     arm_on: bool,
     /// Channel 9 edge tracking of the receiver reports (the waypoint mark).
     marks: MarkTracker,
@@ -355,8 +336,7 @@ impl Hooks for RcHooks {
             .map(|values: [Option<ParamValue>; fw_settings::rc::COUNT]| {
                 RcMap::from_values(&values)
             });
-            // If the store did not answer this time, keep the map we have: dropping it would stop the
-            // stick stream to the flight core until the next refresh.
+            // If the store did not answer, keep the map we have: dropping it would stop the stick stream to the flight core.
             if fresh.is_some() {
                 self.map = fresh;
             }
@@ -396,11 +376,8 @@ impl Hooks for RcHooks {
                 format_args!("{}", MarkText { n, pos }),
             );
         }
-        // A refused arm (decision-prearm-20261119, section 4): on the switch's off-to-on edge, while not armed and
-        // without core 0's permit, one WARNING text with the reason and the LED's three red flashes (the only
-        // formatting and queueing here, and only on such an edge). The gate reads the permit on core 1 a few hundred
-        // us apart from this read, so in that window a report without a refusal, or a refusal without a report, is
-        // possible; both are harmless.
+        // A refused arm: on the switch's off-to-on edge, while not armed and without core 0's permit, one WARNING text with the reason and the LED's three red flashes.
+        // The gate reads the permit on core 1 slightly apart from this read, so a report without a refusal or a refusal without a report is possible and harmless.
         let arm = arm_switch(ch[4]);
         let edge = arm && !self.arm_on;
         self.arm_on = arm;
@@ -477,8 +454,7 @@ impl Hooks for RcHooks {
 
     fn stats(&mut self, stats: &Stats) {
         crate::station::station_heartbeat(stats.last_gcs_heartbeat_us, stats.last_gcs_heartbeat_sender);
-        // The first time each sender of a ground-station HEARTBEAT is seen since boot: one text "GCS HB <sys>,<comp>"
-        // (formatting and queueing only then, at most `SENDERS_SEEN_MAX` times). Log only: which one counts is unchanged.
+        // The first time each ground-station HEARTBEAT sender is seen since boot: one text "GCS HB <sys>,<comp>", at most `SENDERS_SEEN_MAX` times; log only.
         if let Some((sys, comp)) = stats.last_gcs_heartbeat_sender
             && self.gcs_seen.first((sys, comp))
         {
@@ -558,10 +534,8 @@ impl TxBusy for CountingUart {
     }
 }
 
-/// The radio node's hooks (link 1): HEARTBEAT state, SYS_STATUS, one MARV_DEVICE_STATUS row per
-/// message (a row whose state changed since it was last sent on the radio goes out of turn, at most every
-/// other message; the message after it is the cursor's),
-/// GPS_RAW_INT, HIGHRES_IMU, SCALED_IMU2, SCALED_PRESSURE, the texts of link 1, commands through the one book.
+/// The radio node's hooks (link 1): HEARTBEAT state, SYS_STATUS, MARV_DEVICE_STATUS rows, GPS_RAW_INT, the sensor messages, the texts of link 1 and commands through the one book.
+/// A row whose state changed goes out of turn, at most every other message.
 struct RadioBoard {
     cursor: usize,
     last_out_of_turn: bool,
@@ -658,10 +632,7 @@ async fn task(
     preempting(&crate::watchdog::RUNNING0, task::RC, rc_link(uart0, tx, rx)).await
 }
 
-/// `fw_flight::tagged` for a task that preempts thread mode: `id` is stored at the start of each
-/// poll and the preempted task's id put back at its end, so `running` names RC exactly while RC
-/// runs (a stall inside its poll is recorded as RC; the thread-mode task it interrupted keeps its
-/// own id afterwards).
+/// `fw_flight::tagged` for a task that preempts thread mode: the preempted task's id is put back after each poll, so `running` names RC exactly while it runs.
 async fn preempting<F: Future>(running: &AtomicU8, id: u8, fut: F) -> F::Output {
     let mut fut = pin!(fut);
     poll_fn(|cx| {

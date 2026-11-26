@@ -39,7 +39,6 @@ pub fn clear_at_boot<SCL: Pin, SDA: Pin>(
     }
 }
 
-/// The clear: (SDA low, SCL low, pulses) as found, then (SDA low, SCL low) after it.
 fn clear<SCL: Pin, SDA: Pin>(
     scl: &mut Peri<'static, SCL>,
     sda: &mut Peri<'static, SDA>,

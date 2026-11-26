@@ -1,21 +1,12 @@
-//! The station's flight commands, mode and heartbeat between the links on core 0 and the hands-off state machine in the
-//! flight step on core 1 (link-contract section 10, Amendments A and C).
-//!
-//! Commands: core 0 ([`command`], from the nodes' `Telemetry::command_deferrable` through `actions`) decodes; a flight
-//! command is posted to [`FLIGHT_CMD`] and the node sends no COMMAND_ACK then. Core 0 checks the command from the link's
-//! `Telemetry::acks` ([`next_ack`], every `poll_transmit` of that link's node, at least every 100 ms) and offers the one
-//! COMMAND_ACK, ACCEPTED or DENIED with the reason code in `result_param2`, to the sender on the link the command came
-//! on. The flight step has [`BOUND_US`] to take it; not taken by then (withdrawn, never applied), another flight command
-//! outstanding, or parameters not in the table: DENIED, code 0. A command taken is answered only with the flight step's
-//! answer, waited for until it comes or the link goes down (then no ACK, see [`link_lost`]). Core 1 ([`before_step`], [`after_step`], from
-//! `flight::Stepper::sample`): the request, taken at most once, for the step that follows; that step's answer back.
-//!
-//! Mode: after each step core 1 stores the state machine's mode code in [`MODE`] (0 until the first step); both nodes put
-//! it in HEARTBEAT `custom_mode` ([`custom_mode`]).
-//!
-//! Heartbeat: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the station's sender
-//! only ([`FLIGHT_STATION_HB`]); core 1 gives it to
-//! `Flight::set_last_radio_heartbeat_us`.
+//! The station's flight commands, mode and heartbeat between the links on core 0 and the hands-off state machine in the flight step on core 1.
+//! Commands: core 0 ([`command`], via `actions`) decodes and posts a flight command to [`FLIGHT_CMD`]; the node sends no COMMAND_ACK then.
+//! [`next_ack`] (from the link's `Telemetry::acks`) offers the one ACK to the sender on the link the command came on.
+//! The flight step has [`BOUND_US`] to take it; otherwise (withdrawn, another command outstanding, or parameters not in the table) the ACK is DENIED, code 0 in `result_param2`.
+//! A command taken is answered only with the flight step's answer, waited for until it comes or the link goes down (then no ACK, see [`link_lost`]).
+//! Core 1 ([`before_step`], [`after_step`], from `flight::Stepper::sample`) takes the request at most once for the step that follows and hands that step's answer back.
+//! Mode: after each step core 1 stores the mode code in [`MODE`] (0 until the first step); both nodes put it in HEARTBEAT `custom_mode` ([`custom_mode`]).
+//! Heartbeat: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the station's sender only ([`FLIGHT_STATION_HB`]);
+//! core 1 gives it to `Flight::set_last_radio_heartbeat_us`.
 
 use core::cell::{Cell, RefCell};
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
@@ -33,16 +24,13 @@ use mavlink_device::{CommandOutcome, CommandRequest, LateAck, Peer};
 /// Core 0 -> flight step and back: the one flight command in flight.
 pub static FLIGHT_CMD: Mailbox = Mailbox::new();
 
-/// How long the flight step has to take a command, us (its answer, given in the step that takes it, has no bound). The
-/// station sends again after 1.5 s without an ACK; the ACK goes out at the node's next `poll_transmit` after the answer
-/// (within 100 ms).
+/// How long the flight step has to take a command, us; its answer, given in the step that takes it, has no bound.
 pub const BOUND_US: u64 = 50_000;
 
 /// Flight step -> core 0: the hands-off state's mode code after the latest step; 0 before the first.
 pub static MODE: AtomicU8 = AtomicU8::new(0);
 
-/// Core 0 -> flight step: the RC port's time of the latest ground-station HEARTBEAT on the radio link, us (written only
-/// when it is new; nothing before the first).
+/// Core 0 -> flight step: the RC port's time of the latest ground-station HEARTBEAT on the radio link, us (written only when new).
 pub static FLIGHT_STATION_HB: TripleBuffer<u64> = TripleBuffer::new(0);
 
 /// Core 0 -> flight step's log: the sender of the RC port's latest ground-station HEARTBEAT (any sender of type GCS) as
@@ -165,9 +153,8 @@ pub fn custom_mode() -> u32 {
     u32::from(MODE.load(Ordering::Relaxed))
 }
 
-/// Core 0, from the RC port's `Hooks::stats`: its time and sender of the latest ground-station HEARTBEAT (`None` before
-/// the first); the time counts only from the station's sender (`station_heartbeat_us`) and is written to the flight step
-/// when it is new.
+/// Core 0, from the RC port's `Hooks::stats`: the time and sender of the latest ground-station HEARTBEAT;
+/// the time counts only from the station's sender (`station_heartbeat_us`) and is written to the flight step when new.
 pub fn station_heartbeat(t_us: Option<u64>, sender: Option<(u8, u8)>) {
     if let Some((sys, comp)) = sender {
         GCS_SENDER.store(0x1_0000 | u32::from(sys) << 8 | u32::from(comp), Ordering::Relaxed);

@@ -1,11 +1,7 @@
-//! The magnetometer: BMM350 on I2C0 (SDA GPIO12, SCL GPIO13, 400 kHz, the board's 4.7k pull-ups),
-//! data-ready on GPIO4; a core-0 device, async I2C without DMA. The `bmm350` driver is used as it
-//! is; the bus clear before a restart is the firmware's (`busclear`). The sample is the driver's
-//! compensated field in microtesla rotated by `MAG_ORIENT` (chip axes to body FRD), r, then the
-//! calibration m = S (r - o) with the `MAG_OFF*` offsets and the `MAG_DIAG*`/`MAG_ODIAG*` matrix
-//! (body frame), applied here in software (the chip's own offset registers are not used); the
-//! sample carries both m and r. `AHRS_ORIENTATION` is never read here: the compass frame does not
-//! depend on the board's orientation.
+//! The magnetometer: BMM350 on I2C0 (SDA GPIO12, SCL GPIO13, 400 kHz, the board's 4.7k pull-ups), data-ready on GPIO4; a core-0 device, async I2C without DMA.
+//! The `bmm350` driver is used as it is; the bus clear before a restart is the firmware's (`busclear`). The sample is the driver's compensated field in microtesla rotated by `MAG_ORIENT` (chip axes to body FRD), r,
+//! then the calibration m = S (r - o) with the `MAG_OFF*` offsets and the `MAG_DIAG*`/`MAG_ODIAG*` matrix (body frame), applied in software; the sample carries both m and r.
+//! `AHRS_ORIENTATION` is never read here: the compass frame does not depend on the board's orientation.
 
 use bmm350::{Bmm350, Config, DEFAULT_ADDRESS, Error};
 use embassy_rp::gpio::{Input, Pull};
@@ -36,10 +32,8 @@ bind_interrupts!(struct Irqs {
 pub const PERIOD_US: u32 = 10_000;
 const I2C_HZ: u32 = 400_000;
 
-/// The configuration before the first start: the driver's default, as the bench programs ran it on
-/// this board: 100 Hz, averaging 2, all axes, normal mode at start, data-ready interrupt pulsed,
-/// active high, push-pull. It equals the parameters' defaults; every start and apply takes the
-/// stored parameters instead (`refresh_config`).
+/// The configuration before the first start: the driver's default (100 Hz, averaging 2, all axes, normal mode, data-ready interrupt pulsed, active high, push-pull).
+/// It equals the parameters' defaults; every start and apply takes the stored parameters instead (`refresh_config`).
 fn config() -> Config {
     Config::new()
 }
@@ -92,7 +86,6 @@ impl Bmm350Adapter {
         adapter
     }
 
-    /// Builds the I2C0 controller on its pins (embassy-rp resets the block in the constructor).
     fn bus(&mut self) -> Bus {
         let mut cfg = i2c::Config::default();
         cfg.frequency = I2C_HZ;
@@ -138,7 +131,6 @@ impl Bmm350Adapter {
         );
     }
 
-    /// The driver, counting one adapter call on the bus.
     fn chip(&mut self) -> Result<&mut Bmm350<Bus>, ErrorKind> {
         self.calls = self.calls.wrapping_add(1);
         self.chip.as_mut().ok_or(ErrorKind::Bus)

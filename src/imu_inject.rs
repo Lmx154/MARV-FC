@@ -1,9 +1,6 @@
-//! Fault injection around a flight-core IMU adapter (features `inject-imu1-persistent`,
-//! `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify`), 5 s (60 s with `inject-late`)
-//! after the first good sample. One
-//! wrapper for both IMUs: `imu1::adapter` and `imu2::adapter` wrap their adapter in [`Inject`]
-//! with their own cells and [`Mode`]. Runs on the flight core: no log, its state goes out through
-//! `injection()` and core 0 logs it.
+//! Fault injection around a flight-core IMU adapter (features `inject-imu1-persistent`, `inject-imu1-missed-edge`, `inject-imu2-persistent`, `inject-imu2-verify`),
+//! 5 s (60 s with `inject-late`) after the first good sample. One wrapper for both IMUs: `imu1::adapter` and `imu2::adapter` wrap their adapter in [`Inject`] with their own cells and [`Mode`].
+//! Runs on the flight core: no log, its state goes out through `injection()` and core 0 logs it.
 
 use embedded_hal_async::delay::DelayNs;
 use fw_core::health::ErrorKind;
@@ -18,11 +15,9 @@ pub mod inject_state {
     pub const ARMED: u32 = 1;
     /// Active: failing (persistent) or swallowing edges (missed-edge).
     pub const ACTIVE: u32 = 2;
-    /// Over.
     pub const DONE: u32 = 3;
 }
 
-/// What the wrapper injects.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     /// Every acquire, recover and restart fails until a RESTART request has been raised after the
@@ -55,7 +50,6 @@ impl<A> Inject<A> {
     #[cfg(feature = "inject-imu1-missed-edge")]
     const SWALLOW_US: u64 = 200_000;
 
-    /// Wraps `inner`, whose task owns `cells` (the RESTART requests are read there).
     pub fn new(inner: A, cells: &'static ImuCells, mode: Mode) -> Self {
         Self {
             inner,
@@ -80,8 +74,6 @@ impl<A> Inject<A> {
                 .is_some_and(|t| now.saturating_sub(t) >= Self::AFTER_US)
     }
 
-    /// Persistent: true while every acquire, recover and restart must fail (until a RESTART
-    /// request has been raised after the failure began).
     fn failing(&mut self) -> bool {
         #[cfg(any(feature = "inject-imu1-persistent", feature = "inject-imu2-persistent"))]
         if self.mode == Mode::Persistent {

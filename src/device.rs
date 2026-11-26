@@ -1,9 +1,6 @@
-//! The device layer (design: decision-foundation, item 1; core 0): one task per device runs
-//! [`run_device`] over its [`DeviceAdapter`]; one static registry row per device ([`Device`]) is
-//! what the supervisor, the telemetry and SYS_STATUS read. A row is backed either by a core-0 task
-//! ([`BARO`]) or by a flight-core task's cells ([`IMU1`], [`IMU2`], `fw_flight::imu`): the supervisor copies
-//! those into the row every tick, kicks CHECK when the row's last sample is older than T, and logs
-//! the flight core's events, so the rows look the same to every reader.
+//! The device layer (core 0): one task per device runs [`run_device`] over its [`DeviceAdapter`]; one static registry row per device ([`Device`])
+//! is what the supervisor, the telemetry and SYS_STATUS read. A row is backed either by a core-0 task ([`BARO`]) or by a flight-core task's cells
+//! ([`IMU1`], [`IMU2`], `fw_flight::imu`): the supervisor copies those into the row every tick, kicks CHECK when the row's last sample is older than T, and logs the flight core's events.
 
 use core::cell::Cell;
 use core::fmt;
@@ -33,32 +30,25 @@ const VERIFY_EVERY: Duration = Duration::from_secs(1);
 /// Longest single wait of a device task: back-off and park waits are cut into slices so that
 /// `progress` keeps moving and only a task held inside an await is seen as stuck.
 const SLICE: Duration = Duration::from_millis(100);
-/// At most one text per device per second.
 const TEXT_EVERY: Duration = Duration::from_secs(1);
-/// Readers of a device's latest sample.
 const READERS: usize = 2;
 const NOTICE_DEPTH: usize = 4;
 
-/// Where a sample came from.
 #[derive(Clone, Copy, PartialEq, Eq, defmt::Format)]
 pub enum Source {
     Hardware,
-    /// Reserved: HIL is not built (design item 7).
     #[allow(dead_code)]
     Hil,
 }
 
-/// The physical values of one sample (one variant per kind of device). Barometer, compass and GNSS carry the
-/// flight code's types (`fw_core::sample`), so one field set serves both cores.
+/// The physical values of one sample, one variant per kind of device; barometer, compass and GNSS carry `fw_core::sample` types.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Reading {
     Baro(BaroReading),
     Mag {
-        /// The field in microtesla with the calibration applied, m = S (r - o), and the die temperature:
-        /// what the flight core gets.
+        /// The field in microtesla with the calibration applied, m = S (r - o), and the die temperature: what the flight core gets.
         reading: MagReading,
-        /// The raw field r in microtesla, body frame (after `MAG_ORIENT`, before the calibration):
-        /// what the compass calibration measures. Core 0 only.
+        /// The raw field r in microtesla, body frame (after `MAG_ORIENT`, before the calibration): what the compass calibration measures. Core 0 only.
         raw_ut: [f32; 3],
     },
     Batt {
@@ -70,13 +60,11 @@ pub enum Reading {
         accel_ms2: [f32; 3],
         temperature_c: f32,
     },
-    /// One fix of the receiver, in the driver's integer units. Position, speed and course are `None`
-    /// without a fix; the rest is whatever the receiver says (it talks without a fix too).
+    /// One fix of the receiver, in the driver's integer units; position, speed and course are `None` without a fix.
     Gnss(GnssReading),
 }
 
-/// The `[STAT]` text of a reading, field for field as the derived format printed it before the readings
-/// became `fw_core::sample` types (fw-core has no defmt).
+/// The `[STAT]` text of a reading, field for field as the derived format prints it (fw-core has no defmt).
 impl defmt::Format for Reading {
     fn format(&self, f: defmt::Formatter<'_>) {
         match *self {
@@ -145,7 +133,7 @@ impl defmt::Format for Reading {
     }
 }
 
-/// An epoch's UTC time in the `[STAT]` text, in the derived-Debug layout the line has always printed.
+/// An epoch's UTC time in the `[STAT]` text, in the derived-Debug layout.
 pub(crate) struct Utc(pub Option<UtcTime>);
 
 impl defmt::Format for Utc {
@@ -164,7 +152,7 @@ impl defmt::Format for Utc {
     }
 }
 
-/// An epoch's UTC date in the `[STAT]` text, in the derived-Debug layout the line has always printed.
+/// An epoch's UTC date in the `[STAT]` text, in the derived-Debug layout.
 struct UtcDay(Option<UtcDate>);
 
 impl defmt::Format for UtcDay {
@@ -191,10 +179,8 @@ pub struct Sample {
     pub source: Source,
 }
 
-/// What the adapter counts itself.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 pub struct AdapterCounters {
-    /// Adapter operations that went to the bus.
     pub calls: u32,
 }
 
@@ -204,21 +190,15 @@ pub enum Pending {
     Data,
     /// No sample: a deadline miss.
     Nothing,
-    /// The device has been reset.
     PowerOnReset,
 }
 
-/// A failed start.
 pub struct StartFailure {
-    /// The device answered its identity before the start failed.
     pub identified: bool,
 }
 
-/// A failed `verify()`.
 pub enum VerifyError {
-    /// A register differs from the configuration.
     Mismatch,
-    /// The check itself failed.
     Failed(ErrorKind),
 }
 
@@ -227,47 +207,33 @@ pub enum VerifyError {
 pub trait DeviceAdapter {
     /// Waits for the device's data-ready signal. No bus traffic: it may be dropped at any await.
     async fn data_ready(&mut self);
-    /// Init and configure. Used for a boot and for the start retries; the first start attempt after an
-    /// operator RESTART request uses [`restart`](Self::restart) instead.
-    ///
-    /// The loop does not take `Ok` as "started": it then waits for one fresh sample (see
-    /// [`recover`](Self::recover)); if none comes the start has failed, with `identified: true`.
+    /// Init and configure, for a boot and the start retries (the first attempt after an operator RESTART request uses [`restart`](Self::restart)).
+    /// The loop then waits for one fresh sample (see [`recover`](Self::recover)); if none comes the start has failed, with `identified: true`.
     async fn start(&mut self) -> Result<(), StartFailure>;
     /// Reads one sample. `Err(ErrorKind::Por)` means the device reported a power-on reset: the loop
     /// feeds it to `Health` as a power-on-reset event, not as an error event.
     async fn acquire(&mut self) -> Result<Reading, ErrorKind>;
-    /// The one status read after a data-ready timeout.
     async fn status(&mut self) -> Result<Pending, ErrorKind>;
-    /// Checks the configuration registers, changing nothing.
     async fn verify(&mut self) -> Result<(), VerifyError>;
-    /// Configures the running device with the adapter's configuration.
     async fn apply(&mut self) -> Result<(), ErrorKind>;
     /// Brings the bus and the device back in step without a reset.
-    ///
-    /// Contract (also of [`restart`](Self::restart)): `Ok` only says the bus and the device answer. The
-    /// loop then waits for ONE fresh sample, `with_timeout(T, data_ready())` and one `acquire` awaited
-    /// to completion, and only if that works does it report success to `Health`. A timeout or a failed
-    /// `acquire` counts as if the adapter had returned an error: a failed `recover` goes on to
-    /// `restart`, a failed `restart` ends the attempt.
+    /// `Ok` (also of [`restart`](Self::restart)) only says the bus and the device answer; the loop then waits for one fresh sample
+    /// (`with_timeout(T, data_ready())` and one `acquire`) before reporting success to `Health`.
+    /// A timeout or a failed `acquire` counts as an adapter error: a failed `recover` goes on to `restart`, a failed `restart` ends the attempt.
     async fn recover(&mut self) -> Result<(), ErrorKind>;
-    /// Bus clear where the bus has one, then init and configure. Used by the automatic recovery and
-    /// for the first start attempt after an operator RESTART request; a failed attempt after a
-    /// RESTART request goes on to the normal start retries.
+    /// Bus clear where the bus has one, then init and configure; used by the automatic recovery and the first start attempt after an operator RESTART request.
+    /// A failed attempt after a RESTART request goes on to the normal start retries.
     async fn restart(&mut self) -> Result<(), ErrorKind>;
     /// The device's built-in self-test with the driver's default settings. The loop then restarts
     /// the device as for an operator RESTART request, whatever this returned.
     async fn self_test(&mut self) -> Verdict {
         Verdict::Unsupported
     }
-    /// The adapter's own counters.
     fn counters(&self) -> AdapterCounters;
-    /// Called once for every sample published to the row's `Watch`, right after it: barometer, compass and
-    /// GNSS hand the reading's `fw_core::sample` sample to the flight core here (`crate::flight`); a wrapper
-    /// passes it to its inner adapter. Never waits.
+    /// Called once for every sample published to the row's `Watch`, right after it: barometer, compass and GNSS hand the sample to the flight core here (`crate::flight`). Never waits.
     fn to_flight(&mut self, sample: &Sample);
 }
 
-/// A device's health and counters as its task last wrote them.
 #[derive(Clone, Copy)]
 pub struct DeviceStatus {
     pub state: State,
@@ -311,32 +277,24 @@ pub struct Device {
     period_us: AtomicU32,
     pub latest: Watch<CriticalSectionRawMutex, Sample, READERS>,
     status: Mutex<CriticalSectionRawMutex, Cell<DeviceStatus>>,
-    /// Wakes the task for a request.
     pub wake: Signal<CriticalSectionRawMutex, ()>,
     pub progress: AtomicU32,
     pub stuck: AtomicBool,
     /// The requests raised for the task (`REQ_APPLY`, `REQ_RESTART`, `REQ_SELF_TEST`); the task clears each as it takes it.
     request: AtomicU8,
-    /// Restart requests raised since boot: the number of the latest request.
     restarts: AtomicU32,
     /// The outcome of the latest restart the task has finished: request number << 1, bit 0 set when
     /// the device reached Ok, clear when it reached Failed or Absent (0 = none yet; numbers start at 1).
     restart_outcome: AtomicU32,
-    /// The latest self-test the task has finished (`None` before the first).
     self_test: Mutex<CriticalSectionRawMutex, Cell<Option<SelfTestOutcome>>>,
-    /// A self-test action runs on the device (the row's flag bit 1): set and cleared by the action.
     self_testing: AtomicBool,
-    /// MARV_DEVICE_STATUS rows built with the self-test flag since boot.
     self_test_rows: AtomicU32,
-    /// The flight-core task's cells, for a row backed by the flight core.
     flight: Option<&'static ImuCells>,
     /// The data-ready deadline T in microseconds when it is not 3 P (0: 3 P).
     deadline_us: u32,
 }
 
-/// Request bit: apply the stored settings to the running device.
 const REQ_APPLY: u8 = 1;
-/// Request bit: restart the device, from any state.
 pub(crate) const REQ_RESTART: u8 = 2;
 /// Request bit: self-test the device, then restart it as for `REQ_RESTART`, from any state.
 const REQ_SELF_TEST: u8 = 4;
@@ -363,13 +321,11 @@ impl Device {
         }
     }
 
-    /// The same row with its own data-ready deadline T (a slow sensor whose 3 P is too long).
     pub const fn with_deadline_us(mut self, us: u32) -> Self {
         self.deadline_us = us;
         self
     }
 
-    /// A row backed by a flight-core task's `cells`.
     pub const fn flight(
         id: MarvDevice,
         name: &'static str,
@@ -381,7 +337,6 @@ impl Device {
         row
     }
 
-    /// Sets the nominal period P (the task does, when it applies a configuration).
     pub fn set_period_us(&self, us: u32) {
         self.period_us.store(us, Ordering::Relaxed);
     }
@@ -390,7 +345,6 @@ impl Device {
         self.period_us.load(Ordering::Relaxed)
     }
 
-    /// Raises the device's APPLY request and wakes its task (a flight-core row has no APPLY yet).
     pub fn request_apply(&self) {
         if self.flight.is_some() {
             return;
@@ -412,7 +366,6 @@ impl Device {
         number
     }
 
-    /// Restart requests raised since boot.
     pub fn restarts(&self) -> u32 {
         self.restarts.load(Ordering::Acquire)
     }
@@ -426,9 +379,7 @@ impl Device {
     }
 
     /// Raises the device's SELF-TEST request, wakes its task and sets the row's self-test flag.
-    /// Numbered with the restart requests: the restart that follows the test reports under the same
-    /// number through [`restart_outcome`](Self::restart_outcome), the test itself through
-    /// [`self_test_outcome`](Self::self_test_outcome).
+    /// Numbered with the restart requests: the restart that follows reports under the same number ([`restart_outcome`](Self::restart_outcome)), the test through [`self_test_outcome`](Self::self_test_outcome).
     pub fn request_self_test(&self) -> u32 {
         self.self_testing.store(true, Ordering::Relaxed);
         let number = self.restarts.fetch_add(1, Ordering::AcqRel).wrapping_add(1);
@@ -472,7 +423,6 @@ impl Device {
         self.status.lock(|cell| cell.set(status));
     }
 
-    /// Publishes the outcome of restart request `number` (a task with its own loop, `sd`).
     pub(crate) fn finish_restart(&self, number: u32, ok: bool) {
         self.restart_outcome
             .store(number << 1 | u32::from(ok), Ordering::Release);
@@ -482,7 +432,6 @@ impl Device {
         Duration::from_micros(u64::from(self.period_us()))
     }
 
-    /// T = max(3 P, 10 ms), or the row's own deadline.
     pub fn deadline(&self) -> Duration {
         if self.deadline_us != 0 {
             return Duration::from_micros(u64::from(self.deadline_us));
@@ -490,7 +439,6 @@ impl Device {
         (self.period() * 3).max(DEADLINE_FLOOR)
     }
 
-    /// max(1 s, 20 P).
     pub fn stuck_after(&self) -> Duration {
         (self.period() * 20).max(STUCK_FLOOR)
     }
@@ -499,7 +447,6 @@ impl Device {
         self.progress.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// The row for SYS_STATUS and the HEARTBEAT state.
     pub fn row(&self) -> DeviceRow {
         let status = self.status();
         DeviceRow {
@@ -511,7 +458,6 @@ impl Device {
         }
     }
 
-    /// The device's `MARV_DEVICE_STATUS`.
     pub fn message(&self, now_us: u64) -> MARV_DEVICE_STATUS_DATA {
         let status = self.status();
         let ms = |us: u64| u32::try_from(us / 1000).unwrap_or(u32::MAX);
@@ -533,7 +479,6 @@ impl Device {
     }
 }
 
-/// The number of registry rows.
 pub const DEVICE_COUNT: usize = 7;
 /// The IMU rows' period before `main` sets it from the boot setup: 800 Hz, the default of `IMUn_ODR_HZ`.
 const IMU_BOOT_PERIOD_US: u32 = 1250;
@@ -551,18 +496,14 @@ pub static IMU2: Device = Device::flight(
     IMU_BOOT_PERIOD_US,
     &crate::imu2::CELLS,
 );
-/// The barometer's row.
 pub static BARO: Device = Device::new(MarvDevice::MARV_DEVICE_BARO, "BARO", crate::baro::PERIOD_US);
-/// The magnetometer's row.
 pub static MAG: Device = Device::new(MarvDevice::MARV_DEVICE_MAG, "MAG", crate::mag::PERIOD_US);
 /// The GNSS receiver's row: P = 1 s, T = 2.5 s.
 pub static GNSS: Device = Device::new(MarvDevice::MARV_DEVICE_GNSS, "GNSS", crate::gnss::PERIOD_US)
     .with_deadline_us(crate::gnss::DEADLINE_US);
-/// The battery monitor's row.
 pub static BATT: Device = Device::new(MarvDevice::MARV_DEVICE_BATT, "BATT", crate::batt::PERIOD_US);
 /// The SD card's row (`sd`): P = 1 s, so stuck after 20 s.
 pub static SD: Device = Device::new(MarvDevice::MARV_DEVICE_SD, "SD", crate::sd::PERIOD_US);
-/// The registry.
 pub static DEVICES: [&Device; DEVICE_COUNT] = [
     &IMU1,
     &IMU2,
@@ -573,7 +514,6 @@ pub static DEVICES: [&Device; DEVICE_COUNT] = [
     &SD,
 ];
 
-/// The row of device `id`.
 pub fn find(id: MarvDevice) -> Option<&'static Device> {
     DEVICES.iter().copied().find(|d| d.id == id)
 }
@@ -592,14 +532,12 @@ pub static STATE_CHANGES: AtomicU32 = AtomicU32::new(0);
 /// Deadline misses and stuck windows discarded because a flash save overlapped them.
 pub static SAVE_DISCARDS: AtomicU32 = AtomicU32::new(0);
 
-/// What the supervisor turns into a text.
 #[derive(Clone, Copy)]
 enum Notice {
     Report(Report),
     Stuck,
 }
 
-/// Device tasks -> supervisor: the health transitions to report.
 static NOTICES: Channel<CriticalSectionRawMutex, (&'static Device, Notice), 8> = Channel::new();
 
 fn now_ms() -> u64 {
@@ -637,8 +575,7 @@ pub fn error_name(error: ErrorKind) -> &'static str {
 }
 
 /// The device task's loop: steps the device's `Health` and carries out the action it returns.
-/// Sampling is `select(with_timeout(T, data ready), wake)`; neither branch is a bus call, and every
-/// bus call is awaited to completion outside any `select` or timeout (I1.1).
+/// Sampling is `select(with_timeout(T, data ready), wake)`; every bus call is awaited to completion outside any `select` or timeout.
 pub async fn run_device<A: DeviceAdapter>(
     dev: &'static Device,
     adapter: &mut A,
@@ -812,7 +749,6 @@ pub async fn run_device<A: DeviceAdapter>(
     }
 }
 
-/// A SELF-TEST request: the adapter's test, its outcome published under request `number`.
 async fn self_test<A: DeviceAdapter>(dev: &'static Device, adapter: &mut A, number: u32) {
     let begun = Instant::now();
     let verdict = adapter.self_test().await;
@@ -827,7 +763,6 @@ async fn self_test<A: DeviceAdapter>(dev: &'static Device, adapter: &mut A, numb
     });
 }
 
-/// One data-ready wait and what follows it.
 async fn sample<A: DeviceAdapter>(
     dev: &'static Device,
     adapter: &mut A,
@@ -904,7 +839,6 @@ pub(crate) fn discard_for_save(dev: &Device, what: &str) {
     );
 }
 
-/// Reads and publishes one sample.
 async fn read<A: DeviceAdapter>(
     adapter: &mut A,
     status: &mut DeviceStatus,
@@ -950,7 +884,6 @@ pub(crate) async fn sleep_until(dev: &Device, until_ms: u64) {
     }
 }
 
-/// The supervisor's view of one device.
 struct Watcher {
     progress: u32,
     progress_at: Instant,
@@ -960,7 +893,6 @@ struct Watcher {
     flight: FlightSeen,
 }
 
-/// What the supervisor last saw in a flight-core row's cells.
 #[derive(Clone, Copy, Default)]
 struct FlightSeen {
     seq: Option<u32>,
@@ -996,7 +928,6 @@ impl Supervision {
         }
     }
 
-    /// Every supervisor tick.
     pub fn tick(&mut self, now: Instant) {
         while let Ok((dev, notice)) = NOTICES.try_receive() {
             if let Some(w) = DEVICES
@@ -1057,7 +988,6 @@ impl Supervision {
         }
     }
 
-    /// Every 10 s: one `[STAT]` line per device.
     pub fn stat(&mut self, now: Instant) {
         let window_us = (now - self.stat_at).as_micros().max(1);
         self.stat_at = now;
@@ -1164,10 +1094,8 @@ fn norm(v: [f32; 3]) -> f32 {
     x
 }
 
-/// A flight-core row: copies the cells into the row, logs the flight core's events (it logs
-/// nothing itself), queues the transition texts, and kicks CHECK when the last sample is older
-/// than T, except in Failed and Absent (parked: only RESTART wakes it). The delay count is logged
-/// when it changed and no start or recovery is under way (once per episode).
+/// A flight-core row: copies the cells into the row, logs the flight core's events, queues the transition texts and kicks CHECK when the last sample is older
+/// than T, except in Failed and Absent (parked: only RESTART wakes it). The delay count is logged when it changed and no start or recovery is under way.
 fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     let Some(cells) = dev.flight else {
         return;
@@ -1246,8 +1174,7 @@ fn mirror(dev: &'static Device, w: &mut Watcher, now: Instant) {
     }
     if s.attempt_ms != w.flight.attempt_ms {
         w.flight.attempt_ms = s.attempt_ms;
-        // The attempt may have failed within the same tick: then its back-off counted from the
-        // failure seen before.
+        // The attempt may have failed within the same tick: then its back-off counted from the failure seen before.
         let previous = if s.failure_ms >= s.attempt_ms {
             w.flight.failure_ms
         } else {

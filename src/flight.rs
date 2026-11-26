@@ -1,22 +1,9 @@
-//! The flight step on the board (decision-sim-seams-20261119, section 8; decision-first-pair-wiring-20261119, A1-A3).
-//! Core 1 only: IMU1's task owns a [`Stepper`] and runs `fw_flight::step::Flight::step` once per good IMU1 sample,
-//! right after publishing it, with the newest CRSF stick report from `crate::rc::FLIGHT_RC` if one arrived since the
-//! previous step, and the newest barometer, compass and GNSS samples from [`FLIGHT_BARO`], [`FLIGHT_MAG`] and
-//! [`FLIGHT_GNSS`] likewise, then publishes the result through [`OUT`], which the ESC task sends to the motors, and then
-//! pushes the step's log records into [`LOG`] (decision-flight-logging-20261119, section 3). On core 0 `logger`'s
-//! collector touches this module as [`LOG`]'s consumer, and the barometer, compass and GNSS device tasks as the writers
-//! of the three sample cells (decision-nav-eskf-20261120, section 4); core 0 learns "armed" from
-//! `settings::HANDSHAKE` and "flight throttles sent" from `esc::ESC`.
-//! The step runs the steering estimator `SteerMix` (decision-nav-eskf-20261120, Amendments G and G-1: the ESKF3 core,
-//! `Eskf` with `Aiding::Full`, behind its output predictor `EskfSteer` gives attitude, rates and the horizontal state at
-//! the current time; the zero-delay ESKF2, an `Eskf` with `Aiding::ImuBaro`, gives the vertical state), the cascaded PID
-//! and the card's allocator with the constant gains of `fw_flight::tuning`. No shadow estimator runs on the board. The
-//! composed state that steered goes to the log (NKF1, NKF2: I = 0), ESKF2's own state as I = 1, the ESKF3 core's
-//! nominal state at its horizon as I = 2 (NKF1) and the two estimators' events as NKI (I = 0 the core, I = 1 ESKF2).
-//! `MahonyBaro` stays in `fw_flight` and is not run on the board.
-//! No `[STAT] FLT:` line: one was tried on 2026-11-19 and removed, because that one extra log line lengthened the
-//! flight core's longest wait behind the log (README, Flight-core device loop). The `[STAT] NAV:` line of [`stat`]
-//! (packet E2) prints the estimators' state from [`NAV_STAT`].
+//! The flight step on the board, core 1 only: IMU1's task owns a [`Stepper`] and runs `fw_flight::step::Flight::step` once per
+//! good IMU1 sample, with the newest stick report (`crate::rc::FLIGHT_RC`) and the newest barometer, compass and GNSS samples
+//! ([`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`]) since the previous step.
+//! The result goes out through [`OUT`] to the ESC task; the step's log records go into [`LOG`], consumed by `logger` on core 0.
+//! The steering estimator `SteerMix` is the ESKF3 core behind its output predictor `EskfSteer` (attitude, rates, horizontal state)
+//! plus the zero-delay ESKF2 (vertical state). The `[STAT] NAV:` line of [`stat`] prints their state from [`NAV_STAT`].
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -46,26 +33,19 @@ use fw_flight::step::{
 use fw_flight::tuning::{GAIN_COUNT, GAIN_NAMES, Gains, Tuning};
 use static_cell::StaticCell;
 
-/// The steering estimator: a [`SteerMix`] (Amendment G-1) whose parts live in [`STEER_CORE`], [`VERT`] and [`STEER`].
-/// ESKF2 is a full-ring `Eskf` too (a zero-delay filter does not depend on the ring size, G1-a), so the image carries
-/// one monomorphisation of the filter in RAM.
+/// The steering estimator: a [`SteerMix`] whose parts live in [`STEER_CORE`], [`VERT`] and [`STEER`].
 pub type BoardMix = SteerMix<'static, RING>;
 
-/// The flight code this image runs; edit this line to change it (seams decision, section 9). To go back to
-/// `MahonyBaro`: make this `Flight<MahonyBaro, CascadedPid, CardAllocator>`, pass `MahonyBaro::new(&Tuning::DEFAULT)`
-/// to `Flight::new` in [`Stepper::new`] and give the I = 0 records in `log_nav` their old source
-/// (`MahonyBaro::vert()`).
+/// The flight code this image runs.
 pub type BoardFlight = Flight<&'static mut BoardMix, CascadedPid, CardAllocator>;
 
-// `Flight` owns its estimator: by value the `Eskf` (its IMU ring, waiting buffers and P, about 16 KB) would be built
-// on core 1's 16 KB stack. `BoardFlight` must hold the reference only.
+// `Flight` must hold the estimator by reference: an `Eskf` by value (about 16 KB) would be built on core 1's 16 KB stack.
 const _: () = assert!(
     core::mem::size_of::<BoardFlight>() < core::mem::size_of::<Eskf>(),
     "BoardFlight holds an estimator by value: it must hold the &'static mut into STEER"
 );
 
-// `Eskf::with_aiding` refuses only nav_gps_delay_us > nav_buffer_us (C2a) and `EskfSteer::new` a ring too small for
-// nav_buffer_us / nav_predict_us + 1 entries: with the compiled tuning neither can fail.
+// The compiled tuning cannot make `Eskf::with_aiding` or `EskfSteer::new` refuse.
 const _: () = assert!(
     Tuning::DEFAULT.nav_gps_delay_us <= Tuning::DEFAULT.nav_buffer_us,
     "Eskf::new(&Tuning::DEFAULT) would refuse the compiled tuning"
@@ -76,24 +56,21 @@ const _: () = assert!(
     "EskfSteer::new(&Tuning::DEFAULT) would refuse the compiled tuning"
 );
 
-/// The ESKF3 core's storage (17 592 B: the IMU ring, the waiting buffers, P), in `.bss`.
+/// The ESKF3 core's storage (17 592 B), in `.bss`.
 static STEER_CORE: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
-/// Builds the ESKF3 core (`Aiding::Full`) into [`STEER_CORE`]. Call once, on core 0 before core 1 starts (the value
-/// passes through core 0's stack, not core 1's 16 KB one). `None` if the constructor refused, which the assertions above
-/// rule out, or on a second call; [`steer`] then returns `None` and the board does not fly.
-// Never inlined: the 17 592 B value (and its move into the static) must live in this call's own frame, not in
-// the frame of the caller's `poll`, which core 0 would then carry under everything the main task ever calls.
+/// Builds the ESKF3 core into [`STEER_CORE`]; call once on core 0 before core 1 starts, so the value passes through core 0's stack.
+/// `None` if the constructor refused or on a second call; [`steer`] then returns `None` and the board does not fly.
+// Never inlined: the 17 592 B value must live in this call's own frame, not in the caller's `poll` frame on core 0.
 #[inline(never)]
 pub fn steer_core() -> Option<&'static mut Eskf> {
     STEER_CORE.try_init_with(|| Eskf::new(&Tuning::DEFAULT))?.as_mut().ok()
 }
 
-/// The zero-delay ESKF2's storage (a full `Eskf`, 17 592 B; its ring is used as one entry), in `.bss`.
+/// The zero-delay ESKF2's storage, in `.bss`.
 static VERT: StaticCell<Result<Eskf, EskfError>> = StaticCell::new();
 
-/// Builds ESKF2 (`Aiding::ImuBaro` with the GPS vertical velocity option, Amendment V, owner 2026-11-22) into [`VERT`];
-/// as [`steer_core`].
+/// Builds ESKF2 (`Aiding::ImuBaro` with the GPS vertical velocity option) into [`VERT`], as [`steer_core`].
 #[inline(never)]
 pub fn vert() -> Option<&'static mut Eskf> {
     VERT.try_init_with(|| Eskf::with_gps_vd(&Tuning::DEFAULT))?.as_mut().ok()
@@ -102,10 +79,8 @@ pub fn vert() -> Option<&'static mut Eskf> {
 /// The steering estimator's storage (the output predictor's ring and the two references), in `.bss`.
 static STEER: StaticCell<BoardMix> = StaticCell::new();
 
-/// Builds the steering estimator into [`STEER`] over the two estimators from [`steer_core`] and [`vert`]. Call once, on
-/// core 0 before core 1 starts, after those two (they are separate calls so that their frames do not stack). `None` if
-/// either is `None`, a constructor refused, or on a second call; [`Stepper::new`] then returns `None` and the board
-/// does not fly.
+/// Builds the steering estimator into [`STEER`] over [`steer_core`]'s and [`vert`]'s estimators; call once on core 0 before core 1 starts.
+/// `None` if either is `None`, a constructor refused, or on a second call; [`Stepper::new`] then returns `None`.
 #[inline(never)]
 pub fn steer(
     core: Option<&'static mut Eskf>,
@@ -120,10 +95,8 @@ fn core_valid(core: &Eskf) -> u8 {
     u8::from(core.tilt_aligned()) | u8::from(core.yaw_aligned()) << 1
 }
 
-/// One estimator's part of [`NavStat`].
 #[derive(Clone, Copy, Default)]
 pub struct EstStat {
-    /// NAV's valid bits.
     pub valid: u8,
     /// Down position (m) and down velocity (m/s), and their sigmas (infinite when not known).
     pub d_m: f32,
@@ -133,8 +106,7 @@ pub struct EstStat {
 }
 
 impl EstStat {
-    /// The ESKF3 core at its horizon (it has no `NavState` of its own on the board): bit 0 tilt aligned, bit 1 yaw
-    /// aligned, the nominal D and v_D, the sigmas of those two error states.
+    /// The ESKF3 core at its horizon: bit 0 tilt aligned, bit 1 yaw aligned, the nominal D and v_D, their sigmas.
     fn of_core(core: &Eskf) -> Self {
         let (_, v, p) = core.nominal();
         let sig = core.sigmas();
@@ -167,18 +139,14 @@ impl EstStat {
     }
 }
 
-/// What the `[STAT] NAV:` line prints: no horizontal position, no coordinate.
 #[derive(Clone, Copy, Default)]
 pub struct NavStat {
-    /// Steps since the start.
     pub steps: u32,
-    /// The composed state that steers (I = 0; the name dates from `MahonyBaro`): its valid bits, D and v_D with their
-    /// sigmas, which are ESKF2's (Amendment G-1), and ESKF2's barometer counts (fused, gated, height resets).
+    /// The composed state that steers: its valid bits, D and v_D with their sigmas (ESKF2's), and ESKF2's barometer counts
+    /// (fused, gated, height resets).
     pub mb: EstStat,
     pub mb_baro: [u32; 3],
-    /// The ESKF3 core (the name dates from the shadow): present (always true once the board flies), tilt aligned, yaw
-    /// aligned, its state at the horizon (`EstStat::of_core`: valid bits 1 tilt aligned and 2 yaw aligned, nominal D and
-    /// v_D, sigmas of those states) and its counters.
+    /// The ESKF3 core: present, tilt aligned, yaw aligned, its state at the horizon (`EstStat::of_core`) and its counters.
     pub shadow: bool,
     pub tilt_aligned: bool,
     pub yaw_aligned: bool,
@@ -303,20 +271,16 @@ pub fn stat() {
 /// What the flight step publishes after every step.
 #[derive(Clone, Copy)]
 pub struct FlightOut {
-    /// The latest step's time, us.
     pub t_us: u64,
-    /// The latest step's command.
     pub motors: MotorCommand,
 }
 
-/// Written by IMU1's task (core 1) after every step; read by the ESC task (core 1) at every exchange.
 pub static OUT: Seqlock<FlightOut> = Seqlock::new(FlightOut {
     t_us: 0,
     motors: MotorCommand::STOP,
 });
 
-/// Core 0 -> flight core: the barometer's newest sample with its core-0 time (one writer, the barometer's
-/// adapter as it publishes to the row; one reader, IMU1's [`Stepper`]).
+/// Core 0 -> flight core: the barometer's newest sample with its core-0 time (writer: the barometer adapter; reader: IMU1's [`Stepper`]).
 pub static FLIGHT_BARO: TripleBuffer<BaroSample> = TripleBuffer::new(BaroSample {
     reading: BaroReading {
         pressure_pa: 0.0,
@@ -326,8 +290,7 @@ pub static FLIGHT_BARO: TripleBuffer<BaroSample> = TripleBuffer::new(BaroSample 
     seq: 0,
 });
 
-/// Core 0 -> flight core: the compass's newest sample, the calibrated field (one writer, the compass's adapter as
-/// it publishes to the row; one reader, IMU1's [`Stepper`]).
+/// Core 0 -> flight core: the compass's newest calibrated sample (writer: the compass adapter; reader: IMU1's [`Stepper`]).
 pub static FLIGHT_MAG: TripleBuffer<MagSample> = TripleBuffer::new(MagSample {
     reading: MagReading {
         field_ut: [0.0; 3],
@@ -338,8 +301,7 @@ pub static FLIGHT_MAG: TripleBuffer<MagSample> = TripleBuffer::new(MagSample {
     expected: None,
 });
 
-/// Core 0 -> flight core: the receiver's newest epoch (one writer, the GNSS adapter as it publishes to the row;
-/// one reader, IMU1's [`Stepper`]).
+/// Core 0 -> flight core: the receiver's newest epoch (writer: the GNSS adapter; reader: IMU1's [`Stepper`]).
 pub static FLIGHT_GNSS: TripleBuffer<GnssSample> = TripleBuffer::new(GnssSample {
     reading: GnssReading {
         fix_type: 1,
@@ -362,17 +324,14 @@ pub static FLIGHT_GNSS: TripleBuffer<GnssSample> = TripleBuffer::new(GnssSample 
     seq: 0,
 });
 
-/// Core 0 -> flight core: the stored `PILOT_SPEED_XY`, m/s (Amendment P, P9; one writer, core 0, through [`push_speed`];
-/// one reader, IMU1's [`Stepper`]). The flight code takes the value at every disarmed step, so the one in force at the
-/// arming step stays until the next disarm. No flash access on core 1: the value is a copy of the stored one.
+/// Core 0 -> flight core: the stored `PILOT_SPEED_XY`, m/s (writer: core 0 via [`push_speed`]; reader: IMU1's [`Stepper`]).
+/// The flight code takes it at every disarmed step, so the value at the arming step stays until the next disarm.
 pub static FLIGHT_SPEED_XY: TripleBuffer<f32> = TripleBuffer::new(Tuning::DEFAULT.pilot_speed_xy_ms);
 
-/// Core 0's writer of [`FLIGHT_SPEED_XY`].
 static SPEED_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, f32>>>> =
     Mutex::new(RefCell::new(None));
 
-/// Takes the writer of [`FLIGHT_SPEED_XY`] and pushes the stored value. Call once, on core 0, after `settings::boot` and
-/// before core 1 starts, so the flight core's first read has it.
+/// Takes the writer of [`FLIGHT_SPEED_XY`] and pushes the stored value; call once on core 0 after `settings::boot`, before core 1 starts.
 pub fn init_speed() {
     let Some(writer) = FLIGHT_SPEED_XY.take_writer() else {
         defmt::panic!("[FAIL] PILOT_SPEED_XY writer taken twice");
@@ -402,20 +361,16 @@ pub fn push_speed(why: &str) {
     );
 }
 
-/// Core 0 -> flight core: the stored `MOT_POLES` (poles, not pole pairs; one writer, core 0, through [`push_notch`]; one
-/// reader, IMU1's [`Stepper`]). The flight code takes it at every disarmed step (`Flight::set_notch`), so the one in force
-/// at the arming step stays until the next disarm. No flash access on core 1: the value is a copy of the stored one.
+/// Core 0 -> flight core: the stored `MOT_POLES` (poles, not pole pairs; writer: core 0 via [`push_notch`]; reader: IMU1's [`Stepper`]).
+/// The flight code takes it at every disarmed step (`Flight::set_notch`).
 pub static FLIGHT_NOTCH: TripleBuffer<i32> = TripleBuffer::new(NOTCH_POLES_DEFAULT);
 
-/// The default of `MOT_POLES` (`fw_settings::esc`), the value of a parameter that cannot be read.
 const NOTCH_POLES_DEFAULT: i32 = 14;
 
-/// Core 0's writer of [`FLIGHT_NOTCH`].
 static NOTCH_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, i32>>>> =
     Mutex::new(RefCell::new(None));
 
-/// Takes the writer of [`FLIGHT_NOTCH`] and pushes the stored value. Call once, on core 0, after `settings::boot` and
-/// before core 1 starts, so the flight core's first read has it.
+/// Takes the writer of [`FLIGHT_NOTCH`] and pushes the stored value; call once on core 0 after `settings::boot`, before core 1 starts.
 pub fn init_notch() {
     let Some(writer) = FLIGHT_NOTCH.take_writer() else {
         defmt::panic!("[FAIL] MOT_POLES writer taken twice");
@@ -445,24 +400,19 @@ pub fn push_notch(why: &str) {
     );
 }
 
-/// Core 0 -> flight core: the 14 stored gains `ATC_*` as one set (decision-gain-params-20261123, section 1 item 5; one
-/// writer, core 0, through [`push_gains`]; one reader, IMU1's [`Stepper`]). The flight code takes the set at every disarmed
-/// step (`Flight::set_gains`), so the one in force at the arming step stays until the next disarm. No flash access on
-/// core 1: the set is a copy of the stored values.
+/// Core 0 -> flight core: the 14 stored gains `ATC_*` as one set (writer: core 0 via [`push_gains`]; reader: IMU1's [`Stepper`]).
+/// The flight code takes the set at every disarmed step (`Flight::set_gains`).
 pub static FLIGHT_GAINS: TripleBuffer<Gains> = TripleBuffer::new(Gains::of(&Tuning::DEFAULT));
 
 /// Sets of [`FLIGHT_GAINS`] that `Flight::set_gains` refused (written by core 1, read by [`stat`] on core 0).
 static GAINS_REFUSED: AtomicU32 = AtomicU32::new(0);
 
-/// The value of [`GAINS_REFUSED`] at the latest [`stat`] line (core 0).
 static GAINS_REFUSED_SEEN: AtomicU32 = AtomicU32::new(0);
 
-/// Core 0's writer of [`FLIGHT_GAINS`].
 static GAINS_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, Gains>>>> =
     Mutex::new(RefCell::new(None));
 
-/// Takes the writer of [`FLIGHT_GAINS`] and pushes the stored values. Call once, on core 0, after `settings::boot` and
-/// before core 1 starts, so the flight core's first read has them.
+/// Takes the writer of [`FLIGHT_GAINS`] and pushes the stored values; call once on core 0 after `settings::boot`, before core 1 starts.
 pub fn init_gains() {
     let Some(writer) = FLIGHT_GAINS.take_writer() else {
         defmt::panic!("[FAIL] ATC_* gains writer taken twice");
@@ -499,10 +449,8 @@ pub fn push_gains(why: &str) {
     );
 }
 
-/// The committed mission as the flight core takes it ([`fw_core::mission::select_targets`]).
 pub type GdnSet = GdnTargets;
 
-/// What [`FLIGHT_GDN`] holds before the first push: off.
 const GDN_OFF: GdnSet = GdnTargets {
     count: 0,
     radius_m: 2.0,
@@ -514,16 +462,13 @@ const GDN_OFF: GdnSet = GdnTargets {
     alt_max_m: fw_core::mission::ALT_MAX_DEFAULT,
 };
 
-/// Core 0 -> flight core: the committed mission with `GDN_RADIUS` and the height limits (one writer, core 0, through
-/// [`push_gdn`]; one reader, IMU1's [`Stepper`]). No flash access on core 1: the value is a copy.
+/// Core 0 -> flight core: the committed mission with `GDN_RADIUS` and the height limits (writer: core 0 via [`push_gdn`]; reader: IMU1's [`Stepper`]).
 pub static FLIGHT_GDN: TripleBuffer<GdnSet> = TripleBuffer::new(GDN_OFF);
 
-/// Core 0's writer of [`FLIGHT_GDN`].
 static GDN_WRITER: Mutex<CriticalSectionRawMutex, RefCell<Option<TripleWriter<'static, GdnSet>>>> =
     Mutex::new(RefCell::new(None));
 
-/// Takes the writer of [`FLIGHT_GDN`] and pushes the stored values. Call once, on core 0, after `settings::boot` and
-/// before core 1 starts, so the flight core's first read has them.
+/// Takes the writer of [`FLIGHT_GDN`] and pushes the stored values; call once on core 0 after `settings::boot`, before core 1 starts.
 pub fn init_gdn() {
     let Some(writer) = FLIGHT_GDN.take_writer() else {
         defmt::panic!("[FAIL] GDN writer taken twice");
@@ -532,9 +477,9 @@ pub fn init_gdn() {
     push_gdn("boot");
 }
 
-/// Pushes the committed mission's waypoints with `GDN_RADIUS` and the height limits to the flight core (core 0; call with
-/// no store access in progress). Runs when a `GDN_*` parameter changes and when the mission's change counter moves (the
-/// supervisor tick, [`crate::mission::changed`]). A radius that cannot be read is the table's default.
+/// Pushes the committed mission's waypoints with `GDN_RADIUS` and the height limits to the flight core (core 0; no store access in progress).
+/// Runs when a `GDN_*` parameter changes and when the mission's change counter moves ([`crate::mission::changed`]).
+/// A radius that cannot be read is the table's default.
 pub fn push_gdn(why: &str) {
     use fw_settings::flight::{GDN_ALT_MAX, GDN_ALT_MIN, GDN_RADIUS};
     let (radius, limits) = crate::store::with(|p| {
@@ -567,9 +512,7 @@ pub fn push_gdn(why: &str) {
     );
 }
 
-/// The flight log ring's size (decision-flight-logging-20261119, section 3).
 pub const LOG_BYTES: usize = 16384;
-/// The flight records: producer IMU1's [`Stepper`] (core 1), consumer `logger`'s collector (core 0).
 pub static LOG: LogRing<LOG_BYTES> = LogRing::new();
 
 /// One step block: IMU1's sample, then NAV, SETP, DMD, MOT, PIDT, NTCH (281 bytes); disarmed, only every 8th step has the
@@ -598,9 +541,7 @@ pub struct Stepper {
     gains: TripleReader<'static, Gains>,
     station: crate::station::Core1,
     log: LogProducer<'static, LOG_BYTES>,
-    /// Steps since the start, for `log_due`.
     step: u32,
-    /// `TimeUS` of the previous ESC record.
     esc_since_us: u64,
     /// Covariance propagations already seen, of the ESKF3 core (I = 0 and I = 2) and of ESKF2 (I = 1): the NKF records'
     /// rate.
@@ -610,22 +551,16 @@ pub struct Stepper {
     stat: SeqlockWriter<'static, NavStat>,
     /// When MODE is due (the first step and every change of the selected or the effective mode).
     mode_log: ModeLog,
-    /// The hands-off state of the last MSG written (`None` before the first).
     ho_logged: Option<fw_flight::hands_off::State>,
-    /// AUTO's waypoint index of the last "HO WP" MSG written (`None` outside AUTO's guidance).
     wp_logged: Option<u8>,
-    /// Crash rule K's would-fire of the last "K" MSG written (false before the first; `crash_msg`).
     k_logged: bool,
-    /// N14 (3): the card check's MSG was written in this arming (cleared on a disarmed step).
+    /// The card check's MSG was written in this arming (cleared on a disarmed step).
     card_logged: bool,
-    /// The plan id and waypoints of the last "PLAN" MSG written (`None` before the first; `Flight::plan_seen`).
     plan_logged: Option<(Option<u32>, u8)>,
 }
 
 impl Stepper {
-    /// `None` if the writer of [`OUT`], the producer of [`LOG`], the reader of `crate::rc::FLIGHT_RC` (`rc`) or the
-    /// reader of [`FLIGHT_BARO`], [`FLIGHT_MAG`], [`FLIGHT_GNSS`], [`FLIGHT_SPEED_XY`] or [`FLIGHT_NOTCH`] or the writer of
-    /// [`NAV_STAT`] or the reader of [`FLIGHT_GDN`] or [`FLIGHT_GAINS`] was taken already.
+    /// `None` if one of the cells it takes (the writers of [`OUT`] and [`NAV_STAT`], the producer of [`LOG`], the readers of the flight inputs) was taken already.
     /// `steer`: from [`steer`]; `None` here too (the board does not fly without its steering estimator).
     /// `period_us`: IMU1's sample period from its setup (the value the IMU1 task runs on); the notch's sample rate is
     /// 1e6 / `period_us`.
@@ -667,14 +602,10 @@ impl Stepper {
         })
     }
 
-    /// The navigation records (decision-nav-eskf-20261120, 8c, B5, C8; Amendments G and G-1): NKF1 and NKF2 at each
-    /// covariance propagation of each estimator, armed, and at every 8th disarmed; NKI at each scalar fusion and reset.
-    /// I = 0: the composed state that steered (`out.nav`, TimeUS the step time) with the ESKF3 core's biases, and the
-    /// core's events (TimeUS the horizon time); I = 1: ESKF2's own state, biases and events; I = 2: NKF1 of the core's
-    /// nominal state at its horizon (TimeUS the horizon time, valid bits as [`core_valid`]), at the core's propagations.
-    /// NKI Src 10 (Inn the attitude tracking error rad, Var the velocity error m/s) and Src 11 (Inn the position error
-    /// m, Var T_d s), I = 0, TimeUS the step time, Ok 1, at every 20th correction of the output predictor. Then, every
-    /// 64th step, [`NAV_STAT`]. A record that does not fit is dropped and counted by the ring.
+    /// The navigation records: NKF1 and NKF2 at each covariance propagation of each estimator, armed, and at every 8th disarmed; NKI at each scalar fusion and reset.
+    /// I = 0: the state that steered (TimeUS the step time) with the ESKF3 core's biases and events; I = 1: ESKF2's own state, biases and events; I = 2: the core's nominal state at its horizon.
+    /// NKI Src 10 (Inn the attitude tracking error rad, Var the velocity error m/s) and Src 11 (Inn the position error m, Var T_d s) at every 20th output-predictor correction.
+    /// Then, every 64th step, [`NAV_STAT`]. A record that does not fit is dropped and counted by the ring.
     fn log_nav(&mut self, out: &StepOut) {
         const NKF: usize = dflog::NKF1.length as usize + dflog::NKF2.length as usize;
         let armed = out.armed;
@@ -747,7 +678,6 @@ impl Stepper {
 
 impl Stepper {
     /// One MSG record of `text` (up to its first NUL), one push of its own; false when the ring dropped it. One
-    /// instance of the ring's push for every text written through it.
     fn push_msg(&mut self, t_us: u64, text: &[u8]) -> bool {
         self.log.push_with(dflog::MSG.length.into(), |b| dflog::encode_msg(b, t_us, text))
     }
@@ -821,8 +751,7 @@ impl SampleSink for Stepper {
                 }
             });
         }
-        // MODE (decision-nav-eskf-20261120, 8c, F6): at the first step and on every change of the selected or the
-        // effective mode, armed or not (a change is rare, so it has no cadence). A dropped record is offered again.
+        // MODE at the first step and on every change of the selected or the effective mode, armed or not; a dropped record is offered again.
         if self.mode_log.pending(&out)
             && self
                 .log
@@ -831,8 +760,7 @@ impl SampleSink for Stepper {
             self.mode_log.done(&out);
         }
         // The hands-off state: a MSG at every change, a push of its own; a dropped one is offered again.
-        // The text carries why the state was entered ("HO 3 HOLD stn-lost"); at AUTO's exit on station loss a second MSG
-        // gives the station HEARTBEAT's age and the RC port's latest ground-station sender (one push, dropped if full).
+        // The text says why the state was entered ("HO 3 HOLD stn-lost"); at AUTO's exit on station loss a second MSG gives the station HEARTBEAT's age and the RC port's latest ground-station sender.
         let ho = self.flight.hands_off_state();
         let reason = self.flight.hands_off_reason();
         if self.ho_logged != Some(ho)
@@ -860,8 +788,7 @@ impl SampleSink for Stepper {
         {
             self.plan_logged = Some(plan);
         }
-        // AUTO's active waypoint (H3b): "HO WP <k>" at each change while the guidance runs (Start, every Arrived); a dropped
-        // one is offered again.
+        // AUTO's active waypoint: "HO WP <k>" at each change while the guidance runs; a dropped one is offered again.
         let wp = self.flight.leg_active();
         if let Some(k) = wp
             && wp != self.wp_logged
@@ -871,16 +798,14 @@ impl SampleSink for Stepper {
         } else if wp.is_none() {
             self.wp_logged = None;
         }
-        // Crash rule K in shadow (Amendment N, N5): "K 1 <lean error accel speed>" when it would fire, "K 0" when it
-        // clears, in every configuration; a dropped one is offered again.
+        // Crash rule K's would-fire: "K 1 <lean error accel speed>" when it would fire, "K 0" when it clears; a dropped one is offered again.
         let crash = self.flight.crash_status();
         if let Some(text) = fw_flight::step::crash_msg(self.k_logged, &crash)
             && self.push_msg(out.t_us, &text)
         {
             self.k_logged = crash.would_fire();
         }
-        // N14 (3): the card check, one MSG per arming once H is valid and more than 12 % from the card's m g ("HOVER
-        // <H / m g> % of card"; no STATUSTEXT path from the flight step on this branch); a dropped one is offered again.
+        // The card check, one MSG per arming once H is valid and more than 12 % from the card's m g ("HOVER <H / m g> % of card"); a dropped one is offered again.
         if !out.armed {
             self.card_logged = false;
         } else if !self.card_logged
@@ -889,17 +814,14 @@ impl SampleSink for Stepper {
         {
             self.card_logged = true;
         }
-        // The in-air restart (decision-inair-restart-20261125): the free-fall latch's changes ("FALL on", "FALL off
-        // impact"), then a refused switch-on edge ("ARM no thr") or a restart arming ("ARM fall t=630 f=95 thr=74"); one
-        // push each, dropped if full.
+        // The in-air restart: the free-fall latch's changes ("FALL on", "FALL off impact"), then a refused switch-on edge ("ARM no thr") or a restart arming ("ARM fall t=630 f=95 thr=74"); one push each, dropped if full.
         if let Some(note) = self.flight.fall_note() {
             self.push_msg(out.t_us, &fw_flight::step::fall_msg(note));
         }
         if let Some(note) = self.flight.arm_note() {
             self.push_msg(out.t_us, &fw_flight::step::arm_msg(note));
         }
-        // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th),
-        // only while the setpoint is Altitude or Position, so a flight in Angle logs none (F1, P5).
+        // SPN: the altitude or position target, with the step block's cadence (armed: every step; disarmed: every 8th), only while the setpoint is Altitude or Position.
         if due.block && matches!(out.setpoint, Setpoint::Altitude { .. } | Setpoint::Position { .. }) {
             self.log
                 .push_with(dflog::SPN.length.into(), |b| encode_spn(&out, b));

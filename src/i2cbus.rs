@@ -1,10 +1,7 @@
-//! The deadline around every I2C transaction of the core-0 devices (BARO on I2C1, MAG on I2C0),
-//! as ArduPilot's `I2CDevice::_transfer`: [`Timed`] wraps the embassy-rp bus that the driver
-//! uses and runs each transaction under [`fw_core::i2c::timeout_ms`]. A transaction that misses
-//! it is abandoned (its embassy-rp future dropped) and answered [`BusError::TimedOut`], and from
-//! then on the bus's [`Gate`] refuses every transaction with the same error until the adapter has
-//! cleared the bus and built a new one (its `restart`, or its `start` when the gate is dirty). The
-//! driver fails through its ordinary bus-error path. No retry here: the device's ladder retries.
+//! The deadline around every I2C transaction of the core-0 devices (BARO on I2C1, MAG on I2C0), as ArduPilot's `I2CDevice::_transfer`:
+//! [`Timed`] wraps the embassy-rp bus the driver uses and runs each transaction under [`fw_core::i2c::timeout_ms`]. A transaction that misses it is abandoned (its embassy-rp future dropped)
+//! and answered [`BusError::TimedOut`]; from then on the bus's [`Gate`] refuses every transaction with the same error until the adapter has cleared the bus and built a new one (its `restart`, or its `start` when the gate is dirty).
+//! No retry here: the device's ladder retries.
 
 use core::future::Future;
 use core::pin::pin;
@@ -30,7 +27,6 @@ impl<E: Error> Error for BusError<E> {
     }
 }
 
-/// An I2C bus whose transactions run under a deadline.
 pub struct Timed<B> {
     inner: B,
     bus_hz: u32,
@@ -39,7 +35,6 @@ pub struct Timed<B> {
 }
 
 impl<B> Timed<B> {
-    /// A newly built bus: its gate admits transactions again.
     pub fn new(inner: B, bus_hz: u32, gate: &'static Gate, name: &'static str) -> Self {
         gate.rebuilt();
         Self {
@@ -164,7 +159,6 @@ pub mod hang {
     /// The one hang of `once` or `boot` has been given (kept across rebuilt buses).
     static GIVEN: AtomicBool = AtomicBool::new(false);
 
-    /// The bus under the deadline, with the hook.
     pub struct Hang<B>(B);
 
     impl<B> From<B> for Hang<B> {

@@ -1,8 +1,5 @@
-//! The flight core runs from internal SRAM (decision-ram-code-20261115 in MARV-V2-drivers): the copy
-//! of `.ram_text` (core 1's code and all constants, selected in `memory.x`) from its load image in
-//! flash to SRAM. cortex-m-rt calls `__pre_init` before it initialises `.data` and `.bss`; embassy-rp
-//! already defines that function, so the link wraps it (`--wrap=__pre_init`, `build.rs`): this copy
-//! runs first, before anything can call code that lives in SRAM, then embassy-rp's continues.
+//! The flight core runs from internal SRAM: the copy of `.ram_text` (core 1's code and all constants, selected in `memory.x`) from its load image in flash to SRAM.
+//! cortex-m-rt calls `__pre_init` before it initialises `.data` and `.bss`; embassy-rp already defines it, so the link wraps it (`--wrap=__pre_init`, `build.rs`) and this copy runs first, then embassy-rp's.
 //! Assembly, because no Rust may run before RAM is initialised.
 
 core::arch::global_asm!(

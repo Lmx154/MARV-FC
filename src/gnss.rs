@@ -1,35 +1,17 @@
-//! The GNSS receiver: u-blox SAM-M10Q on UART1 (GPIO24 = the board's TX, GPIO25 = RX, 115200 8N1 once
-//! configured), a core-0 device, a buffered UART read in thread mode without DMA, UBX protocol only through the
-//! `sam-m10q` driver (decision-gnss-m10-20261122).
-//!
-//! Every configuration (start, restart, recover after the deadline, and apply, which a `GPS_RATE_MS` write raises)
-//! is the driver's whole `configure`: a baud scan (115200, 9600, 38400, a UBX-MON-VER poll at each), the switch to
-//! 115200, one CFG-VALSET to RAM only (UBX only, NMEA off, the measurement period of `GPS_RATE_MS`, one NAV-PVT per
-//! epoch, dynamic model 8, the constellation set of the driver) whose ACK is required, and 500 ms of settling:
-//! nothing is saved, so the receiver's stored configuration does not change. It takes up to 5.6 s (three 1 s probes,
-//! 100 ms, the 1 s acknowledgement, 500 ms); the scan starts at 115200, where the receiver is after an FC reset with it powered,
-//! so it is found at once; a receiver at 9600 or 38400 is found after the silent 1 s probes before it. The MON-VER software and hardware
-//! strings of the receiver are logged once per successful configure (an INFO text and the RTT line); nothing checks
-//! them.
-//!
-//! A configure that fails (no receiver, a refused or unacknowledged VALSET, a baud switch the receiver did not
-//! follow) is a device error: `start` returns `StartFailure` (the row's start retries), `recover`, `restart` and
-//! `apply` return `ErrorKind::Bus`, the first try's failure is the WARNING `GNSS: configure failed (<reason>)`, the
-//! reason and the counts are on the `[STAT]` line, and a failed apply is tried again
-//! `fw_settings::gnss::CONFIGURE_RETRY_MS` later (the adapter raises the row's APPLY request from `data_ready`, so a
-//! try runs in the task's loop). A retry that succeeds is the INFO `GNSS: configured on try <n>`.
-//!
-//! "Ok" means NAV-PVT frames keep arriving: one sample is one NAV-PVT, WHETHER OR NOT it holds a 3D fix (indoors it
-//! does not). 2.5 s without one (`DEADLINE_US`) is one error event (`ErrorKind::Timeout`); a bad checksum, an
-//! oversize or an unknown frame and a UART error (overrun, framing, break, parity) are counted and are not error
-//! events by themselves: a broken stream shows as that silence. A UART error never reaches the driver (it would end
-//! a `configure` in the middle of a baud probe, where framing errors are expected): `GnssUart::read` counts it and
-//! reads on.
-//!
-//! The driver's `read_pvt` is droppable (its README: dropping any future loses nothing it already read; the UART's
-//! read is cancel safe), so the data-ready wait IS the read of the next NAV-PVT: the timeout or the wake signal may
-//! drop it at any await. It returns on the checksum byte of the frame, so the sample's `t_us`, taken by
-//! `device::read` right after `data_ready` returns, is the time the frame arrived.
+//! The GNSS receiver: u-blox SAM-M10Q on UART1 (GPIO24 = the board's TX, GPIO25 = RX, 115200 8N1 once configured), a core-0 device,
+//! a buffered UART read in thread mode without DMA, UBX only through the `sam-m10q` driver.
+//! Every configuration (start, restart, recover after the deadline, and apply, which a `GPS_RATE_MS` write raises) is the driver's whole `configure`:
+//! a baud scan (115200, 9600, 38400, a UBX-MON-VER poll at each), the switch to 115200, one CFG-VALSET to RAM only (UBX only, NMEA off, the measurement period of `GPS_RATE_MS`,
+//! one NAV-PVT per epoch, dynamic model 8, the driver's constellation set) whose ACK is required, and 500 ms of settling; nothing is saved.
+//! It takes up to 5.6 s; the scan starts at 115200, so a receiver at 9600 or 38400 is found only after the silent 1 s probes before it. The MON-VER strings are logged once per successful configure.
+//! A configure that fails is a device error: `start` returns `StartFailure`, `recover`, `restart` and `apply` return `ErrorKind::Bus`, the first try's failure is the WARNING `GNSS: configure failed (<reason>)`,
+//! the reason and the counts are on the `[STAT]` line, and a failed apply is tried again `fw_settings::gnss::CONFIGURE_RETRY_MS` later (the adapter raises the row's APPLY request from `data_ready`).
+//! A retry that succeeds is the INFO `GNSS: configured on try <n>`.
+//! "Ok" means NAV-PVT frames keep arriving: one sample is one NAV-PVT, whether or not it holds a 3D fix. 2.5 s without one (`DEADLINE_US`) is one error event (`ErrorKind::Timeout`);
+//! a bad checksum, an oversize or an unknown frame and a UART error are counted and are not error events by themselves.
+//! A UART error never reaches the driver (it would end a `configure` in the middle of a baud probe, where framing errors are expected): `GnssUart::read` counts it and reads on.
+//! The driver's `read_pvt` is droppable (dropping any future loses nothing it already read; the UART's read is cancel safe), so the data-ready wait is the read of the next NAV-PVT and the timeout or the wake signal may drop it at any await.
+//! It returns on the checksum byte of the frame, so the sample's `t_us`, taken by `device::read` right after `data_ready` returns, is the time the frame arrived.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -60,21 +42,16 @@ bind_interrupts!(struct Irqs {
     UART1_IRQ => BufferedInterruptHandler<UART1>;
 });
 
-/// The nominal sample period P of the row, which sets its stuck threshold (20 P): 1 s, whatever `GPS_RATE_MS`.
 pub const PERIOD_US: u32 = 1_000_000;
-/// The deadline T of the data-ready wait: 2.5 s of silence is one error event (Betaflight's figure),
-/// instead of the 3 P the other rows use.
+/// The deadline T of the data-ready wait: 2.5 s of silence is one error event (Betaflight's figure), instead of the 3 P the other rows use.
 pub const DEADLINE_US: u32 = 2_500_000;
 /// The UART's receive buffer (4096 bytes: 8 s of NAV-PVT frames at 5 Hz) and its transmit buffer; the driver's
 /// CFG-VALSET frame (109 bytes) goes through it in pieces.
 const RX_BUFFER: usize = 4096;
 const TX_BUFFER: usize = 64;
-/// While the receiver is not configured (a failed apply), `data_ready` looks at the retry schedule this often.
 const RETRY_POLL: Duration = Duration::from_millis(100);
-/// `GnssUart::flush` looks at the UART's busy flag this often while the last byte is still leaving.
 const BUSY_POLL: Duration = Duration::from_micros(200);
 
-/// UART receive errors counted by `GnssUart::read` (the driver never sees them).
 static OVERRUN: AtomicU32 = AtomicU32::new(0);
 static FRAMING: AtomicU32 = AtomicU32::new(0);
 static BREAK: AtomicU32 = AtomicU32::new(0);
@@ -84,8 +61,7 @@ fn count(counter: &AtomicU32) {
     let _ = counter.update(Ordering::Relaxed, Ordering::Relaxed, |n| n.saturating_add(1));
 }
 
-/// UART1 as the driver wants it: `BufferedUart` with the baud rate settable, receive errors counted and read past,
-/// and a `flush` that returns when the last byte has left the UART (the driver changes the baud rate right after
+/// UART1 as the driver wants it: `BufferedUart` with the baud rate settable, receive errors counted and read past, and a `flush` that returns when the last byte has left the UART (the driver changes the baud rate right after
 /// it, and `BufferedUart::flush` returns when the software buffer is empty, up to 32 FIFO bytes earlier).
 struct GnssUart(BufferedUart);
 
@@ -94,9 +70,7 @@ impl ErrorType for GnssUart {
 }
 
 impl Read for GnssUart {
-    /// Reads, counting and skipping a receive error (a framing error, a break, ...); a yield between keeps a line
-    /// that only errors from starving the executor and lets the driver's deadline be polled. Droppable at the
-    /// yield and at the read.
+    /// Reads, counting and skipping a receive error; a yield between keeps an erroring line from starving the executor and lets the driver's deadline be polled. Droppable at the yield and at the read.
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
         loop {
             match self.0.read(buf).await {
@@ -132,24 +106,15 @@ impl SetBaud for GnssUart {
     }
 }
 
-/// What a failed configure was, for the WARNING, the `[STAT]` line and the start failure.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ConfigureError {
-    /// The stored `GPS_RATE_MS` is not a period the receiver accepts.
     Stored,
-    /// The driver refused the configuration (the period) before sending anything.
     Invalid,
-    /// No UBX-MON-VER reply at any baud rate.
     NoReceiver,
-    /// No reply after the switch to 115200.
     BaudSwitch,
-    /// The CFG-VALSET got no ACK within 1 s.
     NoAck,
-    /// The CFG-VALSET got a NAK.
     Rejected,
-    /// A UART error.
     Uart,
-    /// The UART returned zero bytes.
     Closed,
 }
 
@@ -168,7 +133,6 @@ impl ConfigureError {
         }
     }
 
-    /// The receiver answered a MON-VER poll before the failure: the row's `present`.
     fn identified(self) -> bool {
         matches!(self, Self::BaudSwitch | Self::NoAck | Self::Rejected)
     }
@@ -188,34 +152,22 @@ impl From<sam_m10q::Error<uart::Error>> for ConfigureError {
     }
 }
 
-/// What the GNSS row counts besides the health counters. Read by the supervisor's `[STAT]`.
 #[derive(Clone, Copy)]
 pub struct Totals {
-    /// Frames with a valid checksum, decoded or not (the driver's).
     pub frames: u32,
-    /// Frames with a bad checksum.
     pub checksum_errors: u32,
-    /// Frames over the driver's size limit.
     pub oversize: u32,
-    /// Valid frames the driver does not decode.
     pub ignored: u32,
-    /// NAV-PVT frames read by `data_ready`.
     pub pvt: u32,
-    /// Successful configures.
     pub configures: u32,
-    /// Failed configures, and how many of them the receiver answered with a NAK.
     pub configure_failures: u32,
     pub naks: u32,
-    /// The reason of the latest failed configure, "" before any.
     pub last_error: &'static str,
-    /// UART receive errors (counted by `GnssUart::read`).
     pub overrun: u32,
     pub framing: u32,
     pub brk: u32,
     pub parity: u32,
-    /// Board time of the latest NAV-PVT, us.
     pub last_pvt_us: Option<u64>,
-    /// The frames are swallowed by the `inject-gnss-silent` wrapper.
     pub silenced: bool,
 }
 
@@ -247,7 +199,7 @@ pub fn totals() -> Totals {
     TOTALS.lock(Cell::get)
 }
 
-/// The GPS time of week of the latest NAV-PVT (iTOW, ms) and its velocity, which keys it to the reading it belongs to.
+/// The GPS time of week of the latest NAV-PVT (iTOW, ms) and its velocity, which keys it to its reading.
 #[derive(Clone, Copy)]
 struct PvtTow {
     vel_ned_mm_s: Option<[i32; 3]>,
@@ -268,10 +220,8 @@ pub fn pvt_tow_ms(vel_ned_mm_s: [i32; 3]) -> Option<u32> {
 /// The PPS latency measurement (measure only): the edges of GPIO5 (`pps_task`) and the whole-second fixes
 /// (`to_flight`), both on core 0.
 static PPS: CriticalSectionMutex<Cell<Pps>> = CriticalSectionMutex::new(Cell::new(Pps::ZERO));
-/// The latest pairing with the `seq` of the sample it belongs to, for the logger's PPS record.
 static PPS_PAIR: CriticalSectionMutex<Cell<Option<(u32, PpsPair)>>> = CriticalSectionMutex::new(Cell::new(None));
 
-/// The pairing of the sample with sequence number `seq`, if it paired with a PPS edge: what the log's PPS record takes.
 pub fn pps_pair(seq: u32) -> Option<PpsPair> {
     PPS_PAIR
         .lock(Cell::get)
@@ -298,16 +248,11 @@ pub async fn pps_task(pin: Peri<'static, PIN_5>) -> ! {
 pub struct GnssAdapter {
     rx: Receiver<GnssUart>,
     totals: Totals,
-    /// The NAV-PVT `data_ready` ended with, for the `acquire` that follows.
     ready: Option<Pvt>,
-    /// The error `data_ready` ended with, for the `acquire` that follows.
     failed: Option<ErrorKind>,
     calls: u32,
-    /// The writer of `crate::flight::FLIGHT_GNSS` (`None` if it was taken already: nothing is written).
     flight: Option<TripleWriter<'static, GnssSample>>,
-    /// When a failed configuration is tried again.
     retry: Retry,
-    /// The APPLY request of a due retry is raised and not yet carried out.
     retry_raised: bool,
 }
 
@@ -346,7 +291,6 @@ impl GnssAdapter {
         }
     }
 
-    /// Publishes the counts: the driver's and the UART's.
     fn publish(&mut self) {
         let s = self.rx.stats();
         let mut t = self.totals;
@@ -432,7 +376,6 @@ impl GnssAdapter {
         Ok(())
     }
 
-    /// Reads the next NAV-PVT, or ends with `failed` set.
     async fn next_pvt(&mut self) {
         match self.rx.read_pvt().await {
             Ok(pvt) => {
@@ -480,7 +423,6 @@ pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
         alt: alt_mm.unwrap_or(0),
         eph: hdop_x100.unwrap_or(u16::MAX),
         epv: vdop_x100.unwrap_or(u16::MAX),
-        // mm/s to cm/s
         vel: speed_mm_s.map_or(u16::MAX, |v| u16::try_from(v / 10).unwrap_or(u16::MAX)),
         cog: course_cdeg.unwrap_or(u16::MAX),
         fix_type: match fix_type {
@@ -496,7 +438,6 @@ pub fn raw_int(reading: &Reading, t_us: u64) -> Option<GPS_RAW_INT_DATA> {
     })
 }
 
-/// `[STAT]` line of the receiver (the generic line of every row precedes it).
 pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>) {
     let t = totals();
     let previous = PVT_AT_STAT.lock(|cell| cell.replace(t.pvt));
@@ -552,9 +493,7 @@ pub fn stat(now: Instant, window_us: u64, latest: Option<crate::device::Sample>)
 
 impl DeviceAdapter for GnssAdapter {
     /// The read of the next NAV-PVT: droppable (see the module comment); it returns on the frame's checksum byte.
-    /// Frames of other kinds on the way are consumed and counted by the driver, a UART error is counted by
-    /// `GnssUart`. While the receiver is not configured (a failed apply) it waits for the retry schedule, which
-    /// raises the APPLY request when a retry is due.
+    /// Other frames on the way are consumed and counted by the driver; while the receiver is not configured (a failed apply) it waits for the retry schedule, which raises the APPLY request when a retry is due.
     async fn data_ready(&mut self) {
         loop {
             if !self.retry_raised && self.retry.due(Instant::now().as_millis()) {
@@ -593,12 +532,10 @@ impl DeviceAdapter for GnssAdapter {
         Ok(Reading::Gnss(reading))
     }
 
-    /// There is no status to read: after a deadline miss nothing is pending.
     async fn status(&mut self) -> Result<Pending, ErrorKind> {
         Ok(Pending::Nothing)
     }
 
-    /// The configuration is not read back.
     async fn verify(&mut self) -> Result<(), VerifyError> {
         Ok(())
     }
@@ -619,7 +556,6 @@ impl DeviceAdapter for GnssAdapter {
         self.configure(false).await.map_err(|_| ErrorKind::Bus)
     }
 
-    /// The same as `recover`.
     async fn restart(&mut self) -> Result<(), ErrorKind> {
         self.configure(false).await.map_err(|_| ErrorKind::Bus)
     }
@@ -744,7 +680,6 @@ type Adapter = GnssAdapter;
 #[cfg(feature = "inject-gnss-silent")]
 type Adapter = Silent<GnssAdapter>;
 
-/// The adapter for this build (with the fault-injection wrapper when `inject-gnss-silent` is on).
 pub fn adapter(
     uart1: Peri<'static, UART1>,
     tx: Peri<'static, PIN_24>,

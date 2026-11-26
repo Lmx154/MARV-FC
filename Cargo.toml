@@ -11,8 +11,7 @@ members = ["crates/fw-core", "crates/fw-flight", "crates/fw-settings"]
 resolver = "3"
 
 [dependencies]
-# The device drivers, one GitHub repository each, pinned to a commit (the state verified on the board on
-# 2026-11-11). The crate name is the repository name without "-rs".
+# The device drivers, one GitHub repository each, pinned to a commit. The crate name is the repository name without "-rs".
 # To take a newer driver: change its `rev` to the new commit and run `cargo update -p <crate>`.
 # To work on a driver and the firmware together, override it locally without editing this file:
 #   [patch."https://github.com/Lmx154/icm45686-rs.git"]
@@ -22,7 +21,7 @@ lsm6dsk320x = { git = "https://github.com/Lmx154/lsm6dsk320x-rs.git", rev = "447
 bmp581 = { git = "https://github.com/Lmx154/bmp581-rs.git", rev = "5046a13c476ca9493e5dddd3d019a23b6d05395b", features = ["defmt"] }
 bmm350 = { git = "https://github.com/Lmx154/bmm350-rs.git", rev = "d233caac832582f3c67be3332e12baf9970d0d6a", features = ["defmt"] }
 adc-battery = { git = "https://github.com/Lmx154/adc-battery.git", rev = "3d8ad8ebbbc45bb2cb4d23ccad84c77dc0989e26", features = ["defmt"] }
-# The GNSS receiver (src/gnss.rs): the u-blox SAM-M10Q, UBX only (decision-gnss-m10-20261122).
+# The GNSS receiver (src/gnss.rs): the u-blox SAM-M10Q, UBX only.
 sam-m10q = { git = "https://github.com/Lmx154/sam-m10q.git", rev = "d9f6c8858118dc677dfa62b475700c45be46f350", features = ["defmt"] }
 pio-sdmmc = { git = "https://github.com/Lmx154/pio-sdmmc-rs.git", rev = "424fd58b4beb7607e426c398494c836b4bfe1fb3", features = ["defmt", "embassy-rp-0-10", "block-device-driver-0-2"] }
 # The four ESCs (src/esc.rs): bidirectional DShot on PIO2 with `PioDshot`; the same commit as in
@@ -68,10 +67,8 @@ embedded-hal-async = "1.0"
 embedded-hal-bus = { version = "0.3", features = ["async"] }
 embassy-futures = "0.1.2"
 static_cell = "2.1.1"
-# The FAT32 file system on the SD card (src/sd.rs) and its stream adapters (`BufStream`, `StreamSlice`):
-# git only (no release), both at one commit of master (2026-10-23), with the `[patch.crates-io]` below so that
-# the one `BlockDevice<512>` trait in the tree is the one pio-sdmmc implements. 8.3 names, no chrono (FAT
-# times 1980-01-01), no log, no alloc.
+# The FAT32 file system on the SD card (src/sd.rs) and its stream adapters (`BufStream`, `StreamSlice`): git only (no release), both at one commit of master,
+# with the `[patch.crates-io]` below so that the one `BlockDevice<512>` trait in the tree is the one pio-sdmmc implements. 8.3 names, no chrono (FAT times 1980-01-01), no log, no alloc.
 embedded-fatfs = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "7961cd4eb64de51818d8cdda991713784fa98366", default-features = false }
 block-device-adapters = { git = "https://github.com/MabezDev/embedded-fatfs", rev = "7961cd4eb64de51818d8cdda991713784fa98366", default-features = false }
 # The lock-free waker static behind the SD bus's `DMA_IRQ_1` handler (pio-sdmmc `DmaWaker`).
@@ -132,8 +129,7 @@ inject-imu2-persistent = ["inject-imu2"]
 inject-imu2-verify = ["inject-imu2"]
 # Internal: on when an IMU2 injection feature is on.
 inject-imu2 = ["inject-imu"]
-# With any IMU injection feature, the injection starts 60 s (not 5 s) after the first good sample, so the
-# vehicle can be armed first (src/imu_inject.rs; flight-gap decision, 2026-11-19).
+# With any IMU injection feature, the injection starts 60 s (not 5 s) after the first good sample, so the vehicle can be armed first (src/imu_inject.rs).
 inject-late = []
 # Internal: on when an IMU injection feature is on (src/imu_inject.rs, the wrapper both IMUs use).
 inject-imu = []
@@ -177,40 +173,28 @@ quiet-stat = []
 # the MBR check a block 0 whose partition 1 type is 0x07 (exFAT/NTFS).
 inject-sd-no-card = []
 inject-sd-wrong-format = []
-# Test hooks of the log writer (src/sd.rs): inject-sd-write-fail: 60 s after the log opened the next six
-# write calls fail without card traffic (three pieces, each with its retry: three error events, the ladder
-# recovers and the next log number is opened); log-verify: after the mount and before the new log is opened,
-# the previous log (the number in LOGS/LASTLOG.TXT) is read through fw-core's dflog walker and summarised;
-# inject-log-small-volume: the first open's clean-up (before the log is opened) is told a volume of 500 MiB
-# plus the listed bytes minus one, so the oldest log is deleted once; inject-log-delete-big: the first open's
-# clean-up is told a volume of 500 MiB plus the bytes of the logs after the largest one in ring order, so
-# every log up to and including the largest is deleted (a long deletion on the board).
+# Test hooks of the log writer (src/sd.rs): inject-sd-write-fail: 60 s after the log opened the next six write calls fail without card traffic (three pieces, each with its retry);
+# log-verify: after the mount the previous log is read through fw-core's dflog walker and summarised; inject-log-small-volume: the first open's clean-up is told a volume of 500 MiB plus the listed bytes minus one, so the oldest log is deleted once;
+# inject-log-delete-big: a volume of 500 MiB plus the bytes of the logs after the largest one in ring order, so every log up to and including the largest is deleted.
 inject-sd-write-fail = []
 log-verify = []
 inject-log-small-volume = []
 inject-log-delete-big = []
-# NEGATIVE CONTROL of Q1-I1: INTE0 bit 4 (the SD card's channel) is set before the SD task's register
-# check and cleared after it: the INTE0 check must FAIL.
+# NEGATIVE CONTROL: INTE0 bit 4 (the SD card's channel) is set before the SD task's register check and cleared after it: the INTE0 check must FAIL.
 sd-irq-negative = []
-# NEGATIVE CONTROL of the RAM-code guard (decision-ram-code-20261115): `now_us` is linked into flash
-# (section `.text.ram_negative`, never inlined), so tools/check-ram-code.py must FAIL naming it;
-# tools/run.sh then requires that failure (exit 1) before it flashes.
+# NEGATIVE CONTROL of the RAM-code guard: `now_us` is linked into flash (section `.text.ram_negative`, never inlined),
+# so tools/check-ram-code.py must FAIL naming it; tools/run.sh then requires that failure (exit 1) before it flashes.
 ram-negative = []
-# The board check of the RAM-code design (src/xip_park.rs, decision-ram-code-20261115 Q5): 30 s after
-# start a 1 s window of both cores' XIP accesses (more than 100 000: the counter runs), then core 0 parks 1.0 s in SRAM with
-# interrupts off and the XIP accesses counted meanwhile (core 1's) must be 0 with both IMUs sampling;
-# with ram-negative at least 1000.
+# The board check of the RAM-code design (src/xip_park.rs): 30 s after start a 1 s window of both cores' XIP accesses (more than 100 000: the counter runs),
+# then core 0 parks 1.0 s in SRAM with interrupts off and the XIP accesses counted meanwhile (core 1's) must be 0 with both IMUs sampling; with ram-negative at least 1000.
 xip-park = []
-# Props-off bench of the in-air restart (decision-inair-restart-20261125; docs/build-and-test.md): every arm-switch STOP,
-# on the ground too, lets an arm ON within 5 s restart the motors at once with any throttle (the free-fall test forced
-# true), to measure spin-up from ESC telemetry. PROPS OFF; never for flight.
+# Props-off bench of the in-air restart (docs/build-and-test.md): every arm-switch STOP, on the ground too, lets an arm ON within 5 s restart the motors at once with any throttle (the free-fall test forced true),
+# to measure spin-up from ESC telemetry. PROPS OFF; never for flight.
 restart-bench = ["fw-flight/restart-bench"]
 
-# The PSRAM checks (src/psram.rs), built for the board, run by the lead. psram-skip-remap: the hook after a flash
-# erase or program does not remap, so the canary must FAIL after the first save. psram-absent: the driver's init is
-# treated as failed (no chip access): the board boots, the PSRAM state reads FAULT, nothing panics. NEGATIVE CONTROL
-# psram-negative: core 1's `now_us` reads the PSRAM canary, so tools/check-ram-code.py must FAIL naming it (a static
-# check, never flashed).
+# The PSRAM checks (src/psram.rs). psram-skip-remap: the hook after a flash erase or program does not remap, so the canary must FAIL after the first save.
+# psram-absent: the driver's init is treated as failed (no chip access): the board boots, the PSRAM state reads FAULT, nothing panics.
+# NEGATIVE CONTROL psram-negative: core 1's `now_us` reads the PSRAM canary, so tools/check-ram-code.py must FAIL naming it (a static check, never flashed).
 psram-skip-remap = []
 psram-absent = []
 psram-negative = []

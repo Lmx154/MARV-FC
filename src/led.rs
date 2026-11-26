@@ -1,11 +1,6 @@
-//! The status LED (D20, one WS2812C on GPIO43): a core-0 task on PIO1 state machine 1 that shows the
-//! boot roll call, the running display and the one-off flashes of `fw_core::led`
-//! (`decision-status-led-20261118`). Every 20 ms it gathers what the display reads (the device rows,
-//! the motor spin (a motor test or flight throttles), the calibration flag, the open log, the GNSS fix, `LED_BRIGHT`), asks
-//! `fw_core::led` and writes the LED only when the colour or the brightness changed.
-//!
-//! Nothing depends on the LED: if the transport cannot be built the task logs once and ends. There is
-//! no LED device row, and no cross-core cell (every input is readable on core 0).
+//! The status LED (D20, one WS2812C on GPIO43): a core-0 task on PIO1 state machine 1 that shows the boot roll call, the running display and the one-off flashes of `fw_core::led`.
+//! Every 20 ms it gathers what the display reads (the device rows, the motor spin, the calibration flag, the open log, the GNSS fix, `LED_BRIGHT`), asks `fw_core::led`
+//! and writes the LED only when the colour or the brightness changed. Nothing depends on the LED: if the transport cannot be built the task logs once and ends.
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -52,7 +47,6 @@ pub fn event(good: bool) {
     EVENT.store(if good { GOOD } else { BAD }, Ordering::Relaxed);
 }
 
-/// `LED_BRIGHT` from the store.
 fn level() -> i32 {
     crate::store::with(|p| match p.get_named(fw_settings::led::BRIGHT) {
         Some(ParamValue::I32(v)) => Some(v),
@@ -62,12 +56,10 @@ fn level() -> i32 {
     .unwrap_or(DEFAULT_LEVEL)
 }
 
-/// Whether a log is open on the SD card.
 fn log_open() -> bool {
     crate::logger::OPEN.load(Ordering::Relaxed) != 0
 }
 
-/// Everything the display reads, now, with the level last read from the store.
 fn inputs(now_us: u64, level: i32) -> Inputs {
     let sd = find(MarvDevice::MARV_DEVICE_SD).map_or(State::Absent, |d| d.row().state);
     let (esc_state, flight_spin) = crate::esc::led_inputs();
@@ -97,7 +89,6 @@ fn inputs(now_us: u64, level: i32) -> Inputs {
     }
 }
 
-/// The status LED's task (core 0). Spawned in `main` with PIO1 and GPIO43.
 #[embassy_executor::task]
 pub async fn task(pio: Peri<'static, PIO1>, pin: Peri<'static, PIN_43>) {
     tagged(&crate::watchdog::RUNNING0, task::LED, run(pio, pin)).await

@@ -1,26 +1,14 @@
-//! The 16 MiB PSRAM in socket U24 (decision-psram-offload-20261121 in MARV-V2-drivers, D2/D3, work units
-//! W2, W3 and W4). It starts the chip at boot, keeps a 64-byte canary in the memory, re-maps the window after
-//! every flash erase or program, and holds the storage of the two log rings, `logger::RING` (1 MiB) and
-//! `logdl::HANDOVER` (4 KiB), which [`init`] binds once the canary has passed. Without a working chip the rings
-//! stay unbound: the collector drains the flight ring into nothing, the SD task is off ("no PSRAM") and the log
-//! download is refused; arming is not blocked, and there is no SRAM fallback ring.
-//!
-//! The memory is `qmi-psram`'s uncached alias at 0x15000000 (`memory.x`, region PSRAM, section `.psram`).
-//! Rules this module keeps (invariants P1 to P6 of the decision):
-//! - Core 1 never touches it (P1): nothing here is reachable from core 1; `tools/check-ram-code.py` fails
-//!   otherwise (negative control: the feature `psram-negative`).
-//! - Only core 0 uses it, in thread mode (P2): the collector, the SD task and the USB link task, all on core 0's
-//!   thread-mode executor (`main`'s). The one exception is [`after_flash_op`], which runs wherever a settings
-//!   save runs: in thread mode, or on `SWI_IRQ_0` when the save came over the radio.
-//! - Nothing in it is atomic and nothing has an initial value (P3): [`PsramBuf`] is `MaybeUninit` bytes, and
-//!   `psram_static!` below is the one place a static is put in `.psram`.
-//! - No access before `init` and its canary, and none after a flash operation before the remap and the
-//!   canary (P4): [`ready`] says whether the memory may be used. The rings' handles exist only after the bind
-//!   in [`init`]; at run time each producer and consumer checks [`ready`] before a batch of PSRAM accesses
-//!   (the collector once per tick, the SD task once per loop turn, the USB link per sample), so a FAULT after a
-//!   flash operation stops them.
-//! - No DMA to or from it (P5), uncached alias only (P6).
-//! A missing or failing chip never panics: the state reads FAULT, the log says why, and the board goes on.
+//! The 16 MiB PSRAM in socket U24. It starts the chip at boot, keeps a 64-byte canary in the memory, re-maps the window after every flash erase or program,
+//! and holds the storage of the two log rings, `logger::RING` (1 MiB) and `logdl::HANDOVER` (4 KiB), which [`init`] binds once the canary has passed.
+//! Without a working chip the rings stay unbound: the collector drains the flight ring into nothing, the SD task is off ("no PSRAM") and the log download is refused; arming is not blocked.
+//! The memory is `qmi-psram`'s uncached alias at 0x15000000 (`memory.x`, region PSRAM, section `.psram`). Rules this module keeps:
+//! - Core 1 never touches it (P1): nothing here is reachable from core 1; `tools/check-ram-code.py` fails otherwise (negative control: the feature `psram-negative`).
+//! - Only core 0 uses it, in thread mode (P2): the collector, the SD task and the USB link task. The one exception is [`after_flash_op`],
+//!   which runs wherever a settings save runs: in thread mode, or on `SWI_IRQ_0` when the save came over the radio.
+//! - Nothing in it is atomic and nothing has an initial value (P3): [`PsramBuf`] is `MaybeUninit` bytes, and `psram_static!` below is the one place a static is put in `.psram`.
+//! - No access before `init` and its canary, and none after a flash operation before the remap and the canary (P4): [`ready`] says whether the memory may be used;
+//!   each producer and consumer checks it before a batch of PSRAM accesses.
+//! - No DMA to or from it (P5), uncached alias only (P6). A missing or failing chip never panics: the state reads FAULT, the log says why, and the board goes on.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
@@ -37,9 +25,7 @@ use fw_core::extring::{PsramBuf, PsramReady};
 use qmi_psram::Psram;
 use qmi_psram::rp2350::{Cs1Pin, Rp2350Qmi};
 
-/// Bytes of the canary.
 const CANARY_LEN: usize = 64;
-/// Words of the canary.
 const CANARY_WORDS: usize = CANARY_LEN / 4;
 
 /// Not started (before [`init`]), or the chip was never found: nothing is mapped.
@@ -61,7 +47,6 @@ static REASON: AtomicU8 = AtomicU8::new(R_NONE);
 /// Canary checks made (boot, periodic, after a flash operation) and those that failed.
 static CHECKS: AtomicU32 = AtomicU32::new(0);
 static CHECK_FAILS: AtomicU32 = AtomicU32::new(0);
-/// Remaps made after a flash operation.
 static REMAPS: AtomicU32 = AtomicU32::new(0);
 /// Entry points called outside their context (P2): not on core 0, or in an interrupt where only thread mode
 /// is allowed. A release counter, shown in the `[STAT]` line; a debug build also panics.
@@ -87,7 +72,6 @@ psram_static!(LOG_BUF, crate::logger::RING_BYTES);
 // `logdl::HANDOVER`'s storage (the SD task writes it, the USB task reads it).
 psram_static!(HANDOVER_BUF, crate::logdl::HANDOVER_BYTES);
 
-/// The canary's first byte.
 fn canary_base() -> *mut u8 {
     // The newtype is `repr(C)` around one `UnsafeCell` of bytes, so a pointer to it is a pointer to its bytes.
     (&raw mut CANARY).cast()
@@ -105,7 +89,6 @@ fn pattern(k: usize) -> u32 {
     x
 }
 
-/// Writes the canary (the memory must be mapped and idle).
 fn canary_write() {
     let base = canary_base().cast::<u32>();
     for k in 0..CANARY_WORDS {
@@ -156,13 +139,11 @@ fn fault(reason: u8) {
     STATE.store(FAULT, Ordering::Release);
 }
 
-/// True when the memory has been started, its canary verified, and no flash operation has left it unmapped.
-/// The ring users check it before each batch of PSRAM accesses: it turns false for good at a FAULT.
+/// True when the memory has been started, its canary verified, and no flash operation has left it unmapped; it turns false for good at a FAULT.
 pub fn ready() -> bool {
     STATE.load(Ordering::Acquire) == READY
 }
 
-/// One word for the `[STAT]` line.
 pub fn status_text() -> &'static str {
     match (
         STATE.load(Ordering::Relaxed),
@@ -195,12 +176,9 @@ pub fn violations() -> u32 {
     VIOLATIONS.load(Ordering::Relaxed)
 }
 
-/// Starts the PSRAM and checks the canary. At boot, on core 0, after the boot-time flash writes (the
-/// settings are read before) and before `spawn_core1` (the driver's contract: nothing else runs from
-/// flash while it talks to the chip). Takes the chip-select peripheral and its pin so that nothing else can.
-/// A missing or failing chip leaves the state at FAULT with a `[FAIL]` line; it never panics.
+/// Starts the PSRAM and checks the canary: at boot, on core 0, after the boot-time flash writes and before `spawn_core1` (nothing else may run from flash while the driver talks to the chip).
+/// Takes the chip-select peripheral and its pin so that nothing else can. A missing or failing chip leaves the state at FAULT with a `[FAIL]` line; it never panics.
 pub fn init(qmi_cs1: Peri<'static, QMI_CS1>, pin0: Peri<'static, PIN_0>) {
-    // Consumed here for good: QMI CS1 and GPIO0 belong to the driver from now on.
     let _ = (qmi_cs1, pin0);
     context_ok(false);
     let started = Instant::now();
@@ -324,19 +302,8 @@ pub fn periodic() {
     check(R_CANARY);
 }
 
-/// The hook after a flash erase or program (`settings::guarded`, on success or failure, synchronously):
-/// programming the in-package flash through the boot ROM resets the QMI window registers, so the window is
-/// re-programmed (`remap`, contents kept) and the canary read back. A failure makes the state FAULT (P4).
-///
-/// Before [`init`] (the boot-time flash writes) nothing is mapped and it does nothing; `init` runs after them.
-///
-/// Why no access can fall between the flash operation and this remap (P2): this runs synchronously, right
-/// after `blocking_erase`/`blocking_write` return, on the context that called them (a thread-mode task, or
-/// `SWI_IRQ_0`, where the radio's save runs: `rc.rs`). Another thread-mode task cannot run before it returns, a
-/// preempting interrupt cannot return into one, and the interrupt handlers that can run in between (the
-/// hardware interrupts at P0, `SWI_IRQ_1` at P1, and `SWI_IRQ_0` itself when this runs in thread mode) do not
-/// touch the PSRAM: `psram::` is called only from `main` (boot, the supervisor task) and from `settings`.
-/// Another save cannot interleave either: `with_storage` hands the flash out once.
+/// The hook after a flash erase or program (`settings::guarded`, on success or failure, synchronously): programming the in-package flash through the boot ROM resets the QMI window registers, so the window is re-programmed (`remap`, contents kept) and the canary read back. A failure makes the state FAULT (P4). Before [`init`] nothing is mapped and it does nothing.
+/// No access can fall between the flash operation and this remap (P2): this runs synchronously, right after `blocking_erase`/`blocking_write` return, on the context that called them (a thread-mode task, or `SWI_IRQ_0`, where the radio's save runs: `rc.rs`). Another thread-mode task cannot run before it returns, a preempting interrupt cannot return into one, and the interrupt handlers that can run in between do not touch the PSRAM; another save cannot interleave (`with_storage` hands the flash out once).
 pub fn after_flash_op() {
     if STATE.load(Ordering::Acquire) != READY {
         return;

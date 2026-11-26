@@ -1,8 +1,5 @@
-//! IMU2: LSM6DSK320X on SPI1 (SCK GPIO10, MOSI GPIO11, MISO GPIO8, CS GPIO9, 8 MHz, mode 0) with
-//! DMA channels 2 and 3, data-ready on INT1 (GPIO7; INT2 on GPIO6 is not used); a flight-core
-//! device. Everything here except [`CELLS`] runs on core 1: [`adapter`] is called inside core 1's
-//! entry, so the DMA and GPIO interrupts land there, and [`task`] runs `fw_flight::imu` on core 1's
-//! executor. No log here. The `lsm6dsk320x` driver is used as it is.
+//! IMU2: LSM6DSK320X on SPI1 (SCK GPIO10, MOSI GPIO11, MISO GPIO8, CS GPIO9, 8 MHz, mode 0) with DMA channels 2 and 3, data-ready on INT1 (GPIO7; INT2 on GPIO6 is not used); a flight-core device.
+//! Everything here except [`CELLS`] runs on core 1: [`adapter`] is called inside core 1's entry, so the DMA and GPIO interrupts land there, and [`task`] runs `fw_flight::imu` on core 1's executor. No log here.
 
 use core::convert::Infallible;
 
@@ -32,7 +29,6 @@ static STRETCH: Stretch = Stretch::new();
 
 const SPI_HZ: u32 = 8_000_000;
 
-/// The peripherals IMU2 owns, moved into core 1's entry.
 pub struct Parts {
     pub spi: Peri<'static, SPI1>,
     pub sck: Peri<'static, PIN_10>,
@@ -42,10 +38,8 @@ pub struct Parts {
     pub int1: Peri<'static, PIN_7>,
     pub tx_dma: Peri<'static, DMA_CH2>,
     pub rx_dma: Peri<'static, DMA_CH3>,
-    /// The offsets core 0 publishes, subtracted from every sample.
     pub offsets: TripleReader<'static, ImuOffsets>,
-    /// The chip's configuration, its full scales and the sample period, read from the settings at
-    /// boot; handed over by value, so no cell carries it (`fw_settings::imu::imu2_setup`).
+    /// The chip's configuration, full scales and sample period, read from the settings at boot and handed over by value (`fw_settings::imu::imu2_setup`).
     pub setup: Imu2Setup,
 }
 
@@ -71,7 +65,6 @@ fn kind<E>(error: &Error<E>) -> ErrorKind {
 }
 
 impl Lsm6dsk320xAdapter {
-    /// Builds SPI1 with its DMA channels and the INT1 input: call on core 1.
     fn new(p: Parts) -> Self {
         let mut cfg = spi::Config::default();
         cfg.frequency = SPI_HZ;
@@ -105,7 +98,6 @@ impl Lsm6dsk320xAdapter {
         &mut self.chip
     }
 
-    /// Software reset, identity check and the configuration.
     async fn init<D: DelayNs>(&mut self, delay: &mut D) -> Result<(), Error<DevError>> {
         self.step = 0;
         let config = self.setup.config;
@@ -176,7 +168,6 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
         (1_000_000 / self.setup.period_us.max(1) / steps.max(1)).max(1)
     }
 
-    /// INT1 is latched: high while a sample waits.
     fn data_waiting(&mut self) -> bool {
         self.int1.is_high()
     }
@@ -206,8 +197,7 @@ impl ImuAdapter for Lsm6dsk320xAdapter {
         self.init(delay).await.map_err(|e| kind(&e))
     }
 
-    /// The driver's self-test with its defaults (low-g, gyroscope and high-g, positive stimulus,
-    /// 100 ms settle); it restores the configuration only on success, and the restart that follows
+    /// The driver's self-test with its defaults (low-g, gyroscope and high-g, positive stimulus, 100 ms settle); it restores the configuration only on success, and the restart that follows
     /// configures the device in any case.
     async fn self_test<D: DelayNs>(&mut self, delay: &mut D) -> Verdict {
         self.step = 0;
@@ -239,7 +229,6 @@ pub type Adapter = Lsm6dsk320xAdapter;
 #[cfg(feature = "inject-imu2")]
 pub type Adapter = crate::imu_inject::Inject<Lsm6dsk320xAdapter>;
 
-/// The adapter for this build: call on core 1.
 pub fn adapter(parts: Parts) -> Adapter {
     #[cfg(not(feature = "inject-imu2"))]
     return Lsm6dsk320xAdapter::new(parts);

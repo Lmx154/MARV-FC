@@ -1,15 +1,8 @@
-//! The four ESCs: bidirectional DShot300 at 1 kHz on PIO2 SM0, GPIO36-39 (driver line 0 = GPIO36 = M4
-//! ... line 3 = GPIO39 = M1), the reply capture on DMA channel 5 (`dshot` `PioDshot`). Design:
-//! `decision-esc-telemetry-20261118` Q1-Q3. Stop frames from every boot, and command 13 in the EDT
-//! bursts of `fw_flight::esc`; throttle on all four lines from the flight command (`crate::flight::OUT`,
-//! Stop when older than `fw_flight::esc::MOTOR_HOLD_MAX_US`), or, while that is Stop, on one line for the
-//! props-off motor test (command 209: at most 5 %, 3 s, the command in the cell [`TEST`]; README, Motor test).
-//!
-//! [`driver`] and [`task`] run on core 1: [`driver`] is called inside core 1's entry, so
-//! `PIO2_IRQ_0` and the DMA channel's `DMA_IRQ_0` are enabled there, and [`task`] runs on core 1's
-//! executor (no timer, no log, no lock: it waits with `SpinDelay` and publishes to [`ESC`]). The
-//! rest runs on core 0: the ESC row, ESC_STATUS and ESC_INFO (rpm with `MOT_POLES`), the `[STAT]`
-//! line.
+//! The four ESCs: bidirectional DShot300 at 1 kHz on PIO2 SM0, GPIO36-39 (driver line 0 = GPIO36 = M4 ... line 3 = GPIO39 = M1), the reply capture on DMA channel 5 (`dshot` `PioDshot`).
+//! Stop frames from every boot, and command 13 in the EDT bursts of `fw_flight::esc`; throttle on all four lines from the flight command (`crate::flight::OUT`, Stop when older than `fw_flight::esc::MOTOR_HOLD_MAX_US`),
+//! or, while that is Stop, on one line for the props-off motor test (command 209: at most 5 %, 3 s, the command in the cell [`TEST`]).
+//! [`driver`] is called inside core 1's entry, so `PIO2_IRQ_0` and the DMA channel's `DMA_IRQ_0` are enabled there; [`task`] runs on core 1's executor (no timer, no log, no lock: it waits with `SpinDelay` and publishes to [`ESC`]).
+//! The rest runs on core 0: the ESC row, ESC_STATUS and ESC_INFO (rpm with `MOT_POLES`), the `[STAT]` line.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 use embassy_rp::peripherals::{DMA_CH5, PIN_36, PIN_37, PIN_38, PIN_39, PIO2};
@@ -38,7 +31,7 @@ pub static ESC: Seqlock<EscStatus> = Seqlock::new(EscStatus::INITIAL);
 /// initial value is a stop, so a reset never resumes a test.
 static TEST: TripleBuffer<TestCmd> = TripleBuffer::new(TestCmd::INITIAL);
 
-/// The task's reader of [`TEST`]. Called once, on core 0, before core 1 starts.
+/// The task's reader of [`TEST`]; call once on core 0 before core 1 starts.
 pub fn test_reader() -> TripleReader<'static, TestCmd> {
     match TEST.take_reader() {
         Some(reader) => reader,
@@ -57,7 +50,6 @@ pub fn test_writer() -> fw_core::xcore::TripleWriter<'static, TestCmd> {
 /// Copies of [`ESC`] tried before core 0 gives up (as the IMU status).
 const READ_ATTEMPTS: u32 = 64;
 
-/// `MOT_POLES` when the store cannot be read (the table's default).
 const DEFAULT_POLES: i32 = 14;
 
 /// The peripherals the ESC task owns, moved into core 1's entry; the pins in the driver's order
@@ -69,7 +61,6 @@ pub struct Parts {
     pub pin38: Peri<'static, PIN_38>,
     pub pin39: Peri<'static, PIN_39>,
     pub dma: Peri<'static, DMA_CH5>,
-    /// `clk_sys` in Hz, read on core 0 (no `clocks` call on core 1).
     pub clk_sys_hz: u32,
 }
 
@@ -141,20 +132,14 @@ pub async fn task(mut drv: Driver, mut test: TripleReader<'static, TestCmd>) -> 
     }
 }
 
-// ---------------------------------------------------------------------------------------------
-// Core 0.
-// ---------------------------------------------------------------------------------------------
-
 /// The `seq` of the latest ending [`report`] has printed (0: none; core 0 numbers commands from 1).
 static ENDED_SEQ: AtomicU32 = AtomicU32::new(0);
 
-/// The latest status (core 0); the initial status if no consistent copy was had, which the row
-/// shows as stuck.
+/// The latest status (core 0); the initial status if no consistent copy was had, which the row shows as stuck.
 fn snapshot() -> EscStatus {
     ESC.try_read(READ_ATTEMPTS).unwrap_or(EscStatus::INITIAL)
 }
 
-/// Flight throttles went out on the latest exchange (core 0: admission).
 pub fn flight_spin() -> bool {
     snapshot().flight_spin
 }
@@ -210,7 +195,6 @@ pub fn report() {
     }
 }
 
-/// `MOT_POLES` from the store.
 fn poles() -> i32 {
     crate::store::with(|p| match p.get_named(fw_settings::esc::POLES) {
         Some(ParamValue::I32(v)) => Some(v),
@@ -244,7 +228,6 @@ pub fn row() -> DeviceRow {
     }
 }
 
-/// The ESC row's `MARV_DEVICE_STATUS` (report only, recomputed for every message).
 pub fn message(now_us: u64) -> MARV_DEVICE_STATUS_DATA {
     fw_core::esc::device_status(&snapshot(), now_us)
 }

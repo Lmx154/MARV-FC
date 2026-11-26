@@ -1,16 +1,9 @@
-//! The firmware's commands: the one `fw_core::admission::ActionBook`, the action each admitted
-//! command starts, and how each action ends. Link id 0 is USB, 1 the radio (`crate::LINK_*`); the
-//! final ACK goes only to the origin link (the book's rule). `armed` is the flight core's handshake
-//! (`settings::HANDSHAKE`), flight throttles sent (`esc::ESC`) or a motor-test spin; `hil` is false
-//! until the HIL source exists.
-//!
-//! Built: restart of every registry row (IMU1, IMU2, BARO, MAG, GNSS, BATT, SD), the self-test of
-//! MAG, IMU1 and IMU2 (the driver's test, then the restart under the same request number; one
-//! STATUSTEXT with the result before the final ACK), parameters to defaults (all, calibration),
-//! save to and reload from the flash settings region (`settings`), reboot (the watchdog monitor
-//! resets the board 100 ms after the final ACK was handed to the link; nothing is saved), the gyro
-//! and the one-position accelerometer and the compass calibrations (`calibration`). Every other
-//! action the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
+//! The firmware's commands: the one `fw_core::admission::ActionBook`, the action each admitted command starts, and how each action ends.
+//! Link id 0 is USB, 1 the radio (`crate::LINK_*`); the final ACK goes only to the origin link. `armed` is the flight core's handshake (`settings::HANDSHAKE`),
+//! flight throttles sent (`esc::ESC`) or a motor-test spin; `hil` is false.
+//! Actions: restart of every registry row, the self-test of MAG, IMU1 and IMU2 (the driver's test, then the restart under the same request number; one STATUSTEXT with the result before the final ACK),
+//! parameters to defaults (all, calibration), save to and reload from the flash settings region (`settings`), reboot (the watchdog monitor resets the board 100 ms after the final ACK was handed to the link; nothing is saved),
+//! and the gyro, the one-position accelerometer and the compass calibrations (`calibration`). Every other action the book admits ends FAILED at once with one STATUSTEXT "<what>: not built yet".
 
 use core::cell::{Cell, RefCell};
 
@@ -45,7 +38,6 @@ struct Motor {
 static MOTOR: Mutex<CriticalSectionRawMutex, RefCell<Option<Motor>>> =
     Mutex::new(RefCell::new(None));
 
-/// Takes the cell's writer. Call once, on core 0, before core 1 starts.
 pub fn init_motor_test() {
     let cell = crate::esc::test_writer();
     MOTOR.lock(|m| {
@@ -69,12 +61,8 @@ pub fn motor_spin() -> bool {
 /// refusal text of the radio's arm-switch edge (core 0 only).
 static PREARM: AtomicU8 = AtomicU8::new(fw_core::arming::Reasons::BOOTING.bits());
 
-/// Every supervisor tick, after [`tick`] with the same `now_ms` (so `busy` ends nothing by time
-/// limit here): the pre-arm reasons (decision-prearm-20261119) and the permit. The three action
-/// states are read and the permit stored inside one critical section, `BOOK`'s lock (`MOTOR`'s
-/// nests in it as in `command`; embassy-rp's critical section is re-entrant on the core that holds
-/// it), so a command admitted on the radio's `SWI_IRQ_0` executor cannot run between the read and
-/// the store (`fw_core::handshake`).
+/// Every supervisor tick, after [`tick`] with the same `now_ms`: the pre-arm reasons and the permit.
+/// The three action states are read and the permit stored inside one critical section (`BOOK`'s lock; `MOTOR`'s nests in it as in `command`), so a command admitted on the radio's `SWI_IRQ_0` executor cannot run between the read and the store (`fw_core::handshake`).
 pub fn permit(now_ms: u64, imu1: fw_core::health::State, esc: fw_core::health::State) {
     BOOK.lock(|b| {
         let book_busy = b.borrow_mut().busy(now_ms);
@@ -115,7 +103,6 @@ fn result_name(result: MavResult) -> &'static str {
     }
 }
 
-/// The longest an ACK is held back because of pending texts, in ms.
 const HOLD_MAX_MS: u64 = 300;
 
 /// Per link: when `next_ack` first saw that link's texts pending and held back (core 0 only);
@@ -162,8 +149,7 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
         return motor_test(req, link, now_ms);
     }
     // While armed, while flight throttles are sent or while a motor-test spin runs, every other action is refused.
-    // The permit is cleared before ARMED is loaded (the Dekker pair with the gate, `fw_core::handshake`); no await
-    // from here to the action's state (the book's slot in `admit`, then `start`).
+    // The permit is cleared before ARMED is loaded (the Dekker pair with the gate, `fw_core::handshake`); no await from here to the action's state.
     crate::settings::HANDSHAKE.set_permit(false);
     let flying = crate::esc::flight_spin() || crate::settings::HANDSHAKE.armed();
     let decision = BOOK.lock(|b| {
@@ -202,7 +188,7 @@ pub fn command(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
 /// once, no IN_PROGRESS, nothing in the book), the whole `TestCmd` of an accepted command written to
 /// the flight core's cell. The same on every link.
 fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
-    // A spin is refused while armed or while flight throttles are sent; a running spin is replaced as before.
+    // A spin is refused while armed or while flight throttles are sent; a running spin is replaced.
     // The permit is cleared before ARMED is loaded, as in `command`.
     crate::settings::HANDSHAKE.set_permit(false);
     let flying = crate::esc::flight_spin() || crate::settings::HANDSHAKE.armed();
@@ -257,16 +243,13 @@ fn motor_test(req: &CommandRequest, link: u8, now_ms: u64) -> CommandOutcome {
     decision.outcome
 }
 
-/// `Telemetry::acks`: the next late ACK for link `link`.
 pub fn next_ack(link: u8, now_ms: u64) -> Option<LateAck> {
     if let Some(ack) = crate::station::next_ack(link) {
         return Some(ack);
     }
-    // The node sends ACKs before it takes texts from `Telemetry::texts`: hold the ACK until the
-    // queued text (a calibration's result or failure) has gone out, so the text precedes it. The
-    // hold lasts at most `HOLD_MAX_MS` (a flood of texts must not hold ACKs for good): after that
-    // the ACK goes out even if texts are still waiting, so a text can then arrive after its ACK.
-    // The action's own time limit is not applied here but in `tick`, every supervisor tick.
+    // The node sends ACKs before it takes texts from `Telemetry::texts`: hold the ACK until the queued text (a calibration's result or failure) has gone out, so the text precedes it.
+    // The hold lasts at most `HOLD_MAX_MS` (a flood of texts must not hold ACKs for good); after that a text can arrive after its ACK.
+    // The action's own time limit is applied in `tick`, not here.
     let mut by_bound = false;
     let link_ix = usize::from(link);
     if crate::texts_pending(link_ix) {
@@ -386,9 +369,7 @@ fn run(action: Action, now_ms: u64) {
     }
 }
 
-/// Parameters to their defaults; the devices whose values changed get their APPLY request. Ends
-/// ACCEPTED as soon as the store is reset and the requests are raised: it does not wait for the
-/// applies (a device that is not Ok picks the values up when it is restarted).
+/// Parameters to their defaults; the devices whose values changed get their APPLY request. Ends ACCEPTED as soon as the store is reset and the requests are raised.
 fn defaults(calibration_only: bool, now_ms: u64) {
     let action = if calibration_only {
         Action::StorageDefaultsCalibration

@@ -1,28 +1,13 @@
-//! The log collector (decision-sd-logging Q4, Q5; milestone SD3): `log_collect`, a core-0
-//! thread-mode task on a 10 ms `Ticker`, the one producer of the log ring [`RING`]; the SD task
-//! (`sd`) is its one consumer and writes the ring to `LOGS/NNNNNNNN.BIN` (Q4-I1).
-//!
-//! Records go in only while a log is open: [`OPEN`] holds the open log's number, stored by the SD
-//! task after it wrote the header; while it is 0 nothing is pushed and nothing counts as dropped.
-//! When a log opens the collector first commits [`PAD`] filler bytes, which the SD task consumes
-//! without writing them (they put the ring's read index and the file offset in step modulo 4096,
-//! so that whole pieces are written in place), then a PARM for every parameter and a DEV for
-//! every row. Then, per Q5: IMU2 at 25 Hz from its seqlock (every 4th tick, only a new `seq`,
-//! `TimeUS` the sample's own time; IMU1 comes from the flight core, below), BARO, MAG, BAT and
-//! GPS (each with a GPA, and a GPV when it has a velocity) at every new sample, RCIN at 10 Hz while stick reports are fresh, DEV for every row at
-//! 1 Hz and at every state change, MSG for every text (the text ring's third cursor, so the boot
-//! texts come first), PARM after every change of a parameter's value, whatever made it (a set,
-//! a calibration result, a reset, a
-//! reload: every tick the store is compared with the values last logged), and DSF once per second from the figures the SD task hands over
-//! in [`DSF_FIGURES`] (it owns the ring's statistics); Dp is counted here. A record that does not
-//! fit is dropped and counted by the ring. The collector never awaits the card and takes no lock
-//! that the SD task holds across a card call (Q4-I4): its only locks are short critical sections.
-//!
-//! The flight records (decision-flight-logging-20261119, section 3): the collector is the one
-//! consumer of `flight::LOG`, which IMU1's `Stepper` fills on core 1. Every tick, open log or not,
-//! `fw_core::relay::relay` moves its records into [`RING`] (into nothing while no log is open), so
-//! the flight ring is always drained and a full [`RING`] never backs up into core 1; with DSF, FDS
-//! (the flight ring's drops since the log opened and its smallest free space).
+//! The log collector: `log_collect`, a core-0 thread-mode task on a 10 ms `Ticker`, the one producer of the log ring [`RING`];
+//! the SD task (`sd`) is its one consumer and writes the ring to `LOGS/NNNNNNNN.BIN`.
+//! Records go in only while a log is open ([`OPEN`] holds its number, stored by the SD task after the header); while it is 0 nothing is pushed or counted as dropped.
+//! When a log opens the collector first commits [`PAD`] filler bytes, which the SD task consumes without writing (they keep the ring's read index and the file offset in step modulo 4096),
+//! then a PARM for every parameter and a DEV for every row. Then: IMU2 at 25 Hz (every 4th tick, only a new `seq`), BARO, MAG, BAT and GPS (each with a GPA, and a GPV when it has a velocity) at every new sample,
+//! RCIN at 10 Hz while stick reports are fresh, DEV for every row at 1 Hz and at every state change, MSG for every text (the text ring's third cursor),
+//! PARM after every change of a parameter's value (every tick the store is compared with the values last logged), and DSF once per second from [`DSF_FIGURES`].
+//! A record that does not fit is dropped and counted by the ring. The collector never awaits the card and takes no lock that the SD task holds across a card call.
+//! It is also the one consumer of `flight::LOG`, filled by IMU1's `Stepper` on core 1: every tick, open log or not, `fw_core::relay::relay` moves its records into [`RING`]
+//! (into nothing while no log is open), so a full [`RING`] never backs up into core 1; with DSF, FDS (the flight ring's drops since the log opened and its smallest free space).
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -46,22 +31,18 @@ use mavlink_device::{ParamStore, ParamValue};
 use crate::device::{BARO, BATT, DEVICE_COUNT, DEVICES, Device, GNSS, MAG, Reading, Sample};
 use crate::{LINK_LOG, ROWS};
 
-/// The ring's size: 1 MiB in the PSRAM (owner, 2026-11-22: "make the buffer 1mb so when we're logging like crazy we
-/// won't drop anything"; was 64 KiB, decision-flight-logging-20261119 section 2). At log 268's average 75 KB/s it holds
-/// about 13 s of SD-card stall.
+/// The ring's size: 1 MiB in the PSRAM, about 13 s of SD-card stall at 75 KB/s.
 pub const RING_BYTES: usize = 1024 * 1024;
 /// The writer's piece: the SD task writes whole pieces of this size in place.
 pub const PIECE: usize = 4096;
-/// The log ring: the collector's records, the SD task's bytes. Its storage is in the PSRAM (`psram::LOG_BUF`),
-/// bound by `psram::init`; without a working PSRAM it stays unbound, `take_producer` and `take_consumer` give
-/// `None`, and nothing is logged (decision-psram-offload-20261121, D3).
+/// The log ring: the collector's records, the SD task's bytes. Its storage is `psram::LOG_BUF`, bound by `psram::init`;
+/// without a working PSRAM it stays unbound, `take_producer` and `take_consumer` give `None`, and nothing is logged.
 pub static RING: ExtLogRing<RING_BYTES> = ExtLogRing::new();
 /// Collector -> SD task: at least one piece waits in the ring.
 pub static DATA: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 /// SD task -> collector: the open log's number, 0 while no log is open.
 pub static OPEN: AtomicU32 = AtomicU32::new(0);
-/// SD task -> collector: filler bytes to commit before the first record of the log in `OPEN`
-/// (stored before `OPEN`).
+/// SD task -> collector: filler bytes to commit before the first record of the log in `OPEN` (stored before `OPEN`).
 pub static PAD: AtomicU32 = AtomicU32::new(0);
 /// SD task -> collector: the DSF figures of the last second (`dropped` is filled in here).
 pub static DSF_FIGURES: Mutex<CriticalSectionRawMutex, Cell<Option<Dsf>>> =
@@ -71,11 +52,8 @@ type Producer = LogProducer<'static, RING_BYTES>;
 type FlightConsumer = LogConsumer<'static, { crate::flight::LOG_BYTES }>;
 
 const TICK: Duration = Duration::from_millis(10);
-/// IMU records every 4th tick (25 Hz).
 const IMU_EVERY: u32 = 4;
-/// RCIN every 10th tick (10 Hz).
 const RCIN_EVERY: u32 = 10;
-/// DEV of every row every 100th tick (1 Hz).
 const DEV_EVERY: u32 = 100;
 
 #[embassy_executor::task]
@@ -84,8 +62,7 @@ pub async fn task() -> ! {
 }
 
 async fn collect() -> ! {
-    // `None` when the ring is unbound (no PSRAM: `psram::init` bound nothing). The tasks start after `psram::init`,
-    // so the ring is bound by now or never; there is no retry.
+    // `None` when the ring is unbound; the tasks start after `psram::init`, so it is bound by now or never.
     let mut producer = RING.take_producer();
     if producer.is_none() && !RING.is_bound() {
         defmt::info!(
@@ -113,8 +90,7 @@ async fn collect() -> ! {
     loop {
         ticker.next().await;
         match producer.as_mut() {
-            // `psram::ready()` once per tick: after a FAULT at run time (the canary failed after a flash
-            // operation) the ring's bytes are not touched any more (the tick's pushes are the PSRAM batch).
+            // `psram::ready()` once per tick: after a run-time FAULT the ring's bytes are not touched any more.
             Some(p) if crate::psram::ready() => c.tick(p, Instant::now().as_micros()),
             _ => c.drain_flight(),
         }
@@ -127,11 +103,9 @@ struct Collector {
     open: u32,
     /// The ring's drop count when that log opened.
     dropped_at_open: u32,
-    /// The consumer of `flight::LOG`.
     flight: FlightConsumer,
     /// The flight ring's drop count when that log opened.
     flight_dropped_at_open: u32,
-    /// IMU2: a record is due (set every 4th tick, cleared by a read of the seqlock).
     imu_due: bool,
     imu_seq: Option<u32>,
     /// The last `seq` logged of BARO, MAG, GNSS, BATT.
@@ -147,8 +121,7 @@ struct Collector {
 }
 
 impl Collector {
-    /// No ring to fill (no PSRAM, or a FAULT since): the flight ring is still drained, into nothing, so that it
-    /// never backs up into core 1 (`flight::LOG` drops stay 0).
+    /// No ring to fill (no PSRAM, or a FAULT since): the flight ring is still drained, into nothing.
     fn drain_flight(&mut self) {
         relay_with(&mut self.flight, None::<fn(&[u8]) -> bool>);
     }
@@ -230,8 +203,7 @@ impl Collector {
         }
     }
 
-    /// A log opened: the filler; a PARM for every parameter, every row's DEV and IMU2 follow in
-    /// this tick.
+    /// A log opened: the filler; a PARM for every parameter, every row's DEV and IMU2 follow in this tick.
     fn start(&mut self, p: &mut Producer) {
         let pad = PAD.load(Ordering::Relaxed) as usize;
         if pad > 0 {
@@ -352,8 +324,7 @@ impl Collector {
                 ..
             }) = sample.reading
             {
-                // With the SAM-M10Q lat_std_mm and lon_std_mm are both its hAcc, so GPA.HAcc (sqrt(lat^2 + lon^2))
-                // now logs sqrt(2) x hAcc.
+                // With the SAM-M10Q lat_std_mm and lon_std_mm are both its hAcc, so GPA.HAcc (sqrt(lat^2 + lon^2)) logs sqrt(2) x hAcc.
                 let delta_ms =
                     dflog::gpa_delta_ms(self.gnss_t_us.replace(sample.t_us), sample.t_us);
                 p.push_with(dflog::GPA.length.into(), |b| {
@@ -435,8 +406,7 @@ impl Collector {
     }
 }
 
-/// A registry row as its MARV_DEVICE_STATUS would carry it (built here rather than with
-/// `Device::message`, which counts the rows sent during a self-test).
+/// A registry row as its MARV_DEVICE_STATUS would carry it (not `Device::message`, which counts the rows sent during a self-test).
 fn row_message(
     dev: &Device,
     status: crate::device::DeviceStatus,

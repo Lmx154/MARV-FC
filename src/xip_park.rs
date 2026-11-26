@@ -1,13 +1,8 @@
-//! Feature `xip-park`: the board check of invariant R1 (decision-ram-code-20261115 Q5 in
-//! MARV-V2-drivers): after `core1_main` starts, the flight core makes no XIP access. 30 s after start,
-//! a 1 s window with both cores running must count more than 100 000 XIP accesses: it only proves the
-//! counter runs (with core 1 out of XIP it counts core 0 alone, 1.5 to 1.8 million per second idle).
-//! Then core 0 parks itself for 1.0 s in SRAM with its interrupts off (`park_core0`, a root of
-//! tools/check-ram-code.py), so every XIP access counted in that window is core 1's: there must be
-//! none, while IMU1 and IMU2 each deliver at least 790 samples and no error. With `ram-negative`
-//! (`now_us` in flash) the parked window must count at least 1000. The watchdog survives (1.0 s plus
-//! its feed period is under 1.6 s); the "core 0 stalled" and flight-core texts after it are expected.
-//! Once, and not after a watchdog reset.
+//! Feature `xip-park`: the board check of invariant R1: after `core1_main` starts, the flight core makes no XIP access.
+//! 30 s after start, a 1 s window with both cores running must count more than 100 000 XIP accesses (it only proves the counter runs: it counts core 0 alone).
+//! Then core 0 parks itself for 1.0 s in SRAM with its interrupts off (`park_core0`, a root of tools/check-ram-code.py), so every XIP access counted in that window is core 1's:
+//! there must be none, while IMU1 and IMU2 each deliver at least 790 samples and no error. With `ram-negative` (`now_us` in flash) the parked window must count at least 1000.
+//! The watchdog survives (1.0 s plus its feed period is under 1.6 s); the "core 0 stalled" and flight-core texts after it are expected. Once, and not after a watchdog reset.
 
 use core::arch::asm;
 use core::sync::atomic::Ordering;
@@ -21,8 +16,7 @@ use crate::{imu1, imu2, watchdog};
 const START: Duration = Duration::from_secs(30);
 const PARK_US: u32 = 1_000_000;
 const MIN_SAMPLES: u32 = 790;
-/// The unparked window proves only that the counter runs; it counts core 0 alone (1.5 to 1.8 million
-/// per second idle, measured 2026-11-16).
+/// The unparked window proves only that the counter runs; it counts core 0 alone.
 const UNPARKED_MIN: u32 = 100_000;
 
 /// Core 0 parked in SRAM with its interrupts off for `PARK_US`: clears the XIP counters, spins on

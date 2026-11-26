@@ -1,8 +1,6 @@
-//! The low-battery monitor on the board (decision-nav-eskf-20261120, Amendment BATT): core 0, from the supervisor's tick at
-//! 10 Hz. `fw_core::battery` decides; this module reads the BATT row's latest sample, the armed flag and the stored
+//! The low-battery monitor on the board: core 0, from the supervisor's tick at 10 Hz. `fw_core::battery` decides; this module reads the BATT row's latest sample, the armed flag and the stored
 //! `BATT_*` settings, raises the texts, publishes the event for the log and hands one byte to the flight core ([`CELL`]).
-//! The monitor runs on core 0 because it only reads core-0 data (the BATT sample, the store) and the flight core needs
-//! one byte of it; nothing of it runs on core 1 except one relaxed load of [`CELL`] and one store of [`DESCENT`] per step.
+//! Only one relaxed load of [`CELL`] and one store of [`DESCENT`] per step run on core 1.
 
 use core::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
@@ -18,7 +16,6 @@ pub static CELL: AtomicU8 = AtomicU8::new(0);
 /// Flight core -> core 0: what the descent did at the latest step (`fw_flight::step::BattDescent` as a byte).
 pub static DESCENT: AtomicU8 = AtomicU8::new(0);
 
-/// The level the LED shows, 0 none, 1 LOW, 2 CRITICAL.
 pub fn level() -> u8 {
     CELL.load(Ordering::Relaxed) & 3
 }
@@ -26,12 +23,9 @@ pub fn level() -> u8 {
 /// A level reached, for the log: the number of events so far and the latest one's fields. Written by [`Supervision`], read by
 /// the log collector (both core 0); the fields are stored before the count.
 static EVENT_SEQ: AtomicU32 = AtomicU32::new(0);
-/// Level, action and cell count: one byte each.
 static EVENT_WORD: AtomicU32 = AtomicU32::new(0);
-/// The voltage's bits.
 static EVENT_VOLTS: AtomicU32 = AtomicU32::new(0);
 
-/// One BFS record's fields.
 #[derive(Clone, Copy)]
 pub struct Event {
     pub level: u8,
@@ -56,7 +50,6 @@ pub fn event(seen: &mut u32) -> Option<Event> {
     })
 }
 
-/// The supervisor's part: the monitor and what it last told core 0's texts.
 pub struct Watch {
     monitor: Monitor,
     descent_seen: u8,
@@ -70,7 +63,6 @@ impl Watch {
         }
     }
 
-    /// One step at 10 Hz. `now_us` is the board time.
     pub fn tick(&mut self, now_us: u64) {
         let cfg = crate::store::batt_monitor_config();
         let armed = crate::settings::HANDSHAKE.armed();

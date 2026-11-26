@@ -1,15 +1,7 @@
-//! The parameters in the in-package flash (design: decision-foundation item 3, the two-core
-//! amendment "Item 3, changes", and the owner's answers of 2026-11-15, which replace the
-//! automatic save). Two 4096-byte sectors A and B at the end of the 2 MiB flash (`memory.x`
-//! `SETTINGS`), one `fw_core::record` record each. Read at boot before the devices start, and
-//! again on "reload"; written ONLY by an explicit save (MAV_CMD_PREFLIGHT_STORAGE param1 = 1),
-//! never automatically. Core 0 only (the HAL refuses a flash write from core 1).
-//!
-//! Every erase and program goes through [`guarded`], which refuses any range outside the
-//! settings region with a `[FAIL]` line. An erase or program stops both cores (interrupts off on
-//! core 0, core 1 paused through its FIFO interrupt): the stall is measured and published as
-//! [`SAVE_EPOCH`] and the last window ([`overlaps_save`]), so the supervisor can discard what it
-//! caused.
+//! The parameters in the in-package flash: two 4096-byte sectors A and B at the end of the 2 MiB flash (`memory.x` `SETTINGS`), one `fw_core::record` record each.
+//! Read at boot before the devices start, and again on "reload"; written only by an explicit save (MAV_CMD_PREFLIGHT_STORAGE param1 = 1), never automatically. Core 0 only (the HAL refuses a flash write from core 1).
+//! Every erase and program goes through [`guarded`], which refuses any range outside the settings region with a `[FAIL]` line. An erase or program stops both cores (interrupts off on core 0, core 1 paused through its FIFO interrupt):
+//! the stall is measured and published as [`SAVE_EPOCH`] and the last window ([`overlaps_save`]), so the supervisor can discard what it caused.
 
 use core::cell::Cell;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -50,9 +42,7 @@ const FOREIGN: usize = if cfg!(feature = "save-foreign") { 2 } else { 0 };
 
 /// The arm/save handshake; `ARMED` is set and cleared by the flight core's gate (`fw_flight::gate`).
 pub static HANDSHAKE: Handshake = Handshake::new();
-/// Bumped after every flash stall.
 pub static SAVE_EPOCH: AtomicU32 = AtomicU32::new(0);
-/// The range guard's refusals since boot.
 pub static GUARD_REFUSALS: AtomicU32 = AtomicU32::new(0);
 
 /// The last flash stall on core 0's clock; `end_us` is `u64::MAX` while it runs.
@@ -64,7 +54,6 @@ struct Window {
 
 static WINDOW: Mutex<CriticalSectionRawMutex, Cell<Option<Window>>> = Mutex::new(Cell::new(None));
 
-/// True when the last flash stall overlapped `from..=to`.
 pub fn overlaps_save(from: Instant, to: Instant) -> bool {
     WINDOW
         .lock(Cell::get)
@@ -85,7 +74,6 @@ struct Storage {
 static BUFS: ConstStaticCell<[[u8; SECTOR_LEN]; 3]> = ConstStaticCell::new([[0; SECTOR_LEN]; 3]);
 static STORAGE: Mutex<CriticalSectionRawMutex, Cell<Option<Storage>>> = Mutex::new(Cell::new(None));
 
-/// Builds the storage (no flash access). Called once, before [`boot`].
 pub fn init(flash: Peri<'static, FLASH>) {
     let storage = Storage {
         flash: Flash::new_blocking(flash),
@@ -150,8 +138,7 @@ fn guarded(flash: &mut Chip, op: Op<'_>) -> Result<(), &'static str> {
         Op::Erase { from, to } => flash.blocking_erase(from, to),
         Op::Program { offset, bytes } => flash.blocking_write(offset, bytes),
     };
-    // The boot ROM's flash routines reset the QMI window of the PSRAM: re-map it and check its canary right
-    // here, success or failure, before anything else runs (the P2 argument is in `psram::after_flash_op`).
+    // The boot ROM's flash routines reset the QMI window of the PSRAM: re-map it and check its canary here, success or failure (see `psram::after_flash_op`).
     crate::psram::after_flash_op();
     result.map_err(|e| {
         defmt::error!("[INFO] settings: {=str} failed: {}", what, e);
@@ -165,7 +152,6 @@ fn read(flash: &mut Chip, sector: Sector, buf: &mut [u8; SECTOR_LEN]) -> Result<
         .map_err(|_| "flash read error")
 }
 
-/// One sector as the decoder sees it, for the log.
 #[derive(defmt::Format)]
 enum Seen {
     Erased,
@@ -347,7 +333,6 @@ fn load_from_flash(st: &mut Storage, what: &str) -> Result<u32, &'static str> {
     Ok(configure)
 }
 
-/// At boot, after `store::init` and before the devices start.
 pub fn boot() {
     match with_storage(|st| load_from_flash(st, "boot")) {
         Some(Ok(_)) => {}
@@ -486,8 +471,7 @@ fn write_record(st: &mut Storage) -> Result<u64, &'static str> {
 }
 
 /// Feature `corrupt-newest`: at boot, before the settings are read, ONE byte inside the newest
-/// valid record (the first entry's value byte, else the CRC's first byte, else the magic's,
-/// whichever is not already 0x00) is programmed to 0x00 through [`guarded`].
+/// valid record (the first entry's value byte, else the CRC's first byte, else the magic's, whichever is not already 0x00) is programmed to 0x00 through [`guarded`].
 #[cfg(feature = "corrupt-newest")]
 pub fn corrupt_newest() {
     let _ = with_storage(|st| {

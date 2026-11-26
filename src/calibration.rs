@@ -1,27 +1,13 @@
-//! The gyro and one-position accelerometer calibrations (both IMUs, on core 0) and the IMU offsets'
-//! path to the flight core.
-//!
-//! Offsets: per IMU one `TripleBuffer<ImuOffsets>`, written here on core 0, read wait-free by that
-//! IMU's adapter on core 1 with every sample, which subtracts them before the sample is published.
-//! Pushed at boot before core 1 starts ([`init`]), and within one supervisor tick of a change of
-//! the stored values ([`raise_push`]: a parameter set (the Live mask), the calibration defaults, a
-//! reload, a calibration result). Pushes wait while a calibration runs, so the offsets in force
-//! stay constant during the measurement.
-//!
-//! Calibration: the samples are the flight rows' latest ones as the supervisor mirrors them every
-//! 10 ms (about 100 per second per IMU), each counted once by its `seq`; the current offsets are
-//! added back, so the measurement is of the raw values: first un-rotated with the boot's
-//! `AHRS_ORIENTATION` (the offsets are in the board frame, between the chip's fixed rotation and
-//! the board's), so the measurement is in the frame the offsets are stored in. The decision is
-//! `fw_core::calib`. A result is written into the parameters and pushed; nothing is saved.
-//!
-//! The compass calibration is the same on the MAG row's latest sample (core 0's own device): it
-//! measures the raw field r the adapter hands beside the calibrated one (body frame, nothing to
-//! undo), and the result is written as one coherent set (`MAG_OFF*`, S the identity,
-//! `MAG_CAL_TYPE` 1, `MAG_FLD_UT` 0), which the adapter reads from the store for every sample (no
-//! push is needed). Its result or
-//! failure text is queued before the action ends, and the final ACK waits until the text queue is
-//! empty (`actions::next_ack`), so the text precedes the ACK on the link.
+//! The gyro and one-position accelerometer calibrations (both IMUs, on core 0) and the IMU offsets' path to the flight core.
+//! Offsets: per IMU one `TripleBuffer<ImuOffsets>`, written here on core 0 and read wait-free by that IMU's adapter on core 1, which subtracts them from every sample.
+//! They are pushed at boot before core 1 starts ([`init`]) and within one supervisor tick of a change of the stored values ([`raise_push`]);
+//! pushes wait while a calibration runs, so the offsets stay constant during the measurement.
+//! Calibration: the samples are the flight rows' latest ones as the supervisor mirrors them every 10 ms (about 100 per second per IMU), each counted once by its `seq`;
+//! the current offsets are added back, so the measurement is of the raw values, un-rotated with the boot's `AHRS_ORIENTATION` into the frame the offsets are stored in (the board frame).
+//! The decision is `fw_core::calib`. A result is written into the parameters and pushed; nothing is saved.
+//! The compass calibration is the same on the MAG row's latest sample: it measures the raw field r the adapter hands beside the calibrated one (body frame),
+//! and the result is written as one coherent set (`MAG_OFF*`, S the identity, `MAG_CAL_TYPE` 1, `MAG_FLD_UT` 0), which the adapter reads from the store for every sample.
+//! Its result or failure text is queued before the action ends, and the final ACK waits until the text queue is empty (`actions::next_ack`), so the text precedes the ACK on the link.
 
 use core::cell::RefCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -67,11 +53,9 @@ struct Core0 {
 
 static CORE0: Mutex<CriticalSectionRawMutex, RefCell<Option<Core0>>> =
     Mutex::new(RefCell::new(None));
-/// The IMU device bits whose offsets are to be pushed.
 static PENDING: AtomicU32 = AtomicU32::new(0);
 static CALIBRATING: AtomicBool = AtomicBool::new(false);
 
-/// What the running calibration did this tick.
 pub enum Step {
     Progress(u8),
     End(MavResult),
@@ -86,8 +70,7 @@ fn name(kind: Kind) -> &'static str {
     }
 }
 
-/// The adapters' readers (IMU1, IMU2), for core 1's entry. Called once, on core 0, before core 1
-/// starts.
+/// The adapters' readers (IMU1, IMU2), for core 1's entry; call once on core 0 before core 1 starts.
 pub fn readers() -> [TripleReader<'static, ImuOffsets>; IMUS] {
     let [a, b] = &OFFSETS;
     match (a.take_reader(), b.take_reader()) {
@@ -96,10 +79,8 @@ pub fn readers() -> [TripleReader<'static, ImuOffsets>; IMUS] {
     }
 }
 
-/// Takes the writers and pushes the stored offsets. Call after `settings::boot` and before core 1
-/// starts, so the first samples are corrected with them. `board` is the `AHRS_ORIENTATION` the
-/// adapters apply (the boot value, never the store's pending one): the samples core 0 sees are in
-/// the body frame, and are un-rotated with it before the offsets are added back.
+/// Takes the writers and pushes the stored offsets; call after `settings::boot` and before core 1 starts.
+/// `board` is the `AHRS_ORIENTATION` the adapters apply (the boot value, never the store's pending one): core 0's samples are in the body frame and are un-rotated with it before the offsets are added back.
 pub fn init(board: Rotation) {
     let [a, b] = &OFFSETS;
     let (Some(a), Some(b)) = (a.take_writer(), b.take_writer()) else {
@@ -120,24 +101,19 @@ pub fn init(board: Rotation) {
     push(ALL, "boot");
 }
 
-/// The stored offsets of `mask`'s IMUs are pushed at the next supervisor tick (bits of other
-/// devices are ignored, but device 0's: its Live parameters include `PILOT_SPEED_XY`, the `GDN_*` parameters and the 14 `ATC_*` gains, pushed now by
-/// `flight::push_speed`, `flight::push_gdn` and `flight::push_gains`, and the ESC device's: `MOT_POLES`, pushed by `flight::push_notch`).
+/// The stored offsets of `mask`'s IMUs are pushed at the next supervisor tick; device 0's Live parameters (`PILOT_SPEED_XY`, `GDN_*`, the 14 `ATC_*` gains) and the ESC device's `MOT_POLES`
+/// go to the flight core at once, by `flight::push_speed`, `flight::push_gdn`, `flight::push_gains` and `flight::push_notch`. Bits of other devices are ignored.
 pub fn raise_push(mask: u32) {
     PENDING.fetch_or(mask & ALL, Ordering::Relaxed);
-    // Device 0's Live parameters: `PILOT_SPEED_XY` goes to the flight core at once (the flight code latches it at arming).
     if mask & 1 != 0 {
         crate::flight::push_speed("parameters changed");
     }
-    // `MOT_POLES` (the ESC device) goes to the flight core (the flight code latches it at arming).
     if mask & (1 << MarvDevice::MARV_DEVICE_ESC as u32) != 0 {
         crate::flight::push_notch("parameters changed");
     }
-    // `GDN_RADIUS` and the height limits (device 0) go to the flight core with the committed mission.
     if mask & 1 != 0 {
         crate::flight::push_gdn("parameters changed");
     }
-    // The 14 `ATC_*` gains (device 0) go to the flight core as one set (the flight code latches them at arming).
     if mask & 1 != 0 {
         crate::flight::push_gains("parameters changed");
     }
@@ -190,7 +166,6 @@ fn push(mask: u32, why: &str) {
     }
 }
 
-/// The latest mirrored sample of each IMU row and whether the row is Ok.
 fn latest() -> [(bool, Option<Sample>); IMUS] {
     let rows: [&'static Device; IMUS] = [&IMU1, &IMU2];
     rows.map(|d| (d.status().state == State::Ok, d.latest.try_get()))
@@ -297,7 +272,6 @@ pub fn cancel() {
     stop("cancelled");
 }
 
-/// Every supervisor tick while the book runs a calibration: progress, or the end.
 pub fn step() -> Step {
     if CORE0.lock(|c| c.borrow().as_ref().is_some_and(|core| core.mag.is_some())) {
         return step_mag();
@@ -347,8 +321,7 @@ pub fn step() -> Step {
     }
 }
 
-/// Every supervisor tick while no calibration runs: a run the book ended (time limit) is dropped,
-/// and the pending pushes are done.
+/// Every supervisor tick while no calibration runs: a run the book ended (time limit) is dropped, and the pending pushes are done.
 pub fn idle() {
     observe();
     if calibrating() {
@@ -485,7 +458,6 @@ fn observe_mag() -> Option<(MagOutcome, u8)> {
     })
 }
 
-/// Integer microtesla, rounded to the nearest.
 fn ut(x: f32) -> i32 {
     (x + if x < 0.0 { -0.5 } else { 0.5 }) as i32
 }
@@ -565,11 +537,8 @@ fn step_mag() -> Step {
     }
 }
 
-/// Writes the quick result as one coherent set in one store access (`MAG_OFFX/Y/Z`, S the
-/// identity, `MAG_CAL_TYPE` 1, `MAG_FLD_UT` 0: `fw_settings::mag::write_quick_result`; the store
-/// is dirty; nothing is saved; the adapter reads them from the next sample on). `false` when the
-/// store refuses a value (the pure check keeps the offsets inside the parameters' range, so it
-/// does not happen).
+/// Writes the quick result as one coherent set in one store access (`fw_settings::mag::write_quick_result`; the store is dirty, nothing is saved).
+/// `false` when the store refuses a value (the pure check keeps the offsets inside the parameters' range, so it does not happen).
 fn write_mag(fit: &MagFit) -> bool {
     store::with(|p| {
         let all = fw_settings::mag::write_quick_result(p, fit.offset_ut);

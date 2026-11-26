@@ -11,7 +11,6 @@ use fw_flight::imu::Latency;
 
 const WINDOW_MS: u32 = 10_000;
 
-/// Written by the task (one writer), read by its adapter.
 pub struct Stretch {
     max_us: AtomicU32,
     window_us: AtomicU32,
@@ -60,7 +59,6 @@ impl Stretch {
     }
 }
 
-/// Runs `fut`, taking the clock before and after each poll into `stretch`.
 pub async fn measured<F: Future>(stretch: &Stretch, fut: F) -> F::Output {
     let mut fut = pin!(fut);
     poll_fn(|cx| {

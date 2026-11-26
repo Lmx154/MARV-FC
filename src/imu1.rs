@@ -1,8 +1,5 @@
-//! IMU1: ICM-45686 on SPI0 (SCK GPIO18, MOSI GPIO19, MISO GPIO16, CS GPIO20, 8 MHz, mode 0) with
-//! DMA channels 0 and 1, data-ready on INT1 (GPIO15); a flight-core device. Everything here except
-//! [`CELLS`] runs on core 1: [`adapter`] is called inside core 1's entry, so the DMA and GPIO
-//! interrupts land there, and [`task`] runs `fw_flight::imu` on core 1's executor. No log here.
-//! The `icm45686` driver is used as it is.
+//! IMU1: ICM-45686 on SPI0 (SCK GPIO18, MOSI GPIO19, MISO GPIO16, CS GPIO20, 8 MHz, mode 0) with DMA channels 0 and 1, data-ready on INT1 (GPIO15); a flight-core device.
+//! Everything here except [`CELLS`] runs on core 1: [`adapter`] is called inside core 1's entry, so the DMA and GPIO interrupts land there, and [`task`] runs `fw_flight::imu` on core 1's executor. No log here.
 
 use core::convert::Infallible;
 use core::future::poll_fn;
@@ -34,7 +31,6 @@ static STRETCH: Stretch = Stretch::new();
 
 const SPI_HZ: u32 = 8_000_000;
 
-/// The peripherals IMU1 owns, moved into core 1's entry.
 pub struct Parts {
     pub spi: Peri<'static, SPI0>,
     pub sck: Peri<'static, PIN_18>,
@@ -44,22 +40,16 @@ pub struct Parts {
     pub int1: Peri<'static, PIN_15>,
     pub tx_dma: Peri<'static, DMA_CH0>,
     pub rx_dma: Peri<'static, DMA_CH1>,
-    /// The offsets core 0 publishes, subtracted from every sample.
     pub offsets: TripleReader<'static, ImuOffsets>,
-    /// The chip's configuration, its full scales and the sample period, read from the settings at
-    /// boot; handed over by value, so no cell carries it (`fw_settings::imu::imu1_setup`).
+    /// The chip's configuration, full scales and sample period, read from the settings at boot and handed over by value (`fw_settings::imu::imu1_setup`).
     pub setup: Imu1Setup,
 }
 
 type Dev = ExclusiveDevice<Spi<'static, SPI0, spi::Async>, Output<'static>, NoDelay>;
 type DevError = DeviceError<spi::Error, Infallible>;
 
-/// The flight core's delay, on the time driver's counter: no timer queue, no lock. A wait shorter
-/// than 50 us is a busy wait (a verify step on an indirect register waits 10 us twice, so the
-/// sample loop never yields inside a verify step); a wait of 50 us or longer polls the clock and
-/// yields to the executor between polls (`wake_by_ref`), so the other tasks of the flight core run
-/// meanwhile (the ICM-45686 self-test's 100 us result polls). Both IMU tasks wait through it
-/// (start, recover, restart, self-test).
+/// The flight core's delay, on the time driver's counter: no timer queue, no lock. A wait shorter than 50 us is a busy wait (a verify step waits 10 us twice, so the sample loop never yields inside one);
+/// a longer wait polls the clock and yields to the executor between polls (`wake_by_ref`), so the other flight-core tasks run meanwhile. Both IMU tasks wait through it.
 pub struct SpinDelay;
 
 impl SpinDelay {
@@ -100,8 +90,7 @@ pub struct Icm45686Adapter {
     int1: Input<'static>,
     calls: u32,
     step: usize,
-    /// The driver's `verify_steps()`, asked after every operation that can change it (the list of
-    /// owned registers is rebuilt by the driver at every call).
+    /// The driver's `verify_steps()`, asked after every operation that can change it (the driver rebuilds the list at every call).
     steps: usize,
     offsets: TripleReader<'static, ImuOffsets>,
     /// The boot setup: `init`, `apply` and the restart configure with it, `acquire` scales with it.
@@ -117,7 +106,6 @@ fn kind<E>(error: &Error<E>) -> ErrorKind {
 }
 
 impl Icm45686Adapter {
-    /// Builds SPI0 with its DMA channels and the INT1 input: call on core 1.
     fn new(p: Parts) -> Self {
         let mut cfg = spi::Config::default();
         cfg.frequency = SPI_HZ;
@@ -234,7 +222,6 @@ impl ImuAdapter for Icm45686Adapter {
         (1_000_000 / self.setup.period_us.max(1) / steps.max(1)).max(1)
     }
 
-    /// INT1 is latched: high while a sample waits.
     fn data_waiting(&mut self) -> bool {
         self.int1.is_high()
     }
@@ -291,7 +278,6 @@ pub type Adapter = Icm45686Adapter;
 #[cfg(feature = "inject-imu1")]
 pub type Adapter = crate::imu_inject::Inject<Icm45686Adapter>;
 
-/// The adapter for this build: call on core 1.
 pub fn adapter(parts: Parts) -> Adapter {
     #[cfg(not(feature = "inject-imu1"))]
     return Icm45686Adapter::new(parts);

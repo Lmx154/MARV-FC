@@ -30,10 +30,8 @@ bind_interrupts!(struct Irqs {
 pub const PERIOD_US: u32 = 19_978;
 const I2C_HZ: u32 = 400_000;
 
-/// The configuration before the first start: the driver's default, as `bmp581_smoke` ran it on this
-/// board: pressure 16x, temperature 2x, normal mode at 50.056 Hz, no IIR filter, no FIFO, data-ready
-/// interrupt pulsed, active high, push-pull. It equals the parameters' defaults; every start and
-/// apply takes the stored parameters instead (`refresh_config`).
+/// The configuration before the first start: the driver's default (pressure 16x, temperature 2x, normal mode at 50.056 Hz, no IIR filter, no FIFO, data-ready interrupt pulsed, active high, push-pull).
+/// It equals the parameters' defaults; every start and apply takes the stored parameters instead (`refresh_config`).
 fn config() -> Config {
     Config::new()
 }
@@ -87,7 +85,6 @@ impl Bmp581Adapter {
         adapter
     }
 
-    /// Builds the I2C1 controller on its pins (embassy-rp resets the block in the constructor).
     fn bus(&mut self) -> Bus {
         let mut cfg = i2c::Config::default();
         cfg.frequency = I2C_HZ;
@@ -135,7 +132,6 @@ impl Bmp581Adapter {
         );
     }
 
-    /// The driver, counting one adapter call on the bus.
     fn chip(&mut self) -> Result<&mut Bmp581<Bus>, ErrorKind> {
         self.calls = self.calls.wrapping_add(1);
         self.chip.as_mut().ok_or(ErrorKind::Bus)

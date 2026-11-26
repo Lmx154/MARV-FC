@@ -1,24 +1,13 @@
-//! The hardware watchdog (design: decision-foundation, two-core amendment, item 6).
-//!
-//! [`boot`] reads the reset reason and the scratch record once, clears the record's magic and
-//! queues the boot report; `main` then starts the watchdog (1600 ms, paused while a core is halted
-//! by the debugger) and [`start_monitor`] puts the monitor alone on an `InterruptExecutor` on
-//! `SWI_IRQ_1`, above core 0's thread-mode executor. Every 100 ms the monitor applies
-//! `fw_core::watchdog::Monitor` to `BEAT0`, `PONG` and `SAVE_EPOCH`: it feeds only while both
-//! heartbeats are younger than 200 ms; at 200 ms of stall it writes the scratch record once (the
-//! core and the task in `RUNNING0` / `RUNNING1`) and stops feeding, so the board resets about
-//! 1.7 s after the stall began; a stall that ends first clears the record and is logged by the
-//! supervisor ([`report`]), with one text when it reached 500 ms; while a reboot is pending the
-//! monitor neither writes nor clears the record. The monitor uses atomics and the watchdog
-//! registers only. A requested reboot ([`request_reboot`]) is carried out by the monitor
-//! (`trigger_reset`) 100 ms after the final ACK was handed to the link. No device task feeds it.
-//! Known and accepted: a reboot request that races a stall's start within a few microseconds can
-//! leave a scratch record that decodes as none, so the boot report then says "reset: forced, no
-//! record".
-//!
-//! Features `hang-core0`, `spin-1s`, `hang-irqoff` ([`hang_point_core0`], in the barometer's
-//! `acquire`) and `hang-flight` ([`hang_point_flight`], in IMU1's `acquire`) act once, 20 s after
-//! a start that the watchdog did not cause.
+//! The hardware watchdog. [`boot`] reads the reset reason and the scratch record once, clears the record's magic and queues the boot report;
+//! `main` then starts the watchdog (1600 ms, paused while a core is halted by the debugger) and [`start_monitor`] puts the monitor alone on an
+//! `InterruptExecutor` on `SWI_IRQ_1`, above core 0's thread-mode executor. Every 100 ms the monitor applies `fw_core::watchdog::Monitor` to `BEAT0`, `PONG` and `SAVE_EPOCH`:
+//! it feeds only while both heartbeats are younger than 200 ms; at 200 ms of stall it writes the scratch record once (the core and the task in `RUNNING0` / `RUNNING1`)
+//! and stops feeding, so the board resets about 1.7 s after the stall began; a stall that ends first clears the record and is logged by the supervisor ([`report`]),
+//! with one text when it reached 500 ms; while a reboot is pending the monitor neither writes nor clears the record. The monitor uses atomics and the watchdog registers only.
+//! A requested reboot ([`request_reboot`]) is carried out by the monitor (`trigger_reset`) 100 ms after the final ACK was handed to the link.
+//! A reboot request that races a stall's start within a few microseconds can leave a scratch record that decodes as none; the boot report then says "reset: forced, no record".
+//! Features `hang-core0`, `spin-1s`, `hang-irqoff` ([`hang_point_core0`], in the barometer's `acquire`) and `hang-flight` ([`hang_point_flight`], in IMU1's `acquire`)
+//! act once, 20 s after a start that the watchdog did not cause.
 
 use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
@@ -42,7 +31,6 @@ pub static RUNNING1: AtomicU8 = AtomicU8::new(task::NONE);
 /// A reboot was requested; the monitor resets at `REBOOT_AT_MS` (its clock, ms).
 static REBOOT_REQ: AtomicBool = AtomicBool::new(false);
 static REBOOT_AT_MS: AtomicU32 = AtomicU32::new(0);
-/// Feeds since start.
 pub static FEEDS: AtomicU32 = AtomicU32::new(0);
 /// The check features may act: the last reset was not the watchdog's. Cleared when one acts.
 pub static HANG_ARMED: AtomicBool = AtomicBool::new(false);
@@ -96,7 +84,6 @@ fn write_record(words: [u32; 4]) {
     w.scratch3().write(|r| *r = words[3]);
 }
 
-/// The four scratch words S0..S3.
 pub fn read_scratch(wd: &mut Watchdog) -> [u32; 4] {
     [0, 1, 2, 3].map(|i| wd.get_scratch(i))
 }
@@ -120,7 +107,6 @@ fn severity(s: Severity) -> MavSeverity {
 /// The reset cause for the boot text line ("power-on" also for a debugger or RUN-pin reset).
 static CAUSE: AtomicU8 = AtomicU8::new(0);
 
-/// "timeout", "forced" or "power-on".
 pub fn cause() -> &'static str {
     match CAUSE.load(Ordering::Relaxed) {
         1 => "timeout",
@@ -277,7 +263,6 @@ pub fn report(begun_seen: &mut u32, ended_seen: &mut u32) {
     }
 }
 
-/// The supervisor, every 10 s: the monitor's counters.
 pub fn stat() {
     if cfg!(feature = "quiet-stat") {
         return;
@@ -306,9 +291,8 @@ pub fn stat() {
     );
 }
 
-/// The word both stacks are painted with at start-up (stack S1): a word of a stack that still holds
-/// it was, in all likelihood, never written since. The `[STAT] watchdog:` line counts the painted
-/// words from each stack's low end: free = those bytes, used = the rest of the stack.
+/// The word both stacks are painted with at start-up: a word that still holds it was, in all likelihood, never written.
+/// The `[STAT] watchdog:` line counts the painted words from each stack's low end: free = those bytes, used = the rest of the stack.
 const STACK_PAINT: u32 = 0x5354_4B21;
 /// Core 1's stack, `[lo, hi)`, recorded by [`paint_core1`]; 0 until then.
 static CORE1_STACK_LO: AtomicU32 = AtomicU32::new(0);
@@ -346,17 +330,9 @@ static CORE0_BOOT_USED: AtomicU32 = AtomicU32::new(0);
 /// Set by the one call of [`repaint_core0`] (the first status report): it never runs twice.
 static CORE0_REPAINTED: AtomicBool = AtomicBool::new(false);
 
-/// Re-paints the unused part of core 0's stack once, so the mark shows the depth after start-up
-/// (the boot peak, one 16.7 KB frame of `flight::steer_core()` or `flight::vert()`, built one after the other, hides it otherwise).
-/// Only called from [`stat`], which runs in the supervisor task on core 0's thread-mode executor
-/// (`#[embassy_executor::main]`), never from core 1. It runs with interrupts enabled. That is safe
-/// because the loop writes only below `MSP - 256`: an interrupt that preempts it pushes its
-/// exception frame (8 words, 26 with a lazily stacked FPU frame: at most 104 B) and its handler's
-/// frames below the current stack pointer, which is above `hi`'s 256 B allowance or at worst
-/// inside the region being painted, and all of that is dead once the handler returns, before the
-/// loop's next write; nothing live lies below the stack pointer. The only effect is that a deep
-/// handler's use of the range the loop has not yet reached is overwritten by the paint (an
-/// under-count of the since-start-up peak, bounded by the handler's one-off depth).
+/// Re-paints the unused part of core 0's stack once, so the mark shows the depth after start-up (the boot peak, one 16.7 KB frame of `flight::steer_core()` or `flight::vert()`, hides it otherwise).
+/// Called only from [`stat`] on core 0's thread-mode executor, with interrupts enabled; that is safe because the loop writes only below `MSP - 256`
+/// and an interrupt's frames are dead once its handler returns, before the loop's next write. The only effect is an under-count of the since-start-up peak.
 #[inline(never)]
 fn repaint_core0() {
     let (lo, _) = core0_stack();
@@ -402,7 +378,6 @@ pub fn request_reboot(now_ms: u32) {
     write_record(scratch::encode(Reason::Requested, task::ACTION, 0, now_ms));
 }
 
-/// The reboot's final ACK was handed to the link now.
 pub fn reboot_ack_handed(now_ms: u32) {
     if REBOOT_REQ.load(Ordering::Acquire) {
         REBOOT_AT_MS.store(
@@ -417,8 +392,7 @@ pub fn reboot_ack_handed(now_ms: u32) {
     }
 }
 
-/// Features `hang-core0`, `spin-1s`, `hang-irqoff`: called in the barometer's `acquire`; once,
-/// 20 s after a start the watchdog did not cause, spins forever (the executor stalls), 1.0 s, or
+/// Features `hang-core0`, `spin-1s`, `hang-irqoff`: called in the barometer's `acquire`; once, 20 s after a start the watchdog did not cause, spins forever (the executor stalls), 1.0 s, or
 /// forever with interrupts off (the monitor cannot run).
 #[cfg(any(feature = "hang-core0", feature = "spin-1s", feature = "hang-irqoff"))]
 pub fn hang_point_core0() {

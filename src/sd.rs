@@ -1,49 +1,23 @@
-//! The SD card as a device row and the log writer (decision-sd-logging Q1, Q2, Q4, Q6; milestones
-//! SD2, SD3): one core-0 thread-mode task owns the bus (PIO0 SM0, DMA channel 4 completing on
-//! `DMA_IRQ_1` on core 0), the card, the mounted FAT32 volume and the open log, drives row 9
-//! through the shared `Health` machine with its own loop, and is the one consumer of the log ring
-//! (`logger::RING`; `logger`'s collector is its one producer).
-//!
-//! A start, a recovery and a restart are the same: a new bus, `init`, block 0 through
-//! `fw_core::mbr` (partition 1 of type 0x0B/0x0C), the mount over `BufStream` + `StreamSlice`,
-//! `LOGS/` opened (created if missing) and listed once; then the new log (`fw_core::logfile`): the
-//! number after the one `LOGS/LASTLOG.TXT` holds (or the listing's largest), the clean-up
-//! (`plan_cleanup` over the listing, as ArduPilot's `Prep_MinSpace`: one text and one deletion per
-//! step until nothing is left to delete, or "SD: card full": Failed, no log), a stale file of that
-//! number deleted, `LASTLOG.TXT` written BEFORE the log is opened (Q4-I3), `LOGS/NNNNNNNN.BIN`
-//! created and the header (the FMT records) written; then the ring is emptied, the collector is
-//! told the number and the filler length (`logger::OPEN`, `logger::PAD`) and the row is Ok with
-//! one NOTICE ("SD: 59.5 GiB FAT32, 17 MiB in 2 logs, log 3"). A deletion is one awaited call of
-//! about 10 ms per 32 KiB cluster (50 s for 161 MB): it runs only here, never while a log is
-//! written, and the row is kept out of the stuck check by a progress mark every second.
-//!
-//! The service: wait (no card call) for a piece in the ring, 1 s or the row's wake; write whole
-//! 4096-byte pieces in place from the ring and release them after the write returned; after 1 s
-//! without a write the bytes that wait; `flush` once per second, then the DSF figures for the
-//! collector. The file offset and the ring's read index are kept equal modulo 4096 (the filler
-//! before the log's first record makes the read index equal to the header's length), so a short
-//! piece is followed by one that ends at the next 4096-byte boundary of both, and later pieces
-//! are whole and in place again. A failed write is retried once at once; a second failure is one error event and the
-//! piece is discarded. A time-out that overlapped a settings save is retried with no event. A
-//! good write is the row's sample (`samples` = 512-byte blocks written, `overflows` = records the
-//! ring dropped). Every card and file-system call is awaited to its end and a RESTART request is
-//! taken between them (Q2-I1); a recovery or a restart closes the log, un-mounts and opens the
-//! next log number.
-//!
-//! Row (Q6): `NoCard` on every start try: Absent, TIMEOUT, "SD: no card"; block 0 not an MBR with a
-//! FAT32 partition 1, or a volume that does not mount as FAT32: Failed, ID_MISMATCH, "SD: no FAT32
-//! volume, reformat as FAT32" (the machine parks the row after the start retries; this task shows
-//! why); logging: Ok with one NOTICE; card full: Failed, "SD: card full"; `LOG_BACKEND_TYPE` 0 at
-//! boot: Absent, NONE, "SD: logging off", the card untouched, nothing collected. Errors in service
-//! go through the machine and its ladder (BUS or TIMEOUT, the supervisor's texts).
-//!
-//! Test hooks: `inject-sd-write-fail` (60 s after the log opened the next six write calls fail
-//! without card traffic: three pieces, each with its retry); `log-verify` (after the mount, before
-//! the new log, the previous log is read through `dflog::walk::Walker` and summarised);
-//! `inject-log-small-volume` (the first open's clean-up is told a volume of the reserve plus the
-//! listed bytes minus one, so the oldest log is deleted before the log opens); `inject-log-delete-big`
-//! (the first open's clean-up is told a volume of the reserve plus the bytes of the logs after the
-//! largest one in ring order, so every log up to and including the largest is deleted).
+//! The SD card as a device row and the log writer: one core-0 thread-mode task owns the bus (PIO0 SM0, DMA channel 4 completing on `DMA_IRQ_1` on core 0),
+//! the card, the mounted FAT32 volume and the open log, drives row 9 through the shared `Health` machine with its own loop,
+//! and is the one consumer of the log ring (`logger::RING`; `logger`'s collector is its one producer).
+//! A start, a recovery and a restart are the same: a new bus, `init`, block 0 through `fw_core::mbr` (partition 1 of type 0x0B/0x0C),
+//! the mount over `BufStream` + `StreamSlice`, `LOGS/` opened (created if missing) and listed once; then the new log (`fw_core::logfile`):
+//! the number after the one `LOGS/LASTLOG.TXT` holds (or the listing's largest), the clean-up (`plan_cleanup`, as ArduPilot's `Prep_MinSpace`:
+//! one text and one deletion per step until nothing is left to delete, or "SD: card full": Failed, no log), a stale file of that number deleted,
+//! `LASTLOG.TXT` written before the log is opened, `LOGS/NNNNNNNN.BIN` created and the header (the FMT records) written;
+//! then the ring is emptied, the collector is told the number and the filler length (`logger::OPEN`, `logger::PAD`) and the row is Ok with one NOTICE.
+//! A deletion is one awaited call of about 10 ms per 32 KiB cluster; it runs only here, never while a log is written, and a progress mark every second keeps the row out of the stuck check.
+//! The service: wait (no card call) for a piece in the ring, 1 s or the row's wake; write whole 4096-byte pieces in place from the ring and release them after the write returned;
+//! after 1 s without a write the bytes that wait; `flush` once per second, then the DSF figures for the collector.
+//! The file offset and the ring's read index are kept equal modulo 4096 (the filler before the log's first record), so a short piece is followed by one that ends at the next 4096-byte boundary of both.
+//! A failed write is retried once at once; a second failure is one error event and the piece is discarded. A time-out that overlapped a settings save is retried with no event.
+//! A good write is the row's sample (`samples` = 512-byte blocks written, `overflows` = records the ring dropped). Every card and file-system call is awaited to its end and a RESTART request is taken between them;
+//! a recovery or a restart closes the log, un-mounts and opens the next log number.
+//! Row states: `NoCard` on every start try: Absent, TIMEOUT, "SD: no card"; block 0 not an MBR with a FAT32 partition 1, or a volume that does not mount as FAT32: Failed, ID_MISMATCH, "SD: no FAT32 volume, reformat as FAT32";
+//! card full: Failed, "SD: card full"; `LOG_BACKEND_TYPE` 0 at boot: Absent, NONE, "SD: logging off", the card untouched. Errors in service go through the machine and its ladder (BUS or TIMEOUT).
+//! Test hooks: `inject-sd-write-fail` (60 s after the log opened the next six write calls fail without card traffic); `log-verify` (the previous log is read through `dflog::walk::Walker` and summarised);
+//! `inject-log-small-volume` and `inject-log-delete-big` (the first open's clean-up is told a pretended volume so that the oldest log, or every log up to the largest, is deleted).
 
 use core::pin::{Pin, pin};
 use core::sync::atomic::Ordering;
@@ -86,22 +60,15 @@ use crate::psram;
 /// The row's nominal period P: the service's 1 s (the flush, the longest wait).
 pub const PERIOD_US: u32 = 1_000_000;
 const SECOND: Duration = Duration::from_secs(1);
-/// Longest wait while parked, as in `device`.
 const SLICE: Duration = Duration::from_millis(100);
-/// The SD card's channel (resources.md DMA row 4).
 const CH: usize = 4;
 const BIT: u32 = 1 << CH;
 /// INTE0 as the flight core leaves it: IMU1's channels 0 and 1, IMU2's 2 and 3, the ESC capture's 5.
 const FLIGHT_CHANNELS: u32 = 0x2f;
-/// At most this many entries of `LOGS/` are listed.
 const LIST_MAX: usize = 1024;
-/// One slot per log number (slot 0 unused).
 const LOG_SLOTS: usize = MAX_LOG_NUMBER as usize + 1;
-/// A listing slot with no file.
 const ABSENT: u32 = u32::MAX;
-/// Attempts of one write or flush whose time-outs overlapped a settings save.
 const SAVE_RETRIES: u32 = 3;
-/// 512-byte blocks per GiB.
 const GIB_BLOCKS: u64 = 1 << 21;
 const NO_CARD: &str = "SD: no card";
 const WRONG_FORMAT: &str = "SD: no FAT32 volume, reformat as FAT32";
@@ -113,9 +80,7 @@ type Fs<'v, 'a> = FileSystem<&'v mut Volume<'a>, DefaultTimeProvider, LossyOemCp
 type FsError = embedded_fatfs::Error<StreamSliceError<BufStreamError<CardError>>>;
 type LogFile<'f, 'v, 'a> = File<'f, &'v mut Volume<'a>, DefaultTimeProvider, LossyOemCpConverter>;
 
-/// The `LOGS/` listing: per log number its file size (`ABSENT`: none).
 static SIZES: ConstStaticCell<[u32; LOG_SLOTS]> = ConstStaticCell::new([ABSENT; LOG_SLOTS]);
-/// The header of every log (the FMT records), built once.
 static HEADER: ConstStaticCell<[u8; HEADER_SEQUENCE_LEN]> =
     ConstStaticCell::new([0; HEADER_SEQUENCE_LEN]);
 /// `log-verify`: the read buffer, 4-byte aligned so that whole blocks are read in place.
@@ -125,17 +90,14 @@ struct VerifyBuf([u8; PIECE]);
 #[cfg(feature = "log-verify")]
 static VERIFY_BUF: ConstStaticCell<VerifyBuf> = ConstStaticCell::new(VerifyBuf([0; PIECE]));
 
-/// Log bytes a download step reads at most (10 LOG_DATA).
 const READ_CHUNK: usize = 10 * CHUNK;
 /// A read handle with nothing to read is closed after this long (the station sends no
 /// LOG_REQUEST_END after a complete download).
 const READER_IDLE: Duration = Duration::from_secs(2);
-/// Room a whole read step needs in the hand-over ring.
 const READ_ROOM: usize = READ_CHUNK + 10 * DATA_HEADER;
-/// The download's read buffer.
 static READ_BUF: ConstStaticCell<[u8; READ_CHUNK]> = ConstStaticCell::new([0; READ_CHUNK]);
 
-/// The waker of the SD bus's DMA completion (the driver keeps no static state, CONTRACT A6).
+/// The waker of the SD bus's DMA completion (the driver keeps no static state).
 static SD_WAKER: AtomicWaker = AtomicWaker::new();
 
 pub struct SdWaker;
@@ -163,7 +125,6 @@ pub struct Parts {
     pub dat3: Peri<'static, PIN_31>,
 }
 
-/// Why a start, recovery or restart failed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {
     NoCard,
@@ -171,7 +132,6 @@ enum Fault {
     Error(ErrorKind),
 }
 
-/// Q6's error of a driver error: TIMEOUT for time-outs, BUS for the rest.
 fn card_kind(e: &CardError) -> ErrorKind {
     match e {
         CardError::InitTimeout { .. }
@@ -183,7 +143,6 @@ fn card_kind(e: &CardError) -> ErrorKind {
     }
 }
 
-/// The error of a file-system call: the driver's through the adapters, BUS (a decode error) else.
 fn fs_kind(e: &FsError) -> ErrorKind {
     match e {
         embedded_fatfs::Error::Io(StreamSliceError::Other(BufStreamError::Io(e))) => card_kind(e),
@@ -195,24 +154,19 @@ fn now_ms() -> u64 {
     Instant::now().as_millis()
 }
 
-/// Row 9 as this task drives it.
 struct Row {
     dev: &'static Device,
     health: Health,
     status: DeviceStatus,
     action: Action,
-    /// The fault of the latest failed start: what the row shows once the start retries have ended.
     start_fault: Option<Fault>,
-    /// The restart request being carried out, until its outcome is published.
     restart_run: Option<u32>,
     checked: bool,
-    /// The card is full (`plan_cleanup`): Failed, no log, parked until a RESTART request.
     full: bool,
 }
 
 impl Row {
-    /// The state and counters shown: the machine's, except that a row parked Absent by its start
-    /// retries shows why (Q6).
+    /// The state and counters shown: the machine's, except that a row parked Absent by its start retries shows why.
     fn shown(&self) -> (State, Counters) {
         let mut counters = *self.health.counters();
         counters.overflows = RING.dropped();
@@ -282,7 +236,6 @@ impl Row {
         }
     }
 
-    /// A RESTART request: taken here, between operations.
     fn take_restart(&mut self) {
         if !self.dev.take_request(REQ_RESTART) {
             return;
@@ -303,7 +256,6 @@ impl Row {
         );
     }
 
-    /// The operation `op` failed with `fault`.
     fn failed(&mut self, op: Action, fault: Fault, began: Instant) {
         defmt::info!(
             "[INFO] SD: {=str} failed after {=u64} ms: {=str}",
@@ -328,7 +280,6 @@ impl Row {
         self.feed(event);
     }
 
-    /// The clean-up planner said the card is full: Failed, no log, parked until a RESTART request.
     fn card_full(&mut self) {
         self.full = true;
         let before = self.status.state;
@@ -383,9 +334,8 @@ async fn run(mut parts: Parts) -> ! {
     if !fw_settings::sd::file_backend(backend) {
         off(dev, "LOG_BACKEND_TYPE 0", "SD: logging off").await
     }
-    // Without a working PSRAM the rings are unbound (`psram::init` bound nothing): no log, the card is not touched.
-    // The task starts after `psram::init`, so this is final for the boot; the same check at the top of the loop
-    // below catches a FAULT at run time.
+    // Without a working PSRAM the rings are unbound: no log, the card is not touched. This is final for the boot;
+    // the same check at the top of the loop below catches a FAULT at run time.
     if !psram::ready() {
         off(dev, "no PSRAM", NO_PSRAM_TEXT).await
     }
@@ -426,8 +376,7 @@ async fn run(mut parts: Parts) -> ! {
     };
     row.feed(Event::Tick);
     loop {
-        // A FAULT of the PSRAM at run time (its canary failed after a flash operation): `serve` has ended the log
-        // (closed in the file system, nothing more read from the ring), the card is un-mounted; log off from here.
+        // A run-time FAULT of the PSRAM: `serve` has ended the log (nothing more is read from the ring), the card is un-mounted; log off from here.
         if !psram::ready() {
             off(dev, "no PSRAM", NO_PSRAM_TEXT).await
         }
@@ -447,13 +396,11 @@ async fn run(mut parts: Parts) -> ! {
                 row.feed(Event::Tick);
             }
             Action::Park => {
-                // No card traffic; a RESTART request arrives through `wake`.
                 let _ = select(Timer::after(SLICE), dev.wake.wait()).await;
                 dev.mark();
                 row.feed(Event::Tick);
             }
-            // Not reached: every operation's result is fed back at once, and nothing here asks
-            // for a reconfigure.
+            // Not reached: nothing here asks for a reconfigure.
             Action::None | Action::Reconfigure => {
                 Timer::after(SLICE).await;
                 dev.mark();
@@ -463,12 +410,10 @@ async fn run(mut parts: Parts) -> ! {
     }
 }
 
-/// The text when the log ring has no PSRAM.
 const NO_PSRAM_TEXT: &str = "SD: logging off, no PSRAM";
 
-/// `LOG_BACKEND_TYPE` = 0 at boot, or no (working) PSRAM, `why`: Absent, NONE, one text; the card is never
-/// touched from here on. A RESTART request ends at once, not Ok (the parameter takes effect at the next boot; the
-/// PSRAM is not tried again before the next boot either).
+/// `LOG_BACKEND_TYPE` = 0 at boot, or no (working) PSRAM, `why`: Absent, NONE, one text; the card is never touched.
+/// A RESTART request ends at once, not Ok (neither the parameter nor the PSRAM is retried before the next boot).
 async fn off(dev: &'static Device, why: &'static str, line: &'static str) -> ! {
     let mut status = dev.status();
     status.state = State::Absent;
@@ -494,8 +439,7 @@ async fn off(dev: &'static Device, why: &'static str, line: &'static str) -> ! {
     }
 }
 
-/// One bus: built, the start (recovery, restart) the machine asked for, the service while mounted,
-/// the un-mount. Returns when the machine wants another operation or a RESTART request waits.
+/// One bus: built, the start (recovery, restart) the machine asked for, the service while mounted, the un-mount. Returns when the machine wants another operation or a RESTART request waits.
 async fn session(parts: &mut Parts, row: &mut Row, w: &mut LogState) {
     let op = row.action;
     let began = Instant::now();
@@ -548,7 +492,7 @@ async fn session(parts: &mut Parts, row: &mut Row, w: &mut LogState) {
     );
 }
 
-/// `init` and block 0: the partition, or why not.
+/// The partition found by `init` and block 0, or the failure.
 async fn open(card: &mut Sd<'_>) -> Result<Partition, Fault> {
     let t = Instant::now();
     let info = card.init().await;
@@ -598,26 +542,18 @@ async fn open(card: &mut Sd<'_>) -> Result<Partition, Fault> {
     }
 }
 
-/// What the writer keeps across sessions.
 struct LogState {
     consumer: LogConsumer<'static, RING_BYTES>,
-    /// The ring's read index: bytes consumed since boot (wrapping).
     tail: u32,
-    /// Filler bytes of the open log still to consume unwritten.
     pad_left: usize,
-    /// The `LOGS/` listing: per log number its size, `ABSENT` for none.
     sizes: &'static mut [u32; LOG_SLOTS],
     header: &'static mut [u8; HEADER_SEQUENCE_LEN],
-    /// Bytes written to logs since boot (the row's samples are these in 512-byte blocks).
     written: u64,
-    /// Write calls still to fail (`inject-sd-write-fail`; 0 otherwise).
     inject_calls: u8,
-    /// The log download's answers to the USB task.
     handover: LogProducer<'static, HANDOVER_BYTES>,
     read_buf: &'static mut [u8; READ_CHUNK],
     #[cfg(feature = "inject-sd-write-fail")]
     injected: bool,
-    /// The clean-up hooks' pretended volume was used (once per boot).
     #[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
     pretend_told: bool,
     #[cfg(feature = "log-verify")]
@@ -630,13 +566,11 @@ impl LogState {
         self.tail = self.tail.wrapping_add(n as u32);
     }
 
-    /// Empties the ring (nothing is pushed while no log is open).
     fn drain(&mut self) {
         let n = self.consumer.readable();
         self.consume(n);
     }
 
-    /// The listing as `(number, size)`.
     fn listing(&self) -> impl Iterator<Item = (u32, u64)> + '_ {
         (0u32..)
             .zip(self.sizes.iter())
@@ -645,24 +579,18 @@ impl LogState {
     }
 }
 
-/// The open log.
 struct Open {
     number: u32,
-    /// The file offset: bytes written to the file.
     offset: u64,
     opened_at: Instant,
 }
 
-/// Why the service ended.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum End {
-    /// The machine wants another operation (recovery after errors).
     Machine,
-    /// A RESTART request waits.
     Restart,
 }
 
-/// The path of log `n`, `LOGS/NNNNNNNN.BIN`.
 fn log_path(n: u32) -> [u8; 17] {
     let mut path = *b"LOGS/00000000.BIN";
     if let Some(name) = path.get_mut(5..) {
@@ -675,12 +603,8 @@ fn as_str(bytes: &[u8]) -> &str {
     core::str::from_utf8(bytes).unwrap_or("?")
 }
 
-/// The future `make` builds, awaited with its construction and its `poll` in a frame of their own,
-/// the future itself in `slot` (pass `pin!(None)`: built in place in the task's state): the
-/// temporaries of the card's init, the mount, the directory walks and the un-mounts are on the
-/// stack only while they run, not in the poll frame of `run`, `session` and `mounted`, which is on
-/// core 0's stack at every poll of the task while a log is open (stack S1: each of the five
-/// un-mount futures, 5.8 KB, was built on that frame and copied; 31.9 KB in all).
+/// The future `make` builds, awaited with its construction and its `poll` in a frame of their own, the future itself in `slot` (pass `pin!(None)`).
+/// Its temporaries (card init, mount, directory walks, un-mounts) are on the stack only while they run, not in the poll frame of `run`, `session` and `mounted`, which sits on core 0's stack at every poll while a log is open.
 async fn own_frame<F: Future>(
     mut slot: Pin<&mut Option<F>>,
     make: impl FnOnce() -> F,
@@ -704,7 +628,6 @@ fn poll_apart<F: Future>(
     }
 }
 
-/// The mount, the new log, the notice, the service, the log closed, the un-mount.
 async fn mounted(
     volume: &mut Volume<'_>,
     part: Partition,
@@ -773,7 +696,6 @@ async fn mounted(
     );
 }
 
-/// The new log, the notice, the service, the log closed. `Err` if the log could not be opened.
 #[allow(clippy::too_many_arguments)]
 async fn logging(
     fs: &Fs<'_, '_>,
@@ -810,8 +732,7 @@ async fn logging(
             return Err(kind);
         }
     };
-    // The hand-off: the ring is empty (nothing is pushed while `OPEN` is 0); the filler makes the
-    // read index equal to the file offset (the header's length) modulo one piece.
+    // The ring is empty (nothing is pushed while `OPEN` is 0); the filler makes the read index equal the file offset (the header's length) modulo one piece.
     w.drain();
     let pad = (HEADER_SEQUENCE_LEN as u32).wrapping_sub(w.tail) as usize % PIECE;
     w.pad_left = pad;
@@ -897,16 +818,13 @@ async fn logging(
     Ok(())
 }
 
-/// What one listing of `LOGS/` found.
 struct Listing {
     logs: u32,
     log_bytes: u64,
     others: u32,
-    /// The largest log number.
     max: Option<u32>,
 }
 
-/// `LOGS/`, created if missing, listed once (bounded) into `sizes`.
 async fn list(fs: &Fs<'_, '_>, sizes: &mut [u32; LOG_SLOTS]) -> Result<Listing, FsError> {
     sizes.fill(ABSENT);
     let dir = fs.root_dir().create_dir(LOG_DIR).await?;
@@ -940,7 +858,6 @@ async fn list(fs: &Fs<'_, '_>, sizes: &mut [u32; LOG_SLOTS]) -> Result<Listing, 
     Ok(listing)
 }
 
-/// The number `LOGS/LASTLOG.TXT` holds; `None` if the file is missing or does not parse.
 async fn read_lastlog(fs: &Fs<'_, '_>) -> Result<Option<u32>, FsError> {
     let dir = fs.root_dir().open_dir(LOG_DIR).await?;
     let mut file = match dir.open_file(LASTLOG_NAME).await {
@@ -966,8 +883,7 @@ async fn read_lastlog(fs: &Fs<'_, '_>) -> Result<Option<u32>, FsError> {
     Ok(parse_lastlog(buf.get(..n).unwrap_or(&[])))
 }
 
-/// Log `number`: a stale file of that number deleted, `LASTLOG.TXT` written (Q4-I3), the log
-/// created and its header written.
+/// Log `number`: a stale file of that number deleted, `LASTLOG.TXT` written, the log created and its header written.
 async fn open_log<'f, 'v, 'a>(
     fs: &'f Fs<'v, 'a>,
     number: u32,
@@ -1071,7 +987,6 @@ async fn write_piece(
     Ok(done)
 }
 
-/// `flush` with the same retries as a write.
 async fn flush(file: &mut LogFile<'_, '_, '_>, dev: &'static Device) -> Result<(), ErrorKind> {
     let mut retried = false;
     let mut save_retries = 0;
@@ -1100,7 +1015,6 @@ async fn flush(file: &mut LogFile<'_, '_, '_>, dev: &'static Device) -> Result<(
     }
 }
 
-/// The writer's loop while the machine wants nothing and no RESTART request waits.
 async fn serve<'f, 'v, 'a>(
     fs: &'f Fs<'v, 'a>,
     file: &mut LogFile<'f, 'v, 'a>,
@@ -1112,11 +1026,9 @@ async fn serve<'f, 'v, 'a>(
     let mut last_write = Instant::now();
     let mut last_flush = Instant::now();
     let mut download = Download::new();
-    // When the last download step began, until the loop has looked at what is due after it.
     let mut step_began: Option<Instant> = None;
     loop {
-        // Once per turn of the loop, before any read of the ring or write of the hand-over ring (the PSRAM batch of
-        // this turn: the piece, the download step): a FAULT ends the log here, `run` then goes off.
+        // Once per turn, before any read of the ring or write of the hand-over ring (the PSRAM batch): a FAULT ends the log here.
         if !psram::ready() {
             download.close().await;
             return End::Machine;
@@ -1251,47 +1163,34 @@ async fn serve<'f, 'v, 'a>(
 /// What the SD task does for the log download (`logdl`).
 #[derive(Clone, Copy)]
 enum Job {
-    /// Nothing; a read handle is closed.
     Idle,
-    /// Nothing more for this request; a read handle stays open for the next request.
     Done,
-    /// The LOG_ENTRY of the logs from `next` to `end`.
     List {
         next: u32,
         end: u32,
         num_logs: u16,
         last: u16,
     },
-    /// The one LOG_ENTRY with id 0: no logs.
     Empty,
-    /// LOG_DATA for the bytes `pos..end` of log `id`.
     Data { id: u32, pos: u64, end: u64 },
-    /// The one LOG_DATA with count 0: `ofs` at or past the end of log `id`.
     End { id: u32, ofs: u32 },
 }
 
-/// The download's read handle: a second file beside the log being written.
 struct Reader<'f, 'v, 'a> {
     number: u32,
-    /// The listed size when it was opened (the file's directory entry holds at least this).
     size: u64,
-    /// The file offset.
     at: u64,
-    /// When it was last opened, moved or read.
     used: Instant,
     file: LogFile<'f, 'v, 'a>,
 }
 
-/// The SD task's side of the log download.
 struct Download<'f, 'v, 'a> {
-    /// The generation of the request taken last.
     generation: u32,
     job: Job,
     reader: Option<Reader<'f, 'v, 'a>>,
 }
 
 impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
-    /// A request made before the service began is not answered.
     fn new() -> Self {
         Self {
             generation: logdl::request().0,
@@ -1474,7 +1373,6 @@ impl<'f, 'v, 'a> Download<'f, 'v, 'a> {
     }
 }
 
-/// The job of a request: answered from the listing; nothing for a log that does not exist.
 fn job_of(request: Request, w: &LogState, open: u32) -> Job {
     match request {
         Request::Stop => Job::Idle,
@@ -1517,12 +1415,9 @@ fn job_of(request: Request, w: &LogState, open: u32) -> Job {
     }
 }
 
-/// The clean-up before log `number` is opened (ArduPilot's `Prep_MinSpace`): `plan_cleanup` over the
-/// listing until it says `Nothing`; per `Delete`, one text, the deletion (one awaited call, about
-/// 10 ms per 32 KiB cluster: 50 s for 161 MB) and the listing updated. `Ok(true)`: the card is full.
-/// While a deletion runs the row is marked every second (the supervisor's stuck check needs no
-/// progress mark but the task's own) and the deletion future is polled by reference, never
-/// dropped (Q2-I1). An error ends the open like any other error of the open.
+/// The clean-up before log `number` is opened (as ArduPilot's `Prep_MinSpace`): `plan_cleanup` over the listing until it says `Nothing`;
+/// per `Delete`, one text, the deletion (one awaited call, about 10 ms per 32 KiB cluster) and the listing updated. `Ok(true)`: the card is full.
+/// While a deletion runs the row is marked every second and the deletion future is polled by reference, never dropped. An error ends the open like any other.
 async fn clean_up(
     fs: &Fs<'_, '_>,
     number: u32,
@@ -1577,11 +1472,9 @@ async fn clean_up(
     }
 }
 
-/// The test hooks' pretended volume for the first open's clean-up (the whole loop), once per boot.
+/// The test hooks' pretended volume for the first open's clean-up, once per boot.
 /// `inject-log-small-volume`: the reserve plus the listed bytes minus one, so the oldest log goes.
-/// `inject-log-delete-big`: the reserve plus the bytes of the logs after the largest log other than
-/// `number` in ring order (`number` itself, a stale file, counts as the newest), so the planner
-/// deletes oldest first until the largest is gone and stops.
+/// `inject-log-delete-big`: the reserve plus the bytes of the logs after the largest log other than `number` in ring order, so the planner deletes oldest first until the largest is gone.
 #[cfg(any(feature = "inject-log-small-volume", feature = "inject-log-delete-big"))]
 fn pretend_volume(w: &LogState, number: u32) -> u64 {
     #[cfg(feature = "inject-log-delete-big")]
@@ -1626,7 +1519,6 @@ fn pretend_volume(w: &LogState, number: u32) -> u64 {
     }
 }
 
-/// `log-verify`: the previous log read through the walker in 4 KiB pieces and summarised.
 #[cfg(feature = "log-verify")]
 async fn verify(fs: &Fs<'_, '_>, number: Option<u32>, dev: &'static Device, buf: &mut [u8; PIECE]) {
     use fw_core::dflog::TYPES;
@@ -1704,8 +1596,7 @@ async fn verify(fs: &Fs<'_, '_>, number: Option<u32>, dev: &'static Device, buf:
     }
 }
 
-/// Q1-I1 and Q1-I2, once, after the first bus was built. `sd-irq-negative` sets INTE0 bit 4 first
-/// (and clears it again after the checks): the INTE0 check must fail.
+/// The INTE0 checks, once, after the first bus was built. `sd-irq-negative` sets INTE0 bit 4 first (and clears it again after): the check must fail.
 fn register_checks() {
     #[cfg(feature = "sd-irq-negative")]
     alias_write(pac::DMA.inte(0), BIT, 0x2000);
@@ -1745,12 +1636,10 @@ fn register_checks() {
     );
 }
 
-/// `sd-irq-negative`: writes `bits` to the SET (+0x2000) or CLR (+0x3000) alias of `reg`.
 #[cfg(feature = "sd-irq-negative")]
 fn alias_write(reg: pac::common::Reg<u32, pac::common::RW>, bits: u32, alias: usize) {
-    // SAFETY: RP2350 datasheet 2.1.3 "Atomic register access": the DMA block has the atomic SET
-    // alias at +0x2000 and the CLR alias at +0x3000 (pio-sdmmc's `write_set`/`write_clear` do the
-    // same); `reg` comes from the PAC, so its alias is a register too.
+    // SAFETY: RP2350 datasheet 2.1.3 "Atomic register access": the DMA block has the SET alias at +0x2000 and the CLR alias at +0x3000;
+    // `reg` comes from the PAC, so its alias is a register too.
     unsafe {
         pac::common::Reg::<u32, pac::common::RW>::from_ptr(
             reg.as_ptr().cast::<u8>().wrapping_add(alias).cast(),

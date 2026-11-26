@@ -1,13 +1,8 @@
-//! The battery monitor: the RP2350 ADC on core 0, WITHOUT DMA (interrupt-driven single
-//! conversions, each awaited to completion), 10 Hz. Battery voltage on GPIO42 (ADC2, 100k / 10k
-//! divider), the ESC's current output on GPIO41 (ADC1, no pad pull). The `adc-battery` crate turns
-//! the sums into millivolts and milliamps with the configuration of the `BATT_*` parameters, read
-//! for every sample.
-//!
-//! There is no chip identity and no bus: "Ok" means the ADC converts, whatever the pins carry (with
-//! the battery unplugged the voltage reads about 0 V). The device's "data ready" is the 100 ms
-//! period timer; a conversion that does not finish within 3 periods is an error event
-//! (`ErrorKind::Timeout`).
+//! The battery monitor: the RP2350 ADC on core 0 without DMA (interrupt-driven single conversions, each awaited to completion), 10 Hz.
+//! Battery voltage on GPIO42 (ADC2, 100k / 10k divider), the ESC's current output on GPIO41 (ADC1, no pad pull).
+//! The `adc-battery` crate turns the sums into millivolts and milliamps with the `BATT_*` parameters, read for every sample.
+//! There is no chip identity and no bus: "Ok" means the ADC converts, whatever the pins carry. The device's "data ready" is the 100 ms period timer;
+//! a conversion that does not finish within 3 periods is an error event (`ErrorKind::Timeout`).
 
 use adc_battery::{BatteryConfig, Reading as Counts};
 use embassy_rp::Peri;
@@ -27,12 +22,10 @@ bind_interrupts!(struct Irqs {
     ADC_IRQ_FIFO => adc::InterruptHandler;
 });
 
-/// The sample period: 10 Hz.
 pub const PERIOD_US: u32 = 100_000;
 /// Conversions averaged per channel and sample (after one discarded after the channel switch).
 const CONVERSIONS: u32 = 16;
-/// The pad's 100 nF takes a few milliseconds to charge once the pull-down is off; the bench waited
-/// 150 ms before the first conversion (the only wait that was tested).
+/// The pad's 100 nF takes a few milliseconds to charge once the pull-down is off.
 const SETTLE: Duration = Duration::from_millis(150);
 
 pub struct BattAdapter {
@@ -145,17 +138,14 @@ impl DeviceAdapter for BattAdapter {
         })
     }
 
-    /// A period timer is never "missed": after a deadline miss a sample can always be taken.
     async fn status(&mut self) -> Result<Pending, ErrorKind> {
         Ok(Pending::Data)
     }
 
-    /// There is no configuration in the ADC to check.
     async fn verify(&mut self) -> Result<(), VerifyError> {
         Ok(())
     }
 
-    /// The parameters are read for every sample: nothing to apply.
     async fn apply(&mut self) -> Result<(), ErrorKind> {
         Ok(())
     }
@@ -172,7 +162,6 @@ impl DeviceAdapter for BattAdapter {
         AdapterCounters { calls: self.calls }
     }
 
-    /// The battery is not a flight-core input.
     fn to_flight(&mut self, _sample: &Sample) {}
 }
 

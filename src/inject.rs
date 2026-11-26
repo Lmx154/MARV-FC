@@ -1,14 +1,10 @@
 //! Fault injection around a device adapter, for the board checks (cargo features, off by default).
-//! The inner adapter is always called, so the bus traffic is real; the wrapper then replaces the
-//! result with a bus error.
+//! The inner adapter is always called, so the bus traffic is real; the wrapper then replaces the result with a bus error.
 //! - `inject-baro-transient`: after 5 s of good samples, `acquire` fails 4 times in a row, once.
-//! - `inject-baro-persistent`: after 5 s of good samples, every `acquire`, `recover` and `restart`
-//!   fails (it wins when both features are on).
-//! - `inject-baro-missed-edge`: after 5 s of good samples, the data-ready edges are swallowed for
-//!   200 ms while the chip keeps producing data, once.
+//! - `inject-baro-persistent`: after 5 s of good samples, every `acquire`, `recover` and `restart` fails (it wins when both features are on).
+//! - `inject-baro-missed-edge`: after 5 s of good samples, the data-ready edges are swallowed for 200 ms while the chip keeps producing data, once.
 //! - `inject-baro-silent`: the same for 1 s, and `status` answers "nothing pending" meanwhile.
-//! - `inject-baro-fail-until-restart`: as `persistent`, until a RESTART request has been raised
-//!   (`Device::restarts`); from then on everything works again.
+//! - `inject-baro-fail-until-restart`: as `persistent`, until a RESTART request has been raised (`Device::restarts`).
 //! - `inject-baro-por`: after 5 s of good samples, one `acquire` answers a power-on reset, once.
 //! - `inject-baro-verify`: after 5 s of good samples, one `verify` answers "mismatch", once.
 //! - `inject-baro-stuck`: after 5 s of good samples, `acquire` never returns.
@@ -53,10 +49,8 @@ enum Phase {
 
 pub struct Inject<A> {
     inner: A,
-    /// The device whose restart requests end `fail-until-restart`.
     dev: &'static Device,
-    /// Fails until a restart request, as `inject-baro-fail-until-restart` (the magnetometer's
-    /// `inject-mag-fail-until-restart` is this and nothing else).
+    /// Fails until a restart request, as `inject-baro-fail-until-restart`.
     until_restart: bool,
     first_good: Option<Instant>,
     injected: u8,
@@ -72,7 +66,6 @@ impl<A: DeviceAdapter> Inject<A> {
         Self::build(inner, &BARO, UNTIL_RESTART)
     }
 
-    /// The magnetometer's wrapper: fail-until-restart only.
     #[allow(dead_code)] // unused when only the barometer's injection is on
     pub fn new_mag(inner: A) -> Self {
         Self::build(inner, &MAG, true)

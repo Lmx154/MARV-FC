@@ -1,35 +1,7 @@
-//! MARV V2 firmware: two cores and the device layer (design: decision-foundation, two-core
-//! amendment).
-//!
-//! Core 0, the I/O core: `usb_link` (a MAVLink node, system 1 component 1, on USB), `supervisor`
-//! (10 ms tick: the flight core's liveness ping at 10 Hz, the start-up checks, the devices' stuck
-//! check and transition texts, `[STAT]` lines every 10 s), `beat0`, and one task per core-0 device
-//! (`device`: barometer, magnetometer, GNSS, battery, SD card), the radio receiver (`rc`). Core 1,
-//! the flight core: `fw_flight::liveness`, IMU1 (`imu1`: the ICM-45686 on SPI0 with DMA channels 0 and 1) and IMU2 (`imu2`: the LSM6DSK320X on
-//! SPI1 with DMA channels 2 and 3), both built inside core 1's entry and running `fw_flight::imu`.
-//! The cores share only the atomics and `fw_core::xcore` cells (in `imu1::CELLS`, `imu2::CELLS`
-//! and below), in internal SRAM. Telemetry adds HIGHRES_IMU (id 0, IMU1), SCALED_IMU2 (IMU2) and
-//! SCALED_PRESSURE (BARO) at 25 Hz. The parameters
-//! (`store`, every device's table) and the commands (`actions`) are built; the parameters are read
-//! from the flash settings region at boot and written there only on an explicit save (`settings`).
-//! The hardware watchdog (`watchdog`) is started first thing and fed by its monitor on `SWI_IRQ_1`
-//! only while `BEAT0` and `PONG` advance; the boot report says why the last reset happened. It
-//! runs until `tools/run.sh` ends it.
-//!
-//! USB identity: VID 0xc0de, PID 0xcafe, "MARV", "MARV V2 firmware", "marv-v2-fw".
-//! Feature `no-fbeat` (negative control): core 1 starts but its liveness task is not spawned; the
-//! hardware watchdog is not started in that build (it would reset the board in a loop).
-//! Features `inject-baro-transient`, `-persistent`, `-fail-until-restart`, `-missed-edge`, `-silent`,
-//! `-verify`, `-stuck`, `-por`: fault injection (`inject`). Features `inject-imu1-persistent`,
-//! `inject-imu1-missed-edge`, `inject-imu2-persistent`: fault injection around an IMU's adapter
-//! (`imu_inject::Inject`). Feature
-//! `stall-core0`: one core-0 task spins 1.2 s without yielding, 20 s after start (invariant F1).
-//! Feature `f4-negative` (negative control of F4): a DMA channel is built on core 0 before the
-//! start-up check, then its line is disabled again before core 1 starts.
-//! Features `save-loop`, `fake-armed`, `corrupt-newest`, `guard-negative`, `save-foreign`: the
-//! settings checks (`settings`). Features `hang-core0`, `hang-flight`, `spin-1s`, `hang-irqoff`: the
-//! watchdog checks (`watchdog`). Feature `stack-negative` (negative control of
-//! core 0's stack guard): 10 s after start the stack is run 2 KiB below `_stack_end`.
+//! MARV V2 firmware: core 0 is the I/O core (USB MAVLink node, supervisor, devices, radio receiver), core 1 the flight core.
+//! The cores share only atomics and `fw_core::xcore` cells in internal SRAM; the hardware watchdog (`watchdog`) is fed only while `BEAT0` and `PONG` advance.
+//! Optional features (`no-fbeat`, `inject-*`, `stall-core0`, `f4-negative`, `stack-negative`, `save-loop`, `fake-armed`,
+//! `corrupt-newest`, `guard-negative`, `save-foreign`, `hang-*`, `spin-1s`) are fault injections and negative controls for the on-board checks.
 #![no_std]
 #![no_main]
 // The SD task's file-system futures nest deeper than the default limit allows for their layout.
@@ -114,8 +86,7 @@ bind_interrupts!(struct Irqs {
     USBCTRL_IRQ => InterruptHandler<USB>;
 });
 
-// The program's one `DMA_IRQ_0` binding, the flight core's (F4): IMU1's channels 0 and 1, IMU2's 2
-// and 3, the ESC reply capture's 5; the negative control's channel 6 on core 0 is bound here too.
+// The program's one `DMA_IRQ_0` binding, owned by the flight core's channels; `f4-negative` also binds core 0's channel 6.
 #[cfg(not(feature = "f4-negative"))]
 bind_interrupts!(pub struct DmaIrqs {
     DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>,
@@ -131,11 +102,8 @@ bind_interrupts!(pub struct DmaIrqs {
 
 type UsbDriver = Driver<'static, USB>;
 
-// ---------------------------------------------------------------------------------------------
 // Shared between the cores: plain atomics and `xcore` cells only.
-// ---------------------------------------------------------------------------------------------
 
-/// Core 0 -> flight core: the liveness ping, bumped by the supervisor at 10 Hz.
 static PING: AtomicU32 = AtomicU32::new(0);
 /// Flight core -> core 0: the last `PING` the flight core copied (the watchdog monitor reads it).
 pub static PONG: AtomicU32 = AtomicU32::new(0);
@@ -143,45 +111,34 @@ pub static PONG: AtomicU32 = AtomicU32::new(0);
 static PONG_FRESH_MS: AtomicU32 = AtomicU32::new(0);
 /// The HEARTBEAT `system_status` last sent, for the log line at each change (255: none yet).
 static HEARTBEAT_STATE: AtomicU8 = AtomicU8::new(u8::MAX);
-/// The flight core's one wake.
 static KICK: Kick = Kick::new();
 /// Core 1's ACTLR as it read it at the top of its entry; valid once `CORE1_ACTLR_READ` is true.
 static CORE1_ACTLR: AtomicU32 = AtomicU32::new(0);
 static CORE1_ACTLR_READ: AtomicBool = AtomicBool::new(false);
 /// Core 1's `DMA_IRQ_0` after it built IMU1's and IMU2's SPI: 0 not read yet, 1 disabled, 2 enabled.
 static CORE1_DMA_IRQ0: AtomicU8 = AtomicU8::new(0);
-/// Core 1's `DMA_IRQ_1` (the SD card's line, core 0 only), read at the same point; stored before
-/// `CORE1_DMA_IRQ0`, so it is published once that is: 0 not read yet, 1 disabled, 2 enabled.
+/// Core 1's `DMA_IRQ_1` (the SD card's line, core 0 only), read at the same point: 0 not read yet, 1 disabled, 2 enabled.
 pub static CORE1_DMA_IRQ1: AtomicU8 = AtomicU8::new(0);
-/// Core 1's `PIO2_IRQ_0` after it built the ESC driver, read at the same point and stored before
-/// `CORE1_DMA_IRQ0`: 0 not read yet, 1 disabled, 2 enabled, 3 the driver refused its parts.
+/// Core 1's `PIO2_IRQ_0` after it built the ESC driver: 0 not read yet, 1 disabled, 2 enabled, 3 the driver refused its parts.
 static CORE1_PIO2_IRQ0: AtomicU8 = AtomicU8::new(0);
 /// Core 1's VTOR as it read it back after pointing it at `CORE1_VECTOR_TABLE`; 0 until then.
 static CORE1_VTOR: AtomicU32 = AtomicU32::new(0);
 
-/// Core 1's own vector table, in SRAM (decision-ram-code Q3): `spawn_core1` hands core 1 core 0's
-/// table in flash, so every exception on core 1 would read flash. Core 0 copies its table here before
-/// core 1 starts; core 1 points its VTOR here first thing. 128 words cover the 68 entries.
+/// Core 1's own vector table in SRAM, so its exceptions never read flash; core 0 fills it before core 1 starts.
 const CORE1_VECTORS: usize = 128;
 #[repr(C, align(512))]
 struct Core1Vectors(UnsafeCell<[u32; CORE1_VECTORS]>);
-// SAFETY: written only by core 0 in `main` before `spawn_core1`, afterwards only read (by core 1's
-// exception entry).
+// SAFETY: written only by core 0 in `main` before `spawn_core1`, read-only afterwards.
 unsafe impl Sync for Core1Vectors {}
 static CORE1_VECTOR_TABLE: Core1Vectors = Core1Vectors(UnsafeCell::new([0; CORE1_VECTORS]));
 
-/// Core 1's stack and executor.
 const CORE1_STACK_BYTES: usize = 16 * 1024;
 static CORE1_STACK: ConstStaticCell<Stack<CORE1_STACK_BYTES>> = ConstStaticCell::new(Stack::new());
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
-// ---------------------------------------------------------------------------------------------
 // Core 0 only.
-// ---------------------------------------------------------------------------------------------
 
-/// Core 0's executor beat, every 50 ms (the watchdog monitor reads it).
 pub static BEAT0: AtomicU32 = AtomicU32::new(0);
-/// What the node wrote and read on USB: bytes, and frames written (one `write_all` per frame).
 static TX_BYTES: AtomicU32 = AtomicU32::new(0);
 static TX_FRAMES: AtomicU32 = AtomicU32::new(0);
 static RX_BYTES: AtomicU32 = AtomicU32::new(0);
@@ -190,59 +147,43 @@ static LINK_STATE: AtomicU8 = AtomicU8::new(LINK_DOWN);
 const LINK_DOWN: u8 = 0;
 const LINK_GATE: u8 = 1;
 const LINK_RUN: u8 = 2;
-/// The link ids of the text ring and the action book: USB and the radio.
 pub const LINK_USB: usize = 0;
 pub const LINK_RADIO: usize = 1;
-/// The text ring's third cursor: the SD log's MSG records (`logger`), not a MAVLink link.
 pub const LINK_LOG: usize = 2;
-/// The STATUSTEXT ring (`fw_core::text_ring`): a cursor per link and one for the log, each text
-/// once per cursor, the boot report and the settings classification in the sticky slots until
-/// each cursor took them.
+/// The STATUSTEXT ring: a cursor per link plus one for the log; boot texts sit in sticky slots until every cursor took them.
 type Ring = TextRing<(MavSeverity, TextLine), 3, TEXTS_DEPTH>;
 static TEXTS: Mutex<CriticalSectionRawMutex, RefCell<Ring>> = Mutex::new(RefCell::new(Ring::new()));
-/// The text ring's depth.
 const TEXTS_DEPTH: usize = 8;
-/// The registry rows, the RC row (report only, `rc`) and the ESC row (report only, `esc`), in the
-/// order sent.
 pub const ROWS: usize = DEVICE_COUNT + 2;
 
 const KICK_PING: u8 = 1;
 const EXTEXCLALL: u32 = 1 << 29;
 const PONG_STALE: Duration = Duration::from_millis(200);
 const SYS_STATUS_ID: u32 = 1;
-/// The project dialect's MARV_DEVICE_STATUS; every registry row at least once per second.
 const DEVICE_STATUS_ID: u32 = 42421;
 const DEVICE_STATUS_INTERVAL_US: i32 = 1_000_000 / ROWS.div_ceil(MAX_BATCH) as i32;
-/// The sensor values: HIGHRES_IMU (IMU1 as id 0), SCALED_IMU2 (IMU2) and SCALED_PRESSURE (BARO),
-/// 25 Hz each.
+/// The sensor values: HIGHRES_IMU (IMU1 as id 0), SCALED_IMU2 (IMU2) and SCALED_PRESSURE (BARO), 25 Hz each.
 const HIGHRES_IMU_ID: u32 = 105;
 const SCALED_IMU2_ID: u32 = 116;
 /// Standard gravity, m/s^2 per g (SCALED_IMU2 carries milli-g).
 const STANDARD_GRAVITY: f32 = 9.80665;
 const SCALED_PRESSURE_ID: u32 = 29;
 const VALUES_INTERVAL_US: i32 = 40_000;
-/// GPS_RAW_INT, default 1 Hz.
 const GPS_RAW_INT_ID: u32 = 24;
 const GPS_INTERVAL_US: i32 = 1_000_000;
-/// RC_CHANNELS at 5 Hz while stick reports are fresh (USB only).
 const RC_CHANNELS_ID: u32 = 65;
 const RC_CHANNELS_INTERVAL_US: i32 = 200_000;
-/// MANUAL_CONTROL (the mapped sticks, reported only) at 5 Hz while CRSF stick reports are fresh
-/// (USB only).
+/// MANUAL_CONTROL (the mapped sticks) at 5 Hz while CRSF stick reports are fresh (USB only).
 const MANUAL_CONTROL_ID: u32 = 69;
 const MANUAL_CONTROL_INTERVAL_US: i32 = 200_000;
-/// ESC_STATUS at 10 Hz (fastest 50 Hz) and ESC_INFO at 1 Hz (fastest 10 Hz) while the flight core's
-/// ESC data is not older than 1 s (USB only).
+/// ESC_STATUS at 10 Hz and ESC_INFO at 1 Hz while the flight core's ESC data is under 1 s old (USB only).
 const ESC_STATUS_ID: u32 = 291;
 const ESC_STATUS_INTERVAL_US: i32 = 100_000;
 const ESC_INFO_ID: u32 = 290;
 const ESC_INFO_INTERVAL_US: i32 = 1_000_000;
-/// The receiver's value is not sent once its latest sample is older than this (3 fix periods; the
-/// 1 s of the fast sensors would be one period of this one).
+/// The receiver's value is not sent once its latest sample is older than this (3 fix periods).
 const GPS_STALE_US: u64 = 3_000_000;
-/// A sensor value older than this is not sent as fresh.
 const STALE_US: u64 = 1_000_000;
-/// The boot text line; the reset cause follows (", reset: timeout|forced|power-on").
 const TEXT_UP: &str = concat!("MARV V2 fw ", env!("CARGO_PKG_VERSION"), ": flight core up");
 
 #[cfg_attr(
@@ -256,7 +197,6 @@ fn now_us() -> u64 {
     Instant::now().as_micros()
 }
 
-/// This core's ACTLR.
 fn read_actlr() -> u32 {
     // SAFETY: a read of the executing core's own ACTLR in the System Control Space; no side effect.
     unsafe { (*cortex_m::peripheral::ICB::PTR).actlr.read() }
@@ -270,9 +210,7 @@ fn check(pass: bool, what: &str, value: u32) {
     }
 }
 
-// ---------------------------------------------------------------------------------------------
 // Core 1, the flight core.
-// ---------------------------------------------------------------------------------------------
 
 #[cfg(not(feature = "no-fbeat"))]
 #[embassy_executor::task]
@@ -294,8 +232,7 @@ fn core1_main(
     steer: Option<&'static mut crate::flight::BoardMix>,
 ) -> ! {
     let table = CORE1_VECTOR_TABLE.0.get() as u32;
-    // SAFETY: the executing core's own VTOR; the table is aligned to 512 bytes and was filled by core
-    // 0 before this core started. No interrupt of this core is enabled by this firmware yet.
+    // SAFETY: the executing core's own VTOR; the table is 512-aligned and core 0 filled it before this core started.
     let vtor = unsafe {
         let scb = &*cortex_m::peripheral::SCB::PTR;
         scb.vtor.write(table);
@@ -341,11 +278,8 @@ fn core1_main(
     })
 }
 
-// ---------------------------------------------------------------------------------------------
 // Core 0, the I/O core.
-// ---------------------------------------------------------------------------------------------
 
-/// A USB half that counts what passes through it.
 struct Counted<T>(T);
 
 impl<T: ErrorType> ErrorType for Counted<T> {
@@ -379,12 +313,8 @@ impl<T: Write> Write for Counted<T> {
     }
 }
 
-/// The node's hooks: HEARTBEAT status, SYS_STATUS and MARV_DEVICE_STATUS from the registry rows,
-/// and the supervisor's texts.
 struct Board {
-    /// The next registry row to send.
     cursor: usize,
-    /// The log download (USB link only).
     logs: logdl::Usb,
 }
 
@@ -397,7 +327,6 @@ fn rows() -> [DeviceRow; ROWS] {
     })
 }
 
-/// Row `i`'s MARV_DEVICE_STATUS (`i` = `DEVICE_COUNT` is the RC row, `DEVICE_COUNT + 1` the ESC row).
 pub fn device_message(i: usize, now_us: u64) -> Option<MARV_DEVICE_STATUS_DATA> {
     match DEVICES.get(i) {
         Some(dev) => Some(dev.message(now_us)),
@@ -406,7 +335,6 @@ pub fn device_message(i: usize, now_us: u64) -> Option<MARV_DEVICE_STATUS_DATA> 
     }
 }
 
-/// GPS_RAW_INT from the receiver's latest fix while it is younger than 3 s.
 pub fn push_gps_raw_int(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     let Some(sample) = GNSS.latest.try_get() else {
         return false;
@@ -417,15 +345,12 @@ pub fn push_gps_raw_int(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     gnss::raw_int(&sample.reading, sample.t_us).is_some_and(|message| out.push(&message).is_ok())
 }
 
-/// The HEARTBEAT `system_status` from the rows.
 pub fn heartbeat_state(now_us: u64) -> MavState {
     system_status(&rows(), now_us / 1000, calibration::calibrating())
 }
 
-/// SYS_STATUS from the rows and the BATT row.
 pub fn push_sys_status(now_us: u64, out: &mut Outgoing<'_>) -> bool {
-    // The latest BATT sample while it is younger than 1 s, or MAVLink's "not sent" values:
-    // millivolts, centiamps.
+    // The latest BATT sample while under 1 s old, else MAVLink's "not sent" values (millivolts, centiamps).
     let (voltage_battery, current_battery) = match BATT.latest.try_get() {
         Some(Sample {
             reading:
@@ -448,14 +373,12 @@ pub fn push_sys_status(now_us: u64, out: &mut Outgoing<'_>) -> bool {
         onboard_control_sensors_health: MavSysStatusSensor::from_bits_truncate(masks.health),
         voltage_battery,
         current_battery,
-        // Not estimated: MAVLink's "not sent" value.
         battery_remaining: -1,
         ..SYS_STATUS_DATA::DEFAULT
     })
     .is_ok()
 }
 
-/// HIGHRES_IMU (id 0) from IMU1's latest sample and the magnetometer's.
 pub fn push_highres_imu(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     let Some(sample) = IMU1.latest.try_get() else {
         return false;
@@ -528,7 +451,6 @@ pub fn push_highres_imu(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     .is_ok()
 }
 
-/// SCALED_IMU2 from IMU2's latest sample while it is younger than 1 s.
 pub fn push_scaled_imu2(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     let Some(sample) = IMU2.latest.try_get() else {
         return false;
@@ -569,7 +491,6 @@ pub fn push_scaled_imu2(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     .is_ok()
 }
 
-/// SCALED_PRESSURE from the barometer's latest sample while it is younger than 1 s.
 pub fn push_scaled_pressure(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     let Some(sample) = BARO.latest.try_get() else {
         return false;
@@ -581,7 +502,6 @@ pub fn push_scaled_pressure(now_us: u64, out: &mut Outgoing<'_>) -> bool {
     else {
         return false;
     };
-    // No fresh sample (the barometer failed): no message rather than a stale value.
     if now_us.saturating_sub(sample.t_us) >= STALE_US {
         return false;
     }
@@ -686,18 +606,15 @@ impl Telemetry for Board {
     }
 }
 
-/// A STATUSTEXT waits for link `link`'s node (see `actions::next_ack`).
 fn texts_pending(link: usize) -> bool {
     TEXTS.lock(|r| r.borrow().pending(link))
 }
 
-/// The next STATUSTEXT for link `link`.
 fn take_text(link: usize) -> Option<(MavSeverity, TextLine)> {
     TEXTS.lock(|r| r.borrow_mut().pop(link))
 }
 
-/// A boot text kept until every link took it (the boot report, the settings classification); an
-/// ordinary text when both sticky slots are still owed.
+/// A boot text kept until every link took it; an ordinary text when both sticky slots are still owed.
 fn text_sticky(severity: MavSeverity, text: &str) {
     let line = TextLine::new(format_args!("{}", text));
     if !TEXTS.lock(|r| r.borrow_mut().push_sticky((severity, line))) {
@@ -709,7 +626,6 @@ fn text(severity: MavSeverity, text: &str) {
     text_fmt(severity, format_args!("{}", text));
 }
 
-/// Queues one STATUSTEXT for the node (at most 50 bytes; longer text is cut).
 fn text_fmt(severity: MavSeverity, args: fmt::Arguments<'_>) {
     let line = TextLine::new(args);
     let losers = TEXTS.lock(|r| r.borrow_mut().push((severity, line)));
@@ -721,9 +637,8 @@ fn text_fmt(severity: MavSeverity, args: fmt::Arguments<'_>) {
     }
 }
 
-/// The start gate of `docs/link-contract.md` (MARV-GCS), as in mavlink-device's `mavlink_demo`:
-/// nothing is written until a ground-station HEARTBEAT has arrived or DTR has read true at every
-/// check for 100 ms. Returns false when a read ends (link down).
+/// The start gate of `docs/link-contract.md`: nothing is written until a ground-station HEARTBEAT has arrived
+/// or DTR has read true at every check for 100 ms. Returns false when a read ends (link down).
 async fn start_gate(
     rx: &mut impl Read,
     link: &usb_cdc::Link<'_>,
@@ -896,8 +811,7 @@ const USB_ACCEPT: [(u32, u8); logdl::ACCEPT.len() + mission::ACCEPT.len()] = {
     list
 };
 
-/// The USB node: system 1, component 1, the log-download requests and the mission messages handed over, and the station
-/// counted present for 3 s after its HEARTBEAT (read by `start_gate` and `drive`).
+/// The USB node: system 1, component 1; the station counts as present for 3 s after its HEARTBEAT.
 const USB_NODE: NodeConfig = match NodeConfig::new(1, 1)
     .with_gcs_timeout_us(logdl::GCS_TIMEOUT_US)
     .with_accept_list(&USB_ACCEPT)
@@ -905,16 +819,12 @@ const USB_NODE: NodeConfig = match NodeConfig::new(1, 1)
     Ok(config) => config,
     Err(_) => panic!("accept list too long"),
 };
-/// Bytes read from the link at a time, as `Node::run`.
 const READ_BUF: usize = 64;
-/// Longest sleep of `drive`, as `Node::run`.
 const MAX_WAIT_US: u64 = 100_000;
 
-/// The USB node's driver. It mirrors `Node::run` of mavlink-device (`src/run.rs` lines 48-95 at rev
-/// dfdb11a; compare it with that function at every bump of the crate) with two differences only:
-/// received bytes go to `receive_with`, which hands the log-download requests to `board.logs`, and
-/// after each round of sending a log transfer stops when the station's HEARTBEAT is older than
-/// `logdl::GCS_TIMEOUT_US` (`gcs_present`). The timer is embassy's `Timer`, which `Delay` is.
+/// The USB node's driver, mirroring mavlink-device's `Node::run` with two differences: received bytes go to
+/// `receive_with` (log-download requests to `board.logs`), and a log transfer stops when the station's HEARTBEAT is
+/// older than `logdl::GCS_TIMEOUT_US`.
 async fn drive<R: Read, W: Write>(
     node: &mut Node<'_>,
     rx: &mut R,
@@ -955,9 +865,7 @@ async fn drive<R: Read, W: Write>(
     }
 }
 
-/// Every 10 ms: the age of `PONG` (time since it last equalled `PING`); at 10 Hz a new `PING` and a
-/// kick of the flight core; the start-up check "PONG follows PING"; the liveness texts; the
-/// devices' stuck check and transition texts; every 10 s a `[STAT]` line, and one per device.
+/// Every 10 ms: PONG age, a 10 Hz `PING` and flight-core kick, the start-up checks, liveness and device texts; every 10 s a `[STAT]` line.
 #[embassy_executor::task]
 async fn supervisor() -> ! {
     tagged(&watchdog::RUNNING0, task::SUPERVISOR, supervise()).await
@@ -1088,10 +996,7 @@ async fn beat0() -> ! {
     .await
 }
 
-/// Feature `stall-core0` (invariant F1): 20 s after start, spins 1.2 s without yielding, once, and
-/// logs IMU1's and IMU2's samples and errors before and after. The watchdog is fed again before
-/// 1.6 s without a feed, so it survives (a "core 0 stalled" text, no reset); it does not act after
-/// a watchdog reset (no reset loop).
+/// Feature `stall-core0` (invariant F1): once, 20 s after start, spins 1.2 s without yielding; skipped after a watchdog reset.
 #[cfg(feature = "stall-core0")]
 #[embassy_executor::task]
 async fn stall() {
@@ -1126,11 +1031,8 @@ async fn stall() {
     }
 }
 
-/// Feature `stack-negative` (negative control of core 0's stack guard): one core-0 task recurses until
-/// the stack pointer is 2 KiB below `_stack_end`, writing every frame. With the guard the first
-/// push below `_stack_end` faults (no log line, then the watchdog resets); without it the task logs
-/// `[FAIL]` and the 2 KiB of statics under the stack hold the frames' pattern. Acts once, 10 s after a
-/// start the watchdog did not cause, so it does not loop through resets.
+/// Feature `stack-negative`: once, 10 s after a start the watchdog did not cause, recurses until the stack pointer is 2 KiB
+/// below `_stack_end`. With the guard the first push below it faults; without it the task logs `[FAIL]`.
 #[cfg(feature = "stack-negative")]
 #[inline(never)]
 fn stack_dive(limit: u32, depth: u32) -> u32 {
@@ -1182,12 +1084,8 @@ async fn stack_negative() {
     );
 }
 
-/// The two IMUs' setups from the stored settings (`IMUn_ACC_FS`, `IMUn_GYR_FS`, `IMUn_ODR_HZ`,
-/// `AHRS_ORIENTATION`), read once at boot after `settings::boot` (which refused and reset an invalid
-/// combination, so the read succeeds) and handed to core 1 by value. The board's orientation is read
-/// here once, for both setups and for `calibration::init`, so core 0 un-rotates the calibration
-/// samples with the rotation core 1 applies. One line per IMU; a change takes effect after the next
-/// reboot.
+/// The two IMUs' setups from the stored settings, read once at boot and handed to core 1 by value; a change takes
+/// effect after the next reboot. The board orientation is read here once, for both setups and `calibration::init`.
 fn imu_setups() -> (
     fw_settings::imu::Imu1Setup,
     fw_settings::imu::Imu2Setup,
@@ -1290,9 +1188,8 @@ async fn main(spawner: Spawner) {
     let [imu1_offsets, imu2_offsets] = calibration::readers();
     #[cfg(feature = "fake-armed")]
     settings::fake_arm();
-    // The PSRAM (decision-psram-offload-20261121, D3): after every boot-time flash write (the settings read above)
-    // and before `spawn_core1`, because the driver talks to the chip while nothing else may run from flash. A missing
-    // or failing chip is a logged FAULT, not a stop.
+    // The PSRAM comes after every boot-time flash write and before `spawn_core1`: the driver talks to the chip while
+    // nothing else may run from flash. A missing or failing chip is a logged FAULT, not a stop.
     psram::init(p.QMI_CS1, p.PIN_0);
     let imu1_parts = imu1::Parts {
         spi: p.SPI0,
@@ -1327,13 +1224,10 @@ async fn main(spawner: Spawner) {
         dma: p.DMA_CH5,
         clk_sys_hz: embassy_rp::clocks::clk_sys_freq(),
     };
-    // The motor-test cell (as the IMU offsets): the reader goes to core 1, the writer stays here.
     let esc_test = esc::test_reader();
     actions::init_motor_test();
-    // The sticks cell (as the motor-test cell): the reader goes to core 1, the RC port's hooks take the writer.
     let flight_rc = rc::FLIGHT_RC.take_reader();
-    // The steering estimator's parts (the ESKF3 core of about 16 KB, ESKF2, the composite) are built here, on core 0's
-    // large stack, into their statics, one call each so that their frames do not stack.
+    // The steering estimator's parts are built here, on core 0's large stack, into their statics, one call each.
     let steer_core = flight::steer_core();
     let vert = flight::vert();
     let steer = flight::steer(steer_core, vert);
@@ -1423,7 +1317,6 @@ async fn main(spawner: Spawner) {
     spawner.spawn(defmt::unwrap!(xip_park::task()));
 
     tagged(&watchdog::RUNNING0, task::MAIN, startup_checks()).await;
-    // The SD card's device task and the log collector.
     spawner.spawn(defmt::unwrap!(logger::task()));
     spawner.spawn(defmt::unwrap!(sd::task(sd::Parts {
         pio: p.PIO0,

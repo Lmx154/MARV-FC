@@ -1,8 +1,6 @@
-//! The firmware's one parameter store (`fw_core::params::Params` over the devices' tables), in
-//! RAM; `settings` loads it from flash at boot and writes it there only on an explicit save (a
-//! write takes effect here and is lost at reset unless saved). It sits in a critical-section mutex so the link task (the
-//! parameter protocol, through [`Store`]), the action code and the device tasks can all reach it;
-//! every access is short and none is held across an await.
+//! The firmware's one parameter store (`fw_core::params::Params` over the devices' tables), in RAM; `settings` loads it from flash at boot
+//! and writes it there only on an explicit save (a write takes effect here and is lost at reset unless saved).
+//! It sits in a critical-section mutex so the link task (through [`Store`]), the action code and the device tasks can all reach it; every access is short and none is held across an await.
 
 use core::cell::RefCell;
 
@@ -15,7 +13,6 @@ use mavlink_device::{ParamError, ParamName, ParamStore, ParamValue};
 
 use crate::device::raise_apply;
 
-/// The number of parameters.
 pub const COUNT: usize = fw_settings::COUNT;
 
 static PARAMS: Mutex<CriticalSectionRawMutex, RefCell<Option<Params<COUNT>>>> =
@@ -50,7 +47,6 @@ pub fn with<R>(f: impl FnOnce(&mut Params<COUNT>) -> R) -> Option<R> {
     PARAMS.lock(|cell| cell.borrow_mut().as_mut().map(f))
 }
 
-/// The barometer's whole `Config` from the stored values.
 pub fn baro_config() -> Result<bmp581::Config, &'static str> {
     with(|params| {
         fw_settings::baro::settings_to_config(|name| match params.get_named(name) {
@@ -61,7 +57,6 @@ pub fn baro_config() -> Result<bmp581::Config, &'static str> {
     .unwrap_or(Err("store not ready"))
 }
 
-/// The magnetometer's whole `Config` from the stored values.
 pub fn mag_config() -> Result<bmm350::Config, &'static str> {
     with(|params| {
         let rate = match params.get_named(fw_settings::mag::ODR_HZ) {
@@ -92,8 +87,7 @@ pub fn gnss_rate_and_set() -> Result<(u16, sam_m10q::Constellations), &'static s
     })
 }
 
-/// The three stored values of IMU `imu` (0 = IMU1, 1 = IMU2): the accelerometer full scale in g,
-/// the gyroscope full scale in dps, the rate in Hz.
+/// The three stored values of IMU `imu` (0 = IMU1, 1 = IMU2): the accelerometer full scale in g, the gyroscope full scale in dps, the rate in Hz.
 pub fn imu_values(imu: usize) -> Option<(i32, i32, i32)> {
     let names = (
         fw_settings::imu::ACC_FS.get(imu)?,
@@ -236,7 +230,6 @@ pub fn batt_monitor_config() -> fw_core::battery::Config {
     .unwrap_or(fw_core::battery::Config::DEFAULT)
 }
 
-/// `ParamStore` for the node: the one store, behind the lock.
 pub struct Store;
 
 impl ParamStore for Store {
