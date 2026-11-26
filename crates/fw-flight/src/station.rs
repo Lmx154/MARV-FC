@@ -89,7 +89,6 @@ mod tests {
         assert_eq!(ack_of(answer_byte(None)), (false, 0));
         let reasons = [
             (DenyReason::NotRadioLink, 1),
-            (DenyReason::CrsfFresh, 2),
             (DenyReason::HandsOffDisabled, 3),
             (DenyReason::NotInThisState, 4),
             (DenyReason::StationAbsent, 5),

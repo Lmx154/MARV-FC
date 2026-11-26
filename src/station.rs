@@ -14,7 +14,7 @@
 //! it in HEARTBEAT `custom_mode` ([`custom_mode`]).
 //!
 //! Heartbeat: core 0 writes the RC port's time of the latest station HEARTBEAT on the radio link, from the station's sender
-//! only ([`FLIGHT_STATION_HB`], the clock of `rc::FLIGHT_RADIO_STATUS`); core 1 gives it to
+//! only ([`FLIGHT_STATION_HB`]); core 1 gives it to
 //! `Flight::set_last_radio_heartbeat_us`.
 
 use core::cell::{Cell, RefCell};

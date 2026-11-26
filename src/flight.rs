@@ -596,7 +596,6 @@ pub struct Stepper {
     notch: TripleReader<'static, i32>,
     gdn: TripleReader<'static, GdnSet>,
     gains: TripleReader<'static, Gains>,
-    radio_status: TripleReader<'static, u64>,
     station: crate::station::Core1,
     log: LogProducer<'static, LOG_BYTES>,
     /// Steps since the start, for `log_due`.
@@ -615,8 +614,6 @@ pub struct Stepper {
     ho_logged: Option<fw_flight::hands_off::State>,
     /// AUTO's waypoint index of the last "HO WP" MSG written (`None` outside AUTO's guidance).
     wp_logged: Option<u8>,
-    /// N12's M of the last "HO M" MSG written (false before the first).
-    m_logged: bool,
     /// Crash rule K's would-fire of the last "K" MSG written (false before the first; `crash_msg`).
     k_logged: bool,
     /// N14 (3): the card check's MSG was written in this arming (cleared on a disarmed step).
@@ -654,7 +651,6 @@ impl Stepper {
             notch: FLIGHT_NOTCH.take_reader()?,
             gdn: FLIGHT_GDN.take_reader()?,
             gains: FLIGHT_GAINS.take_reader()?,
-            radio_status: crate::rc::FLIGHT_RADIO_STATUS.take_reader()?,
             station: crate::station::Core1::new()?,
             log: LOG.take_producer()?,
             step: 0,
@@ -665,7 +661,6 @@ impl Stepper {
             mode_log: ModeLog::new(),
             ho_logged: None,
             wp_logged: None,
-            m_logged: false,
             k_logged: false,
             card_logged: false,
             plan_logged: None,
@@ -779,11 +774,6 @@ impl SampleSink for Stepper {
         if gains_fresh && !self.flight.set_gains(gains) {
             GAINS_REFUSED.fetch_add(1, Ordering::Relaxed);
         }
-        // N12: the RC port's time of the latest RADIO_STATUS (none until the first write).
-        let (radio_status, radio_status_fresh) = self.radio_status.read();
-        if radio_status_fresh {
-            self.flight.set_last_radio_status_us(Some(radio_status));
-        }
         // The whole set, read wait-free: the flight's mission facts and AUTO's list (taken at Start) at once, armed or not.
         let (gdn, gdn_fresh) = self.gdn.read();
         if gdn_fresh {
@@ -880,14 +870,6 @@ impl SampleSink for Stepper {
             self.wp_logged = wp;
         } else if wp.is_none() {
             self.wp_logged = None;
-        }
-        // N12's M bit: a MSG at each change of M in force (set only in a hands-off state, so only after a stick loss); a
-        // dropped one is offered again.
-        let m = self.flight.radio_status_seen();
-        if m != self.m_logged
-            && self.push_msg(out.t_us, if m { "HO M 1 RADIO_STATUS after entry" } else { "HO M 0" }.as_bytes())
-        {
-            self.m_logged = m;
         }
         // Crash rule K in shadow (Amendment N, N5): "K 1 <lean error accel speed>" when it would fire, "K 0" when it
         // clears, in every configuration; a dropped one is offered again.

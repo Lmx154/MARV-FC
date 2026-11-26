@@ -3,7 +3,7 @@
 Part of [MARV V2 firmware](../README.md)
 
 The mode is the state of the hands-off state machine (`crates/fw-flight/src/hands_off.rs`), sent in HEARTBEAT `custom_mode`. Two radio models decide
-what is possible: a CRSF model only ever flies PILOT; a MAVLink model also gets HOLD, AUTO, RETURN and TAKEOVER and a mission switch.
+what is possible: a CRSF model is hand-flown (PILOT; LAND, BLIND or TAKEOVER only around a stick loss); a MAVLink model also gets HOLD, AUTO and RETURN and a mission switch.
 
 ## Modes
 
@@ -84,8 +84,9 @@ link loss then lands in place and Start is refused "no home point".
 | Stick source | CRSF frames | `RC_CHANNELS_OVERRIDE` only from sender (255, 68) with none of ch 1-8 at 0 or 65535; any other sender (the station is 255/190) is never a stick report |
 | Rate | about 245 /s | 100 /s |
 | Arms | always | always (mission switch OFF) |
-| Hands-off states | never HOLD / AUTO / RETURN: stick loss gives LAND (BLIND, or STOP on the ground); when reports return, TAKEOVER until the pilot gives control back | HOLD, AUTO, RETURN, TAKEOVER, mission switch |
-| Station radio commands | refused, reason 3 | accepted |
+| Hands-off states | never HOLD / AUTO / RETURN: stick loss gives LAND (BLIND on T1, STOP on the ground); a fresh report in LAND or BLIND gives TAKEOVER, which hands back to PILOT after a report with arm ON and Position, then one with arm ON and not Position | HOLD, AUTO, RETURN, TAKEOVER, mission switch |
+| Arm OFF | STOP at once in every state, ch 8 ignored | see the transition table |
+| Station radio commands | refused, reason 3 (reason 2 is retired) | accepted |
 
 The flight keeps the link type it armed on until disarm; reports from the other source are ignored for the rest of the flight (`gate.rs` latches the source; `hands_off.rs` `ho_allowed`). See [radio](radio.md).
 

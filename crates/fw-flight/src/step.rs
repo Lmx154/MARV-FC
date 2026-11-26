@@ -563,8 +563,6 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// When the newest station HEARTBEAT arrived on the radio link, us (`set_last_radio_heartbeat_us`); `None` until
     /// set.
     last_radio_heartbeat_us: Option<u64>,
-    /// When the newest RADIO_STATUS arrived from the receiver, us (`set_last_radio_status_us`); `None` until set.
-    last_radio_status_us: Option<u64>,
     /// The station command for the next step (`set_command`); taken by that step.
     command: Option<hands_off::StationCommand>,
     /// The answer of the latest step to its command (`take_command_result`)
@@ -732,7 +730,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             rc_newest: None,
             heading_ok: true,
             last_radio_heartbeat_us: None,
-            last_radio_status_us: None,
             command: None,
             command_result: None,
             mission: MISSION_OFF,
@@ -835,11 +832,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
         self.last_radio_heartbeat_us = t_us;
     }
 
-    /// When the newest RADIO_STATUS arrived from the receiver, us (the RC port's time of it)
-    pub fn set_last_radio_status_us(&mut self, t_us: Option<u64>) {
-        self.last_radio_status_us = t_us;
-    }
-
     /// A station command for the next step, which gives it to the state machine and answers it
     /// ([`Flight::take_command_result`]); a later call before that step replaces it.
     pub fn set_command(&mut self, command: hands_off::StationCommand) {
@@ -861,11 +853,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     /// The latest step's answer to its command; `None` when it had none (or the answer was taken)
     pub fn take_command_result(&mut self) -> Option<hands_off::CommandResult> {
         self.command_result.take()
-    }
-
-    /// M in force after the latest step: a hands-off state and a RADIO_STATUS after its entry (the log's M bit)
-    pub fn radio_status_seen(&self) -> bool {
-        self.hands_off.radio_status_seen()
     }
 
     /// The card check: H / the card's m g in percent (rounded, at most 999) once H is valid and differs from the
@@ -1071,7 +1058,6 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             now_us: t_us,
             crsf: self.rc_newest,
             last_radio_heartbeat_us: self.last_radio_heartbeat_us,
-            last_radio_status_us: self.last_radio_status_us,
             armed: self.gate.armed(),
             airborne: self.airborne,
             lifted: lifted_in,

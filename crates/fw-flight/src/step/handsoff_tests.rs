@@ -327,11 +327,6 @@ impl Fly {
         self.f.hands_off_state()
     }
 
-    /// A RADIO_STATUS from the receiver just after the latest step.
-    fn radio_status(&mut self) {
-        self.f.set_last_radio_status_us(Some(self.t + 1));
-    }
-
     fn set_valid(&self, valid: Valid) {
         let mut n = self.cell.get();
         n.valid = valid;
@@ -448,32 +443,22 @@ fn i3_full_sticks_and_any_switch_in_takeover_give_the_centred_setpoint_until_the
     assert!(!is_centred(&o), "the real sticks: {:?}", o.setpoint);
 }
 
+/// On a CRSF flight an arm-OFF report through the real gate stops the motors at once in LAND and in TAKEOVER, with
+/// ch8 ON in the report.
 #[test]
-fn i3_control_high_with_arm_off_does_not_open_the_lock() {
-    let mut fly = Fly::crsf(true, POSITION);
-    fly.lose();
-    fly.radio_status();
-    fly.rc(false, FULL, Switch3::High);
-    let o = fly.rc(true, FULL, Switch3::Middle);
-    assert_eq!(fly.state(), State::Takeover, "K, no P");
-    assert!(is_centred(&o) && o.armed);
-}
-
-#[test]
-fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot() {
-    let mut fly = Fly::crsf(true, POSITION);
-    fly.lose();
-    fly.radio_status();
-    for _ in 0..200 {
-        let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
-        assert_eq!(fly.state(), State::Takeover);
-        assert!(o.armed && o.motors.throttles().is_some());
+fn c1_arm_off_through_the_step_disarms_at_once_on_crsf_with_ch8_on_and_in_pilot() {
+    for takeover in [false, true] {
+        let mut fly = Fly::crsf(true, POSITION);
+        fly.lose();
+        assert_eq!(fly.state(), State::Land);
+        if takeover {
+            let o = fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
+            assert!(o.armed && fly.state() == State::Takeover);
+        }
+        let o = fly.rc_ms(false, [0.0, 0.0, 0.5, 0.0], Switch3::High, true);
+        assert!(!o.armed && o.motors.throttles().is_none(), "takeover {takeover}");
+        assert_eq!(fly.state(), State::Stop, "takeover {takeover}");
     }
-    let o = fly.rc(true, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
-    assert!(o.armed);
-    let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::Low);
-    assert!(!o.armed && o.motors.throttles().is_none(), "after K");
-    assert_eq!(fly.state(), State::Stop);
     for mavlink in [true, false] {
         let mut fly = Fly::new(mavlink, true, POSITION);
         let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
@@ -486,23 +471,6 @@ fn c1_arm_off_through_the_step_holds_before_k_and_disarms_after_k_and_in_pilot()
         let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
         assert!(!o.armed && o.motors.throttles().is_none() && fly.state() == State::Stop, "mavlink {mavlink}");
     }
-}
-
-#[test]
-fn wr2_the_held_arm_off_report_still_newest_when_the_latch_clears_stays_held_until_td_then_disarms_in_that_step() {
-    let mut fly = Fly::crsf(true, POSITION);
-    fly.lose();
-    fly.radio_status();
-    let o = fly.rc(false, [0.0, 0.0, 0.5, 0.0], Switch3::High);
-    assert!(o.armed && fly.state() == State::Takeover);
-    fly.f.airborne = false;
-    let o = fly.quiet();
-    assert!(o.armed && fly.state() == State::Takeover, "held with the latch false");
-    fly.f.airborne = false;
-    fly.f.still_us = fly.f.land_detect_us;
-    let o = fly.quiet();
-    assert_eq!(fly.state(), State::Stop);
-    assert!(!o.armed && o.motors.throttles().is_none(), "disarmed in the step TD reads held");
 }
 
 #[test]
@@ -1663,14 +1631,10 @@ fn wr3_on_the_real_step() {
     let mut counts = [0u32; 6];
     let mut seen = [0u32; 8];
     let mut rest = true;
-    let mut radio = Lcg(0x5eed_0d3b);
     let mut clears = Lcg(0x5eed_0d3c);
     let mut hold_low = false;
     for k in 0..2_000_000u32 {
         t += DT_US;
-        if radio.chance(1) {
-            f.set_last_radio_status_us(Some(t));
-        }
         if rng.chance(2) {
             f.set_heading_ok(!rng.chance(300));
         }
@@ -2318,8 +2282,6 @@ fn ns_walk(seed: u64, steps: usize, source: fw_core::rc::RcSource) -> [u32; 6] {
     let mut newest: Option<u64> = None;
     let (mut prev_armed, mut prev_state, mut ever) = (false, State::Stop, false);
     let (mut counts, mut homed) = ([0u32; 6], 0u32);
-    let (mut radio, mut mavlink, mut status, mut entry, mut m, mut k_set) =
-        (Lcg(seed ^ 0xa5a5), false, None::<u64>, 0u64, false, false);
     f.set_mission(super::auto_tests::square());
     let (mut bat, mut batt) = (Lcg(seed ^ 0xb0b0), fw_core::battery::CELL_KNOWN_OK);
     let (mut cmds, mut station, mut auto_steps, mut return_steps) = (Lcg(seed ^ 0x3c3c), true, 0u32, 0u32);
@@ -2387,13 +2349,6 @@ fn ns_walk(seed: u64, steps: usize, source: fw_core::rc::RcSource) -> [u32; 6] {
         if rc.is_some() {
             newest = Some(t);
         }
-        if radio.chance(1) {
-            mavlink = !mavlink;
-        }
-        if mavlink && radio.chance(1) {
-            status = Some(t);
-            f.set_last_radio_status_us(status);
-        }
         if cmds.chance(1) {
             station = !station || cmds.chance(500);
         }
@@ -2420,21 +2375,8 @@ fn ns_walk(seed: u64, steps: usize, source: fw_core::rc::RcSource) -> [u32; 6] {
         let finite = r.gyro_rads.iter().chain(r.accel_ms2.iter()).all(|v| v.is_finite());
         let (air, still, td) = (f.airborne, f.still, f.still_us >= tuning.land_detect_us);
         let hands_off = |s: State| !matches!(s, State::Pilot | State::Stop);
-        if hands_off(prev_state) && status.is_some_and(|s| s > entry) {
-            m = true;
-        }
-        let held = hands_off(prev_state) && !(prev_state == State::Takeover && k_set) && m;
-        let held = if receiver { rc.is_some_and(|r| r.mission) } else { held };
         let o = f.step(&i);
         let state = f.hands_off_state();
-        if state != prev_state && hands_off(state) {
-            k_set = false;
-            if !hands_off(prev_state) {
-                (m, entry) = (false, t);
-            }
-        }
-        k_set |= state == State::Takeover && f.rc_newest.is_some_and(|r| r.arm);
-        assert_eq!(f.radio_status_seen(), hands_off(state) && m, "seed {seed:#x} step {k}: M");
         auto_steps += u32::from(state == State::Auto);
         return_steps += u32::from(state == State::Return);
         homed += u32::from(o.armed && f.hands_off.home().is_some());
@@ -2442,7 +2384,7 @@ fn ns_walk(seed: u64, steps: usize, source: fw_core::rc::RcSource) -> [u32; 6] {
         if prev_armed && ever && (!o.armed || o.motors.throttles().is_none()) {
             let cause = if gap {
                 Cause::Gap
-            } else if if receiver { arm_off_ms_off(f.rc_newest) } else { rc.is_some_and(|r| !r.arm) && !held } {
+            } else if if receiver { arm_off_ms_off(f.rc_newest) } else { rc.is_some_and(|r| !r.arm) } {
                 Cause::ArmOff
             } else if !(o.nav.valid.tilt && o.nav.valid.rates) || !finite {
                 Cause::Coverage
@@ -2455,7 +2397,7 @@ fn ns_walk(seed: u64, steps: usize, source: fw_core::rc::RcSource) -> [u32; 6] {
             };
             counts[cause as usize] += 1;
         }
-        let held_now = if receiver { f.rc_newest.is_some_and(|r| !r.arm && r.mission) } else { held && rc.is_some_and(|r| !r.arm) };
+        let held_now = receiver && f.rc_newest.is_some_and(|r| !r.arm && r.mission);
         counts[4] += u32::from(held_now && o.armed);
         counts[5] += u32::from(prev_armed && air && prev_state == State::Pilot && hands_off(state));
         if !o.armed {
@@ -2482,7 +2424,7 @@ fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     use fw_core::rc::RcSource::{Crsf, Receiver};
     for (seed, source) in [(0x5eed_0e01, Crsf), (0x5eed_0e02, Receiver), (0x5eed_0e03, Crsf), (0x5eed_0e04, Crsf)] {
         let c = ns_walk(seed, 400_000, source);
-        std::println!("NS walk {seed:#x} {source:?}: gap, arm off, coverage, touchdown, arm off held with M, air losses: {c:?}");
+        std::println!("NS walk {seed:#x} {source:?}: gap, arm off, coverage, touchdown, arm off held (MAVLink), air losses: {c:?}");
         assert!(c[5] > 20, "seed {seed:#x}: stick losses in the air {c:?}");
         for (a, b) in total.iter_mut().zip(c) {
             *a += b;
@@ -2491,7 +2433,7 @@ fn n1_ns_walk_every_stop_after_the_first_airborne_latch_has_a_cause() {
     for cause in [Cause::Gap, Cause::ArmOff, Cause::Coverage, Cause::Touchdown] {
         assert!(total[cause as usize] > 0, "{cause:?} never occurred: {total:?}");
     }
-    assert!(total[4] > 0, "no arm-OFF report held with M: {total:?}");
+    assert!(total[4] > 0, "no arm-OFF report held: {total:?}");
 }
 
 // ---- The learned hover collective ----

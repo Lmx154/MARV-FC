@@ -1076,7 +1076,6 @@ mod tests {
             now_us: 0,
             crsf: None,
             last_radio_heartbeat_us: None,
-            last_radio_status_us: None,
             armed: false,
             airborne: false,
             tier: Tier::T3,

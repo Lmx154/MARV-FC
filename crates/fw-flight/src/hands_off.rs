@@ -175,8 +175,6 @@ pub struct Inputs {
     pub crsf: Option<RcSample>,
     /// When the newest station HEARTBEAT was received on the radio link, us.
     pub last_radio_heartbeat_us: Option<u64>,
-    /// When the newest RADIO_STATUS was received, us.
-    pub last_radio_status_us: Option<u64>,
     /// The gate's armed state.
     pub armed: bool,
     /// The airborne latch.
@@ -228,8 +226,6 @@ pub struct Inputs {
 pub enum DenyReason {
     /// The command did not arrive on the radio link.
     NotRadioLink,
-    /// A CRSF stick report is fresh.
-    CrsfFresh,
     /// Armed on a CRSF report: not a MAVLink flight.
     HandsOffDisabled,
     /// The state does not take this command.
@@ -259,20 +255,19 @@ pub enum DenyReason {
     HeadingNotOk,
     /// Start: the battery is not known to be non-critical.
     BatteryNotOk,
-    /// Start: the last CRSF report before the sticks were lost did not have arm ON.
+    /// Start: no live report with arm ON; a command into HOLD: the newest report has arm OFF.
     ArmSwitchOff,
-    /// Start: the last CRSF report before the sticks were lost did not have switch6 High.
+    /// Start: no live report with switch6 High.
     SwitchNotHigh,
     /// Start on a MAVLink flight: no receiver report younger than 1.0 s with the mission switch ON.
     MissionSwitchOff,
 }
 
 impl DenyReason {
-    /// The reason code for COMMAND_ACK.result_param2; 0 is reserved for unknown, 20 is retired (never reused).
+    /// The reason code for COMMAND_ACK.result_param2; 0 is reserved for unknown, 2 and 20 are retired (never reused).
     pub fn code(self) -> u8 {
         match self {
             DenyReason::NotRadioLink => 1,
-            DenyReason::CrsfFresh => 2,
             DenyReason::HandsOffDisabled => 3,
             DenyReason::NotInThisState => 4,
             DenyReason::StationAbsent => 5,
@@ -340,7 +335,7 @@ pub enum Reason {
     ArmMsOff,
     /// An arm-OFF report in PILOT on the ground: STOP.
     ArmOffGround,
-    /// An arm-OFF report: STOP (the disarm not withheld) or, on a MAVLink flight in the air, LAND.
+    /// An arm-OFF report: STOP or, on a MAVLink flight in the air, LAND.
     ArmOff,
     /// The gate is disarmed: STOP.
     Disarmed,
@@ -477,14 +472,8 @@ pub struct HandsOff {
     stick_loss_us: u64,
     /// Set when the pilot flies; cleared on entry to any hands-off state.
     pilot_latch: bool,
-    /// K, "arm seen ON": a counting report had arm ON. Cleared on entry to any hands-off state.
-    arm_seen: bool,
     /// P, "lock open": a counting report had arm ON and switch6 High.
     lock_open: bool,
-    /// M, "RADIO_STATUS seen": a RADIO_STATUS newer than `entry_us` arrived.
-    radio_seen: bool,
-    /// The step time of the latest entry into a hands-off state from PILOT or STOP, us.
-    entry_us: u64,
     /// The battery was critical in this TAKEOVER; cleared on any state change.
     descent: bool,
     /// A mission place exists (AUTO, or HOLD after a pause that kept it)
@@ -530,10 +519,7 @@ impl HandsOff {
             state: State::Stop,
             stick_loss_us: tuning.rc_fs_timeout_us,
             pilot_latch: true,
-            arm_seen: false,
             lock_open: false,
-            radio_seen: false,
-            entry_us: 0,
             descent: false,
             place: false,
             flown_plan: None,
@@ -588,11 +574,6 @@ impl HandsOff {
         self.ever_airborne
     }
 
-    /// M in force: a hands-off state, and a RADIO_STATUS arrived after its entry (the log's M bit)
-    pub fn radio_status_seen(&self) -> bool {
-        self.state.is_hands_off() && self.radio_seen
-    }
-
     /// One flight step.
     pub fn step(&mut self, i: &Inputs) -> Output {
         let fresh = i
@@ -636,12 +617,8 @@ impl HandsOff {
             }
         }
         self.update_tier(i.now_us, instant);
-        // M from a RADIO_STATUS newer than the entry, before this step's arm-OFF rule reads it.
-        if self.state.is_hands_off() && i.last_radio_status_us.is_some_and(|t| t > self.entry_us) {
-            self.radio_seen = true;
-        }
         self.automatic(i, fresh, &mut ev);
-        let command = i.command.map(|c| self.command(c, i, fresh, &mut ev));
+        let command = i.command.map(|c| self.command(c, i, &mut ev));
         let hands_off = self.state.is_hands_off();
         let demand = match instant {
             Tier::T3 => Demand::Position,
@@ -672,11 +649,7 @@ impl HandsOff {
             land_law,
             demand,
             takeover_descent: self.state == State::Takeover && self.descent,
-            arm_off_holds: if self.mavlink_flight() {
-                hands_off && i.crsf.is_some_and(|r| !r.arm && r.mission)
-            } else {
-                self.arm_off_holds()
-            },
+            arm_off_holds: self.mavlink_flight() && hands_off && i.crsf.is_some_and(|r| !r.arm && r.mission),
             disarm: self.state == State::Stop && was != State::Stop && i.armed,
             speed_limit_xy_ms: if hands_off {
                 speed_limit_xy_ms(i.speed_xy_ms)
@@ -903,7 +876,7 @@ impl HandsOff {
             self.mission_switch(i, fresh, ev);
             return;
         }
-        if !i.armed || (i.crsf.is_some_and(|r| !r.arm) && !self.arm_off_holds()) {
+        if !i.armed || i.crsf.is_some_and(|r| !r.arm) {
             self.go(State::Stop, if i.armed { Reason::ArmOff } else { Reason::Disarmed }, i, ev);
             return;
         }
@@ -933,37 +906,9 @@ impl HandsOff {
                     }
                 }
             }
-            State::Hold | State::Auto | State::Return | State::Land | State::Blind if fresh => {
+            State::Land | State::Blind if fresh => {
                 self.go(State::Takeover, Reason::RcBack, i, ev);
                 self.lock(i);
-            }
-            State::Hold => {
-                if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
-                    self.go(self.land_state(), self.land_reason(i), i, ev);
-                } else if self.link_age(i) > LINK_LOSS_US {
-                    let next = if self.home().is_some() {
-                        State::Return
-                    } else {
-                        State::Land
-                    };
-                    self.go(next, Reason::LinkLost, i, ev);
-                } else if self.place && i.mission.plan_id != self.flown_plan {
-                    self.drop_place(ev);
-                }
-            }
-            State::Auto => {
-                if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
-                    self.go(self.land_state(), self.land_reason(i), i, ev);
-                } else if i.mission.plan_id != self.flown_plan || i.last_waypoint_reached {
-                    self.go(State::Hold, if i.last_waypoint_reached { Reason::LastWp } else { Reason::Plan }, i, ev);
-                } else if !Self::station_present(i) {
-                    self.pause(Reason::StationLost, i, ev);
-                }
-            }
-            State::Return => {
-                if self.debounced != Tier::T3 || i.battery_critical || self.track_fault || i.home_reached {
-                    self.go(self.land_state(), self.return_reason(i), i, ev);
-                }
             }
             State::Land => {
                 if self.debounced == Tier::T1 {
@@ -975,19 +920,15 @@ impl HandsOff {
                     self.go(State::Land, Reason::Tier, i, ev);
                 }
             }
+            // Not reachable on a CRSF flight.
+            State::Hold | State::Auto | State::Return => {}
         }
         if self.state == State::Takeover && (i.battery_critical || self.track_fault) {
             self.descent = true;
         }
     }
 
-    /// Arm OFF withholds the disarm in a hands-off state while K is clear and M is set.
-    /// airborne term)
-    fn arm_off_holds(&self) -> bool {
-        self.state.is_hands_off() && !self.arm_seen && self.radio_seen
-    }
-
-    /// This step's counting report sets K and P; after P, arm ON and switch6 not High sets the pilot latch.
+    /// This step's counting report sets P; after P, arm ON and switch6 not High sets the pilot latch.
     fn lock(&mut self, i: &Inputs) {
         let Some(r) = i.crsf.filter(|r| r.arm) else {
             return;
@@ -996,7 +937,6 @@ impl HandsOff {
         if self.lock_open && !high {
             self.pilot_latch = true;
         }
-        self.arm_seen = true;
         self.lock_open |= high;
     }
 
@@ -1079,12 +1019,7 @@ impl HandsOff {
         }
         if next.is_hands_off() {
             self.pilot_latch = false;
-            self.arm_seen = false;
             self.lock_open = false;
-            if !self.state.is_hands_off() {
-                self.radio_seen = false;
-                self.entry_us = i.now_us;
-            }
         }
         self.descent = false;
         self.return_height_m = None;
@@ -1111,13 +1046,10 @@ impl HandsOff {
     }
 
     /// And the lead's rulings: the answer, and the change at this step when ACCEPTED.
-    fn command(&mut self, c: StationCommand, i: &Inputs, fresh: bool, ev: &mut Events) -> CommandResult {
+    fn command(&mut self, c: StationCommand, i: &Inputs, ev: &mut Events) -> CommandResult {
         use CommandResult::{Accepted, Denied};
         if c.link != Link::Radio {
             return Denied(DenyReason::NotRadioLink);
-        }
-        if fresh && i.crsf.is_some_and(|r| r.source == RcSource::Crsf) {
-            return Denied(DenyReason::CrsfFresh);
         }
         if !self.ho_allowed() {
             return Denied(DenyReason::HandsOffDisabled);
@@ -1243,25 +1175,16 @@ impl HandsOff {
         if !i.battery_ok || i.battery_critical {
             return Some(DenyReason::BatteryNotOk);
         }
-        if self.mavlink_flight() {
-            let live = i.crsf.filter(|r| i.now_us.saturating_sub(r.t_us) <= self.stick_loss_us);
-            return if !live.is_some_and(|r| r.mission) {
-                Some(DenyReason::MissionSwitchOff)
-            } else if !live.is_some_and(|r| r.arm) {
-                Some(DenyReason::ArmSwitchOff)
-            } else if !live.is_some_and(|r| r.switch6 == Switch3::High) {
-                Some(DenyReason::SwitchNotHigh)
-            } else {
-                None
-            };
+        let live = i.crsf.filter(|r| i.now_us.saturating_sub(r.t_us) <= self.stick_loss_us);
+        if !live.is_some_and(|r| r.mission) {
+            Some(DenyReason::MissionSwitchOff)
+        } else if !live.is_some_and(|r| r.arm) {
+            Some(DenyReason::ArmSwitchOff)
+        } else if !live.is_some_and(|r| r.switch6 == Switch3::High) {
+            Some(DenyReason::SwitchNotHigh)
+        } else {
+            None
         }
-        if !i.crsf.is_some_and(|r| r.arm) {
-            return Some(DenyReason::ArmSwitchOff);
-        }
-        if !i.crsf.is_some_and(|r| r.switch6 == Switch3::High) {
-            return Some(DenyReason::SwitchNotHigh);
-        }
-        None
     }
 }
 
@@ -1323,7 +1246,6 @@ mod tests {
                     t_us: T0,
                 }),
                 last_radio_heartbeat_us: Some(T0),
-                last_radio_status_us: None,
                 armed: false,
                 airborne: false,
                 tier: Tier::T3,
@@ -1759,22 +1681,6 @@ mod tests {
     // ---- I4 ----
 
     #[test]
-    fn hands_off_i4_return_at_10_1_s_not_at_9_9_s_with_radio_status_present() {
-        let mut r = Rig::hold();
-        let hb = r.now();
-        for t in (hb..hb + 9_900_000).step_by(100_000) {
-            r.i.last_radio_status_us = Some(t);
-            assert_eq!(r.at(t).state, State::Hold, "at {}", t - hb);
-        }
-        r.i.last_radio_status_us = Some(hb + 9_900_000);
-        assert_eq!(r.at(hb + 9_900_000).state, State::Hold);
-        r.i.last_radio_status_us = Some(hb + 10_100_000);
-        let out = r.at(hb + 10_100_000);
-        assert_eq!(out.state, State::Return);
-        assert!(out.hands_off);
-    }
-
-    #[test]
     fn hands_off_i4_link_age_runs_from_the_newer_of_crsf_and_the_radio_heartbeat() {
         let mut r = Rig::pilot();
         r.i.last_radio_heartbeat_us = None;
@@ -1829,7 +1735,6 @@ mod tests {
     fn hands_off_i5_auto_pauses_at_5_s_without_the_radio_heartbeat_place_kept() {
         let mut r = Rig::auto();
         let hb = r.now();
-        r.i.last_radio_status_us = Some(hb + STATION_LOST_US);
         assert_eq!(r.at(hb + STATION_LOST_US).state, State::Auto);
         let out = r.at(hb + STATION_LOST_US + 1);
         assert_eq!(out.state, State::Hold);
@@ -2208,19 +2113,11 @@ mod tests {
         let mut i = Rig::new().i;
         let mut seen = [false; 8];
         let (mut prev, mut high_seen) = (State::Stop, false);
-        let (mut k, mut p) = (false, false);
+        let mut p = false;
         let (mut hand_overs, mut held) = (0u32, 0u32);
-        let (mut m, mut entry) = (false, 0u64);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
-            let prev_ho = !matches!(prev, State::Pilot | State::Stop);
-            if prev_ho && i.last_radio_status_us.is_some_and(|t| t > entry) {
-                m = true;
-            }
             let out = h.step(&i);
-            if !prev_ho && out.hands_off {
-                (m, entry) = (false, i.now_us);
-            }
             let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
             let arm_now = i.crsf.is_some_and(|r| r.arm);
             let mav = h.mavlink_flight();
@@ -2237,14 +2134,12 @@ mod tests {
             if out.state == State::Takeover {
                 if prev != State::Takeover {
                     high_seen = false;
-                    (k, p) = (false, false);
+                    p = false;
                 }
                 high_seen |= high_now;
-                k |= arm_now;
                 p |= arm_now && high_now;
             }
-            let k_now = out.state == State::Takeover && k;
-            let want = if mav { out.hands_off && !arm_now && ms_now } else { out.hands_off && !k_now && m };
+            let want = mav && out.hands_off && !arm_now && ms_now;
             assert_eq!(out.arm_off_holds, want, "{out:?}");
             if i.crsf.is_some_and(|r| !r.arm) && out.state != State::Stop {
                 assert!(out.arm_off_holds, "arm OFF outside STOP only while held: {out:?}");
@@ -2602,19 +2497,19 @@ mod tests {
     // ---- Commands ----
 
     #[test]
-    fn hands_off_commands_denied_while_crsf_is_fresh() {
+    fn hands_off_commands_on_a_crsf_flight_are_refused_with_code_3() {
         for c in [Command::Start, Command::Pause, Command::Abort, Command::Land] {
             let mut r = Rig::crsf_pilot();
-            assert_eq!(r.cmd(c).command, denied(DenyReason::CrsfFresh), "pilot {c:?}");
+            assert_eq!(r.cmd(c).command, denied(DenyReason::HandsOffDisabled), "pilot {c:?}");
             let mut r = Rig::crsf_takeover();
             let out = r.cmd(c);
-            assert_eq!((out.state, out.command), (State::Takeover, denied(DenyReason::CrsfFresh)));
+            assert_eq!((out.state, out.command), (State::Takeover, denied(DenyReason::HandsOffDisabled)));
             let mut r = Rig::crsf_land();
             let t = r.now() + 1_000;
             r.i.crsf = r.i.crsf.map(|s| RcSample { t_us: t, ..s });
             r.i.now_us = t;
             let out = r.cmd(c);
-            assert_eq!((out.state, out.command), (State::Takeover, denied(DenyReason::CrsfFresh)));
+            assert_eq!((out.state, out.command), (State::Takeover, denied(DenyReason::HandsOffDisabled)));
         }
     }
 
@@ -2705,8 +2600,7 @@ mod tests {
 
     // ---- Review follow-up ----
 
-    /// Amended by: arm OFF in a hands-off state in the air holds (K is clear there); on the ground, and in PILOT,
-    /// it is STOP in the same step.
+    /// Arm OFF with the mission switch OFF is STOP in the same step, in every state, in the air and on the ground.
     #[test]
     fn hands_off_arm_switch_off_in_the_same_step_from_every_state() {
         let rigs: [(&str, fn() -> Rig, State); 9] = [
@@ -2721,23 +2615,16 @@ mod tests {
             ("crsf blind", Rig::crsf_blind, State::Blind),
         ];
         for (name, make, from) in rigs {
-            for (airborne, radio) in [(true, true), (true, false), (false, true), (false, false)] {
+            for airborne in [true, false] {
                 let mut r = make();
                 assert_eq!(r.h.state(), from, "{name}");
                 r.i.airborne = airborne;
                 r.i.td_held = false;
-                if radio {
-                    r.i.last_radio_status_us = Some(r.now() + 500);
-                }
                 let t = r.now() + 1_000;
                 let out = r.report_with(t, CENTRED, Switch3::High, false);
-                if radio && from != State::Pilot && name.starts_with("crsf") {
-                    assert_eq!((out.state, out.hands_off, out.arm_off_holds), (State::Takeover, true, true), "{name}");
-                } else {
-                    let want = (State::Stop, false, false, false);
-                    let got = (out.state, out.hands_off, out.synthetic_sticks, out.arm_off_holds);
-                    assert_eq!(got, want, "{name} airborne {airborne} radio {radio}");
-                }
+                let want = (State::Stop, false, false, false);
+                let got = (out.state, out.hands_off, out.synthetic_sticks, out.arm_off_holds);
+                assert_eq!(got, want, "{name} airborne {airborne}");
             }
         }
     }
@@ -2857,30 +2744,23 @@ mod tests {
 
     // ---- The take-over lock ----
 
-    /// LAND on a CRSF flight, a RADIO_STATUS after its entry, then CRSF returns with this arm switch and switch6.
+    /// LAND on a CRSF flight, then CRSF returns with this arm switch and switch6.
     fn returns_with(switch6: Switch3, arm: bool) -> (Rig, Output) {
         let mut r = Rig::crsf_land();
-        r.i.last_radio_status_us = Some(r.now() + 500);
         let t = r.now() + 1_000;
         let out = r.report_with(t, CENTRED, switch6, arm);
         (r, out)
     }
 
     #[test]
-    fn hands_off_c1_a1_arm_off_return_holds_then_arm_on_high_opens_then_middle_hands_over() {
-        let (mut r, out) = returns_with(Switch3::High, false);
-        assert_eq!((out.state, out.hands_off, out.arm_off_holds), (State::Takeover, true, true));
-        assert!(out.synthetic_sticks);
-        for _ in 0..5 {
-            let t = r.now() + 20_000;
-            let out = r.report_with(t, FULL, Switch3::High, false);
-            assert_eq!((out.state, out.arm_off_holds), (State::Takeover, true));
-            assert!(!r.h.arm_seen && !r.h.lock_open);
-        }
+    fn hands_off_c1_a1_arm_on_high_opens_the_lock_then_middle_hands_over() {
+        let (mut r, out) = returns_with(Switch3::Middle, true);
+        assert_eq!((out.state, out.hands_off, out.arm_off_holds), (State::Takeover, true, false));
+        assert!(out.synthetic_sticks && !r.h.lock_open);
         let t = r.now() + 20_000;
         let out = r.report_with(t, FULL, Switch3::High, true);
         assert_eq!((out.state, out.arm_off_holds), (State::Takeover, false), "lock open");
-        assert!(r.h.arm_seen && r.h.lock_open);
+        assert!(r.h.lock_open);
         let t = r.now() + 20_000;
         let out = r.report_with(t, FULL, Switch3::Middle, true);
         assert_eq!((out.state, out.hands_off, out.synthetic_sticks), (State::Pilot, false, false));
@@ -2888,10 +2768,11 @@ mod tests {
 
     #[test]
     fn hands_off_c1_lock_needs_arm_on_and_high_in_the_same_report() {
-        let (mut r, _) = returns_with(Switch3::High, false);
+        let (mut r, out) = returns_with(Switch3::Low, true);
+        assert_eq!(out.state, State::Takeover);
         let t = r.now() + 20_000;
         assert_eq!(r.report_with(t, FULL, Switch3::Middle, true).state, State::Takeover);
-        assert!(r.h.arm_seen && !r.h.lock_open);
+        assert!(!r.h.lock_open);
         let t = r.now() + 20_000;
         assert_eq!(r.report_with(t, FULL, Switch3::Low, true).state, State::Takeover);
         let t = r.now() + 20_000;
@@ -2927,10 +2808,9 @@ mod tests {
         r
     }
 
-    /// (replaces N10 (ii) and the airborne term): with no RADIO_STATUS after the entry (a plain dropout, M clear)
-    /// an arm-OFF report on return stops in that step.
+    /// An arm-OFF report on return stops in that step, in the air and on the ground.
     #[test]
-    fn hands_off_c1_a3_arm_off_without_radio_status_after_the_entry_is_stop_at_once() {
+    fn hands_off_c1_a3_arm_off_on_return_is_stop_at_once() {
         for airborne in [true, false] {
             let mut r = lost_with();
             r.i.airborne = airborne;
@@ -2941,78 +2821,18 @@ mod tests {
         }
     }
 
-    /// With a RADIO_STATUS after the entry (M) an arm-OFF return is held, in the air and on the ground; ON then OFF
-    /// stops (P); on the ground TD stops (T)
     #[test]
-    fn hands_off_n12_radio_status_after_the_entry_holds_arm_off_until_k_or_td() {
-        for airborne in [true, false] {
-            let mut r = lost_with();
-            r.i.airborne = airborne;
-            r.i.td_held = false;
-            r.i.last_radio_status_us = Some(r.now() + 1);
-            let t = r.now() + 1_000;
-            let out = r.report_with(t, CENTRED, Switch3::High, false);
-            assert_eq!((out.state, out.arm_off_holds), (State::Takeover, true), "air {airborne}");
-            assert!(r.h.radio_status_seen());
-            if airborne {
-                let t = r.now() + 20_000;
-                assert_eq!(r.report_with(t, CENTRED, Switch3::Low, true).state, State::Takeover);
-                let t = r.now() + 20_000;
-                let out = r.report_with(t, CENTRED, Switch3::Low, false);
-                assert_eq!((out.state, out.disarm), (State::Stop, true), "ON then OFF");
-            } else {
-                let t = r.now() + 20_000;
-                assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Takeover);
-                r.i.td_held = true;
-                let out = r.step();
-                assert_eq!((out.state, out.disarm), (State::Stop, true), "TD on the ground");
-            }
-        }
-        let mut r = Rig::pilot();
-        r.i.last_radio_status_us = Some(r.now());
-        let t = r.last_report() + LOSS + 1;
-        r.i.last_radio_status_us = Some(t);
-        assert_eq!(r.heartbeat(t).state, State::Hold);
-        assert!(!r.h.radio_status_seen());
-        let t = r.now() + 1_000;
-        assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Stop, "status before the entry only");
-        let (mut r, out) = returns_with(Switch3::High, true);
-        assert_eq!(out.state, State::Takeover);
-        assert!(r.h.radio_status_seen());
-        let t = r.last_report() + LOSS + 1;
-        assert_eq!(r.at(t).state, State::Land);
-        assert!(r.h.radio_status_seen(), "kept between hands-off states");
-        let t = r.now() + 1_000;
-        assert_eq!(r.report(t, Switch3::High).state, State::Takeover);
-        let t = r.now() + 1_000;
-        assert_eq!(r.report(t, Switch3::Middle).state, State::Pilot);
-        assert!(!r.h.radio_status_seen());
-        let t = r.last_report() + LOSS + 1;
-        assert_eq!(r.heartbeat(t).state, State::Land);
-        assert!(!r.h.radio_status_seen() && !r.h.radio_seen, "cleared on the re-entry");
-        let t = r.now() + 1_000;
-        assert_eq!(r.report_with(t, CENTRED, Switch3::High, false).state, State::Stop, "re-entry without a new status");
-    }
-
-    #[test]
-    fn hands_off_c1_a4_rc_lost_in_takeover_clears_k_and_p_and_a_second_arm_off_return_holds() {
+    fn hands_off_c1_a4_rc_lost_in_takeover_clears_p_and_a_second_return_needs_the_lock_again() {
         let (mut r, _) = returns_with(Switch3::High, true);
-        assert!(r.h.arm_seen && r.h.lock_open);
+        assert!(r.h.lock_open);
         let t = r.last_report() + LOSS + 1;
         let out = r.at(t);
-        assert_eq!((out.state, out.arm_off_holds), (State::Land, true));
-        assert!(!r.h.arm_seen && !r.h.lock_open);
+        assert_eq!((out.state, out.arm_off_holds), (State::Land, false));
+        assert!(!r.h.lock_open);
         let t = r.now() + 1_000;
-        let out = r.report_with(t, CENTRED, Switch3::Middle, false);
-        assert_eq!((out.state, out.arm_off_holds), (State::Takeover, true), "second return holds");
+        assert_eq!(r.report_with(t, CENTRED, Switch3::Middle, true).state, State::Takeover, "second return");
         let t = r.now() + 20_000;
         assert_eq!(r.report_with(t, CENTRED, Switch3::Middle, true).state, State::Takeover);
-        let (mut r, _) = returns_with(Switch3::High, false);
-        let t = r.last_report() + LOSS + 1;
-        let out = r.at(t);
-        assert_eq!((out.state, out.hands_off, out.arm_off_holds), (State::Land, true, true));
-        let t = r.now() + 600 * S;
-        assert_ne!(r.at(t).state, State::Stop);
     }
 
     #[test]
@@ -3064,35 +2884,6 @@ mod tests {
         assert_eq!(r.step().state, State::Land);
     }
 
-    // ---- C2 ----
-
-    #[test]
-    fn hands_off_c2_start_denied_arm_switch_off_when_the_last_report_had_arm_off() {
-        let (mut r, _) = returns_with(Switch3::High, false);
-        let t = r.last_report() + LOSS + 1;
-        assert_eq!(r.heartbeat(t).state, State::Land);
-        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::ArmSwitchOff));
-        assert_eq!(r.cmd(Command::Start).command, denied(DenyReason::HandsOffDisabled));
-    }
-
-    #[test]
-    fn hands_off_c2_arm_switch_off_comes_after_battery_and_before_switch_not_high() {
-        let mut r = Rig::crsf_land();
-        r.i.battery_ok = false;
-        r.i.crsf = r.i.crsf.map(|c| RcSample {
-            arm: false,
-            switch6: Switch3::Middle,
-            source: fw_core::rc::RcSource::Crsf,
-            mission: false,
-            ..c
-        });
-        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::BatteryNotOk));
-        r.i.battery_ok = true;
-        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::ArmSwitchOff));
-        r.i.crsf = r.i.crsf.map(|c| RcSample { arm: true, ..c });
-        assert_eq!(r.h.start_check(&r.i), Some(DenyReason::SwitchNotHigh));
-    }
-
     // ---- Return ----
 
     #[test]
@@ -3137,10 +2928,10 @@ mod tests {
         let mut r = Rig::pilot();
         assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::NotInThisState));
         let mut r = Rig::crsf_pilot();
-        assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::CrsfFresh));
+        assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::HandsOffDisabled));
         let mut r = Rig::crsf_takeover();
         let out = r.cmd(Command::Return);
-        assert_eq!((out.state, out.command), (State::Takeover, denied(DenyReason::CrsfFresh)));
+        assert_eq!((out.state, out.command), (State::Takeover, denied(DenyReason::HandsOffDisabled)));
     }
 
     #[test]
@@ -3151,14 +2942,14 @@ mod tests {
         let t = r.now() + 1_000;
         r.i.crsf = r.i.crsf.map(|s| RcSample { t_us: t, ..s });
         r.i.now_us = t;
-        assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::CrsfFresh));
+        assert_eq!(r.cmd(Command::Return).command, denied(DenyReason::HandsOffDisabled));
         let mut r = Rig::crsf_land();
         let mut ev = Events::NONE;
         let ret = StationCommand {
             command: Command::Return,
             link: Link::Radio,
         };
-        assert_eq!(r.h.command(ret, &r.i, false, &mut ev), CommandResult::Denied(DenyReason::HandsOffDisabled));
+        assert_eq!(r.h.command(ret, &r.i, &mut ev), CommandResult::Denied(DenyReason::HandsOffDisabled));
         let mut r = Rig::new();
         r.step();
         r.i.armed = true;
@@ -3180,7 +2971,7 @@ mod tests {
             r.h.home_ne = None;
             let mut ev = Events::NONE;
             for want in [DenyReason::NoHome, DenyReason::NotT3, DenyReason::BatteryCritical] {
-                assert_eq!(r.h.command(ret, &r.i, false, &mut ev), CommandResult::Denied(want), "{name}");
+                assert_eq!(r.h.command(ret, &r.i, &mut ev), CommandResult::Denied(want), "{name}");
                 assert_eq!((r.h.state(), ev), (from, Events::NONE), "{name} {want:?}");
                 match want {
                     DenyReason::NoHome => r.h.home_ne = Some(HOME_NE),
@@ -3188,7 +2979,7 @@ mod tests {
                     _ => r.i.battery_critical = false,
                 }
             }
-            assert_eq!(r.h.command(ret, &r.i, false, &mut ev), CommandResult::Accepted, "{name}");
+            assert_eq!(r.h.command(ret, &r.i, &mut ev), CommandResult::Accepted, "{name}");
         }
     }
 
@@ -3213,7 +3004,7 @@ mod tests {
             } else {
                 DenyReason::NotT3
             };
-            assert_eq!(r.h.command(ret, &r.i, false, &mut ev), CommandResult::Denied(want));
+            assert_eq!(r.h.command(ret, &r.i, &mut ev), CommandResult::Denied(want));
             assert_eq!(r.h.state(), State::Hold, "{want:?}: this step");
             r.i.now_us += TIER_DEBOUNCE_US;
             assert_eq!(r.step().state, State::Land, "{want:?}: the next step lands, never RETURN");
@@ -3233,7 +3024,6 @@ mod tests {
     fn hands_off_c3_deny_reason_codes_are_the_contracts() {
         let table = [
             (DenyReason::NotRadioLink, 1),
-            (DenyReason::CrsfFresh, 2),
             (DenyReason::HandsOffDisabled, 3),
             (DenyReason::NotInThisState, 4),
             (DenyReason::StationAbsent, 5),
@@ -3254,7 +3044,7 @@ mod tests {
         ];
         for (k, (reason, code)) in table.iter().enumerate() {
             assert_eq!(reason.code(), *code, "{reason:?}");
-            assert_eq!(usize::from(reason.code()), k + 1, "{reason:?}: 1..=19, 0 reserved, 20 retired");
+            assert_eq!(usize::from(reason.code()), k + 1 + usize::from(k > 0), "{reason:?}: 1, 3..=19; 0 reserved, 2 and 20 retired");
         }
     }
 
@@ -3320,21 +3110,14 @@ mod tests {
     #[test]
     fn hands_off_wr2_disarm_is_stop_entered_while_armed() {
         let (mut r, out) = returns_with(Switch3::High, false);
-        assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Takeover, true, false));
-        r.i.airborne = false;
-        r.i.td_held = false;
-        let t = r.now() + 5_000;
-        let out = r.at(t);
-        assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Takeover, true, false));
-        r.i.td_held = true;
-        let out = r.step();
         assert_eq!((out.state, out.arm_off_holds, out.disarm), (State::Stop, false, true));
+        assert_eq!((r.step().state, r.step().disarm), (State::Stop, false));
         let mut r = Rig::pilot();
         let t = r.now() + 1_000;
         assert!(r.report_with(t, FULL, Switch3::High, false).disarm, "pilot arm off");
         let (mut r, _) = returns_with(Switch3::Low, true);
         let t = r.now() + 20_000;
-        assert!(r.report_with(t, FULL, Switch3::Low, false).disarm, "after K");
+        assert!(r.report_with(t, FULL, Switch3::Low, false).disarm, "takeover arm off");
         let mut r = Rig::pilot();
         r.i.airborne = false;
         let t = r.last_report() + LOSS + 1;
@@ -3399,9 +3182,6 @@ mod tests {
         }
         if !silent && rng.chance(200) {
             i.last_radio_heartbeat_us = Some(now);
-        }
-        if rng.chance(200) {
-            i.last_radio_status_us = Some(now);
         }
         if rng.chance(10) {
             i.armed = !i.armed;
@@ -4114,12 +3894,12 @@ mod tests {
     }
 
     /// The MAVLink-flight rule and section 3: a CRSF flight never enters HOLD, AUTO or RETURN: a stick loss on T3'
-    /// lands, a radio command is refused with code 2 while its report is fresh and 3 after.
+    /// lands, a radio command is refused with code 3.
     #[test]
     fn n19_a_crsf_flight_has_no_hands_off_path() {
         let mut r = Rig::crsf_pilot();
         assert!(!r.h.mavlink_flight());
-        assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::CrsfFresh));
+        assert_eq!(r.cmd(Command::Land).command, denied(DenyReason::HandsOffDisabled));
         let mut r = Rig::crsf_land();
         for c in [Command::Start, Command::Abort, Command::Return] {
             assert_eq!(r.cmd(c).command, denied(DenyReason::HandsOffDisabled), "{c:?}");
@@ -4137,22 +3917,14 @@ mod tests {
         let mut i = Rig::crsf().i;
         let mut seen = [0u32; 8];
         let (mut prev, mut high_seen) = (State::Stop, false);
-        let (mut k, mut p) = (false, false);
-        let (mut hand_overs, mut held, mut armed_steps) = (0u32, 0u32, 0u32);
-        let (mut m, mut entry) = (false, 0u64);
+        let mut p = false;
+        let (mut hand_overs, mut stops, mut armed_steps) = (0u32, 0u32, 0u32);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
             i.crsf = i.crsf.map(|c| RcSample { source: RcSource::Crsf, mission: false, ..c });
-            let prev_ho = !matches!(prev, State::Pilot | State::Stop);
-            if prev_ho && i.last_radio_status_us.is_some_and(|t| t > entry) {
-                m = true;
-            }
             let out = h.step(&i);
             assert!(!h.mavlink_flight());
             assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{out:?}");
-            if !prev_ho && out.hands_off {
-                (m, entry) = (false, i.now_us);
-            }
             let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
             let arm_now = i.crsf.is_some_and(|r| r.arm);
             if prev == State::Takeover && out.state == State::Pilot {
@@ -4163,17 +3935,15 @@ mod tests {
             if out.state == State::Takeover {
                 if prev != State::Takeover {
                     high_seen = false;
-                    (k, p) = (false, false);
+                    p = false;
                 }
                 high_seen |= high_now;
-                k |= arm_now;
                 p |= arm_now && high_now;
             }
-            let k_now = out.state == State::Takeover && k;
-            assert_eq!(out.arm_off_holds, out.hands_off && !k_now && m, "{out:?}");
-            if i.crsf.is_some_and(|r| !r.arm) && out.state != State::Stop {
-                assert!(out.arm_off_holds, "arm OFF outside STOP only while held: {out:?}");
-                held += 1;
+            assert!(!out.arm_off_holds, "{out:?}");
+            if i.crsf.is_some_and(|r| !r.arm) {
+                assert_eq!(out.state, State::Stop, "arm OFF is STOP: {out:?}");
+                stops += u32::from(prev != State::Stop);
             }
             assert_eq!(out.hands_off, !matches!(out.state, State::Pilot | State::Stop));
             if !i.armed {
@@ -4186,7 +3956,53 @@ mod tests {
         for s in [State::Pilot, State::Takeover, State::Land, State::Blind, State::Stop] {
             assert!(seen[usize::from(s.code() - 1)] > 100, "{s:?} reached: {seen:?}");
         }
-        assert!(hand_overs > 20 && held > 20 && armed_steps > 10_000, "lock exercised: {hand_overs} hand-overs, {held} held, {armed_steps} armed steps");
+        assert!(hand_overs > 20 && stops > 20 && armed_steps > 10_000, "lock exercised: {hand_overs} hand-overs, {stops} arm-OFF stops, {armed_steps} armed steps");
+    }
+
+    /// On a CRSF flight an arm-OFF report stops at once in LAND, BLIND and TAKEOVER in the air, also with ch8 (the
+    /// mission switch bit) ON: `arm_off_holds` is a MAVLink-flight output only.
+    #[test]
+    fn crsf_arm_off_with_ch8_on_stops_at_once_in_land_blind_and_takeover() {
+        let rigs: [(&str, fn() -> Rig, State); 3] = [
+            ("land", Rig::crsf_land, State::Land),
+            ("blind", Rig::crsf_blind, State::Blind),
+            ("takeover", Rig::crsf_takeover, State::Takeover),
+        ];
+        for (name, make, from) in rigs {
+            let mut r = make();
+            assert_eq!(r.h.state(), from, "{name}");
+            r.i.td_held = false;
+            let t = r.now() + 1_000;
+            let out = r.report_full(t, CENTRED, Switch3::High, false, true);
+            let got = (out.state, out.disarm, out.arm_off_holds, out.reason);
+            assert_eq!(got, (State::Stop, true, false, Some(Reason::ArmOff)), "{name}");
+        }
+    }
+
+    /// A CRSF flight with ch8 ON in random reports, commands included: never HOLD, AUTO or RETURN, never a held
+    /// arm-OFF report.
+    #[test]
+    fn crsf_with_ch8_on_never_reaches_hold_auto_or_return() {
+        let mut rng = Lcg(0x5eed_0002);
+        let mut h = HandsOff::new(&Tuning::DEFAULT);
+        let mut i = Rig::crsf().i;
+        let (mut ch8_hands_off, mut ch8_stops) = (0u32, 0u32);
+        for _ in 0..200_000 {
+            random_inputs(&mut rng, &mut i, true);
+            i.crsf = i.crsf.map(|c| RcSample { source: RcSource::Crsf, ..c });
+            let was = h.state();
+            let out = h.step(&i);
+            assert!(!h.mavlink_flight());
+            assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{out:?}");
+            assert!(!out.arm_off_holds && matches!(out.command, None | Some(CommandResult::Denied(_))), "{out:?}");
+            let ch8 = i.crsf.is_some_and(|r| r.mission);
+            ch8_hands_off += u32::from(ch8 && out.hands_off);
+            if i.crsf.is_some_and(|r| !r.arm) {
+                assert_eq!(out.state, State::Stop, "{out:?}");
+                ch8_stops += u32::from(ch8 && was != State::Stop && i.armed);
+            }
+        }
+        assert!(ch8_hands_off > 1_000 && ch8_stops > 10, "ch8 ON: {ch8_hands_off} hands-off steps, {ch8_stops} arm-OFF stops");
     }
 
     /// On a MAVLink flight never airborne since arming, PILOT with arm OFF and the
