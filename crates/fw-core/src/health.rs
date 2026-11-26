@@ -81,6 +81,8 @@ pub struct Limits {
     pub start_backoff_ms: [u32; 3],
     /// Number of start retries; the failure of the last retry makes the device Absent.
     pub start_retries: u8,
+    /// Some: after the start retries the device is never Absent; the start is tried again every this many ms until it succeeds.
+    pub start_forever_ms: Option<u32>,
     /// Back-off before recovery attempt 1, 2, 3, 4 (the last entry is reused beyond four).
     pub recovery_backoff_ms: [u32; 4],
     /// Recovery attempts per episode; a failed last attempt makes the device Failed.
@@ -99,6 +101,7 @@ impl Limits {
         threshold: 9,
         start_backoff_ms: [100, 300, 1000],
         start_retries: 3,
+        start_forever_ms: None,
         recovery_backoff_ms: [100, 300, 1000, 3000],
         max_attempts: 4,
         flap_entries: 4,
@@ -337,7 +340,16 @@ impl Health {
             Event::StartFailed { identified } => {
                 self.counters.present |= identified;
                 self.start_failures = self.start_failures.saturating_add(1);
-                if self.start_failures > self.limits.start_retries {
+                if let (true, Some(wait)) = (
+                    self.start_failures > self.limits.start_retries,
+                    self.limits.start_forever_ms,
+                ) {
+                    self.phase = Phase::Wait {
+                        until: now.saturating_add(u64::from(wait)),
+                        then: Op::Start,
+                    };
+                    None
+                } else if self.start_failures > self.limits.start_retries {
                     self.state = State::Absent;
                     self.phase = Phase::Parked;
                     Some(Report::Absent)
@@ -610,6 +622,39 @@ mod tests {
         assert_eq!(r.at(1440, f), st(Action::Park, Some(Report::Absent)));
         assert_eq!(r.h.state(), State::Absent);
         assert!(!r.h.counters().present);
+    }
+
+    #[test]
+    fn start_forever_retries_every_period_and_never_goes_absent() {
+        let limits = Limits {
+            start_forever_ms: Some(5000),
+            ..Limits::DESIGN
+        };
+        let mut r = Rig::with(limits);
+        let f = Event::StartFailed { identified: false };
+        assert_eq!(r.at(0, Event::Tick), quiet(Action::Start));
+        assert_eq!(r.at(10, f), quiet(Action::WaitUntil(110)));
+        assert_eq!(r.at(110, Event::Tick), quiet(Action::Start));
+        assert_eq!(r.at(120, f), quiet(Action::WaitUntil(420)));
+        assert_eq!(r.at(420, Event::Tick), quiet(Action::Start));
+        assert_eq!(r.at(430, f), quiet(Action::WaitUntil(1430)));
+        assert_eq!(r.at(1430, Event::Tick), quiet(Action::Start));
+        let mut t = 1440;
+        for _ in 0..50 {
+            assert_eq!(r.at(t, f), quiet(Action::WaitUntil(t + 5000)));
+            assert_eq!(r.at(t + 4999, Event::Tick), quiet(Action::WaitUntil(t + 5000)));
+            assert_eq!(r.at(t + 5000, Event::Tick), quiet(Action::Start));
+            assert_eq!(r.h.state(), State::Starting);
+            t += 5010;
+        }
+        assert_eq!(r.at(t, Event::StartOk), quiet(Action::None));
+        assert_eq!(r.h.state(), State::Ok);
+    }
+
+    #[test]
+    fn start_forever_off_by_default_so_other_devices_go_absent() {
+        assert_eq!(Limits::DESIGN.start_forever_ms, None);
+        assert_eq!(Limits::default(), Limits::DESIGN);
     }
 
     #[test]

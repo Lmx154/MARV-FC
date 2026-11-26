@@ -6,6 +6,7 @@
 //! It takes up to 5.6 s; the scan starts at 115200, so a receiver at 9600 or 38400 is found only after the silent 1 s probes before it. The MON-VER strings are logged once per successful configure.
 //! A configure that fails is a device error: `start` returns `StartFailure`, `recover`, `restart` and `apply` return `ErrorKind::Bus`, the first try's failure is the WARNING `GNSS: configure failed (<reason>)`,
 //! the reason and the counts are on the `[STAT]` line, and a failed apply is tried again `fw_settings::gnss::CONFIGURE_RETRY_MS` later (the adapter raises the row's APPLY request from `data_ready`).
+//! The start never gives up: the health row retries it every `CONFIGURE_RETRY_MS` after its normal start retries (`Limits::start_forever_ms`), and those retries are quiet like the apply's.
 //! A retry that succeeds is the INFO `GNSS: configured on try <n>`.
 //! "Ok" means NAV-PVT frames keep arriving: one sample is one NAV-PVT, whether or not it holds a 3D fix. 2.5 s without one (`DEADLINE_US`) is one error event (`ErrorKind::Timeout`);
 //! a bad checksum, an oversize or an unknown frame and a UART error are counted and are not error events by themselves.
@@ -254,6 +255,7 @@ pub struct GnssAdapter {
     flight: Option<TripleWriter<'static, GnssSample>>,
     retry: Retry,
     retry_raised: bool,
+    start_failed: bool,
 }
 
 impl GnssAdapter {
@@ -288,6 +290,7 @@ impl GnssAdapter {
             flight: crate::flight::FLIGHT_GNSS.take_writer(),
             retry: Retry::default(),
             retry_raised: false,
+            start_failed: false,
         }
     }
 
@@ -511,7 +514,9 @@ impl DeviceAdapter for GnssAdapter {
 
     /// Configures the receiver (see the module comment). A failure is the start's failure: the row retries it.
     async fn start(&mut self) -> Result<(), StartFailure> {
-        self.configure(false).await.map_err(|error| StartFailure {
+        let result = self.configure(self.start_failed).await;
+        self.start_failed = result.is_err();
+        result.map_err(|error| StartFailure {
             identified: error.identified(),
         })
     }
@@ -557,7 +562,9 @@ impl DeviceAdapter for GnssAdapter {
     }
 
     async fn restart(&mut self) -> Result<(), ErrorKind> {
-        self.configure(false).await.map_err(|_| ErrorKind::Bus)
+        let result = self.configure(false).await;
+        self.start_failed = result.is_err();
+        result.map_err(|_| ErrorKind::Bus)
     }
 
     fn counters(&self) -> AdapterCounters {
@@ -702,7 +709,14 @@ pub async fn task(mut adapter: Adapter) -> ! {
     fw_flight::tagged(
         &crate::watchdog::RUNNING0,
         fw_core::watchdog::task::GNSS,
-        run_device(&GNSS, &mut adapter, Limits::DESIGN),
+        run_device(
+            &GNSS,
+            &mut adapter,
+            Limits {
+                start_forever_ms: Some(CONFIGURE_RETRY_MS as u32),
+                ..Limits::DESIGN
+            },
+        ),
     )
     .await
 }

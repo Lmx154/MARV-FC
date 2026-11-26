@@ -73,7 +73,7 @@ RC and ESC are not in the registry (`device::DEVICES`); their rows are computed 
 |---|---|
 | BARO | `acquire` reads INT_STATUS (clear-on-read) then the data; a power-on-reset flag gives `Err(Por)`, which goes straight to Recovering. Pressure 16x, temperature 2x, no filter, no FIFO by default. |
 | MAG | field in microtesla, rotated by `MAG_ORIENT`, then the compass calibration m = S (r - o) in software (see [calibration](calibration.md)). The sample also carries the raw field r. No power-on-reset flag: a reset shows as a `verify` mismatch. |
-| GNSS | UBX only. Every start, restart and apply runs a whole `configure` (baud scan, 115200, one CFG-VALSET to RAM, 500 ms settle; up to 5.6 s). Ok means NAV-PVT frames keep arriving, with or without a fix. `GPS_RATE_MS` and `GPS_GNSS` set the rate and constellations. A PPS task stamps GPIO5 edges for a latency measure only. |
+| GNSS | UBX only. Every start, restart and apply runs a whole `configure` (baud scan, 115200, one CFG-VALSET to RAM, 500 ms settle; up to 5.6 s). Ok means NAV-PVT frames keep arriving, with or without a fix. `GPS_RATE_MS` and `GPS_GNSS` set the rate and constellations. The start never gives up: after the normal start retries the row stays Starting and the configure is tried again every 5 s (`Limits::start_forever_ms`) until the receiver answers; one WARNING on the first failure, one INFO `GNSS: configured on try <n>` on success. A PPS task stamps GPIO5 edges for a latency measure only. |
 | BATT | Ok means only that the ADC converts: no chip identity. 16 averaged conversions per channel; voltage reads about 0 V unplugged; the current scale is a placeholder. `BATT_V_SCALE`, `BATT_A_SCALE`, `BATT_A_OFFSET`. |
 
 ## Fault injection
