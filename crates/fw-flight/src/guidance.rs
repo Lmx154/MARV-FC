@@ -16,7 +16,8 @@ pub const LEG_DESCENT_MS: f32 = 1.5;
 /// The vertical carrot's rate changes by at most this, m/s^2 (ArduPilot AC_WPNav
 /// WP_ACC_Z_DEFAULT 1.0; the same value as `LAND_RATE_ACC_MSS`).
 pub const LEG_ACC_Z_MSS: f32 = 1.0;
-/// The horizontal distance vehicle to carrot at which the carrot stops advancing, m (PX4 MPC_XY_ERR_MAX).
+/// The horizontal distance vehicle to carrot at which the carrot stops advancing while the vehicle is behind it along the
+/// leg, m (PX4 MPC_XY_ERR_MAX).
 pub const LAG_E_MAX_M: f32 = 2.0;
 /// The arrival radius is at most the track-fault bound X
 /// less this, m: the lag limit `LAG_E_MAX_M` plus 1.0 m, since after an arrival the carrot sits at the reached waypoint.
@@ -136,6 +137,9 @@ pub struct LegGuidance {
     d_goal: f32,
     vd: f32,
     e_m: f32,
+    /// Test control: the lag scale from the unsigned distance also when the vehicle is ahead (the carrot stall).
+    #[cfg(test)]
+    lag_unsigned: bool,
 }
 
 impl Default for LegGuidance {
@@ -162,6 +166,8 @@ impl LegGuidance {
             d_goal: 0.0,
             vd: 0.0,
             e_m: 0.0,
+            #[cfg(test)]
+            lag_unsigned: false,
         }
     }
 
@@ -293,8 +299,12 @@ impl LegGuidance {
         if !matches!(self.phase, LegPhase::Leg | LegPhase::Climb | LegPhase::HomeLeg) {
             return self.out([0.0; 2], 0.0, 0.0, false, self.level_event());
         }
-        // The advance is scaled by k (the profile runs on k dt).
-        let k = (1.0 - Self::dist(veh, self.carrot_ne()) / LAG_E_MAX_M).max(0.0).min(1.0);
+        // The advance is scaled by k (the profile runs on k dt); 1 while the vehicle is ahead of the carrot along the leg.
+        let c = self.carrot_ne();
+        let ahead = (pn - c[0]) * self.line.dir[0] + (pe - c[1]) * self.line.dir[1] > 0.0;
+        #[cfg(test)]
+        let ahead = ahead && !self.lag_unsigned;
+        let k = if ahead { 1.0 } else { (1.0 - Self::dist(veh, c) / LAG_E_MAX_M).max(0.0).min(1.0) };
         let dte = k * dt;
         if self.s < self.line.len {
             let (a, r) = (Tuning::GUIDANCE_ACC_MS2, self.line.len - self.s);

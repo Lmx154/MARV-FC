@@ -646,3 +646,40 @@ fn closed_loop_square_reaches_every_waypoint() {
     std::eprintln!("closed-loop square 30 m at 3 m/s: e max {:.3} m, {:.1} s", run.e_max, run.outs.len() as f32 * DT);
     assert!(run.e_max <= LAG_E_MAX_M + 3.0 * DT, "{}", run.e_max);
 }
+
+/// Field log 346 (M3 480.3-482.7 s): the vehicle passed the carrot at 4.75 m/s; with the lag scale on the unsigned
+/// distance the carrot stopped and the vehicle braked and reversed. Ahead of the carrot the scale is 1.
+#[test]
+fn vehicle_ahead_of_the_carrot_does_not_stall_it() {
+    let run = |unsigned: bool| {
+        let m = mission(&[(200.0, 0.0, 10.0)], R);
+        let mut g = LegGuidance::new();
+        g.lag_unsigned = unsigned;
+        assert!(g.enter([0.0, 0.0, -10.0], HOME, &ORIGIN, &m, 0, 5.0));
+        let mut o = g.step(DT, [0.0, 0.0, -10.0], true, true);
+        while o.velocity_ne[0] < 5.0 {
+            o = g.step(DT, [o.position_ne[0], o.position_ne[1], -10.0], true, true);
+        }
+        // Point mass as in `fly`, 2.5 m ahead of the carrot and 0.5 m to the side, at 4.75 m/s.
+        let (mut p, mut v) = ([o.position_ne[0] + 2.5, 0.5], [4.75f32, 0.0]);
+        let (mut carrot_min, mut veh_min) = (f32::MAX, f32::MAX);
+        for _ in 0..300 {
+            let o = g.step(DT, [p[0], p[1], -10.0], true, true);
+            if p[0] > o.position_ne[0] {
+                carrot_min = carrot_min.min(o.velocity_ne[0]);
+            }
+            let cmd = [o.velocity_ne[0] + 0.95 * (o.position_ne[0] - p[0]), o.velocity_ne[1] + 0.95 * (o.position_ne[1] - p[1])];
+            let dv = [cmd[0] - v[0], cmd[1] - v[1]];
+            let s = (A * DT / hypotf(dv[0], dv[1])).min(1.0);
+            v = [v[0] + dv[0] * s, v[1] + dv[1] * s];
+            p = [p[0] + v[0] * DT, p[1] + v[1] * DT];
+            veh_min = veh_min.min(v[0]);
+        }
+        (carrot_min, veh_min)
+    };
+    let (carrot, veh) = run(false);
+    let (carrot0, veh0) = run(true);
+    std::eprintln!("ahead 2.5 m at 4.75 m/s: carrot min {carrot:.2} m/s, vehicle min {veh:.2} m/s; unsigned rule {carrot0:.2}, {veh0:.2}");
+    assert!((carrot - 5.0).abs() < 1e-4 && veh > 2.0, "{carrot} {veh}");
+    assert!(carrot0 < 0.01 && veh0 <= 0.0, "{carrot0} {veh0}");
+}
