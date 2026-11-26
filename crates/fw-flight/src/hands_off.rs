@@ -209,6 +209,8 @@ pub struct Inputs {
     pub battery_ok: bool,
     /// The battery is critical.
     pub battery_critical: bool,
+    /// The battery's LOW level (or CRITICAL) is reached.
+    pub battery_low: bool,
     /// The horizontal distance between the navigation position and the Position target the controller tracked at the
     /// previous step, both of that step, m; `None` when the previous step tracked no Position target.
     pub track_error_m: Option<f32>,
@@ -253,7 +255,7 @@ pub enum DenyReason {
     WaypointBeyondRange,
     /// Start: the heading monitor is not OK, or the track fault is latched.
     HeadingNotOk,
-    /// Start: the battery is not known to be non-critical.
+    /// Start: the battery is not known to be non-critical, or its LOW level is reached.
     BatteryNotOk,
     /// Start: no live report with arm ON; a command into HOLD: the newest report has arm OFF.
     ArmSwitchOff,
@@ -357,6 +359,8 @@ pub enum Reason {
     Tier,
     /// The battery is critical: LAND or BLIND.
     BattCrit,
+    /// HOLD or AUTO: the battery's LOW level, once per arming: RETURN or LAND.
+    BattLow,
     /// The H12 track fault: LAND or BLIND.
     Track,
     /// Link age above `LINK_LOSS_US` in HOLD: RETURN or LAND.
@@ -398,6 +402,7 @@ impl Reason {
             Reason::MsOn => "ms-on",
             Reason::Tier => "tier",
             Reason::BattCrit => "batt-crit",
+            Reason::BattLow => "batt-low",
             Reason::Track => "track",
             Reason::LinkLost => "link10s",
             Reason::Plan => "plan",
@@ -510,6 +515,9 @@ pub struct HandsOff {
     anchor_pending: bool,
     /// Why the present state was entered (`None` before the first change)
     reason: Option<Reason>,
+    /// The LOW battery return is used for this arming: it fired, or a step began in RETURN, LAND or BLIND with LOW;
+    /// cleared on a disarmed step.
+    low_done: bool,
 }
 
 impl HandsOff {
@@ -538,6 +546,7 @@ impl HandsOff {
             anchor: None,
             anchor_pending: false,
             reason: None,
+            low_done: false,
         }
     }
 
@@ -739,6 +748,7 @@ impl HandsOff {
             self.home_d = None;
             self.home_ne = None;
             self.home_window = false;
+            self.low_done = false;
         } else {
             if !self.was_armed {
                 self.home_window = !i.restart;
@@ -777,6 +787,9 @@ impl HandsOff {
     /// Section 2, the transition table of a MAVLink flight, in its priority order: the arm columns 4 and 5.
     /// Newest report, stale or not), columns 2 and 3, each state's own exits (column 6 among them)
     fn mission_switch(&mut self, i: &Inputs, fresh: bool, ev: &mut Events) {
+        if i.battery_low && matches!(self.state, State::Return | State::Land | State::Blind) {
+            self.low_done = true;
+        }
         if let Some(r) = i.crsf.filter(|r| !r.arm) {
             let ground = self.ground(i);
             match self.state {
@@ -821,6 +834,9 @@ impl HandsOff {
                 State::Hold => {
                     if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
                         self.go(self.land_state(), self.land_reason(i), i, ev);
+                    } else if i.battery_low && !self.low_done {
+                        self.low_done = true;
+                        self.go(if self.home().is_some() { State::Return } else { State::Land }, Reason::BattLow, i, ev);
                     } else if self.link_age(i) > LINK_LOSS_US {
                         let next = if self.home().is_some() {
                             State::Return
@@ -835,6 +851,9 @@ impl HandsOff {
                 State::Auto => {
                     if self.debounced != Tier::T3 || i.battery_critical || self.track_fault {
                         self.go(self.land_state(), self.land_reason(i), i, ev);
+                    } else if i.battery_low && !self.low_done {
+                        self.low_done = true;
+                        self.go(if self.home().is_some() { State::Return } else { State::Land }, Reason::BattLow, i, ev);
                     } else if i.mission.plan_id != self.flown_plan || i.last_waypoint_reached {
                         self.go(State::Hold, if i.last_waypoint_reached { Reason::LastWp } else { Reason::Plan }, i, ev);
                     } else if !Self::station_present(i) {
@@ -1172,7 +1191,7 @@ impl HandsOff {
         if i.tier != Tier::T3 {
             return Some(DenyReason::NotT3);
         }
-        if !i.battery_ok || i.battery_critical {
+        if !i.battery_ok || i.battery_critical || i.battery_low {
             return Some(DenyReason::BatteryNotOk);
         }
         let live = i.crsf.filter(|r| i.now_us.saturating_sub(r.t_us) <= self.stick_loss_us);
@@ -1262,6 +1281,7 @@ mod tests {
                 heading_ok: true,
                 battery_ok: true,
                 battery_critical: false,
+                battery_low: false,
                 track_error_m: None,
                 speed_xy_ms: Tuning::DEFAULT.pilot_speed_xy_ms,
                 td_held: true,
@@ -2115,9 +2135,23 @@ mod tests {
         let (mut prev, mut high_seen) = (State::Stop, false);
         let mut p = false;
         let (mut hand_overs, mut held) = (0u32, 0u32);
+        let (mut lows_this_arming, mut lows) = (0u32, 0u32);
+        let mut low_rng = Lcg(0x5eed_0002);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, true);
+            i.battery_low = i.battery_critical || low_rng.chance(100);
             let out = h.step(&i);
+            if !i.armed {
+                lows_this_arming = 0;
+            }
+            if out.reason == Some(Reason::BattLow) && out.state != prev {
+                assert!(matches!(prev, State::Hold | State::Auto), "batt-low from {prev:?}");
+                assert!(i.battery_low && !i.battery_critical, "batt-low: {i:?}");
+                assert!(matches!(out.state, State::Return | State::Land), "{out:?}");
+                lows_this_arming += 1;
+                lows += 1;
+                assert_eq!(lows_this_arming, 1, "batt-low once per arming");
+            }
             let high_now = i.crsf.is_some_and(|r| r.switch6 == Switch3::High);
             let arm_now = i.crsf.is_some_and(|r| r.arm);
             let mav = h.mavlink_flight();
@@ -2173,6 +2207,7 @@ mod tests {
         }
         assert!(seen.iter().all(|&s| s), "every state reached: {seen:?}");
         assert!(hand_overs > 50 && held > 50, "lock exercised: {hand_overs} hand-overs, {held} held");
+        assert!(lows > 50, "batt-low exercised: {lows}");
     }
 
     #[test]
@@ -2579,12 +2614,15 @@ mod tests {
         let mut h = HandsOff::new(&Tuning::DEFAULT);
         let mut i = Rig::crsf().i;
         let mut seen = [0u32; 8];
+        let mut low_rng = Lcg(0x5eed_0002);
         for _ in 0..200_000 {
             random_inputs(&mut rng, &mut i, false);
+            i.battery_low = i.battery_critical || low_rng.chance(100);
             let was = h.state();
             let out = h.step(&i);
             seen[usize::from(out.state.code() - 1)] += 1;
             assert!(!matches!(out.state, State::Hold | State::Auto | State::Return), "{:?} on CRSF", out.state);
+            assert_ne!(out.reason, Some(Reason::BattLow));
             if matches!(was, State::Pilot | State::Stop) && i.crsf.is_some_and(|r| !r.arm) {
                 assert_eq!(out.state, State::Stop, "CRSF: arm OFF in PILOT or STOP is STOP");
             }
@@ -4149,6 +4187,7 @@ mod tests {
             Reason::MsOn,
             Reason::Tier,
             Reason::BattCrit,
+            Reason::BattLow,
             Reason::Track,
             Reason::LinkLost,
             Reason::Plan,
@@ -4185,5 +4224,135 @@ mod tests {
                 assert_eq!(o.home, want, "restart {restart}, step {k}");
             }
         }
+    }
+
+    // ---- Low battery ----
+
+    /// HOLD and AUTO with LOW: RETURN with home, LAND without; reason batt-low; LOW beats link loss and the last
+    /// waypoint; critical, tier and track beat LOW.
+    #[test]
+    fn hands_off_batt_low_returns_from_hold_and_auto_and_its_priority() {
+        let mut r = Rig::hold();
+        r.i.battery_low = true;
+        let out = r.step();
+        assert_eq!((out.state, out.reason), (State::Return, Some(Reason::BattLow)));
+        assert_eq!(out.return_height_m, Some(20.0));
+        let mut r = Rig::auto();
+        r.i.battery_low = true;
+        r.i.last_waypoint_reached = true;
+        let out = r.step();
+        assert_eq!((out.state, out.reason), (State::Return, Some(Reason::BattLow)), "LOW beats last-wp");
+        let mut r = Rig::hold();
+        r.i.battery_low = true;
+        let t = r.now() + LINK_LOSS_US + 1;
+        assert_eq!((r.at(t).state, r.h.reason()), (State::Return, Some(Reason::BattLow)), "LOW beats link10s");
+        for crit in [Rig::hold(), Rig::auto()] {
+            let mut r = crit;
+            r.i.battery_low = true;
+            r.i.battery_critical = true;
+            let out = r.step();
+            assert_eq!((out.state, out.reason), (State::Land, Some(Reason::BattCrit)));
+        }
+        let mut r = Rig::hold();
+        r.h.track_fault = true;
+        r.i.battery_low = true;
+        assert_eq!(r.step().reason, Some(Reason::Track));
+        let mut r = Rig::hold();
+        assert_eq!(r.drop_tier(Tier::T2).state, State::Hold);
+        r.i.battery_low = true;
+        let out = r.hold_drop();
+        assert_eq!((out.state, out.reason), (State::Land, Some(Reason::Tier)));
+    }
+
+    /// No home: HOLD with LOW lands.
+    #[test]
+    fn hands_off_batt_low_without_home_lands() {
+        let mut r = Rig::new();
+        r.step();
+        r.i.armed = true;
+        r.i.position_ne_valid = false;
+        r.report(T0 + 1_000, Switch3::High);
+        r.i.airborne = true;
+        r.report(T0 + 2_000, Switch3::High);
+        r.i.position_ne_valid = true;
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!((r.heartbeat(t).state, r.h.home()), (State::Hold, None));
+        r.i.battery_low = true;
+        let out = r.step();
+        assert_eq!((out.state, out.reason), (State::Land, Some(Reason::BattLow)));
+    }
+
+    /// Once per arming: the mission switch OFF then ON after it gives HOLD and HOLD stays; Pause from RETURN stays
+    /// HOLD; LOW reached in RETURN or LAND uses it too; a new arming fires again.
+    #[test]
+    fn hands_off_batt_low_fires_once_per_arming() {
+        let mut r = Rig::ms_hold();
+        r.i.battery_low = true;
+        assert_eq!(r.step().state, State::Return);
+        let t = r.now() + 1_000;
+        assert_eq!(r.report_full(t, FULL, Switch3::High, true, false).state, State::Pilot);
+        let t = r.now() + 1_000;
+        let out = r.report_ms(t, Switch3::High, true);
+        assert_eq!((out.state, out.reason), (State::Hold, Some(Reason::MsOn)));
+        for k in 1..20 {
+            assert_eq!(r.at(t + k * 10_000).state, State::Hold, "no re-trigger");
+        }
+        assert_eq!(r.cmd(Command::Start).command, denied(DenyReason::BatteryNotOk));
+        assert_eq!(r.cmd(Command::Return).state, State::Return);
+        let out = r.cmd(Command::Pause);
+        assert_eq!((out.command, out.state), (Some(CommandResult::Accepted), State::Hold));
+        assert_eq!(r.step().state, State::Hold, "Pause from RETURN: no bounce");
+        let out = r.cmd(Command::Land);
+        assert_eq!((out.command, out.state), (Some(CommandResult::Accepted), State::Land));
+        let out = r.cmd(Command::Abort);
+        assert_eq!((out.command, out.state), (Some(CommandResult::Accepted), State::Hold));
+        assert_eq!(r.step().state, State::Hold);
+        for first in [State::Return, State::Land] {
+            let mut r = if first == State::Return { Rig::ret() } else { Rig::land() };
+            r.i.battery_low = true;
+            r.i.last_radio_heartbeat_us = Some(r.now());
+            assert_eq!(r.step().state, first);
+            let out = r.cmd(Command::Abort);
+            assert_eq!((out.command, out.state), (Some(CommandResult::Accepted), State::Hold));
+            assert_eq!(r.step().state, State::Hold, "LOW reached in {first:?}: used");
+        }
+        r.i.armed = false;
+        r.i.airborne = false;
+        assert_eq!(r.step().state, State::Stop);
+        r.i.position_ne_m = HOME_NE;
+        r.i.position_d_m = HOME_D;
+        r.i.armed = true;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        r.i.airborne = true;
+        let t = r.now() + 1_000;
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot, "LOW in PILOT: nothing");
+        let t = r.last_report() + LOSS + 1;
+        assert_eq!(r.heartbeat(t).state, State::Hold);
+        let out = r.step();
+        assert_eq!((out.state, out.reason), (State::Return, Some(Reason::BattLow)), "a new arming fires again");
+    }
+
+    /// LOW reached in PILOT waits: the mission switch ON gives HOLD and the next step RETURN; on a CRSF flight it
+    /// never fires.
+    #[test]
+    fn hands_off_batt_low_in_pilot_is_deferred_and_never_on_crsf() {
+        let mut r = Rig::pilot();
+        r.i.battery_low = true;
+        let t = r.now() + 1_000;
+        r.i.last_radio_heartbeat_us = Some(t);
+        assert_eq!(r.report(t, Switch3::High).state, State::Pilot);
+        let t = r.now() + 1_000;
+        assert_eq!(r.report_ms(t, Switch3::High, true).state, State::Hold);
+        let out = r.at(t + 10_000);
+        assert_eq!((out.state, out.reason), (State::Return, Some(Reason::BattLow)));
+        let mut r = Rig::crsf_pilot();
+        r.i.battery_low = true;
+        for k in 1..20 {
+            assert_eq!(r.report(T0 + 2_000 + k * 10_000, Switch3::High).state, State::Pilot);
+        }
+        let mut r = Rig::crsf_land();
+        r.i.battery_low = true;
+        assert_eq!(r.step().state, State::Land);
     }
 }

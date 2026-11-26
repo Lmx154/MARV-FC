@@ -150,6 +150,11 @@ pub const fn cell_critical(cell: u8) -> bool {
     cell & 3 == Level::Critical as u8
 }
 
+/// Whether the flight core's cell byte says LOW (or CRITICAL) is reached (armed, latched until disarm).
+pub const fn cell_low(cell: u8) -> bool {
+    cell & 3 >= Level::Low as u8
+}
+
 /// Whether the flight core's cell byte carries [`CELL_KNOWN_OK`].
 pub const fn cell_known_ok(cell: u8) -> bool {
     cell & CELL_KNOWN_OK != 0
@@ -537,6 +542,8 @@ mod tests {
         assert_eq!((u.level, u.cell), (Level::Low, 1));
         assert!(!cell_descends(u.cell));
         assert!(!cell_descends(0));
+        assert!(cell_low(1) && cell_low(2 | CELL_DESCEND) && cell_low(1 | CELL_KNOWN_OK));
+        assert!(!cell_low(0) && !cell_low(CELL_KNOWN_OK) && !cell_critical(1));
     }
 
     #[test]

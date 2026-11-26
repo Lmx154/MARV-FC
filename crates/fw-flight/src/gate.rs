@@ -1099,6 +1099,7 @@ mod tests {
             heading_ok: true,
             battery_ok: true,
             battery_critical: false,
+            battery_low: false,
             track_error_m: None,
             speed_xy_ms: tuning.pilot_speed_xy_ms,
             td_held: true,

@@ -176,7 +176,7 @@ fn n_no_command_in_any_state_disarms_or_stops_the_motors() {
                 batt = if bat.chance(100) {
                     2 | if bat.chance(500) { fw_core::battery::CELL_DESCEND } else { 0 }
                 } else {
-                    u8::from(bat.chance(300)) | if bat.chance(100) { 0 } else { fw_core::battery::CELL_KNOWN_OK }
+                    u8::from(bat.chance(100)) | if bat.chance(100) { 0 } else { fw_core::battery::CELL_KNOWN_OK }
                 };
             }
             f.set_battery_cell(batt);

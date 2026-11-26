@@ -64,7 +64,7 @@ Start is `MAV_CMD_MISSION_START` from state HOLD. It must arrive on the radio li
 | 6 | waypoint distance known / all within 1 km | 10 / 11 |
 | 7 | heading monitor OK and no track fault | 12 |
 | 8 | position tier T3 | 13 |
-| 9 | battery known non-critical | 14 |
+| 9 | battery known non-critical and not LOW | 14 |
 | 10 | live receiver report younger than 1.0 s with mission switch ON / arm ON / mode switch in Position | 19 / 15 / 16 |
 
 Other codes: 2 (a fresh CRSF stick report: station commands are refused while the sticks come over CRSF), 17 battery critical and 18 link lost (on entering HOLD or RETURN: Pause, Abort, Return). 0 is unknown. The station shows one result line per

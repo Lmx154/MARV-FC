@@ -68,7 +68,7 @@ MSG texts of the station and hands-off path (logged only; a full ring drops them
 | `GCS HB <sys>,<comp>` | first time each ground-station HEARTBEAT sender is seen on the radio link since boot (at most 8); also sent as STATUSTEXT | core 0 (`rc`) |
 
 Reason tokens: `armed`, `arm-off`, `arm-gnd`, `arm-ms-off`, `disarmed`, `landed`, `rc-lost`, `rc-back`, `handover`, `ms-off`,
-`ms-on`, `tier`, `batt-crit`, `track`, `link10s`, `plan`, `last-wp`, `stn-lost`, `home`, `start`, `pause`, `abort`, `rtl`,
+`ms-on`, `tier`, `batt-crit`, `batt-low`, `track`, `link10s`, `plan`, `last-wp`, `stn-lost`, `home`, `start`, `pause`, `abort`, `rtl`,
 `cmd-land`.
 
 ## SD card (device row)

@@ -34,6 +34,8 @@ stateDiagram-v2
     HOLD --> RETURN: link age over 10 s (home latched) or station Return
     HOLD --> LAND: link age over 10 s without home, battery critical, track fault
     AUTO --> LAND: battery critical, track fault, station Land
+    HOLD --> RETURN: battery LOW (once per arming; LAND without home)
+    AUTO --> RETURN: battery LOW (once per arming; LAND without home)
     RETURN --> LAND: arrival within radius of home
     HOLD --> PILOT: mission switch OFF, arm ON, Position
     AUTO --> PILOT: mission switch OFF, arm ON, Position
@@ -60,7 +62,7 @@ MS = mission switch (ch 8) ON, A = arm ON, P = mode switch in Position. "Fresh" 
 | LAND / BLIND | unchanged | PILOT | TAKEOVER | stays | STOP | unchanged |
 
 Priority in code: arm OFF columns (they read the newest report even if stale), the ground exit (not airborne, touchdown held: STOP), the MS OFF columns, each state's own exits
-(tier lost, battery critical, track fault, link age, station loss, arrival), MS ON entry to HOLD, then station commands.
+(tier lost, battery critical, track fault, battery LOW, link age, last waypoint or new plan, station loss, arrival), MS ON entry to HOLD, then station commands.
 
 ## Failsafe timings
 
@@ -71,6 +73,7 @@ Priority in code: arm OFF columns (they read the newest report even if stale), t
 | No station heartbeat in AUTO | 10 s (`STATION_LOST_US`) | HOLD, mission paused, place kept; Start again continues. Live sticks mean no RETURN |
 | Tier drop | 1.0 s debounce (`TIER_DEBOUNCE_US`) | state exits take effect only after it |
 | Battery critical or track fault in HOLD / AUTO / RETURN | immediate | LAND |
+| Battery LOW in HOLD / AUTO (`BATT_LOW_CELL`, MAVLink flights) | immediate, once per arming | RETURN (LAND without home), reason `batt-low`. Reached in PILOT or TAKEOVER: at the next HOLD. A step in RETURN, LAND or BLIND with LOW also uses it, so the mission switch OFF then ON, or Pause / Abort from RETURN or LAND, leaves HOLD in HOLD. Start is refused at LOW (code 14) |
 | Distance rule | D_max 10 m (`D_MAX_M`) | LAND must have started by then |
 
 **Home latch.** Home is latched between arming and the first take-off, at the first valid position, and cleared at disarm. Taking off within a few seconds of arming means no home:

@@ -865,7 +865,7 @@ fn batt_m_start_needs_the_battery_known_not_critical() {
     let d = Config::DEFAULT;
     let cases: [(&str, Config, Option<f32>, u64, Option<CommandResult>); 9] = [
         ("fine", d, Some(16.0), 0, Some(CommandResult::Accepted)),
-        ("LOW", d, Some(14.3), 0, Some(CommandResult::Accepted)),
+        ("LOW", d, Some(14.3), 0, Some(CommandResult::Denied(DenyReason::NotInThisState))),
         ("cells 0", Config { cells: 0, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
         ("timer 0", Config { timer_s: 0, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
         ("CRT = LOW", Config { crt_cell_v: 3.6, ..d }, Some(16.0), 0, Some(CommandResult::Denied(DenyReason::BatteryNotOk))),
@@ -888,7 +888,7 @@ fn batt_m_start_needs_the_battery_known_not_critical() {
         let level = m.level();
         match want {
             Some(want) => {
-                assert_eq!(r.state(), State::Hold, "{name}");
+                assert_eq!(r.state(), if name == "LOW" { State::Return } else { State::Hold }, "{name}");
                 assert_eq!(level, if name == "LOW" { Level::Low } else { Level::None }, "{name}");
                 assert_eq!(r.command(Command::Start), want, "{name}");
             }
@@ -942,6 +942,17 @@ fn batt_m_auto_critical_lands_holding_position_and_td_stops() {
     let raw = run(None);
     assert_eq!(run(Some((fw_core::battery::Level::Critical as u8))), raw, "action 0");
     assert_eq!(run(Some((fw_core::battery::Level::Critical as u8) | fw_core::battery::CELL_DESCEND)), raw, "action 1");
+}
+
+/// In AUTO: LOW from the monitor's byte gives RETURN at the next step, "HO 5 RETURN batt-low".
+#[test]
+fn batt_m_auto_low_returns_home() {
+    let mut r = in_auto();
+    r.f.set_battery_cell(fw_core::battery::Level::Low as u8 | fw_core::battery::CELL_KNOWN_OK);
+    r.fly();
+    let m = hands_off_reason_msg(r.state(), r.f.hands_off_reason());
+    let n = m.iter().position(|&b| b == 0).unwrap_or(m.len());
+    assert_eq!(core::str::from_utf8(&m[..n]).unwrap(), "HO 5 RETURN batt-low");
 }
 
 /// The hand-back (column 2: the mission switch OFF, arm ON, Position, centred sticks) from AUTO at 3 m/s and from

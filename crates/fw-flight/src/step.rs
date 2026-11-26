@@ -658,6 +658,8 @@ pub struct Flight<E: Estimator, C: Controller, A: Allocator> {
     /// The state machine's `battery_ok` (Start): the monitor knows the battery is not critical.
     /// `set_battery_ok` in host tests and MARV-sim); false until set (Start answers BatteryNotOk)
     battery_ok: bool,
+    /// The state machine's battery LOW: the monitor's LOW (or CRITICAL) level (`set_battery_cell`); false until set.
+    battery_low: bool,
 }
 
 impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
@@ -783,6 +785,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             latch_off: false,
             battery_critical: false,
             battery_ok: false,
+            battery_low: false,
         }
     }
 
@@ -901,11 +904,12 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
     }
 
     /// The low-battery monitor's byte from core 0 (`fw_core::battery`'s cell byte), every step: the descent request
-    /// ([`Flight::set_batt_descend`]), the state machine's battery critical.
+    /// ([`Flight::set_batt_descend`]), the state machine's battery critical and LOW.
     pub fn set_battery_cell(&mut self, cell: u8) {
         self.set_batt_descend(fw_core::battery::cell_descends(cell));
         self.battery_critical = fw_core::battery::cell_critical(cell);
         self.battery_ok = fw_core::battery::cell_known_ok(cell);
+        self.battery_low = fw_core::battery::cell_low(cell);
     }
 
     /// What the descent did at the latest step, read only.
@@ -1076,6 +1080,7 @@ impl<E: Estimator, C: Controller, A: Allocator> Flight<E, C, A> {
             heading_ok: nav.valid.heading && self.heading_ok,
             battery_ok,
             battery_critical,
+            battery_low: self.battery_low,
             track_error_m: self.track_error_m,
             speed_xy_ms: self.shaper.pilot_speed_xy_ms,
             td_held: td_in,
