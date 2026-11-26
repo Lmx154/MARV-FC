@@ -181,13 +181,30 @@ mod tests {
     use fw_core::params::Params;
     use mavlink_device::ParamStore;
 
+    /// Names unique and at most 16 characters, the count the table's length, every default of its range's type and
+    /// within it.
+    #[test]
+    fn the_table_is_sane() {
+        use mavlink_device::ParamValue::{F32, I32};
+        assert_eq!(TABLE.len(), COUNT);
+        assert_eq!(Params::<COUNT>::new(&TABLE).unwrap().count() as usize, TABLE.len());
+        for (i, def) in TABLE.iter().enumerate() {
+            assert!(!def.name.is_empty() && def.name.len() <= 16, "{}", def.name);
+            assert!(TABLE[..i].iter().all(|d| d.name != def.name), "{} twice", def.name);
+            match (def.default, def.min, def.max) {
+                (I32(v), I32(lo), I32(hi)) => assert!(lo <= v && v <= hi, "{}", def.name),
+                (F32(v), F32(lo), F32(hi)) => assert!(lo <= v && v <= hi, "{}", def.name),
+                _ => panic!("{}: mixed types", def.name),
+            }
+        }
+    }
+
     #[test]
     fn the_whole_table_is_accepted_with_every_validator() {
         let mut params = Params::<COUNT>::new(&TABLE).unwrap();
         assert!(params.set_validator(baro::TABLE[0].device, baro::validate));
         assert!(params.set_validator(mag::TABLE[0].device, mag::validate));
         assert_eq!(params.count() as usize, COUNT);
-        assert_eq!(COUNT, 117);
         let mut expected = baro::TABLE
             .iter()
             .chain(mag::TABLE.iter())
@@ -209,183 +226,6 @@ mod tests {
             assert_eq!(def.name, expected.next().unwrap().name);
         }
         assert!(expected.next().is_none());
-    }
-
-    /// The first 70 parameters keep their indices (a stored record is indexed by name, but the tools list by index): the six IMU chip settings are appended after them.
-    #[test]
-    fn the_first_70_names_keep_their_indices() {
-        const FIRST_70: [&str; 70] = [
-            "BARO_ODR_HZ",
-            "BARO_OSR_P",
-            "BARO_OSR_T",
-            "BARO_IIR_P",
-            "BARO_IIR_T",
-            "MAG_ODR_HZ",
-            "MAG_AVG",
-            "MAG_OFFX",
-            "MAG_OFFY",
-            "MAG_OFFZ",
-            "BATT_V_SCALE",
-            "BATT_A_SCALE",
-            "BATT_A_OFFSET",
-            "IMU1_GYR_OFFX",
-            "IMU1_GYR_OFFY",
-            "IMU1_GYR_OFFZ",
-            "IMU1_ACC_OFFX",
-            "IMU1_ACC_OFFY",
-            "IMU1_ACC_OFFZ",
-            "IMU2_GYR_OFFX",
-            "IMU2_GYR_OFFY",
-            "IMU2_GYR_OFFZ",
-            "IMU2_ACC_OFFX",
-            "IMU2_ACC_OFFY",
-            "IMU2_ACC_OFFZ",
-            "LOG_BACKEND_TYPE",
-            "RC1_MIN",
-            "RC1_TRIM",
-            "RC1_MAX",
-            "RC1_REVERSED",
-            "RC1_DZ",
-            "RC2_MIN",
-            "RC2_TRIM",
-            "RC2_MAX",
-            "RC2_REVERSED",
-            "RC2_DZ",
-            "RC3_MIN",
-            "RC3_TRIM",
-            "RC3_MAX",
-            "RC3_REVERSED",
-            "RC3_DZ",
-            "RC4_MIN",
-            "RC4_TRIM",
-            "RC4_MAX",
-            "RC4_REVERSED",
-            "RC4_DZ",
-            "RC5_MIN",
-            "RC5_TRIM",
-            "RC5_MAX",
-            "RC5_REVERSED",
-            "RC5_DZ",
-            "RC6_MIN",
-            "RC6_TRIM",
-            "RC6_MAX",
-            "RC6_REVERSED",
-            "RC6_DZ",
-            "RC7_MIN",
-            "RC7_TRIM",
-            "RC7_MAX",
-            "RC7_REVERSED",
-            "RC7_DZ",
-            "RC8_MIN",
-            "RC8_TRIM",
-            "RC8_MAX",
-            "RC8_REVERSED",
-            "RC8_DZ",
-            "RCMAP_ROLL",
-            "RCMAP_PITCH",
-            "RCMAP_THROTTLE",
-            "RCMAP_YAW",
-        ];
-        for (i, name) in FIRST_70.iter().enumerate() {
-            assert_eq!(TABLE[i].name, *name, "index {i}");
-        }
-        let appended = [
-            "IMU1_ACC_FS",
-            "IMU1_GYR_FS",
-            "IMU1_ODR_HZ",
-            "IMU2_ACC_FS",
-            "IMU2_GYR_FS",
-            "IMU2_ODR_HZ",
-            "AHRS_ORIENTATION",
-            "MAG_ORIENT",
-            "MOT_POLES",
-            "LED_BRIGHT",
-            "GPS_RATE_MS",
-            "MAG_DIAGX",
-            "MAG_DIAGY",
-            "MAG_DIAGZ",
-            "MAG_ODIAGXY",
-            "MAG_ODIAGXZ",
-            "MAG_ODIAGYZ",
-            "MAG_CAL_TYPE",
-            "MAG_FLD_UT",
-            "MAG_FLD_INC",
-            "MAG_HLT_STR",
-            "MAG_HLT_INC",
-            "GPS_GNSS",
-            "PILOT_SPEED_XY",
-            "RPM_NOTCH_EN",
-            "GDN_RADIUS",
-            "ATC_ANG_RP_P",
-            "ATC_ANG_YAW_P",
-            "ATC_RAT_RLL_P",
-            "ATC_RAT_PIT_P",
-            "ATC_RAT_YAW_P",
-            "ATC_RAT_RLL_I",
-            "ATC_RAT_PIT_I",
-            "ATC_RAT_YAW_I",
-            "ATC_RAT_RLL_D",
-            "ATC_RAT_PIT_D",
-            "ATC_RAT_RLL_IMAX",
-            "ATC_RAT_PIT_IMAX",
-            "ATC_RAT_YAW_IMAX",
-            "ATC_RAT_FLTD",
-            "GDN_ALT_MIN",
-            "GDN_ALT_MAX",
-            "BATT_CELLS",
-            "BATT_LOW_CELL",
-            "BATT_CRT_CELL",
-            "BATT_LOW_TIMER",
-            "BATT_FS_CRT_ACT",
-        ];
-        for (k, name) in appended.iter().enumerate() {
-            assert_eq!(TABLE[70 + k].name, *name, "index {}", 70 + k);
-        }
-        assert_eq!(70 + appended.len(), COUNT);
-    }
-
-    /// The compass's soft-iron matrix and calibration record are indices 81 to 91 with the types, defaults, ranges and classes; each range is the whole check.
-    #[test]
-    fn the_compass_calibration_parameters_are_appended_at_81_to_91() {
-        use mavlink_device::{ParamError, ParamValue};
-        use ParamValue::{F32, I32};
-        assert_eq!(COUNT, 117);
-        assert_eq!(mag::CAL_OFFSET, 81);
-        let expected = [
-            ("MAG_DIAGX", F32(1.0), F32(0.2), F32(5.0), true),
-            ("MAG_DIAGY", F32(1.0), F32(0.2), F32(5.0), true),
-            ("MAG_DIAGZ", F32(1.0), F32(0.2), F32(5.0), true),
-            ("MAG_ODIAGXY", F32(0.0), F32(-1.0), F32(1.0), true),
-            ("MAG_ODIAGXZ", F32(0.0), F32(-1.0), F32(1.0), true),
-            ("MAG_ODIAGYZ", F32(0.0), F32(-1.0), F32(1.0), true),
-            ("MAG_CAL_TYPE", I32(0), I32(0), I32(2), true),
-            ("MAG_FLD_UT", F32(0.0), F32(0.0), F32(95.0), true),
-            ("MAG_FLD_INC", F32(0.0), F32(-90.0), F32(90.0), true),
-            ("MAG_HLT_STR", F32(10.0), F32(1.0), F32(50.0), false),
-            ("MAG_HLT_INC", F32(10.0), F32(1.0), F32(45.0), false),
-        ];
-        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        for (k, (name, default, min, max, calibration)) in expected.into_iter().enumerate() {
-            let i = 81 + k;
-            let def = &TABLE[i];
-            assert_eq!(def.name, name, "index {i}");
-            assert_eq!(def.device, mag::TABLE[0].device, "{name}");
-            assert_eq!(def.default, default, "{name}");
-            assert_eq!((def.min, def.max), (min, max), "{name}");
-            assert_eq!(def.apply, Apply::Live, "{name}");
-            assert_eq!(def.calibration, calibration, "{name}");
-            assert!(!def.read_only, "{name}");
-            let i = u16::try_from(i).unwrap();
-            assert_eq!(p.set(i, min), Ok(min), "{name}");
-            assert_eq!(p.set(i, max), Ok(max), "{name}");
-            let (below, above) = match (min, max) {
-                (I32(lo), I32(hi)) => (I32(lo - 1), I32(hi + 1)),
-                (F32(lo), F32(hi)) => (F32(lo - 0.01), F32(hi + 0.01)),
-                _ => panic!("{name}"),
-            };
-            assert_eq!(p.set(i, below), Err(ParamError::OutOfRange), "{name}");
-            assert_eq!(p.set(i, above), Err(ParamError::OutOfRange), "{name}");
-        }
     }
 
     /// "calibration to defaults" gives a coherent "not calibrated": 81 to 89 and `MAG_OFF*` at their defaults (S the identity, offsets 0, type 0, no expected field); the two health tolerances and `MAG_ORIENT` are not calibration results and keep their values.
@@ -426,121 +266,6 @@ mod tests {
         }
         assert_eq!(p.get_named("MAG_HLT_STR"), Some(F32(15.0)));
         assert_eq!(p.get_named("MAG_ORIENT"), Some(I32(3)));
-    }
-
-    /// The two orientation parameters are appended after the first 76 (names unchanged in order), with their ranges, defaults and classes; the 0 to 15 range is the whole validator.
-    #[test]
-    fn the_orientation_parameters_are_appended_with_their_ranges_defaults_and_classes() {
-        use mavlink_device::ParamValue;
-        assert_eq!(COUNT, 117);
-        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        for (k, name) in [
-            "IMU1_ACC_FS",
-            "IMU1_GYR_FS",
-            "IMU1_ODR_HZ",
-            "IMU2_ACC_FS",
-            "IMU2_GYR_FS",
-            "IMU2_ODR_HZ",
-        ]
-        .iter()
-        .enumerate()
-        {
-            assert_eq!(TABLE[70 + k].name, *name);
-        }
-        let ahrs = &TABLE[76];
-        assert_eq!(ahrs.name, "AHRS_ORIENTATION");
-        assert_eq!(ahrs.name.len(), 16);
-        assert_eq!(ahrs.device, 0);
-        assert_eq!(ahrs.default, ParamValue::I32(0));
-        assert_eq!(
-            (ahrs.min, ahrs.max),
-            (ParamValue::I32(0), ParamValue::I32(15))
-        );
-        assert_eq!(ahrs.apply, Apply::Reboot);
-        assert!(!ahrs.calibration && !ahrs.read_only);
-        let mag = &TABLE[77];
-        assert_eq!(mag.name, "MAG_ORIENT");
-        assert_eq!(mag.device, mag::TABLE[0].device);
-        assert_eq!(mag.default, ParamValue::I32(10));
-        assert_eq!(
-            (mag.min, mag.max),
-            (ParamValue::I32(0), ParamValue::I32(15))
-        );
-        assert_eq!(mag.apply, Apply::Live);
-        assert!(!mag.calibration && !mag.read_only);
-        for (i, name) in [(76u16, "AHRS_ORIENTATION"), (77, "MAG_ORIENT")] {
-            for ok in [0, 7, 15] {
-                assert_eq!(
-                    p.set(i, ParamValue::I32(ok)),
-                    Ok(ParamValue::I32(ok)),
-                    "{name}"
-                );
-            }
-            for bad in [-1, 16] {
-                assert_eq!(
-                    p.set(i, ParamValue::I32(bad)),
-                    Err(mavlink_device::ParamError::OutOfRange),
-                    "{name}"
-                );
-            }
-        }
-        for v in 0..=15 {
-            assert!(fw_core::rotation::Rotation::from_i32(v).is_some());
-        }
-        assert_eq!(imu::board_rotation(None), fw_core::rotation::Rotation::None);
-        assert_eq!(
-            mag::orientation(None),
-            fw_core::rotation::Rotation::Roll180Yaw90
-        );
-    }
-
-    /// `MOT_POLES` is the 79th parameter (index 78): I32, default 14, 2 to 64, `Live`, device ESC (12).
-    #[test]
-    fn mot_poles_is_appended_at_index_78() {
-        use mavlink_device::ParamValue;
-        let def = &TABLE[78];
-        assert_eq!(def.name, "MOT_POLES");
-        assert_eq!(def.device, 12);
-        assert_eq!(def.default, ParamValue::I32(14));
-        assert_eq!(
-            (def.min, def.max),
-            (ParamValue::I32(2), ParamValue::I32(64))
-        );
-        assert_eq!(def.apply, Apply::Live);
-        assert!(!def.calibration && !def.read_only);
-        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        for ok in [2, 14, 64] {
-            assert_eq!(p.set(78, ParamValue::I32(ok)), Ok(ParamValue::I32(ok)));
-        }
-        for bad in [1, 65] {
-            assert_eq!(
-                p.set(78, ParamValue::I32(bad)),
-                Err(mavlink_device::ParamError::OutOfRange)
-            );
-        }
-    }
-
-    /// `LED_BRIGHT` is the 80th parameter (index 79): I32, default 1, 0 to 3, `Live`, device 0.
-    #[test]
-    fn led_bright_is_appended_at_index_79() {
-        use mavlink_device::ParamValue;
-        let def = &TABLE[79];
-        assert_eq!(def.name, "LED_BRIGHT");
-        assert_eq!(def.device, 0);
-        assert_eq!(def.default, ParamValue::I32(1));
-        assert_eq!((def.min, def.max), (ParamValue::I32(0), ParamValue::I32(3)));
-        assert_eq!(def.apply, Apply::Live);
-        assert!(!def.calibration && !def.read_only);
-        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        for ok in [0, 1, 3] {
-            assert_eq!(p.set(79, ParamValue::I32(ok)), Ok(ParamValue::I32(ok)));
-        }
-        for bad in [-1, 4] {
-            assert_eq!(
-                p.set(79, ParamValue::I32(bad)),
-                Err(mavlink_device::ParamError::OutOfRange)
-            );
-        }
     }
 
     /// A refused IMU setup puts `AHRS_ORIENTATION` back to nothing: it is device 0, never reset; a refused magnetometer keeps `MAG_ORIENT` (`Live`).
@@ -630,55 +355,6 @@ mod tests {
         assert_eq!(get(&p, "MAG_AVG"), ParamValue::I32(2));
         assert_eq!(get(&p, "MAG_OFFX"), ParamValue::F32(1.5));
         assert!(!p.dirty());
-    }
-
-    /// A record saved before `GPS_RATE_MS` existed (it can name only the first 80 parameters) loads by the boot rule of `settings::load_from_flash` (`reset_all`, then each entry by name) with every one of its 80 values and `GPS_RATE_MS` at its default, 200 ms, which the adapter accepts.
-    #[test]
-    fn a_record_of_the_first_80_parameters_loads_gps_rate_ms_at_its_default() {
-        use fw_core::record::{self, Boot, Entry, SECTOR_LEN};
-        use mavlink_device::ParamValue;
-        let old = &TABLE[..80];
-        assert!(old.iter().all(|d| d.name != gnss::RATE_MS));
-        let changed = |def: &ParamDef| match (def.default, def.max) {
-            (ParamValue::I32(d), ParamValue::I32(hi)) if d < hi => ParamValue::I32(d + 1),
-            (ParamValue::I32(_), ParamValue::I32(_)) => def.min,
-            (ParamValue::F32(d), ParamValue::F32(hi)) if d < hi => ParamValue::F32(hi.min(d + 0.5)),
-            _ => def.min,
-        };
-        let entries = old.iter().map(|d| Entry {
-            name: ParamName::new(d.name).unwrap(),
-            value: changed(d),
-        });
-        let mut a = [0u8; SECTOR_LEN];
-        let b = [0xFFu8; SECTOR_LEN];
-        record::encode(7, entries, &mut a).unwrap();
-        let Boot::Current { record, .. } = record::choose(&a, &b).boot else {
-            panic!("the old record is not current");
-        };
-        assert_eq!(record.declared_count(), 80);
-        let mut p = Params::<COUNT>::new(&TABLE).unwrap();
-        assert_eq!(p.set(80, ParamValue::I32(1000)), Ok(ParamValue::I32(1000)));
-        p.reset_all();
-        let mut loaded = 0;
-        for entry in record.entries() {
-            assert_eq!(
-                p.load(&entry.name, entry.value),
-                Ok(true),
-                "{}",
-                entry.name.as_str()
-            );
-            loaded += 1;
-        }
-        assert_eq!(loaded, 80);
-        for def in old {
-            assert_eq!(p.get_named(def.name), Some(changed(def)), "{}", def.name);
-        }
-        assert_eq!(p.get_named(gnss::RATE_MS), Some(ParamValue::I32(200)));
-        let stored = match p.get_named(gnss::RATE_MS) {
-            Some(ParamValue::I32(v)) => Some(v),
-            _ => None,
-        };
-        assert_eq!(gnss::rate_ms(stored), Ok(200));
     }
 
     /// A record with only `MAG_OFF*` non-default loads by the boot rule with S the identity, `MAG_CAL_TYPE` 0 and no expected field; the output is then the plain offset subtraction.

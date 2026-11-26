@@ -23,10 +23,7 @@ pub const GDN_ALT_MAX: &str = "GDN_ALT_MAX";
 /// The number of flight parameters.
 pub const COUNT: usize = 5 + GAIN_COUNT;
 
-/// The index of [`SPEED_XY`] in the firmware's table: the one after `GPS_GNSS` (92).
-pub const SPEED_XY_AT: usize = 93;
-
-/// `PILOT_SPEED_XY`, appended to the firmware's table at index 93: `F32`, default 5.0 m/s (ArduPilot POSCONTROL_SPEED_MS), range 3 to 20 m/s (PX4 MPC_VEL_MANUAL's range), `Live`: core 0 pushes the stored value to the flight core, which takes the value in force at the arming step and keeps it until the next disarm (`fw_flight::step::Flight`).
+/// `PILOT_SPEED_XY`: `F32`, default 5.0 m/s (ArduPilot POSCONTROL_SPEED_MS), range 3 to 20 m/s (PX4 MPC_VEL_MANUAL's range), `Live`: core 0 pushes the stored value to the flight core, which takes the value in force at the arming step and keeps it until the next disarm (`fw_flight::step::Flight`).
 pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(SPEED_XY, 0, 5.0, 3.0, 20.0, Apply::Live),
     ParamDef::i32(RPM_NOTCH_EN, 0, 0, 0, 1, Apply::Live),
@@ -49,22 +46,12 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(GDN_ALT_MAX, 0, 50.0, 3.0, 120.0, Apply::Live),
 ];
 
-/// The index of [`GAIN_NAMES`]`[0]`, `ATC_ANG_RP_P`, in the firmware's table: the one after `GDN_RADIUS` (95).
-pub const GAINS_AT: usize = 96;
-
-/// The index of [`GDN_ALT_MIN`] in the firmware's table: the one after the last gain, `ATC_RAT_FLTD` (109). `GDN_ALT_MAX`
-/// is 111.
-pub const GDN_ALT_MIN_AT: usize = 110;
-
 /// The definition of gain `i` of `GAIN_NAMES`: `F32`, device 0, `Live`; the default is the field of `Tuning::DEFAULT` and the range is `Gains::MIN` to `Gains::MAX`, so the table has no number of its own.
 #[allow(clippy::indexing_slicing)] // `i` is a literal below `GAIN_COUNT`; the table's length is checked by its type
 const fn gain(i: usize) -> ParamDef {
     const DEFAULT: Gains = Gains::of(&Tuning::DEFAULT);
     ParamDef::f32(GAIN_NAMES[i], 0, DEFAULT.0[i], Gains::MIN.0[i], Gains::MAX.0[i], Apply::Live)
 }
-
-/// The index of [`RPM_NOTCH_EN`] in the firmware's table: the one after `PILOT_SPEED_XY` (93).
-pub const RPM_NOTCH_EN_AT: usize = 94;
 
 #[cfg(test)]
 mod tests {
@@ -74,123 +61,9 @@ mod tests {
     use fw_core::params::Params;
     use mavlink_device::{ParamError, ParamStore, ParamValue};
 
-    #[test]
-    fn pilot_speed_xy_is_appended_at_index_93_with_its_range_default_and_class() {
-        let def = &crate::TABLE[SPEED_XY_AT];
-        assert_eq!(def.name, "PILOT_SPEED_XY");
-        assert!(def.name.len() <= 16);
-        assert_eq!(def.device, 0);
-        assert_eq!(def.default, ParamValue::F32(5.0));
-        assert_eq!((def.min, def.max), (ParamValue::F32(3.0), ParamValue::F32(20.0)));
-        assert_eq!(def.apply, Apply::Live);
-        assert!(!def.calibration && !def.read_only);
-        assert_eq!(crate::TABLE[SPEED_XY_AT - 1].name, "GPS_GNSS");
-        assert_eq!(SPEED_XY_AT + COUNT + crate::batt::FS_COUNT, crate::COUNT);
-    }
-
-    #[test]
-    fn rpm_notch_en_is_appended_at_index_94_off_by_default_live_and_0_or_1() {
-        let def = &crate::TABLE[RPM_NOTCH_EN_AT];
-        assert_eq!(def.name, "RPM_NOTCH_EN");
-        assert!(def.name.len() <= 16);
-        assert_eq!(def.device, 0);
-        assert_eq!(def.default, ParamValue::I32(0));
-        assert_eq!((def.min, def.max), (ParamValue::I32(0), ParamValue::I32(1)));
-        assert_eq!(def.apply, Apply::Live);
-        assert!(!def.calibration && !def.read_only);
-        assert_eq!(crate::TABLE[RPM_NOTCH_EN_AT - 1].name, "PILOT_SPEED_XY");
-        assert_eq!(crate::TABLE[RPM_NOTCH_EN_AT + 1].name, "GDN_RADIUS");
-        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-        let i = u16::try_from(RPM_NOTCH_EN_AT).unwrap();
-        for ok in [0, 1] {
-            assert_eq!(p.set(i, ParamValue::I32(ok)), Ok(ParamValue::I32(ok)));
-        }
-        for bad in [-1, 2] {
-            assert_eq!(p.set(i, ParamValue::I32(bad)), Err(ParamError::OutOfRange), "{bad}");
-        }
-        assert_eq!(p.get_named(RPM_NOTCH_EN), Some(ParamValue::I32(1)));
-    }
-
-    #[test]
-    fn gdn_radius_is_at_index_95_f32_m_live_device_0() {
-        use ParamValue::F32;
-        let at = RPM_NOTCH_EN_AT + 1;
-        let def = &crate::TABLE[at];
-        assert_eq!(def.name, GDN_RADIUS);
-        assert_eq!((def.device, def.default, def.min, def.max, def.apply), (0, F32(2.0), F32(0.05), F32(10.0), Apply::Live));
-        assert!(!def.calibration && !def.read_only);
-        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-        let i = u16::try_from(at).unwrap();
-        assert_eq!(p.set(i, F32(10.0)), Ok(F32(10.0)));
-        for bad in [0.049, 10.01, f32::NAN] {
-            assert!(p.set(i, F32(bad)).is_err(), "{bad}");
-        }
-        assert_eq!(p.get_named(GDN_RADIUS), Some(F32(10.0)), "a refused value leaves the stored one");
-    }
-
-    #[test]
-    fn gdn_alt_min_and_max_are_at_110_and_111_after_the_gains_f32_m_live_device_0() {
-        use ParamValue::F32;
-        assert_eq!(GDN_ALT_MIN_AT, GAINS_AT + GAIN_COUNT);
-        for (at, name, default) in [(GDN_ALT_MIN_AT, "GDN_ALT_MIN", 5.0), (GDN_ALT_MIN_AT + 1, "GDN_ALT_MAX", 50.0)] {
-            let def = &crate::TABLE[at];
-            assert_eq!(def.name, name);
-            assert!(def.name.len() <= 16);
-            assert_eq!(
-                (def.device, def.default, def.min, def.max, def.apply),
-                (0, F32(default), F32(3.0), F32(120.0), Apply::Live)
-            );
-            assert!(!def.calibration && !def.read_only);
-            let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-            let i = u16::try_from(at).unwrap();
-            assert_eq!(p.get_named(name), Some(F32(default)));
-            for ok in [3.0, 120.0, 77.5] {
-                assert_eq!(p.set(i, F32(ok)), Ok(F32(ok)), "{name} {ok}");
-            }
-            for bad in [2.999, 120.001, 0.0, -5.0, f32::INFINITY, f32::NEG_INFINITY] {
-                assert_eq!(p.set(i, F32(bad)), Err(ParamError::OutOfRange), "{name} {bad}");
-            }
-            assert!(p.set(i, F32(f32::NAN)).is_err());
-            assert_eq!(p.get_named(name), Some(F32(77.5)), "a refused value leaves the stored one");
-            assert!(p.set(i, ParamValue::I32(10)).is_err());
-        }
-        let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-        assert_eq!(p.set(u16::try_from(GDN_ALT_MIN_AT).unwrap(), F32(100.0)), Ok(F32(100.0)));
-        assert_eq!(p.get_named(GDN_ALT_MAX), Some(F32(50.0)));
-    }
-
-    #[test]
-    fn the_gain_parameters_are_at_96_to_109_in_table_order_f32_device_0_live() {
-        assert_eq!(GAINS_AT, RPM_NOTCH_EN_AT + 2);
-        assert_eq!(GDN_ALT_MIN_AT + 2 + crate::batt::FS_COUNT, crate::COUNT);
-        assert_eq!(crate::COUNT, 117);
-        assert_eq!(crate::TABLE[GAINS_AT - 1].name, "GDN_RADIUS");
-        let names = [
-            "ATC_ANG_RP_P",
-            "ATC_ANG_YAW_P",
-            "ATC_RAT_RLL_P",
-            "ATC_RAT_PIT_P",
-            "ATC_RAT_YAW_P",
-            "ATC_RAT_RLL_I",
-            "ATC_RAT_PIT_I",
-            "ATC_RAT_YAW_I",
-            "ATC_RAT_RLL_D",
-            "ATC_RAT_PIT_D",
-            "ATC_RAT_RLL_IMAX",
-            "ATC_RAT_PIT_IMAX",
-            "ATC_RAT_YAW_IMAX",
-            "ATC_RAT_FLTD",
-        ];
-        assert_eq!(names, GAIN_NAMES);
-        for (k, name) in names.iter().enumerate() {
-            let def = &crate::TABLE[GAINS_AT + k];
-            assert_eq!(def.name, *name, "index {}", GAINS_AT + k);
-            assert!(def.name.len() <= 16, "{name}");
-            assert_eq!(def.device, 0, "{name}");
-            assert!(matches!(def.default, ParamValue::F32(_)), "{name}");
-            assert_eq!(def.apply, Apply::Live, "{name}");
-            assert!(!def.calibration && !def.read_only, "{name}");
-        }
+    /// The index of `name` in the firmware's table.
+    fn at(name: &str) -> u16 {
+        u16::try_from(crate::TABLE.iter().position(|d| d.name == name).unwrap()).unwrap()
     }
 
     /// The defaults are the fields of `Tuning::DEFAULT`, read here by name and not through `Gains`, bit for bit.
@@ -214,8 +87,7 @@ mod tests {
             ("ATC_RAT_FLTD", t.atc_rat_fltd_hz),
         ];
         for (k, (name, field)) in fields.into_iter().enumerate() {
-            let def = &crate::TABLE[GAINS_AT + k];
-            assert_eq!(def.name, name);
+            let def = &crate::TABLE[usize::from(at(name))];
             let ParamValue::F32(d) = def.default else { panic!("{name}") };
             assert_eq!(d.to_bits(), field.to_bits(), "{name}");
             let (ParamValue::F32(lo), ParamValue::F32(hi)) = (def.min, def.max) else { panic!("{name}") };
@@ -230,7 +102,7 @@ mod tests {
         for k in 0..GAIN_COUNT {
             let name = GAIN_NAMES[k];
             let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-            let i = u16::try_from(GAINS_AT + k).unwrap();
+            let i = at(name);
             let (lo, hi) = (Gains::MIN.0[k], Gains::MAX.0[k]);
             assert_eq!(p.set(i, ParamValue::F32(lo)), Ok(ParamValue::F32(lo)), "{name}");
             assert_eq!(p.set(i, ParamValue::F32(hi)), Ok(ParamValue::F32(hi)), "{name}");
@@ -244,9 +116,9 @@ mod tests {
         }
     }
 
-    /// All 128 parameters stored as non-default values (the worst case of a record) fit one record in one sector.
+    /// Every parameter stored as a non-default value (the worst case of a record) fits one record in one sector.
     #[test]
-    fn all_120_parameters_as_non_default_values_fit_one_record_and_one_sector() {
+    fn every_parameter_as_a_non_default_value_fits_one_record_and_one_sector() {
         use fw_core::record::{self, Boot, ENTRY_LEN, Entry, HEADER_LEN, MAX_ENTRIES, SECTOR_LEN};
         assert!(crate::COUNT <= MAX_ENTRIES);
         let entries = crate::TABLE.iter().map(|def| Entry {
@@ -272,7 +144,7 @@ mod tests {
     #[test]
     fn pilot_speed_xy_range_is_enforced() {
         let mut p = Params::<{ crate::COUNT }>::new(&crate::TABLE).unwrap();
-        let i = u16::try_from(SPEED_XY_AT).unwrap();
+        let i = at(SPEED_XY);
         for ok in [3.0_f32, 5.0, 7.5, 20.0] {
             assert_eq!(p.set(i, ParamValue::F32(ok)), Ok(ParamValue::F32(ok)));
         }

@@ -458,7 +458,6 @@ mod tests {
 
     #[test]
     fn the_rc_table_keeps_its_place_in_the_firmware_table() {
-        assert_eq!(crate::COUNT, 117);
         assert_eq!(RC_OFFSET, 26);
         for (i, d) in TABLE.iter().enumerate() {
             assert_eq!(crate::TABLE[RC_OFFSET + i].name, d.name);

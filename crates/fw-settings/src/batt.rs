@@ -43,7 +43,7 @@ pub static TABLE: [ParamDef; COUNT] = [
     ParamDef::f32(A_OFFSET, DEVICE, 0.0, -3.3, 3.3, Apply::Live),
 ];
 
-/// The low-battery monitor's parameters, appended at indices 123 to 127 after the last existing one, all device BATT and `Live` (core 0 reads them at 10 Hz).
+/// The low-battery monitor's parameters, appended last, all device BATT and `Live` (core 0 reads them at 10 Hz).
 pub static FS_TABLE: [ParamDef; FS_COUNT] = [
     ParamDef::i32(CELLS, DEVICE, 4, 0, 12, Apply::Live),
     ParamDef::f32(LOW_CELL, DEVICE, 3.6, 3.0, 4.2, Apply::Live),
@@ -160,9 +160,9 @@ mod tests {
         assert_eq!(with(A_OFFSET, -0.5).current.zero_uv, -500_000);
     }
 
-    /// The monitor's five parameters are at 123 to 127 with their defaults and ranges; the range is the whole validator; the table's defaults are the monitor's `Config::DEFAULT`.
+    /// The monitor's five parameters are at `FS_AT` with their defaults and ranges; the range is the whole validator; the table's defaults are the monitor's `Config::DEFAULT`.
     #[test]
-    fn the_monitor_parameters_are_appended_at_123_to_127_with_the_amendments_numbers() {
+    fn the_monitor_parameters_are_appended_last_with_the_amendments_numbers() {
         use mavlink_device::{ParamError, ParamValue::{F32, I32}};
         let expected = [
             ("BATT_CELLS", I32(4), I32(0), I32(12)),
