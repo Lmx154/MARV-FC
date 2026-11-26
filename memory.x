@@ -125,8 +125,8 @@ SECTIONS {
         /* The RPM notch and its two records: fw_flight::notch, PIDT and NTCH. sinf and cosf are
          * libm::math (above). */
         *(.text.*9fw_flight5notch* .text.*7fw_core5dflog11encode_pidt* .text.*7fw_core5dflog11encode_ntch*)
-        /* The guidance: fw_flight::guidance, run by the Stepper, and the GDN record. */
-        *(.text.*9fw_flight8guidance* .text.*7fw_core5dflog10encode_gdn*)
+        /* The mission guidance: fw_flight::guidance (LegGuidance), run by the Stepper. */
+        *(.text.*9fw_flight8guidance*)
         /* The station's flight commands: the Stepper takes and answers them; decode and exchange (core 0) stay in flash. */
         *(.text.*9fw_flight7station* .text.*7fw_core10flight_cmd*7Mailbox4take* .text.*7fw_core10flight_cmd*7Mailbox6answer*)
         *(.text.*7fw_core10flight_cmd10request_of*)
